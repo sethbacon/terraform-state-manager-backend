@@ -1,0 +1,57 @@
+replicaCount:
+  backend: 2
+  frontend: 2
+
+image:
+  backend:
+    repository: terraform-state-manager-backend
+    tag: latest
+    pullPolicy: IfNotPresent
+  frontend:
+    repository: terraform-state-manager-frontend
+    tag: latest
+    pullPolicy: IfNotPresent
+
+service:
+  backend:
+    type: ClusterIP
+    port: 8080
+  frontend:
+    type: ClusterIP
+    port: 80
+
+ingress:
+  enabled: true
+  className: nginx
+  host: tsm.example.com
+  tls: []
+
+config:
+  devMode: "false"
+  storageType: "local"
+  storagePath: "/data/backups"
+  logLevel: "info"
+
+secrets:
+  databaseUrl: "postgres://tsm:CHANGE_ME@postgres:5432/terraform_state_manager?sslmode=require"
+  jwtSecret: "CHANGE_ME"
+  oidcIssuer: ""
+  oidcClientId: ""
+  oidcClientSecret: ""
+  oidcRedirectUrl: ""
+
+resources:
+  backend:
+    requests:
+      memory: "128Mi"
+      cpu: "100m"
+    limits:
+      memory: "512Mi"
+      cpu: "500m"
+  frontend:
+    requests:
+      memory: "64Mi"
+      cpu: "50m"
+    limits:
+      memory: "128Mi"
+      cpu: "200m"

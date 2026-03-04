@@ -1,0 +1,50 @@
+version: '3.8'
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: terraform_state_manager
+      POSTGRES_USER: ${TSM_DB_USER:-tsm}
+      POSTGRES_PASSWORD: ${TSM_DB_PASSWORD}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${TSM_DB_USER:-tsm} -d terraform_state_manager"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  backend:
+    image: ${TSM_BACKEND_IMAGE:-terraform-state-manager-backend:latest}
+    ports:
+      - "${TSM_PORT:-8080}:8080"
+    environment:
+      TSM_DATABASE_URL: "postgres://${TSM_DB_USER:-tsm}:${TSM_DB_PASSWORD}@postgres:5432/terraform_state_manager?sslmode=disable"
+      TSM_JWT_SECRET: ${TSM_JWT_SECRET}
+      TSM_DEV_MODE: "false"
+      TSM_STORAGE_TYPE: ${TSM_STORAGE_TYPE:-local}
+      TSM_STORAGE_LOCAL_PATH: "/data/backups"
+      TSM_OIDC_ISSUER: ${TSM_OIDC_ISSUER}
+      TSM_OIDC_CLIENT_ID: ${TSM_OIDC_CLIENT_ID}
+      TSM_OIDC_CLIENT_SECRET: ${TSM_OIDC_CLIENT_SECRET}
+      TSM_OIDC_REDIRECT_URL: ${TSM_OIDC_REDIRECT_URL}
+      TSM_LOG_LEVEL: "info"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - backups:/data/backups
+    restart: unless-stopped
+
+  frontend:
+    image: ${TSM_FRONTEND_IMAGE:-terraform-state-manager-frontend:latest}
+    ports:
+      - "${TSM_FRONTEND_PORT:-80}:80"
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  backups:

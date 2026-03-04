@@ -1,0 +1,63 @@
+# Terraform State Manager Backend Configuration
+# Copy this file to config.yaml and update values as needed.
+# All values can be overridden via environment variables with the TSM_ prefix.
+
+server:
+  port: 8080
+  host: "0.0.0.0"
+  mode: "release"  # debug, release, test
+
+database:
+  host: "localhost"
+  port: 5432
+  name: "tsm"
+  user: "tsm"
+  password: ""
+  sslmode: "require"
+  max_open_conns: 25
+  max_idle_conns: 5
+  conn_max_lifetime: "5m"
+
+auth:
+  jwt_secret: ""  # Set via TSM_AUTH_JWT_SECRET env var
+  jwt_expiry: "24h"
+  jwt_issuer: "terraform-state-manager"
+
+oidc:
+  enabled: false
+  issuer_url: ""
+  client_id: ""
+  client_secret: ""  # Set via TSM_OIDC_CLIENT_SECRET env var
+  redirect_url: "http://localhost:3000/callback"
+  scopes:
+    - openid
+    - profile
+    - email
+
+security:
+  cors:
+    allowed_origins:
+      - "http://localhost:3000"
+      - "http://localhost:5173"
+  setup_token: ""  # Auto-generated on first run if empty
+
+storage:
+  default_backend: "local"
+  local:
+    base_path: "./data"
+  s3:
+    bucket: ""
+    region: ""
+    access_key_id: ""
+    secret_access_key: ""
+  azure:
+    account_name: ""
+    container_name: ""
+    account_key: ""
+  gcs:
+    bucket: ""
+    credentials_json: ""
+
+logging:
+  level: "info"
+  format: "json"  # json or text

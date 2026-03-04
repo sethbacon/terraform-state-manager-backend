@@ -1,0 +1,11 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: tsm-config
+  labels:
+    app: tsm
+data:
+  TSM_DEV_MODE: "false"
+  TSM_STORAGE_TYPE: "local"
+  TSM_STORAGE_LOCAL_PATH: "/data/backups"
+  TSM_LOG_LEVEL: "info"

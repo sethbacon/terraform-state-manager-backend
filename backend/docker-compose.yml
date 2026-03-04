@@ -1,0 +1,45 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: tsm
+      POSTGRES_USER: tsm
+      POSTGRES_PASSWORD: tsm_dev_password
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U tsm"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8080:8080"
+    environment:
+      TSM_DATABASE_HOST: postgres
+      TSM_DATABASE_PORT: 5432
+      TSM_DATABASE_NAME: tsm
+      TSM_DATABASE_USER: tsm
+      TSM_DATABASE_PASSWORD: tsm_dev_password
+      TSM_DATABASE_SSLMODE: disable
+      TSM_SERVER_PORT: 8080
+      ENCRYPTION_KEY: "change-me-in-production-32-bytes!"
+      TSM_STORAGE_DEFAULT_BACKEND: local
+      TSM_STORAGE_LOCAL_BASE_PATH: /app/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - appdata:/app/data
+
+volumes:
+  pgdata:
+  appdata:
