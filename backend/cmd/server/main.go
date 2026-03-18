@@ -1,3 +1,19 @@
+// @title           Terraform State Manager API
+// @version         1.0.0
+// @description     REST API for the Terraform State Manager backend.
+// @basePath        /api/v1
+// @schemes         http https
+//
+// @securityDefinitions.apiKey  BearerAuth
+// @in                          header
+// @name                        Authorization
+// @description                 Bearer JWT token. Format: "Bearer {token}"
+//
+// @securityDefinitions.apiKey  ApiKeyAuth
+// @in                          header
+// @name                        X-API-Key
+// @description                 API key for service-to-service authentication
+
 // Package main is the entry point for the Terraform State Manager server binary.
 // It dispatches three subcommands — serve, migrate, and version — via os.Args.
 package main

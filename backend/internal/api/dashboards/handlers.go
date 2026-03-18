@@ -93,6 +93,17 @@ type VersionDistributionEntry struct {
 
 // GetOverview handles GET /api/v1/dashboard/overview.
 // Returns summary statistics from the latest completed analysis run.
+//
+// @Summary      Get dashboard overview
+// @Description  Returns summary statistics from the latest completed analysis run.
+// @Tags         Dashboard
+// @Produce      json
+// @Success      200  {object}  map[string]interface{}
+// @Failure      400  {object}  map[string]interface{}
+// @Failure      500  {object}  map[string]interface{}
+// @Security     BearerAuth
+// @Security     ApiKeyAuth
+// @Router       /dashboard/overview [get]
 func (h *Handlers) GetOverview(c *gin.Context) {
 	orgID, _ := c.Get("organization_id")
 	orgIDStr, ok := orgID.(string)
@@ -138,6 +149,18 @@ func (h *Handlers) GetOverview(c *gin.Context) {
 
 // GetResourceBreakdown handles GET /api/v1/dashboard/resources.
 // Returns the resource type breakdown from the latest completed run.
+//
+// @Summary      Get resource summary
+// @Description  Returns the resource type breakdown from the latest completed run.
+// @Tags         Dashboard
+// @Produce      json
+// @Param        limit  query  int  false  "Maximum number of resource types to return (1-100, default 20)"
+// @Success      200  {object}  map[string]interface{}
+// @Failure      400  {object}  map[string]interface{}
+// @Failure      500  {object}  map[string]interface{}
+// @Security     BearerAuth
+// @Security     ApiKeyAuth
+// @Router       /dashboard/resources [get]
 func (h *Handlers) GetResourceBreakdown(c *gin.Context) {
 	orgID, _ := c.Get("organization_id")
 	orgIDStr, ok := orgID.(string)
@@ -183,6 +206,17 @@ func (h *Handlers) GetResourceBreakdown(c *gin.Context) {
 
 // GetProviderDistribution handles GET /api/v1/dashboard/providers.
 // Returns provider usage data from the latest completed run.
+//
+// @Summary      Get provider breakdown
+// @Description  Returns provider usage data from the latest completed run.
+// @Tags         Dashboard
+// @Produce      json
+// @Success      200  {object}  map[string]interface{}
+// @Failure      400  {object}  map[string]interface{}
+// @Failure      500  {object}  map[string]interface{}
+// @Security     BearerAuth
+// @Security     ApiKeyAuth
+// @Router       /dashboard/providers [get]
 func (h *Handlers) GetProviderDistribution(c *gin.Context) {
 	orgID, _ := c.Get("organization_id")
 	orgIDStr, ok := orgID.(string)
@@ -223,6 +257,18 @@ func (h *Handlers) GetProviderDistribution(c *gin.Context) {
 
 // GetTrends handles GET /api/v1/dashboard/trends.
 // Returns historical data across multiple completed runs (last 10 by default).
+//
+// @Summary      Get usage trends
+// @Description  Returns historical data across multiple completed runs (last 10 by default).
+// @Tags         Dashboard
+// @Produce      json
+// @Param        limit  query  int  false  "Number of historical runs to include (1-50, default 10)"
+// @Success      200  {object}  map[string]interface{}
+// @Failure      400  {object}  map[string]interface{}
+// @Failure      500  {object}  map[string]interface{}
+// @Security     BearerAuth
+// @Security     ApiKeyAuth
+// @Router       /dashboard/trends [get]
 func (h *Handlers) GetTrends(c *gin.Context) {
 	orgID, _ := c.Get("organization_id")
 	orgIDStr, ok := orgID.(string)
@@ -250,6 +296,17 @@ func (h *Handlers) GetTrends(c *gin.Context) {
 
 // GetTerraformVersions handles GET /api/v1/dashboard/terraform-versions.
 // Returns the Terraform version distribution from the latest completed run.
+//
+// @Summary      Get Terraform version distribution
+// @Description  Returns the Terraform version distribution from the latest completed run.
+// @Tags         Dashboard
+// @Produce      json
+// @Success      200  {object}  map[string]interface{}
+// @Failure      400  {object}  map[string]interface{}
+// @Failure      500  {object}  map[string]interface{}
+// @Security     BearerAuth
+// @Security     ApiKeyAuth
+// @Router       /dashboard/terraform-versions [get]
 func (h *Handlers) GetTerraformVersions(c *gin.Context) {
 	orgID, _ := c.Get("organization_id")
 	orgIDStr, ok := orgID.(string)
@@ -546,17 +603,28 @@ type OrganizationBreakdownEntry struct {
 
 // WorkspaceHealthEntry represents the health status of a single workspace.
 type WorkspaceHealthEntry struct {
-	WorkspaceName     string  `json:"workspace_name"`
-	SourceName        string  `json:"source_name"`
-	Status            string  `json:"status"`
-	LastAnalyzed      string  `json:"last_analyzed,omitempty"`
-	ResourceCount     int     `json:"resource_count"`
-	RUMCount          int     `json:"rum_count"`
-	DaysSinceModified *int    `json:"days_since_modified,omitempty"`
+	WorkspaceName     string `json:"workspace_name"`
+	SourceName        string `json:"source_name"`
+	Status            string `json:"status"`
+	LastAnalyzed      string `json:"last_analyzed,omitempty"`
+	ResourceCount     int    `json:"resource_count"`
+	RUMCount          int    `json:"rum_count"`
+	DaysSinceModified *int   `json:"days_since_modified,omitempty"`
 }
 
 // GetOrganizationBreakdown handles GET /api/v1/dashboard/organizations.
 // Returns aggregated analysis results grouped by organization.
+//
+// @Summary      Get organization summary
+// @Description  Returns aggregated analysis results grouped by organization.
+// @Tags         Dashboard
+// @Produce      json
+// @Success      200  {object}  map[string]interface{}
+// @Failure      400  {object}  map[string]interface{}
+// @Failure      500  {object}  map[string]interface{}
+// @Security     BearerAuth
+// @Security     ApiKeyAuth
+// @Router       /dashboard/organizations [get]
 func (h *Handlers) GetOrganizationBreakdown(c *gin.Context) {
 	orgID, _ := c.Get("organization_id")
 	orgIDStr, ok := orgID.(string)
@@ -579,6 +647,17 @@ func (h *Handlers) GetOrganizationBreakdown(c *gin.Context) {
 
 // GetWorkspaceHealth handles GET /api/v1/dashboard/workspaces.
 // Returns the latest snapshot per workspace combined with the last analysis status.
+//
+// @Summary      Get workspace summary
+// @Description  Returns the latest snapshot per workspace combined with the last analysis status.
+// @Tags         Dashboard
+// @Produce      json
+// @Success      200  {object}  map[string]interface{}
+// @Failure      400  {object}  map[string]interface{}
+// @Failure      500  {object}  map[string]interface{}
+// @Security     BearerAuth
+// @Security     ApiKeyAuth
+// @Router       /dashboard/workspaces [get]
 func (h *Handlers) GetWorkspaceHealth(c *gin.Context) {
 	orgID, _ := c.Get("organization_id")
 	orgIDStr, ok := orgID.(string)

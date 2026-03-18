@@ -46,6 +46,16 @@ type UpdateUserRequest struct {
 
 // ListUsersHandler returns a handler that lists users with pagination.
 // Query params: page (default 1), per_page (default 20, max 100).
+// @Summary      List users
+// @Tags         Users
+// @Security     BearerAuth
+// @Security     ApiKeyAuth
+// @Produce      json
+// @Param        organization_id  query  string  false  "Filter by organization ID"
+// @Success      200  {object}  map[string]interface{}
+// @Failure      401  {object}  map[string]interface{}
+// @Failure      500  {object}  map[string]interface{}
+// @Router       /users [get]
 func (h *UserHandlers) ListUsersHandler() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		page, perPage := parsePagination(c)
@@ -71,6 +81,17 @@ func (h *UserHandlers) ListUsersHandler() gin.HandlerFunc {
 
 // GetUserHandler returns a handler that retrieves a single user by ID,
 // including their organization memberships.
+// @Summary      Get user
+// @Tags         Users
+// @Security     BearerAuth
+// @Security     ApiKeyAuth
+// @Produce      json
+// @Param        id  path  string  true  "Resource ID"
+// @Success      200  {object}  map[string]interface{}
+// @Failure      401  {object}  map[string]interface{}
+// @Failure      404  {object}  map[string]interface{}
+// @Failure      500  {object}  map[string]interface{}
+// @Router       /users/{id} [get]
 func (h *UserHandlers) GetUserHandler() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		id := c.Param("id")
@@ -106,6 +127,19 @@ func (h *UserHandlers) GetUserHandler() gin.HandlerFunc {
 }
 
 // CreateUserHandler returns a handler that creates a new user.
+// @Summary      Create user
+// @Tags         Users
+// @Security     BearerAuth
+// @Security     ApiKeyAuth
+// @Accept       json
+// @Produce      json
+// @Param        body  body  CreateUserRequest  true  "Create user request"
+// @Success      201  {object}  map[string]interface{}
+// @Failure      400  {object}  map[string]interface{}
+// @Failure      401  {object}  map[string]interface{}
+// @Failure      409  {object}  map[string]interface{}
+// @Failure      500  {object}  map[string]interface{}
+// @Router       /users [post]
 func (h *UserHandlers) CreateUserHandler() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		var req CreateUserRequest
@@ -158,6 +192,21 @@ func (h *UserHandlers) CreateUserHandler() gin.HandlerFunc {
 }
 
 // UpdateUserHandler returns a handler that updates an existing user by ID.
+// @Summary      Update user
+// @Tags         Users
+// @Security     BearerAuth
+// @Security     ApiKeyAuth
+// @Accept       json
+// @Produce      json
+// @Param        id    path  string             true  "Resource ID"
+// @Param        body  body  UpdateUserRequest  true  "Update user request"
+// @Success      200  {object}  map[string]interface{}
+// @Failure      400  {object}  map[string]interface{}
+// @Failure      401  {object}  map[string]interface{}
+// @Failure      404  {object}  map[string]interface{}
+// @Failure      409  {object}  map[string]interface{}
+// @Failure      500  {object}  map[string]interface{}
+// @Router       /users/{id} [put]
 func (h *UserHandlers) UpdateUserHandler() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		id := c.Param("id")
@@ -213,6 +262,17 @@ func (h *UserHandlers) UpdateUserHandler() gin.HandlerFunc {
 }
 
 // DeleteUserHandler returns a handler that deletes a user by ID.
+// @Summary      Delete user
+// @Tags         Users
+// @Security     BearerAuth
+// @Security     ApiKeyAuth
+// @Produce      json
+// @Param        id  path  string  true  "Resource ID"
+// @Success      200  {object}  map[string]interface{}
+// @Failure      401  {object}  map[string]interface{}
+// @Failure      404  {object}  map[string]interface{}
+// @Failure      500  {object}  map[string]interface{}
+// @Router       /users/{id} [delete]
 func (h *UserHandlers) DeleteUserHandler() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		id := c.Param("id")
@@ -244,6 +304,17 @@ func (h *UserHandlers) DeleteUserHandler() gin.HandlerFunc {
 
 // SearchUsersHandler returns a handler that searches users by query string.
 // Query params: q (required), page (default 1), per_page (default 20, max 100).
+// @Summary      Search users
+// @Tags         Users
+// @Security     BearerAuth
+// @Security     ApiKeyAuth
+// @Produce      json
+// @Param        q  query  string  true  "Search query"
+// @Success      200  {object}  map[string]interface{}
+// @Failure      400  {object}  map[string]interface{}
+// @Failure      401  {object}  map[string]interface{}
+// @Failure      500  {object}  map[string]interface{}
+// @Router       /users/search [get]
 func (h *UserHandlers) SearchUsersHandler() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		query := c.Query("q")
@@ -274,6 +345,15 @@ func (h *UserHandlers) SearchUsersHandler() gin.HandlerFunc {
 
 // GetCurrentUserMembershipsHandler returns a handler that retrieves the
 // organization memberships for the currently authenticated user.
+// @Summary      Get current user memberships
+// @Tags         Users
+// @Security     BearerAuth
+// @Security     ApiKeyAuth
+// @Produce      json
+// @Success      200  {object}  map[string]interface{}
+// @Failure      401  {object}  map[string]interface{}
+// @Failure      500  {object}  map[string]interface{}
+// @Router       /users/me/memberships [get]
 func (h *UserHandlers) GetCurrentUserMembershipsHandler() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		userID, exists := c.Get("user_id")
@@ -301,6 +381,17 @@ func (h *UserHandlers) GetCurrentUserMembershipsHandler() gin.HandlerFunc {
 
 // GetUserMembershipsHandler returns a handler that retrieves the organization
 // memberships for a specific user by ID.
+// @Summary      Get user memberships
+// @Tags         Users
+// @Security     BearerAuth
+// @Security     ApiKeyAuth
+// @Produce      json
+// @Param        id  path  string  true  "Resource ID"
+// @Success      200  {object}  map[string]interface{}
+// @Failure      401  {object}  map[string]interface{}
+// @Failure      404  {object}  map[string]interface{}
+// @Failure      500  {object}  map[string]interface{}
+// @Router       /users/{id}/memberships [get]
 func (h *UserHandlers) GetUserMembershipsHandler() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		id := c.Param("id")
@@ -414,14 +505,14 @@ func (h *UserHandlers) listUserMemberships(c *gin.Context, userID string) ([]gin
 			return nil, err
 		}
 		memberships = append(memberships, gin.H{
-			"id":                       membershipID,
-			"organization_id":          organizationID,
-			"organization_name":        organizationName,
+			"id":                        membershipID,
+			"organization_id":           organizationID,
+			"organization_name":         organizationName,
 			"organization_display_name": organizationDisplayName,
-			"role_template_id":         roleTemplateID,
-			"role_template_name":       roleTemplateName,
-			"created_at":               createdAt,
-			"updated_at":               updatedAt,
+			"role_template_id":          roleTemplateID,
+			"role_template_name":        roleTemplateName,
+			"created_at":                createdAt,
+			"updated_at":                updatedAt,
 		})
 	}
 	if memberships == nil {

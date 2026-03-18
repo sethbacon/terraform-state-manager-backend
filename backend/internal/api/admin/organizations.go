@@ -55,6 +55,15 @@ type UpdateMemberRequest struct {
 }
 
 // ListOrganizationsHandler returns a handler that lists organizations with pagination.
+// @Summary      List organizations
+// @Tags         Organizations
+// @Security     BearerAuth
+// @Security     ApiKeyAuth
+// @Produce      json
+// @Success      200  {object}  map[string]interface{}
+// @Failure      401  {object}  map[string]interface{}
+// @Failure      500  {object}  map[string]interface{}
+// @Router       /organizations [get]
 func (h *OrganizationHandlers) ListOrganizationsHandler() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		page, perPage := parsePagination(c)
@@ -80,6 +89,17 @@ func (h *OrganizationHandlers) ListOrganizationsHandler() gin.HandlerFunc {
 
 // GetOrganizationHandler returns a handler that retrieves a single organization
 // by ID, including its members.
+// @Summary      Get organization
+// @Tags         Organizations
+// @Security     BearerAuth
+// @Security     ApiKeyAuth
+// @Produce      json
+// @Param        id  path  string  true  "Resource ID"
+// @Success      200  {object}  map[string]interface{}
+// @Failure      401  {object}  map[string]interface{}
+// @Failure      404  {object}  map[string]interface{}
+// @Failure      500  {object}  map[string]interface{}
+// @Router       /organizations/{id} [get]
 func (h *OrganizationHandlers) GetOrganizationHandler() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		id := c.Param("id")
@@ -114,6 +134,19 @@ func (h *OrganizationHandlers) GetOrganizationHandler() gin.HandlerFunc {
 }
 
 // CreateOrganizationHandler returns a handler that creates a new organization.
+// @Summary      Create organization
+// @Tags         Organizations
+// @Security     BearerAuth
+// @Security     ApiKeyAuth
+// @Accept       json
+// @Produce      json
+// @Param        body  body  CreateOrganizationRequest  true  "Create organization request"
+// @Success      201  {object}  map[string]interface{}
+// @Failure      400  {object}  map[string]interface{}
+// @Failure      401  {object}  map[string]interface{}
+// @Failure      409  {object}  map[string]interface{}
+// @Failure      500  {object}  map[string]interface{}
+// @Router       /organizations [post]
 func (h *OrganizationHandlers) CreateOrganizationHandler() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		var req CreateOrganizationRequest
@@ -152,6 +185,21 @@ func (h *OrganizationHandlers) CreateOrganizationHandler() gin.HandlerFunc {
 }
 
 // UpdateOrganizationHandler returns a handler that updates an existing organization.
+// @Summary      Update organization
+// @Tags         Organizations
+// @Security     BearerAuth
+// @Security     ApiKeyAuth
+// @Accept       json
+// @Produce      json
+// @Param        id    path  string                     true  "Resource ID"
+// @Param        body  body  UpdateOrganizationRequest  true  "Update organization request"
+// @Success      200  {object}  map[string]interface{}
+// @Failure      400  {object}  map[string]interface{}
+// @Failure      401  {object}  map[string]interface{}
+// @Failure      404  {object}  map[string]interface{}
+// @Failure      409  {object}  map[string]interface{}
+// @Failure      500  {object}  map[string]interface{}
+// @Router       /organizations/{id} [put]
 func (h *OrganizationHandlers) UpdateOrganizationHandler() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		id := c.Param("id")
@@ -212,6 +260,18 @@ func (h *OrganizationHandlers) UpdateOrganizationHandler() gin.HandlerFunc {
 
 // DeleteOrganizationHandler returns a handler that deletes an organization by ID.
 // The default organization cannot be deleted.
+// @Summary      Delete organization
+// @Tags         Organizations
+// @Security     BearerAuth
+// @Security     ApiKeyAuth
+// @Produce      json
+// @Param        id  path  string  true  "Resource ID"
+// @Success      200  {object}  map[string]interface{}
+// @Failure      401  {object}  map[string]interface{}
+// @Failure      403  {object}  map[string]interface{}
+// @Failure      404  {object}  map[string]interface{}
+// @Failure      500  {object}  map[string]interface{}
+// @Router       /organizations/{id} [delete]
 func (h *OrganizationHandlers) DeleteOrganizationHandler() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		id := c.Param("id")
@@ -249,6 +309,17 @@ func (h *OrganizationHandlers) DeleteOrganizationHandler() gin.HandlerFunc {
 
 // SearchOrganizationsHandler returns a handler that searches organizations by query.
 // Query params: q (required), page (default 1), per_page (default 20, max 100).
+// @Summary      Search organizations
+// @Tags         Organizations
+// @Security     BearerAuth
+// @Security     ApiKeyAuth
+// @Produce      json
+// @Param        q  query  string  true  "Search query"
+// @Success      200  {object}  map[string]interface{}
+// @Failure      400  {object}  map[string]interface{}
+// @Failure      401  {object}  map[string]interface{}
+// @Failure      500  {object}  map[string]interface{}
+// @Router       /organizations/search [get]
 func (h *OrganizationHandlers) SearchOrganizationsHandler() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		query := c.Query("q")
@@ -279,6 +350,17 @@ func (h *OrganizationHandlers) SearchOrganizationsHandler() gin.HandlerFunc {
 
 // ListMembersHandler returns a handler that lists all members of an organization
 // with their roles.
+// @Summary      List organization members
+// @Tags         Organizations
+// @Security     BearerAuth
+// @Security     ApiKeyAuth
+// @Produce      json
+// @Param        id  path  string  true  "Resource ID"
+// @Success      200  {object}  map[string]interface{}
+// @Failure      401  {object}  map[string]interface{}
+// @Failure      404  {object}  map[string]interface{}
+// @Failure      500  {object}  map[string]interface{}
+// @Router       /organizations/{id}/members [get]
 func (h *OrganizationHandlers) ListMembersHandler() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		id := c.Param("id")
@@ -311,6 +393,21 @@ func (h *OrganizationHandlers) ListMembersHandler() gin.HandlerFunc {
 }
 
 // AddMemberHandler returns a handler that adds a new member to an organization.
+// @Summary      Add organization member
+// @Tags         Organizations
+// @Security     BearerAuth
+// @Security     ApiKeyAuth
+// @Accept       json
+// @Produce      json
+// @Param        id    path  string            true  "Resource ID"
+// @Param        body  body  AddMemberRequest  true  "Add member request"
+// @Success      201  {object}  map[string]interface{}
+// @Failure      400  {object}  map[string]interface{}
+// @Failure      401  {object}  map[string]interface{}
+// @Failure      404  {object}  map[string]interface{}
+// @Failure      409  {object}  map[string]interface{}
+// @Failure      500  {object}  map[string]interface{}
+// @Router       /organizations/{id}/members [post]
 func (h *OrganizationHandlers) AddMemberHandler() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		orgID := c.Param("id")
@@ -392,6 +489,21 @@ func (h *OrganizationHandlers) AddMemberHandler() gin.HandlerFunc {
 }
 
 // UpdateMemberHandler returns a handler that updates a member's role in an organization.
+// @Summary      Update organization member
+// @Tags         Organizations
+// @Security     BearerAuth
+// @Security     ApiKeyAuth
+// @Accept       json
+// @Produce      json
+// @Param        id       path  string               true  "Resource ID"
+// @Param        user_id  path  string               true  "User ID"
+// @Param        body     body  UpdateMemberRequest  true  "Update member request"
+// @Success      200  {object}  map[string]interface{}
+// @Failure      400  {object}  map[string]interface{}
+// @Failure      401  {object}  map[string]interface{}
+// @Failure      404  {object}  map[string]interface{}
+// @Failure      500  {object}  map[string]interface{}
+// @Router       /organizations/{id}/members/{user_id} [put]
 func (h *OrganizationHandlers) UpdateMemberHandler() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		orgID := c.Param("id")
@@ -451,6 +563,18 @@ func (h *OrganizationHandlers) UpdateMemberHandler() gin.HandlerFunc {
 }
 
 // RemoveMemberHandler returns a handler that removes a member from an organization.
+// @Summary      Remove organization member
+// @Tags         Organizations
+// @Security     BearerAuth
+// @Security     ApiKeyAuth
+// @Produce      json
+// @Param        id       path  string  true  "Resource ID"
+// @Param        user_id  path  string  true  "User ID"
+// @Success      200  {object}  map[string]interface{}
+// @Failure      401  {object}  map[string]interface{}
+// @Failure      404  {object}  map[string]interface{}
+// @Failure      500  {object}  map[string]interface{}
+// @Router       /organizations/{id}/members/{user_id} [delete]
 func (h *OrganizationHandlers) RemoveMemberHandler() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		orgID := c.Param("id")

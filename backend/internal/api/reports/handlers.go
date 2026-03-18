@@ -56,6 +56,19 @@ func NewHandlers(
 // GenerateReport handles POST /api/v1/reports/generate.
 // Takes a run_id and format, generates the report, stores it via the storage
 // backend, and returns the report metadata.
+// @Summary      Generate report
+// @Description  Generates a report for a completed analysis run and stores it via the storage backend
+// @Tags         Reports
+// @Accept       json
+// @Produce      json
+// @Param        request  body      models.ReportCreateRequest  true  "Report creation request"
+// @Success      201  {object}  map[string]interface{}
+// @Failure      400  {object}  map[string]interface{}
+// @Failure      404  {object}  map[string]interface{}
+// @Failure      500  {object}  map[string]interface{}
+// @Security     BearerAuth
+// @Security     ApiKeyAuth
+// @Router       /reports/generate [post]
 func (h *Handlers) GenerateReport(c *gin.Context) {
 	orgID, _ := c.Get("organization_id")
 	orgIDStr, ok := orgID.(string)
@@ -176,6 +189,16 @@ func (h *Handlers) GenerateReport(c *gin.Context) {
 
 // ListReports handles GET /api/v1/reports.
 // Returns a paginated list of reports for the organization.
+// @Summary      List reports
+// @Description  Returns a paginated list of reports for the organization
+// @Tags         Reports
+// @Produce      json
+// @Success      200  {object}  map[string]interface{}
+// @Failure      400  {object}  map[string]interface{}
+// @Failure      500  {object}  map[string]interface{}
+// @Security     BearerAuth
+// @Security     ApiKeyAuth
+// @Router       /reports [get]
 func (h *Handlers) ListReports(c *gin.Context) {
 	orgID, _ := c.Get("organization_id")
 	orgIDStr, ok := orgID.(string)
@@ -211,6 +234,18 @@ func (h *Handlers) ListReports(c *gin.Context) {
 
 // GetReport handles GET /api/v1/reports/:id.
 // Returns report metadata.
+// @Summary      Get report
+// @Description  Returns report metadata
+// @Tags         Reports
+// @Produce      json
+// @Param        id  path      string  true  "Resource ID"
+// @Success      200  {object}  map[string]interface{}
+// @Failure      400  {object}  map[string]interface{}
+// @Failure      404  {object}  map[string]interface{}
+// @Failure      500  {object}  map[string]interface{}
+// @Security     BearerAuth
+// @Security     ApiKeyAuth
+// @Router       /reports/{id} [get]
 func (h *Handlers) GetReport(c *gin.Context) {
 	orgID, _ := c.Get("organization_id")
 	orgIDStr, ok := orgID.(string)
@@ -242,6 +277,18 @@ func (h *Handlers) GetReport(c *gin.Context) {
 
 // DownloadReport handles GET /api/v1/reports/:id/download.
 // Streams the report file to the client.
+// @Summary      Download report file
+// @Description  Streams the report file to the client
+// @Tags         Reports
+// @Produce      application/octet-stream
+// @Param        id  path      string  true  "Resource ID"
+// @Success      200  {file}    binary
+// @Failure      400  {object}  map[string]interface{}
+// @Failure      404  {object}  map[string]interface{}
+// @Failure      500  {object}  map[string]interface{}
+// @Security     BearerAuth
+// @Security     ApiKeyAuth
+// @Router       /reports/{id}/download [get]
 func (h *Handlers) DownloadReport(c *gin.Context) {
 	orgID, _ := c.Get("organization_id")
 	orgIDStr, ok := orgID.(string)
@@ -295,6 +342,18 @@ func (h *Handlers) DownloadReport(c *gin.Context) {
 
 // DeleteReport handles DELETE /api/v1/reports/:id.
 // Deletes the report metadata and the stored file.
+// @Summary      Delete report
+// @Description  Deletes the report metadata and the stored file
+// @Tags         Reports
+// @Produce      json
+// @Param        id  path      string  true  "Resource ID"
+// @Success      200  {object}  map[string]interface{}
+// @Failure      400  {object}  map[string]interface{}
+// @Failure      404  {object}  map[string]interface{}
+// @Failure      500  {object}  map[string]interface{}
+// @Security     BearerAuth
+// @Security     ApiKeyAuth
+// @Router       /reports/{id} [delete]
 func (h *Handlers) DeleteReport(c *gin.Context) {
 	orgID, _ := c.Get("organization_id")
 	orgIDStr, ok := orgID.(string)

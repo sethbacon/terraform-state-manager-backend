@@ -43,6 +43,18 @@ func NewHandlers(
 
 // CreateMigration handles POST /api/v1/migrations.
 // Creates a new migration job and optionally starts execution.
+// @Summary      Create migration
+// @Description  Creates a new migration job and optionally starts execution
+// @Tags         Migrations
+// @Accept       json
+// @Produce      json
+// @Param        request  body      models.MigrationJobCreateRequest  true  "Migration job create request"
+// @Success      201  {object}  map[string]interface{}
+// @Failure      400  {object}  map[string]interface{}
+// @Failure      500  {object}  map[string]interface{}
+// @Security     BearerAuth
+// @Security     ApiKeyAuth
+// @Router       /migrations [post]
 func (h *Handlers) CreateMigration(c *gin.Context) {
 	orgID, _ := c.Get("organization_id")
 	orgIDStr, ok := orgID.(string)
@@ -106,6 +118,18 @@ func (h *Handlers) CreateMigration(c *gin.Context) {
 
 // ListMigrations handles GET /api/v1/migrations.
 // Returns a paginated list of migration jobs for the organization.
+// @Summary      List migrations
+// @Description  Returns a paginated list of migration jobs for the organization
+// @Tags         Migrations
+// @Produce      json
+// @Param        limit   query  int  false  "Page size (default 20, max 100)"
+// @Param        offset  query  int  false  "Page offset (default 0)"
+// @Success      200  {object}  map[string]interface{}
+// @Failure      400  {object}  map[string]interface{}
+// @Failure      500  {object}  map[string]interface{}
+// @Security     BearerAuth
+// @Security     ApiKeyAuth
+// @Router       /migrations [get]
 func (h *Handlers) ListMigrations(c *gin.Context) {
 	orgID, _ := c.Get("organization_id")
 	orgIDStr, ok := orgID.(string)
@@ -141,6 +165,18 @@ func (h *Handlers) ListMigrations(c *gin.Context) {
 
 // GetMigration handles GET /api/v1/migrations/:id.
 // Returns the details of a single migration job.
+// @Summary      Get migration
+// @Description  Returns the details of a single migration job
+// @Tags         Migrations
+// @Produce      json
+// @Param        id  path  string  true  "Resource ID"
+// @Success      200  {object}  map[string]interface{}
+// @Failure      400  {object}  map[string]interface{}
+// @Failure      404  {object}  map[string]interface{}
+// @Failure      500  {object}  map[string]interface{}
+// @Security     BearerAuth
+// @Security     ApiKeyAuth
+// @Router       /migrations/{id} [get]
 func (h *Handlers) GetMigration(c *gin.Context) {
 	orgID, _ := c.Get("organization_id")
 	orgIDStr, ok := orgID.(string)
@@ -172,6 +208,18 @@ func (h *Handlers) GetMigration(c *gin.Context) {
 
 // CancelMigration handles POST /api/v1/migrations/:id/cancel.
 // Cancels a pending or running migration job.
+// @Summary      Cancel migration
+// @Description  Cancels a pending or running migration job
+// @Tags         Migrations
+// @Produce      json
+// @Param        id  path  string  true  "Resource ID"
+// @Success      200  {object}  map[string]interface{}
+// @Failure      400  {object}  map[string]interface{}
+// @Failure      404  {object}  map[string]interface{}
+// @Failure      500  {object}  map[string]interface{}
+// @Security     BearerAuth
+// @Security     ApiKeyAuth
+// @Router       /migrations/{id}/cancel [post]
 func (h *Handlers) CancelMigration(c *gin.Context) {
 	orgID, _ := c.Get("organization_id")
 	orgIDStr, ok := orgID.(string)
@@ -218,6 +266,18 @@ func (h *Handlers) CancelMigration(c *gin.Context) {
 
 // ValidateMigration handles POST /api/v1/migrations/validate.
 // Validates a migration configuration without creating a job.
+// @Summary      Validate migration config
+// @Description  Validates a migration configuration without creating a job
+// @Tags         Migrations
+// @Accept       json
+// @Produce      json
+// @Param        request  body      models.MigrationJobCreateRequest  true  "Migration job create request"
+// @Success      200  {object}  map[string]interface{}
+// @Failure      400  {object}  map[string]interface{}
+// @Failure      500  {object}  map[string]interface{}
+// @Security     BearerAuth
+// @Security     ApiKeyAuth
+// @Router       /migrations/validate [post]
 func (h *Handlers) ValidateMigration(c *gin.Context) {
 	orgID, _ := c.Get("organization_id")
 	orgIDStr, ok := orgID.(string)
@@ -261,6 +321,18 @@ func (h *Handlers) ValidateMigration(c *gin.Context) {
 
 // DryRunMigration handles POST /api/v1/migrations/dry-run.
 // Simulates a migration and returns what would be migrated.
+// @Summary      Dry run migration
+// @Description  Simulates a migration and returns what would be migrated
+// @Tags         Migrations
+// @Accept       json
+// @Produce      json
+// @Param        request  body      models.MigrationJobCreateRequest  true  "Migration job create request"
+// @Success      200  {object}  map[string]interface{}
+// @Failure      400  {object}  map[string]interface{}
+// @Failure      500  {object}  map[string]interface{}
+// @Security     BearerAuth
+// @Security     ApiKeyAuth
+// @Router       /migrations/dry-run [post]
 func (h *Handlers) DryRunMigration(c *gin.Context) {
 	orgID, _ := c.Get("organization_id")
 	orgIDStr, ok := orgID.(string)

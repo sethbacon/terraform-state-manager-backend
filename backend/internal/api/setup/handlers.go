@@ -81,6 +81,13 @@ func NewHandlers(
 // GetSetupStatus returns the current state of the setup wizard. It is the only
 // setup endpoint that does not require the setup token, allowing the frontend
 // to decide whether to show the wizard or the normal login screen.
+// GetSetupStatus godoc
+// @Summary      Get setup status
+// @Tags         Setup
+// @Produce      json
+// @Success      200  {object}  map[string]interface{}
+// @Failure      500  {object}  map[string]interface{}
+// @Router       /setup/status [get]
 func (h *Handlers) GetSetupStatus(c *gin.Context) {
 	ctx := c.Request.Context()
 
@@ -110,6 +117,13 @@ func (h *Handlers) GetSetupStatus(c *gin.Context) {
 // ValidateToken confirms that the setup token supplied via the
 // SetupTokenMiddleware is valid. If the request reaches this handler, the
 // middleware has already accepted the token.
+// ValidateToken godoc
+// @Summary      Validate setup token
+// @Tags         Setup
+// @Produce      json
+// @Success      200  {object}  map[string]interface{}
+// @Failure      401  {object}  map[string]interface{}
+// @Router       /setup/validate-token [post]
 func (h *Handlers) ValidateToken(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"valid": true})
 }
@@ -117,6 +131,15 @@ func (h *Handlers) ValidateToken(c *gin.Context) {
 // TestOIDCConfig validates an OIDC configuration by performing provider
 // discovery against the issuer URL. The discovery request is capped at 15
 // seconds so the wizard does not hang on unreachable endpoints.
+// TestOIDCConfig godoc
+// @Summary      Test OIDC configuration
+// @Tags         Setup
+// @Accept       json
+// @Produce      json
+// @Param        input  body  OIDCConfigInput  true  "OIDC configuration"
+// @Success      200  {object}  map[string]interface{}
+// @Failure      400  {object}  map[string]interface{}
+// @Router       /setup/oidc/test [post]
 func (h *Handlers) TestOIDCConfig(c *gin.Context) {
 	var input OIDCConfigInput
 	if err := c.ShouldBindJSON(&input); err != nil {
@@ -163,6 +186,16 @@ func (h *Handlers) TestOIDCConfig(c *gin.Context) {
 // SaveOIDCConfig encrypts the client secret, persists the OIDC configuration
 // to the database, and activates a live OIDC provider so that login is usable
 // immediately.
+// SaveOIDCConfig godoc
+// @Summary      Save OIDC configuration
+// @Tags         Setup
+// @Accept       json
+// @Produce      json
+// @Param        input  body  OIDCConfigInput  true  "OIDC configuration"
+// @Success      200  {object}  map[string]interface{}
+// @Failure      400  {object}  map[string]interface{}
+// @Failure      500  {object}  map[string]interface{}
+// @Router       /setup/oidc [post]
 func (h *Handlers) SaveOIDCConfig(c *gin.Context) {
 	var input OIDCConfigInput
 	if err := c.ShouldBindJSON(&input); err != nil {
@@ -239,6 +272,17 @@ func (h *Handlers) SaveOIDCConfig(c *gin.Context) {
 
 // ConfigureAdmin creates the initial admin user, ensures the default
 // organisation exists, and grants the user the admin role template.
+// ConfigureAdmin godoc
+// @Summary      Configure admin user
+// @Tags         Setup
+// @Accept       json
+// @Produce      json
+// @Param        input  body  AdminConfigInput  true  "Admin configuration"
+// @Success      200  {object}  map[string]interface{}
+// @Failure      400  {object}  map[string]interface{}
+// @Failure      409  {object}  map[string]interface{}
+// @Failure      500  {object}  map[string]interface{}
+// @Router       /setup/admin [post]
 func (h *Handlers) ConfigureAdmin(c *gin.Context) {
 	var input AdminConfigInput
 	if err := c.ShouldBindJSON(&input); err != nil {
@@ -344,6 +388,14 @@ func (h *Handlers) ConfigureAdmin(c *gin.Context) {
 // CompleteSetup verifies that all required setup components (OIDC and admin)
 // are configured and marks the setup as completed. Once completed, the
 // SetupTokenMiddleware will reject all further setup requests.
+// CompleteSetup godoc
+// @Summary      Complete setup
+// @Tags         Setup
+// @Produce      json
+// @Success      200  {object}  map[string]interface{}
+// @Failure      400  {object}  map[string]interface{}
+// @Failure      500  {object}  map[string]interface{}
+// @Router       /setup/complete [post]
 func (h *Handlers) CompleteSetup(c *gin.Context) {
 	ctx := c.Request.Context()
 

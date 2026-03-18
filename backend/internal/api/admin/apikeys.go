@@ -36,18 +36,18 @@ func NewAPIKeyHandlers(cfg *config.Config, db *sql.DB) *APIKeyHandlers {
 
 // CreateAPIKeyRequest represents the request body for creating a new API key.
 type CreateAPIKeyRequest struct {
-	Name           string    `json:"name" binding:"required"`
-	Description    *string   `json:"description"`
-	OrganizationID string    `json:"organization_id" binding:"required"`
-	Scopes         []string  `json:"scopes" binding:"required"`
+	Name           string     `json:"name" binding:"required"`
+	Description    *string    `json:"description"`
+	OrganizationID string     `json:"organization_id" binding:"required"`
+	Scopes         []string   `json:"scopes" binding:"required"`
 	ExpiresAt      *time.Time `json:"expires_at"`
 }
 
 // CreateAPIKeyResponse represents the response when creating a new API key.
 // The full key value is returned only once at creation time.
 type CreateAPIKeyResponse struct {
-	Key       string      `json:"key"`
-	KeyPrefix string      `json:"key_prefix"`
+	Key       string         `json:"key"`
+	KeyPrefix string         `json:"key_prefix"`
 	APIKey    *models.APIKey `json:"api_key"`
 }
 
@@ -58,15 +58,25 @@ type RotateAPIKeyRequest struct {
 
 // RotateAPIKeyResponse represents the response when rotating an API key.
 type RotateAPIKeyResponse struct {
-	Key              string     `json:"key"`
-	KeyPrefix        string     `json:"key_prefix"`
-	APIKey           *models.APIKey `json:"api_key"`
-	OldKeyExpiresAt  *time.Time `json:"old_key_expires_at,omitempty"`
+	Key             string         `json:"key"`
+	KeyPrefix       string         `json:"key_prefix"`
+	APIKey          *models.APIKey `json:"api_key"`
+	OldKeyExpiresAt *time.Time     `json:"old_key_expires_at,omitempty"`
 }
 
 // ListAPIKeysHandler returns a handler that lists API keys.
 // If the user has the api_keys:manage scope, all keys for the organization are
 // returned. Otherwise only keys owned by the current user are returned.
+// @Summary      List API keys
+// @Tags         API Keys
+// @Security     BearerAuth
+// @Security     ApiKeyAuth
+// @Produce      json
+// @Param        organization_id  query  string  false  "Filter by organization ID"
+// @Success      200  {object}  map[string]interface{}
+// @Failure      401  {object}  map[string]interface{}
+// @Failure      500  {object}  map[string]interface{}
+// @Router       /apikeys [get]
 func (h *APIKeyHandlers) ListAPIKeysHandler() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		userID, _ := c.Get("user_id")
@@ -119,6 +129,19 @@ func (h *APIKeyHandlers) ListAPIKeysHandler() gin.HandlerFunc {
 // CreateAPIKeyHandler returns a handler that creates a new API key.
 // It validates the requested scopes, verifies organization membership and role
 // permissions, and returns the full key value only once.
+// @Summary      Create API key
+// @Tags         API Keys
+// @Security     BearerAuth
+// @Security     ApiKeyAuth
+// @Accept       json
+// @Produce      json
+// @Param        body  body  CreateAPIKeyRequest  true  "Create API key request"
+// @Success      201  {object}  map[string]interface{}
+// @Failure      400  {object}  map[string]interface{}
+// @Failure      401  {object}  map[string]interface{}
+// @Failure      403  {object}  map[string]interface{}
+// @Failure      500  {object}  map[string]interface{}
+// @Router       /apikeys [post]
 func (h *APIKeyHandlers) CreateAPIKeyHandler() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		var req CreateAPIKeyRequest
@@ -219,6 +242,18 @@ func (h *APIKeyHandlers) CreateAPIKeyHandler() gin.HandlerFunc {
 // GetAPIKeyHandler returns a handler that retrieves a single API key by ID.
 // Users can retrieve their own keys; users with api_keys:manage scope can
 // retrieve any key.
+// @Summary      Get API key
+// @Tags         API Keys
+// @Security     BearerAuth
+// @Security     ApiKeyAuth
+// @Produce      json
+// @Param        id  path  string  true  "Resource ID"
+// @Success      200  {object}  map[string]interface{}
+// @Failure      401  {object}  map[string]interface{}
+// @Failure      403  {object}  map[string]interface{}
+// @Failure      404  {object}  map[string]interface{}
+// @Failure      500  {object}  map[string]interface{}
+// @Router       /apikeys/{id} [get]
 func (h *APIKeyHandlers) GetAPIKeyHandler() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		id := c.Param("id")
@@ -258,6 +293,21 @@ func (h *APIKeyHandlers) GetAPIKeyHandler() gin.HandlerFunc {
 
 // UpdateAPIKeyHandler returns a handler that updates an existing API key.
 // Only the key owner can update it. Validates scopes on update.
+// @Summary      Update API key
+// @Tags         API Keys
+// @Security     BearerAuth
+// @Security     ApiKeyAuth
+// @Accept       json
+// @Produce      json
+// @Param        id    path  string                  true  "Resource ID"
+// @Param        body  body  map[string]interface{}  true  "Update API key request"
+// @Success      200  {object}  map[string]interface{}
+// @Failure      400  {object}  map[string]interface{}
+// @Failure      401  {object}  map[string]interface{}
+// @Failure      403  {object}  map[string]interface{}
+// @Failure      404  {object}  map[string]interface{}
+// @Failure      500  {object}  map[string]interface{}
+// @Router       /apikeys/{id} [put]
 func (h *APIKeyHandlers) UpdateAPIKeyHandler() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		id := c.Param("id")
@@ -336,6 +386,18 @@ func (h *APIKeyHandlers) UpdateAPIKeyHandler() gin.HandlerFunc {
 
 // DeleteAPIKeyHandler returns a handler that deletes an API key by ID.
 // The key owner or a user with api_keys:manage scope can delete a key.
+// @Summary      Delete API key
+// @Tags         API Keys
+// @Security     BearerAuth
+// @Security     ApiKeyAuth
+// @Produce      json
+// @Param        id  path  string  true  "Resource ID"
+// @Success      200  {object}  map[string]interface{}
+// @Failure      401  {object}  map[string]interface{}
+// @Failure      403  {object}  map[string]interface{}
+// @Failure      404  {object}  map[string]interface{}
+// @Failure      500  {object}  map[string]interface{}
+// @Router       /apikeys/{id} [delete]
 func (h *APIKeyHandlers) DeleteAPIKeyHandler() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		id := c.Param("id")
@@ -383,6 +445,21 @@ func (h *APIKeyHandlers) DeleteAPIKeyHandler() gin.HandlerFunc {
 // A new key is generated with the same properties as the old key. An optional
 // grace period (0-72 hours) may be specified during which the old key remains
 // valid.
+// @Summary      Rotate API key
+// @Tags         API Keys
+// @Security     BearerAuth
+// @Security     ApiKeyAuth
+// @Accept       json
+// @Produce      json
+// @Param        id    path  string               true  "Resource ID"
+// @Param        body  body  RotateAPIKeyRequest  true  "Rotate API key request"
+// @Success      200  {object}  map[string]interface{}
+// @Failure      400  {object}  map[string]interface{}
+// @Failure      401  {object}  map[string]interface{}
+// @Failure      403  {object}  map[string]interface{}
+// @Failure      404  {object}  map[string]interface{}
+// @Failure      500  {object}  map[string]interface{}
+// @Router       /apikeys/{id}/rotate [post]
 func (h *APIKeyHandlers) RotateAPIKeyHandler() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		id := c.Param("id")

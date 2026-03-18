@@ -37,6 +37,18 @@ func NewHandlers(
 
 // ListChannels handles GET /api/v1/notifications/channels.
 // Returns a paginated list of notification channels for the authenticated user's organization.
+// @Summary      List notification channels
+// @Description  Returns a paginated list of notification channels for the organization
+// @Tags         Notifications
+// @Produce      json
+// @Param        limit   query  int  false  "Page size (default 20, max 100)"
+// @Param        offset  query  int  false  "Page offset (default 0)"
+// @Success      200  {object}  map[string]interface{}
+// @Failure      400  {object}  map[string]interface{}
+// @Failure      500  {object}  map[string]interface{}
+// @Security     BearerAuth
+// @Security     ApiKeyAuth
+// @Router       /notifications/channels [get]
 func (h *Handlers) ListChannels(c *gin.Context) {
 	orgID, _ := c.Get("organization_id")
 	orgIDStr, ok := orgID.(string)
@@ -72,6 +84,18 @@ func (h *Handlers) ListChannels(c *gin.Context) {
 
 // CreateChannel handles POST /api/v1/notifications/channels.
 // Creates a new notification channel for the authenticated user's organization.
+// @Summary      Create notification channel
+// @Description  Creates a new notification channel for the organization
+// @Tags         Notifications
+// @Accept       json
+// @Produce      json
+// @Param        request  body      models.NotificationChannelCreateRequest  true  "Notification channel create request"
+// @Success      201  {object}  map[string]interface{}
+// @Failure      400  {object}  map[string]interface{}
+// @Failure      500  {object}  map[string]interface{}
+// @Security     BearerAuth
+// @Security     ApiKeyAuth
+// @Router       /notifications/channels [post]
 func (h *Handlers) CreateChannel(c *gin.Context) {
 	orgID, _ := c.Get("organization_id")
 	orgIDStr, ok := orgID.(string)
@@ -117,6 +141,18 @@ func (h *Handlers) CreateChannel(c *gin.Context) {
 
 // GetChannel handles GET /api/v1/notifications/channels/:id.
 // Returns a single notification channel by ID.
+// @Summary      Get notification channel
+// @Description  Returns a single notification channel by ID
+// @Tags         Notifications
+// @Produce      json
+// @Param        id  path  string  true  "Resource ID"
+// @Success      200  {object}  map[string]interface{}
+// @Failure      400  {object}  map[string]interface{}
+// @Failure      404  {object}  map[string]interface{}
+// @Failure      500  {object}  map[string]interface{}
+// @Security     BearerAuth
+// @Security     ApiKeyAuth
+// @Router       /notifications/channels/{id} [get]
 func (h *Handlers) GetChannel(c *gin.Context) {
 	orgID, _ := c.Get("organization_id")
 	orgIDStr, ok := orgID.(string)
@@ -148,6 +184,20 @@ func (h *Handlers) GetChannel(c *gin.Context) {
 
 // UpdateChannel handles PUT /api/v1/notifications/channels/:id.
 // Applies partial updates to a notification channel.
+// @Summary      Update notification channel
+// @Description  Applies partial updates to a notification channel
+// @Tags         Notifications
+// @Accept       json
+// @Produce      json
+// @Param        id       path  string                                   true  "Resource ID"
+// @Param        request  body  models.NotificationChannelUpdateRequest  true  "Notification channel update request"
+// @Success      200  {object}  map[string]interface{}
+// @Failure      400  {object}  map[string]interface{}
+// @Failure      404  {object}  map[string]interface{}
+// @Failure      500  {object}  map[string]interface{}
+// @Security     BearerAuth
+// @Security     ApiKeyAuth
+// @Router       /notifications/channels/{id} [put]
 func (h *Handlers) UpdateChannel(c *gin.Context) {
 	orgID, _ := c.Get("organization_id")
 	orgIDStr, ok := orgID.(string)
@@ -208,6 +258,18 @@ func (h *Handlers) UpdateChannel(c *gin.Context) {
 }
 
 // DeleteChannel handles DELETE /api/v1/notifications/channels/:id.
+// @Summary      Delete notification channel
+// @Description  Deletes a notification channel by ID
+// @Tags         Notifications
+// @Produce      json
+// @Param        id  path  string  true  "Resource ID"
+// @Success      200  {object}  map[string]interface{}
+// @Failure      400  {object}  map[string]interface{}
+// @Failure      404  {object}  map[string]interface{}
+// @Failure      500  {object}  map[string]interface{}
+// @Security     BearerAuth
+// @Security     ApiKeyAuth
+// @Router       /notifications/channels/{id} [delete]
 func (h *Handlers) DeleteChannel(c *gin.Context) {
 	orgID, _ := c.Get("organization_id")
 	orgIDStr, ok := orgID.(string)
@@ -246,6 +308,18 @@ func (h *Handlers) DeleteChannel(c *gin.Context) {
 
 // TestChannel handles POST /api/v1/notifications/channels/:id/test.
 // Sends a test notification through the specified channel.
+// @Summary      Test notification channel
+// @Description  Sends a test notification through the specified channel
+// @Tags         Notifications
+// @Produce      json
+// @Param        id  path  string  true  "Resource ID"
+// @Success      200  {object}  map[string]interface{}
+// @Failure      400  {object}  map[string]interface{}
+// @Failure      404  {object}  map[string]interface{}
+// @Failure      500  {object}  map[string]interface{}
+// @Security     BearerAuth
+// @Security     ApiKeyAuth
+// @Router       /notifications/channels/{id}/test [post]
 func (h *Handlers) TestChannel(c *gin.Context) {
 	orgID, _ := c.Get("organization_id")
 	orgIDStr, ok := orgID.(string)

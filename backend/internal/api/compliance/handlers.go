@@ -40,6 +40,18 @@ func NewHandlers(
 
 // CreatePolicy handles POST /api/v1/compliance/policies.
 // Creates a new compliance policy for the authenticated user's organization.
+//
+// @Summary      Create compliance policy
+// @Tags         Compliance
+// @Accept       json
+// @Produce      json
+// @Param        body  body      models.CompliancePolicyCreateRequest  true  "Compliance policy"
+// @Success      201  {object}  map[string]interface{}
+// @Failure      400  {object}  map[string]interface{}
+// @Failure      500  {object}  map[string]interface{}
+// @Security     BearerAuth
+// @Security     ApiKeyAuth
+// @Router       /compliance/policies [post]
 func (h *Handlers) CreatePolicy(c *gin.Context) {
 	orgID, _ := c.Get("organization_id")
 	orgIDStr, ok := orgID.(string)
@@ -91,6 +103,17 @@ func (h *Handlers) CreatePolicy(c *gin.Context) {
 
 // ListPolicies handles GET /api/v1/compliance/policies.
 // Returns a paginated list of compliance policies for the authenticated user's organization.
+//
+// @Summary      List compliance policies
+// @Tags         Compliance
+// @Accept       json
+// @Produce      json
+// @Success      200  {object}  map[string]interface{}
+// @Failure      400  {object}  map[string]interface{}
+// @Failure      500  {object}  map[string]interface{}
+// @Security     BearerAuth
+// @Security     ApiKeyAuth
+// @Router       /compliance/policies [get]
 func (h *Handlers) ListPolicies(c *gin.Context) {
 	orgID, _ := c.Get("organization_id")
 	orgIDStr, ok := orgID.(string)
@@ -126,6 +149,19 @@ func (h *Handlers) ListPolicies(c *gin.Context) {
 
 // GetPolicy handles GET /api/v1/compliance/policies/:id.
 // Returns a single compliance policy by ID.
+//
+// @Summary      Get compliance policy
+// @Tags         Compliance
+// @Accept       json
+// @Produce      json
+// @Param        id   path      string  true  "Policy ID"
+// @Success      200  {object}  map[string]interface{}
+// @Failure      400  {object}  map[string]interface{}
+// @Failure      404  {object}  map[string]interface{}
+// @Failure      500  {object}  map[string]interface{}
+// @Security     BearerAuth
+// @Security     ApiKeyAuth
+// @Router       /compliance/policies/{id} [get]
 func (h *Handlers) GetPolicy(c *gin.Context) {
 	orgID, _ := c.Get("organization_id")
 	orgIDStr, ok := orgID.(string)
@@ -157,6 +193,20 @@ func (h *Handlers) GetPolicy(c *gin.Context) {
 
 // UpdatePolicy handles PUT /api/v1/compliance/policies/:id.
 // Applies partial updates to a compliance policy.
+//
+// @Summary      Update compliance policy
+// @Tags         Compliance
+// @Accept       json
+// @Produce      json
+// @Param        id    path      string                                true  "Policy ID"
+// @Param        body  body      models.CompliancePolicyUpdateRequest  true  "Compliance policy update"
+// @Success      200  {object}  map[string]interface{}
+// @Failure      400  {object}  map[string]interface{}
+// @Failure      404  {object}  map[string]interface{}
+// @Failure      500  {object}  map[string]interface{}
+// @Security     BearerAuth
+// @Security     ApiKeyAuth
+// @Router       /compliance/policies/{id} [put]
 func (h *Handlers) UpdatePolicy(c *gin.Context) {
 	orgID, _ := c.Get("organization_id")
 	orgIDStr, ok := orgID.(string)
@@ -220,6 +270,19 @@ func (h *Handlers) UpdatePolicy(c *gin.Context) {
 }
 
 // DeletePolicy handles DELETE /api/v1/compliance/policies/:id.
+//
+// @Summary      Delete compliance policy
+// @Tags         Compliance
+// @Accept       json
+// @Produce      json
+// @Param        id   path      string  true  "Policy ID"
+// @Success      200  {object}  map[string]interface{}
+// @Failure      400  {object}  map[string]interface{}
+// @Failure      404  {object}  map[string]interface{}
+// @Failure      500  {object}  map[string]interface{}
+// @Security     BearerAuth
+// @Security     ApiKeyAuth
+// @Router       /compliance/policies/{id} [delete]
 func (h *Handlers) DeletePolicy(c *gin.Context) {
 	orgID, _ := c.Get("organization_id")
 	orgIDStr, ok := orgID.(string)
@@ -262,6 +325,17 @@ func (h *Handlers) DeletePolicy(c *gin.Context) {
 
 // ListResults handles GET /api/v1/compliance/results.
 // Returns a paginated list of compliance results, filterable by run_id.
+//
+// @Summary      Get compliance results
+// @Tags         Compliance
+// @Accept       json
+// @Produce      json
+// @Success      200  {object}  map[string]interface{}
+// @Failure      400  {object}  map[string]interface{}
+// @Failure      500  {object}  map[string]interface{}
+// @Security     BearerAuth
+// @Security     ApiKeyAuth
+// @Router       /compliance/results [get]
 func (h *Handlers) ListResults(c *gin.Context) {
 	orgID, _ := c.Get("organization_id")
 	orgIDStr, ok := orgID.(string)
@@ -339,6 +413,17 @@ func (h *Handlers) ListResults(c *gin.Context) {
 
 // GetComplianceScore handles GET /api/v1/compliance/score.
 // Returns the aggregate compliance score for the authenticated user's organization.
+//
+// @Summary      Get compliance score
+// @Tags         Compliance
+// @Accept       json
+// @Produce      json
+// @Success      200  {object}  map[string]interface{}
+// @Failure      400  {object}  map[string]interface{}
+// @Failure      500  {object}  map[string]interface{}
+// @Security     BearerAuth
+// @Security     ApiKeyAuth
+// @Router       /compliance/score [get]
 func (h *Handlers) GetComplianceScore(c *gin.Context) {
 	orgID, _ := c.Get("organization_id")
 	orgIDStr, ok := orgID.(string)

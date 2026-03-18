@@ -61,6 +61,19 @@ func NewHandlers(
 // StartRun handles POST /api/v1/analysis/run.
 // Creates a new analysis run record, then starts the analysis in a background
 // goroutine. Returns the run ID immediately (async operation).
+// @Summary      Start analysis run
+// @Description  Creates a new analysis run and starts it asynchronously; returns the run ID immediately
+// @Tags         Analysis
+// @Accept       json
+// @Produce      json
+// @Param        request  body      models.AnalysisRunCreateRequest  true  "Analysis run creation request"
+// @Success      202  {object}  map[string]interface{}
+// @Failure      400  {object}  map[string]interface{}
+// @Failure      404  {object}  map[string]interface{}
+// @Failure      500  {object}  map[string]interface{}
+// @Security     BearerAuth
+// @Security     ApiKeyAuth
+// @Router       /analysis/run [post]
 func (h *Handlers) StartRun(c *gin.Context) {
 	orgID, _ := c.Get("organization_id")
 	orgIDStr, ok := orgID.(string)
@@ -148,6 +161,18 @@ func (h *Handlers) StartRun(c *gin.Context) {
 
 // ListRuns handles GET /api/v1/analysis/runs.
 // Returns a paginated list of analysis runs for the organization.
+// @Summary      List analysis runs
+// @Description  Returns a paginated list of analysis runs for the organization
+// @Tags         Analysis
+// @Produce      json
+// @Param        source_id  query     string  false  "Filter by source ID"
+// @Param        status     query     string  false  "Filter by run status"
+// @Success      200  {object}  map[string]interface{}
+// @Failure      400  {object}  map[string]interface{}
+// @Failure      500  {object}  map[string]interface{}
+// @Security     BearerAuth
+// @Security     ApiKeyAuth
+// @Router       /analysis/runs [get]
 func (h *Handlers) ListRuns(c *gin.Context) {
 	orgID, _ := c.Get("organization_id")
 	orgIDStr, ok := orgID.(string)
@@ -183,6 +208,18 @@ func (h *Handlers) ListRuns(c *gin.Context) {
 
 // GetRun handles GET /api/v1/analysis/runs/:id.
 // Returns the run details including summary counts.
+// @Summary      Get analysis run
+// @Description  Returns the run details including summary counts
+// @Tags         Analysis
+// @Produce      json
+// @Param        id  path      string  true  "Resource ID"
+// @Success      200  {object}  map[string]interface{}
+// @Failure      400  {object}  map[string]interface{}
+// @Failure      404  {object}  map[string]interface{}
+// @Failure      500  {object}  map[string]interface{}
+// @Security     BearerAuth
+// @Security     ApiKeyAuth
+// @Router       /analysis/runs/{id} [get]
 func (h *Handlers) GetRun(c *gin.Context) {
 	orgID, _ := c.Get("organization_id")
 	orgIDStr, ok := orgID.(string)
@@ -214,6 +251,18 @@ func (h *Handlers) GetRun(c *gin.Context) {
 
 // GetRunResults handles GET /api/v1/analysis/runs/:id/results.
 // Returns paginated workspace results for a specific run.
+// @Summary      Get analysis run results
+// @Description  Returns paginated workspace results for a specific analysis run
+// @Tags         Analysis
+// @Produce      json
+// @Param        id  path      string  true  "Resource ID"
+// @Success      200  {object}  map[string]interface{}
+// @Failure      400  {object}  map[string]interface{}
+// @Failure      404  {object}  map[string]interface{}
+// @Failure      500  {object}  map[string]interface{}
+// @Security     BearerAuth
+// @Security     ApiKeyAuth
+// @Router       /analysis/runs/{id}/results [get]
 func (h *Handlers) GetRunResults(c *gin.Context) {
 	orgID, _ := c.Get("organization_id")
 	orgIDStr, ok := orgID.(string)
@@ -268,6 +317,18 @@ func (h *Handlers) GetRunResults(c *gin.Context) {
 
 // CancelRun handles POST /api/v1/analysis/runs/:id/cancel.
 // Sets the run status to cancelled and cancels its context.
+// @Summary      Cancel analysis run
+// @Description  Sets the run status to cancelled and cancels its in-flight context
+// @Tags         Analysis
+// @Produce      json
+// @Param        id  path      string  true  "Resource ID"
+// @Success      200  {object}  map[string]interface{}
+// @Failure      400  {object}  map[string]interface{}
+// @Failure      404  {object}  map[string]interface{}
+// @Failure      500  {object}  map[string]interface{}
+// @Security     BearerAuth
+// @Security     ApiKeyAuth
+// @Router       /analysis/runs/{id}/cancel [post]
 func (h *Handlers) CancelRun(c *gin.Context) {
 	orgID, _ := c.Get("organization_id")
 	orgIDStr, ok := orgID.(string)
@@ -327,6 +388,18 @@ func (h *Handlers) CancelRun(c *gin.Context) {
 
 // DeleteRun handles DELETE /api/v1/analysis/runs/:id.
 // Removes a completed, failed, or cancelled analysis run and its results.
+// @Summary      Delete analysis run
+// @Description  Removes a completed, failed, or cancelled analysis run and its results
+// @Tags         Analysis
+// @Produce      json
+// @Param        id  path      string  true  "Resource ID"
+// @Success      200  {object}  map[string]interface{}
+// @Failure      400  {object}  map[string]interface{}
+// @Failure      404  {object}  map[string]interface{}
+// @Failure      500  {object}  map[string]interface{}
+// @Security     BearerAuth
+// @Security     ApiKeyAuth
+// @Router       /analysis/runs/{id} [delete]
 func (h *Handlers) DeleteRun(c *gin.Context) {
 	orgID, _ := c.Get("organization_id")
 	orgIDStr, ok := orgID.(string)
@@ -370,6 +443,16 @@ func (h *Handlers) DeleteRun(c *gin.Context) {
 
 // GetLatestSummary handles GET /api/v1/analysis/summary.
 // Returns aggregated summary from the latest completed run.
+// @Summary      Get analysis summary
+// @Description  Returns aggregated summary from the latest completed analysis run
+// @Tags         Analysis
+// @Produce      json
+// @Success      200  {object}  map[string]interface{}
+// @Failure      400  {object}  map[string]interface{}
+// @Failure      500  {object}  map[string]interface{}
+// @Security     BearerAuth
+// @Security     ApiKeyAuth
+// @Router       /analysis/summary [get]
 func (h *Handlers) GetLatestSummary(c *gin.Context) {
 	orgID, _ := c.Get("organization_id")
 	orgIDStr, ok := orgID.(string)

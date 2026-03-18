@@ -39,6 +39,15 @@ type updateRoleTemplateRequest struct {
 }
 
 // ListRoleTemplates handles listing all role templates.
+// @Summary      List role templates
+// @Description  Returns all role templates including system and custom templates.
+// @Tags         Admin
+// @Produce      json
+// @Success      200  {object}  map[string]interface{}
+// @Failure      500  {object}  map[string]interface{}
+// @Security     BearerAuth
+// @Security     ApiKeyAuth
+// @Router       /admin/role-templates [get]
 func (h *RoleHandlers) ListRoleTemplates(c *gin.Context) {
 	templates, err := h.roleRepo.ListRoleTemplates(c.Request.Context())
 	if err != nil {
@@ -51,6 +60,18 @@ func (h *RoleHandlers) ListRoleTemplates(c *gin.Context) {
 }
 
 // GetRoleTemplate handles retrieving a single role template by its UUID.
+// @Summary      Get role template
+// @Description  Returns a single role template by ID.
+// @Tags         Admin
+// @Produce      json
+// @Param        id   path      string  true  "Resource ID"
+// @Success      200  {object}  map[string]interface{}
+// @Failure      400  {object}  map[string]interface{}
+// @Failure      404  {object}  map[string]interface{}
+// @Failure      500  {object}  map[string]interface{}
+// @Security     BearerAuth
+// @Security     ApiKeyAuth
+// @Router       /admin/role-templates/{id} [get]
 func (h *RoleHandlers) GetRoleTemplate(c *gin.Context) {
 	id := c.Param("id")
 	if id == "" {
@@ -74,6 +95,19 @@ func (h *RoleHandlers) GetRoleTemplate(c *gin.Context) {
 
 // CreateRoleTemplate handles creating a new custom role template.
 // System roles cannot be created through this endpoint (is_system is always false).
+// @Summary      Create role template
+// @Description  Creates a new custom role template. System roles cannot be created through this endpoint.
+// @Tags         Admin
+// @Accept       json
+// @Produce      json
+// @Param        body  body      createRoleTemplateRequest  true  "Role template to create"
+// @Success      201   {object}  map[string]interface{}
+// @Failure      400   {object}  map[string]interface{}
+// @Failure      409   {object}  map[string]interface{}
+// @Failure      500   {object}  map[string]interface{}
+// @Security     BearerAuth
+// @Security     ApiKeyAuth
+// @Router       /admin/role-templates [post]
 func (h *RoleHandlers) CreateRoleTemplate(c *gin.Context) {
 	var req createRoleTemplateRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -112,6 +146,22 @@ func (h *RoleHandlers) CreateRoleTemplate(c *gin.Context) {
 
 // UpdateRoleTemplate handles updating an existing role template.
 // System role templates cannot be modified.
+// @Summary      Update role template
+// @Description  Updates an existing role template. System role templates cannot be modified.
+// @Tags         Admin
+// @Accept       json
+// @Produce      json
+// @Param        id    path      string                     true  "Resource ID"
+// @Param        body  body      updateRoleTemplateRequest  true  "Fields to update"
+// @Success      200   {object}  map[string]interface{}
+// @Failure      400   {object}  map[string]interface{}
+// @Failure      403   {object}  map[string]interface{}
+// @Failure      404   {object}  map[string]interface{}
+// @Failure      409   {object}  map[string]interface{}
+// @Failure      500   {object}  map[string]interface{}
+// @Security     BearerAuth
+// @Security     ApiKeyAuth
+// @Router       /admin/role-templates/{id} [put]
 func (h *RoleHandlers) UpdateRoleTemplate(c *gin.Context) {
 	id := c.Param("id")
 	if id == "" {
@@ -177,6 +227,19 @@ func (h *RoleHandlers) UpdateRoleTemplate(c *gin.Context) {
 
 // DeleteRoleTemplate handles deleting a role template by ID.
 // System role templates cannot be deleted.
+// @Summary      Delete role template
+// @Description  Deletes a role template by ID. System role templates cannot be deleted.
+// @Tags         Admin
+// @Produce      json
+// @Param        id   path      string  true  "Resource ID"
+// @Success      200  {object}  map[string]interface{}
+// @Failure      400  {object}  map[string]interface{}
+// @Failure      403  {object}  map[string]interface{}
+// @Failure      404  {object}  map[string]interface{}
+// @Failure      500  {object}  map[string]interface{}
+// @Security     BearerAuth
+// @Security     ApiKeyAuth
+// @Router       /admin/role-templates/{id} [delete]
 func (h *RoleHandlers) DeleteRoleTemplate(c *gin.Context) {
 	id := c.Param("id")
 	if id == "" {

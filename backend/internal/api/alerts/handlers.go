@@ -42,6 +42,20 @@ func NewHandlers(
 // ListAlerts handles GET /api/v1/alerts.
 // Returns a paginated list of alerts for the authenticated user's organization.
 // Query parameters: limit (default 20), offset (default 0), severity, acknowledged.
+// @Summary      List alerts
+// @Description  Returns a paginated list of alerts for the organization
+// @Tags         Alerts
+// @Produce      json
+// @Param        limit        query  int     false  "Page size (default 20, max 100)"
+// @Param        offset       query  int     false  "Page offset (default 0)"
+// @Param        severity     query  string  false  "Filter by severity"
+// @Param        acknowledged query  bool    false  "Filter by acknowledged status"
+// @Success      200  {object}  map[string]interface{}
+// @Failure      400  {object}  map[string]interface{}
+// @Failure      500  {object}  map[string]interface{}
+// @Security     BearerAuth
+// @Security     ApiKeyAuth
+// @Router       /alerts [get]
 func (h *Handlers) ListAlerts(c *gin.Context) {
 	orgID, _ := c.Get("organization_id")
 	orgIDStr, ok := orgID.(string)
@@ -87,6 +101,18 @@ func (h *Handlers) ListAlerts(c *gin.Context) {
 
 // AcknowledgeAlert handles PUT /api/v1/alerts/:id/acknowledge.
 // Marks an alert as acknowledged by the authenticated user.
+// @Summary      Acknowledge alert
+// @Description  Marks an alert as acknowledged by the authenticated user
+// @Tags         Alerts
+// @Produce      json
+// @Param        id  path  string  true  "Resource ID"
+// @Success      200  {object}  map[string]interface{}
+// @Failure      400  {object}  map[string]interface{}
+// @Failure      404  {object}  map[string]interface{}
+// @Failure      500  {object}  map[string]interface{}
+// @Security     BearerAuth
+// @Security     ApiKeyAuth
+// @Router       /alerts/{id}/acknowledge [put]
 func (h *Handlers) AcknowledgeAlert(c *gin.Context) {
 	orgID, _ := c.Get("organization_id")
 	orgIDStr, ok := orgID.(string)
@@ -132,6 +158,18 @@ func (h *Handlers) AcknowledgeAlert(c *gin.Context) {
 
 // CreateAlertRule handles POST /api/v1/alerts/rules.
 // Creates a new alert rule for the authenticated user's organization.
+// @Summary      Create alert rule
+// @Description  Creates a new alert rule for the organization
+// @Tags         Alerts
+// @Accept       json
+// @Produce      json
+// @Param        request  body      models.AlertRuleCreateRequest  true  "Alert rule create request"
+// @Success      201  {object}  map[string]interface{}
+// @Failure      400  {object}  map[string]interface{}
+// @Failure      500  {object}  map[string]interface{}
+// @Security     BearerAuth
+// @Security     ApiKeyAuth
+// @Router       /alerts/rules [post]
 func (h *Handlers) CreateAlertRule(c *gin.Context) {
 	orgID, _ := c.Get("organization_id")
 	orgIDStr, ok := orgID.(string)
@@ -189,6 +227,18 @@ func (h *Handlers) CreateAlertRule(c *gin.Context) {
 
 // ListAlertRules handles GET /api/v1/alerts/rules.
 // Returns a paginated list of alert rules for the authenticated user's organization.
+// @Summary      List alert rules
+// @Description  Returns a paginated list of alert rules for the organization
+// @Tags         Alerts
+// @Produce      json
+// @Param        limit   query  int  false  "Page size (default 20, max 100)"
+// @Param        offset  query  int  false  "Page offset (default 0)"
+// @Success      200  {object}  map[string]interface{}
+// @Failure      400  {object}  map[string]interface{}
+// @Failure      500  {object}  map[string]interface{}
+// @Security     BearerAuth
+// @Security     ApiKeyAuth
+// @Router       /alerts/rules [get]
 func (h *Handlers) ListAlertRules(c *gin.Context) {
 	orgID, _ := c.Get("organization_id")
 	orgIDStr, ok := orgID.(string)
@@ -224,6 +274,18 @@ func (h *Handlers) ListAlertRules(c *gin.Context) {
 
 // GetAlertRule handles GET /api/v1/alerts/rules/:id.
 // Returns a single alert rule by ID.
+// @Summary      Get alert rule
+// @Description  Returns a single alert rule by ID
+// @Tags         Alerts
+// @Produce      json
+// @Param        id  path  string  true  "Resource ID"
+// @Success      200  {object}  map[string]interface{}
+// @Failure      400  {object}  map[string]interface{}
+// @Failure      404  {object}  map[string]interface{}
+// @Failure      500  {object}  map[string]interface{}
+// @Security     BearerAuth
+// @Security     ApiKeyAuth
+// @Router       /alerts/rules/{id} [get]
 func (h *Handlers) GetAlertRule(c *gin.Context) {
 	orgID, _ := c.Get("organization_id")
 	orgIDStr, ok := orgID.(string)
@@ -255,6 +317,20 @@ func (h *Handlers) GetAlertRule(c *gin.Context) {
 
 // UpdateAlertRule handles PUT /api/v1/alerts/rules/:id.
 // Applies partial updates to an alert rule.
+// @Summary      Update alert rule
+// @Description  Applies partial updates to an alert rule
+// @Tags         Alerts
+// @Accept       json
+// @Produce      json
+// @Param        id       path  string                         true  "Resource ID"
+// @Param        request  body  models.AlertRuleUpdateRequest  true  "Alert rule update request"
+// @Success      200  {object}  map[string]interface{}
+// @Failure      400  {object}  map[string]interface{}
+// @Failure      404  {object}  map[string]interface{}
+// @Failure      500  {object}  map[string]interface{}
+// @Security     BearerAuth
+// @Security     ApiKeyAuth
+// @Router       /alerts/rules/{id} [put]
 func (h *Handlers) UpdateAlertRule(c *gin.Context) {
 	orgID, _ := c.Get("organization_id")
 	orgIDStr, ok := orgID.(string)
@@ -321,6 +397,18 @@ func (h *Handlers) UpdateAlertRule(c *gin.Context) {
 }
 
 // DeleteAlertRule handles DELETE /api/v1/alerts/rules/:id.
+// @Summary      Delete alert rule
+// @Description  Deletes an alert rule by ID
+// @Tags         Alerts
+// @Produce      json
+// @Param        id  path  string  true  "Resource ID"
+// @Success      200  {object}  map[string]interface{}
+// @Failure      400  {object}  map[string]interface{}
+// @Failure      404  {object}  map[string]interface{}
+// @Failure      500  {object}  map[string]interface{}
+// @Security     BearerAuth
+// @Security     ApiKeyAuth
+// @Router       /alerts/rules/{id} [delete]
 func (h *Handlers) DeleteAlertRule(c *gin.Context) {
 	orgID, _ := c.Get("organization_id")
 	orgIDStr, ok := orgID.(string)

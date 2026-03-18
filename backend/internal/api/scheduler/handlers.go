@@ -40,6 +40,19 @@ func NewHandlers(
 
 // CreateTask handles POST /api/v1/scheduler/tasks.
 // Creates a new scheduled task for the authenticated user's organization.
+//
+// @Summary      Create scheduled task
+// @Description  Creates a new scheduled task for the authenticated user's organization.
+// @Tags         Scheduler
+// @Accept       json
+// @Produce      json
+// @Param        body  body  models.ScheduledTaskCreateRequest  true  "Scheduled task creation request"
+// @Success      201  {object}  map[string]interface{}
+// @Failure      400  {object}  map[string]interface{}
+// @Failure      500  {object}  map[string]interface{}
+// @Security     BearerAuth
+// @Security     ApiKeyAuth
+// @Router       /scheduler/tasks [post]
 func (h *Handlers) CreateTask(c *gin.Context) {
 	orgID, _ := c.Get("organization_id")
 	orgIDStr, ok := orgID.(string)
@@ -106,6 +119,19 @@ func (h *Handlers) CreateTask(c *gin.Context) {
 
 // ListTasks handles GET /api/v1/scheduler/tasks.
 // Returns a paginated list of scheduled tasks for the organization.
+//
+// @Summary      List scheduled tasks
+// @Description  Returns a paginated list of scheduled tasks for the organization.
+// @Tags         Scheduler
+// @Produce      json
+// @Param        limit   query  int  false  "Maximum number of tasks to return (1-100, default 20)"
+// @Param        offset  query  int  false  "Number of tasks to skip (default 0)"
+// @Success      200  {object}  map[string]interface{}
+// @Failure      400  {object}  map[string]interface{}
+// @Failure      500  {object}  map[string]interface{}
+// @Security     BearerAuth
+// @Security     ApiKeyAuth
+// @Router       /scheduler/tasks [get]
 func (h *Handlers) ListTasks(c *gin.Context) {
 	orgID, _ := c.Get("organization_id")
 	orgIDStr, ok := orgID.(string)
@@ -141,6 +167,19 @@ func (h *Handlers) ListTasks(c *gin.Context) {
 
 // GetTask handles GET /api/v1/scheduler/tasks/:id.
 // Returns a single scheduled task by ID.
+//
+// @Summary      Get scheduled task
+// @Description  Returns a single scheduled task by ID.
+// @Tags         Scheduler
+// @Produce      json
+// @Param        id  path  string  true  "Resource ID"
+// @Success      200  {object}  map[string]interface{}
+// @Failure      400  {object}  map[string]interface{}
+// @Failure      404  {object}  map[string]interface{}
+// @Failure      500  {object}  map[string]interface{}
+// @Security     BearerAuth
+// @Security     ApiKeyAuth
+// @Router       /scheduler/tasks/{id} [get]
 func (h *Handlers) GetTask(c *gin.Context) {
 	orgID, _ := c.Get("organization_id")
 	orgIDStr, ok := orgID.(string)
@@ -172,6 +211,21 @@ func (h *Handlers) GetTask(c *gin.Context) {
 
 // UpdateTask handles PUT /api/v1/scheduler/tasks/:id.
 // Applies partial updates to a scheduled task.
+//
+// @Summary      Update scheduled task
+// @Description  Applies partial updates to a scheduled task.
+// @Tags         Scheduler
+// @Accept       json
+// @Produce      json
+// @Param        id    path  string                              true  "Resource ID"
+// @Param        body  body  models.ScheduledTaskUpdateRequest  true  "Scheduled task update request"
+// @Success      200  {object}  map[string]interface{}
+// @Failure      400  {object}  map[string]interface{}
+// @Failure      404  {object}  map[string]interface{}
+// @Failure      500  {object}  map[string]interface{}
+// @Security     BearerAuth
+// @Security     ApiKeyAuth
+// @Router       /scheduler/tasks/{id} [put]
 func (h *Handlers) UpdateTask(c *gin.Context) {
 	orgID, _ := c.Get("organization_id")
 	orgIDStr, ok := orgID.(string)
@@ -241,6 +295,19 @@ func (h *Handlers) UpdateTask(c *gin.Context) {
 }
 
 // DeleteTask handles DELETE /api/v1/scheduler/tasks/:id.
+//
+// @Summary      Delete scheduled task
+// @Description  Deletes a scheduled task by ID.
+// @Tags         Scheduler
+// @Produce      json
+// @Param        id  path  string  true  "Resource ID"
+// @Success      200  {object}  map[string]interface{}
+// @Failure      400  {object}  map[string]interface{}
+// @Failure      404  {object}  map[string]interface{}
+// @Failure      500  {object}  map[string]interface{}
+// @Security     BearerAuth
+// @Security     ApiKeyAuth
+// @Router       /scheduler/tasks/{id} [delete]
 func (h *Handlers) DeleteTask(c *gin.Context) {
 	orgID, _ := c.Get("organization_id")
 	orgIDStr, ok := orgID.(string)
@@ -282,6 +349,19 @@ func (h *Handlers) DeleteTask(c *gin.Context) {
 // TriggerTask handles POST /api/v1/scheduler/tasks/:id/trigger.
 // Manually triggers immediate execution of a scheduled task by setting its
 // next_run_at to now so the scheduler picks it up on its next tick.
+//
+// @Summary      Manually trigger task
+// @Description  Manually triggers immediate execution of a scheduled task.
+// @Tags         Scheduler
+// @Produce      json
+// @Param        id  path  string  true  "Resource ID"
+// @Success      200  {object}  map[string]interface{}
+// @Failure      400  {object}  map[string]interface{}
+// @Failure      404  {object}  map[string]interface{}
+// @Failure      500  {object}  map[string]interface{}
+// @Security     BearerAuth
+// @Security     ApiKeyAuth
+// @Router       /scheduler/tasks/{id}/trigger [post]
 func (h *Handlers) TriggerTask(c *gin.Context) {
 	orgID, _ := c.Get("organization_id")
 	orgIDStr, ok := orgID.(string)

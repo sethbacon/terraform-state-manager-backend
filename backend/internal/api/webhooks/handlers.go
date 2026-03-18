@@ -38,6 +38,19 @@ type triggerRequest struct {
 // TriggerAnalysis handles POST /api/v1/webhooks/trigger.
 // Takes a source_id in the request body, validates it, creates a new analysis
 // run, and returns the run_id.
+//
+// @Summary      Trigger webhook
+// @Tags         Webhooks
+// @Accept       json
+// @Produce      json
+// @Param        body  body      triggerRequest  true  "Webhook trigger request"
+// @Success      201  {object}  map[string]interface{}
+// @Failure      400  {object}  map[string]interface{}
+// @Failure      404  {object}  map[string]interface{}
+// @Failure      500  {object}  map[string]interface{}
+// @Security     BearerAuth
+// @Security     ApiKeyAuth
+// @Router       /webhooks/trigger [post]
 func (h *Handlers) TriggerAnalysis(c *gin.Context) {
 	orgID, _ := c.Get("organization_id")
 	orgIDStr, ok := orgID.(string)

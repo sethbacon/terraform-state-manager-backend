@@ -62,6 +62,15 @@ func NewOIDCHandlers(tokenCipher *crypto.TokenCipher, oidcConfigRepo *repositori
 // GetOIDCConfig returns the current active OIDC configuration.
 // The client_secret field is always returned as "***".
 // GET /api/v1/admin/oidc
+// @Summary      Get OIDC configuration
+// @Description  Returns the current active OIDC configuration. The client_secret is always masked as "***".
+// @Tags         Admin
+// @Produce      json
+// @Success      200  {object}  map[string]interface{}
+// @Failure      404  {object}  map[string]interface{}
+// @Security     BearerAuth
+// @Security     ApiKeyAuth
+// @Router       /admin/oidc [get]
 func (h *OIDCHandlers) GetOIDCConfig(c *gin.Context) {
 	ctx := c.Request.Context()
 
@@ -85,6 +94,18 @@ func (h *OIDCHandlers) GetOIDCConfig(c *gin.Context) {
 // UpdateOIDCConfig saves a new OIDC configuration to the database.
 // If client_secret is empty or "***", the existing encrypted secret is reused.
 // PUT /api/v1/admin/oidc
+// @Summary      Update OIDC configuration
+// @Description  Saves a new OIDC configuration. If client_secret is empty or "***", the existing encrypted secret is reused.
+// @Tags         Admin
+// @Accept       json
+// @Produce      json
+// @Param        body  body      UpdateOIDCConfigRequest  true  "OIDC configuration to save"
+// @Success      200   {object}  map[string]interface{}
+// @Failure      400   {object}  map[string]interface{}
+// @Failure      500   {object}  map[string]interface{}
+// @Security     BearerAuth
+// @Security     ApiKeyAuth
+// @Router       /admin/oidc [put]
 func (h *OIDCHandlers) UpdateOIDCConfig(c *gin.Context) {
 	var req UpdateOIDCConfigRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -143,6 +164,18 @@ func (h *OIDCHandlers) UpdateOIDCConfig(c *gin.Context) {
 // TestOIDCConfig verifies reachability of an OIDC provider by issuing a HEAD
 // request to the well-known discovery endpoint.
 // POST /api/v1/admin/oidc/test
+// @Summary      Test OIDC configuration
+// @Description  Verifies reachability of an OIDC provider by issuing a request to its well-known discovery endpoint.
+// @Tags         Admin
+// @Accept       json
+// @Produce      json
+// @Param        body  body      TestOIDCConfigRequest  true  "OIDC provider to test"
+// @Success      200   {object}  map[string]interface{}
+// @Failure      400   {object}  map[string]interface{}
+// @Failure      502   {object}  map[string]interface{}
+// @Security     BearerAuth
+// @Security     ApiKeyAuth
+// @Router       /admin/oidc/test [post]
 func (h *OIDCHandlers) TestOIDCConfig(c *gin.Context) {
 	var req TestOIDCConfigRequest
 	if err := c.ShouldBindJSON(&req); err != nil {

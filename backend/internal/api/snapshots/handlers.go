@@ -48,6 +48,20 @@ func NewHandlers(
 // ListSnapshots handles GET /api/v1/snapshots.
 // Returns a paginated list of snapshots for the organization, optionally
 // filtered by workspace_name query parameter.
+//
+// @Summary      List snapshots
+// @Description  Returns a paginated list of snapshots for the organization.
+// @Tags         Snapshots
+// @Produce      json
+// @Param        limit           query  int     false  "Maximum number of snapshots to return (1-100, default 20)"
+// @Param        offset          query  int     false  "Number of snapshots to skip (default 0)"
+// @Param        workspace_name  query  string  false  "Filter by workspace name"
+// @Success      200  {object}  map[string]interface{}
+// @Failure      400  {object}  map[string]interface{}
+// @Failure      500  {object}  map[string]interface{}
+// @Security     BearerAuth
+// @Security     ApiKeyAuth
+// @Router       /snapshots [get]
 func (h *Handlers) ListSnapshots(c *gin.Context) {
 	orgID, _ := c.Get("organization_id")
 	orgIDStr, ok := orgID.(string)
@@ -96,6 +110,19 @@ func (h *Handlers) ListSnapshots(c *gin.Context) {
 
 // GetSnapshot handles GET /api/v1/snapshots/:id.
 // Returns a single snapshot by ID.
+//
+// @Summary      Get snapshot
+// @Description  Returns a single snapshot by ID.
+// @Tags         Snapshots
+// @Produce      json
+// @Param        id  path  string  true  "Resource ID"
+// @Success      200  {object}  map[string]interface{}
+// @Failure      400  {object}  map[string]interface{}
+// @Failure      404  {object}  map[string]interface{}
+// @Failure      500  {object}  map[string]interface{}
+// @Security     BearerAuth
+// @Security     ApiKeyAuth
+// @Router       /snapshots/{id} [get]
 func (h *Handlers) GetSnapshot(c *gin.Context) {
 	orgID, _ := c.Get("organization_id")
 	orgIDStr, ok := orgID.(string)
@@ -128,6 +155,18 @@ func (h *Handlers) GetSnapshot(c *gin.Context) {
 // CaptureNow handles POST /api/v1/snapshots/capture.
 // Triggers an immediate snapshot capture using results from the most recent
 // completed analysis run for the organization.
+//
+// @Summary      Capture snapshot
+// @Description  Triggers an immediate snapshot capture using results from the most recent completed analysis run.
+// @Tags         Snapshots
+// @Produce      json
+// @Success      201  {object}  map[string]interface{}
+// @Failure      400  {object}  map[string]interface{}
+// @Failure      404  {object}  map[string]interface{}
+// @Failure      500  {object}  map[string]interface{}
+// @Security     BearerAuth
+// @Security     ApiKeyAuth
+// @Router       /snapshots/capture [post]
 func (h *Handlers) CaptureNow(c *gin.Context) {
 	orgID, _ := c.Get("organization_id")
 	orgIDStr, ok := orgID.(string)
@@ -199,6 +238,20 @@ func (h *Handlers) CaptureNow(c *gin.Context) {
 
 // CompareSnapshots handles GET /api/v1/snapshots/compare?before=UUID&after=UUID.
 // Compares two snapshots and returns the drift analysis.
+//
+// @Summary      Compare snapshots
+// @Description  Compares two snapshots and returns the drift analysis.
+// @Tags         Snapshots
+// @Produce      json
+// @Param        before  query  string  true  "ID of the before snapshot"
+// @Param        after   query  string  true  "ID of the after snapshot"
+// @Success      200  {object}  map[string]interface{}
+// @Failure      400  {object}  map[string]interface{}
+// @Failure      404  {object}  map[string]interface{}
+// @Failure      500  {object}  map[string]interface{}
+// @Security     BearerAuth
+// @Security     ApiKeyAuth
+// @Router       /snapshots/compare [get]
 func (h *Handlers) CompareSnapshots(c *gin.Context) {
 	orgID, _ := c.Get("organization_id")
 	orgIDStr, ok := orgID.(string)
@@ -269,6 +322,20 @@ func (h *Handlers) CompareSnapshots(c *gin.Context) {
 // ListDriftEvents handles GET /api/v1/snapshots/drift.
 // Returns a paginated list of drift events for the organization, optionally
 // filtered by workspace_name query parameter.
+//
+// @Summary      List drift events
+// @Description  Returns a paginated list of drift events for the organization.
+// @Tags         Drift
+// @Produce      json
+// @Param        limit           query  int     false  "Maximum number of events to return (1-100, default 20)"
+// @Param        offset          query  int     false  "Number of events to skip (default 0)"
+// @Param        workspace_name  query  string  false  "Filter by workspace name"
+// @Success      200  {object}  map[string]interface{}
+// @Failure      400  {object}  map[string]interface{}
+// @Failure      500  {object}  map[string]interface{}
+// @Security     BearerAuth
+// @Security     ApiKeyAuth
+// @Router       /drift/events [get]
 func (h *Handlers) ListDriftEvents(c *gin.Context) {
 	orgID, _ := c.Get("organization_id")
 	orgIDStr, ok := orgID.(string)
@@ -317,6 +384,19 @@ func (h *Handlers) ListDriftEvents(c *gin.Context) {
 
 // GetDriftEvent handles GET /api/v1/snapshots/drift/:id.
 // Returns a single drift event by ID.
+//
+// @Summary      Get drift event
+// @Description  Returns a single drift event by ID.
+// @Tags         Drift
+// @Produce      json
+// @Param        id  path  string  true  "Resource ID"
+// @Success      200  {object}  map[string]interface{}
+// @Failure      400  {object}  map[string]interface{}
+// @Failure      404  {object}  map[string]interface{}
+// @Failure      500  {object}  map[string]interface{}
+// @Security     BearerAuth
+// @Security     ApiKeyAuth
+// @Router       /drift/events/{id} [get]
 func (h *Handlers) GetDriftEvent(c *gin.Context) {
 	orgID, _ := c.Get("organization_id")
 	orgIDStr, ok := orgID.(string)

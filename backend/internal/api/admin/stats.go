@@ -29,6 +29,15 @@ type DashboardStats struct {
 // GetDashboardStats handles the dashboard statistics endpoint. It counts rows
 // across users, organizations, api_keys, and audit_logs tables in a single
 // query. Missing tables gracefully fall back to zero.
+// @Summary      Get admin dashboard statistics
+// @Description  Returns aggregate counts for users, organizations, API keys, and audit events.
+// @Tags         Admin
+// @Produce      json
+// @Success      200  {object}  map[string]interface{}
+// @Failure      500  {object}  map[string]interface{}
+// @Security     BearerAuth
+// @Security     ApiKeyAuth
+// @Router       /admin/stats/dashboard [get]
 func (h *StatsHandler) GetDashboardStats(c *gin.Context) {
 	var stats DashboardStats
 

@@ -100,6 +100,13 @@ func (h *AuthHandlers) pruneExpiredSessions() {
 
 // LoginHandler initiates the OIDC authorization code flow.
 // GET /api/v1/auth/login
+// LoginHandler godoc
+// @Summary      Initiate OIDC login
+// @Tags         Auth
+// @Produce      json
+// @Success      307  {object}  map[string]interface{}
+// @Failure      503  {object}  map[string]interface{}
+// @Router       /auth/login [get]
 func (h *AuthHandlers) LoginHandler() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		provider := h.oidcProvider.Load()
@@ -128,6 +135,14 @@ func (h *AuthHandlers) LoginHandler() gin.HandlerFunc {
 
 // CallbackHandler handles the OIDC authorization code callback.
 // GET /api/v1/auth/callback
+// CallbackHandler godoc
+// @Summary      Handle OIDC callback
+// @Tags         Auth
+// @Produce      json
+// @Success      307  {object}  map[string]interface{}
+// @Failure      400  {object}  map[string]interface{}
+// @Failure      500  {object}  map[string]interface{}
+// @Router       /auth/callback [get]
 func (h *AuthHandlers) CallbackHandler() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		provider := h.oidcProvider.Load()
@@ -313,6 +328,12 @@ func (h *AuthHandlers) resolveUserScopes(c *gin.Context, userID string) []string
 
 // LogoutHandler handles user logout.
 // GET /api/v1/auth/logout
+// LogoutHandler godoc
+// @Summary      Logout user
+// @Tags         Auth
+// @Produce      json
+// @Success      200  {object}  map[string]interface{}
+// @Router       /auth/logout [get]
 func (h *AuthHandlers) LogoutHandler() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		// For OIDC, we can optionally redirect to the IdP's end-session endpoint
@@ -335,6 +356,16 @@ func (h *AuthHandlers) LogoutHandler() gin.HandlerFunc {
 
 // RefreshHandler issues a new JWT with an extended expiry.
 // POST /api/v1/auth/refresh
+// RefreshHandler godoc
+// @Summary      Refresh JWT token
+// @Tags         Auth
+// @Produce      json
+// @Success      200  {object}  map[string]interface{}
+// @Failure      401  {object}  map[string]interface{}
+// @Failure      500  {object}  map[string]interface{}
+// @Security     BearerAuth
+// @Security     ApiKeyAuth
+// @Router       /auth/refresh [post]
 func (h *AuthHandlers) RefreshHandler() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		userID, _ := c.Get("user_id")
@@ -373,6 +404,16 @@ func (h *AuthHandlers) RefreshHandler() gin.HandlerFunc {
 
 // MeHandler returns the current authenticated user's profile and scopes.
 // GET /api/v1/auth/me
+// MeHandler godoc
+// @Summary      Get current user
+// @Tags         Auth
+// @Produce      json
+// @Success      200  {object}  map[string]interface{}
+// @Failure      401  {object}  map[string]interface{}
+// @Failure      404  {object}  map[string]interface{}
+// @Security     BearerAuth
+// @Security     ApiKeyAuth
+// @Router       /auth/me [get]
 func (h *AuthHandlers) MeHandler() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		userID, _ := c.Get("user_id")

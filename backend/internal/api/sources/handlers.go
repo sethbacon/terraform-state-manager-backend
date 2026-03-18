@@ -136,6 +136,17 @@ func maskConfig(rawConfig json.RawMessage) json.RawMessage {
 // ListSources handles GET /api/v1/sources.
 // Returns a paginated list of state sources for the authenticated user's
 // organization. Query parameters: limit (default 20), offset (default 0).
+// @Summary      List state sources
+// @Description  Returns a paginated list of state sources for the authenticated user's organization
+// @Tags         Sources
+// @Produce      json
+// @Param        organization_id  query     string  false  "Filter by organization ID"
+// @Success      200  {object}  map[string]interface{}
+// @Failure      400  {object}  map[string]interface{}
+// @Failure      500  {object}  map[string]interface{}
+// @Security     BearerAuth
+// @Security     ApiKeyAuth
+// @Router       /sources [get]
 func (h *Handlers) ListSources(c *gin.Context) {
 	orgID, _ := c.Get("organization_id")
 	orgIDStr, ok := orgID.(string)
@@ -185,6 +196,18 @@ func (h *Handlers) ListSources(c *gin.Context) {
 // CreateSource handles POST /api/v1/sources.
 // Binds a StateSourceCreateRequest, encrypts sensitive config fields, and
 // persists the new source.
+// @Summary      Create state source
+// @Description  Creates a new state source with encrypted sensitive config fields
+// @Tags         Sources
+// @Accept       json
+// @Produce      json
+// @Param        request  body      models.StateSourceCreateRequest  true  "State source creation request"
+// @Success      201  {object}  map[string]interface{}
+// @Failure      400  {object}  map[string]interface{}
+// @Failure      500  {object}  map[string]interface{}
+// @Security     BearerAuth
+// @Security     ApiKeyAuth
+// @Router       /sources [post]
 func (h *Handlers) CreateSource(c *gin.Context) {
 	orgID, _ := c.Get("organization_id")
 	orgIDStr, ok := orgID.(string)
@@ -245,6 +268,18 @@ func (h *Handlers) CreateSource(c *gin.Context) {
 
 // GetSource handles GET /api/v1/sources/:id.
 // Returns a single source by ID, masking sensitive config fields.
+// @Summary      Get state source
+// @Description  Returns a single state source by ID, masking sensitive config fields
+// @Tags         Sources
+// @Produce      json
+// @Param        id  path      string  true  "Resource ID"
+// @Success      200  {object}  map[string]interface{}
+// @Failure      400  {object}  map[string]interface{}
+// @Failure      404  {object}  map[string]interface{}
+// @Failure      500  {object}  map[string]interface{}
+// @Security     BearerAuth
+// @Security     ApiKeyAuth
+// @Router       /sources/{id} [get]
 func (h *Handlers) GetSource(c *gin.Context) {
 	orgID, _ := c.Get("organization_id")
 	orgIDStr, ok := orgID.(string)
@@ -284,6 +319,20 @@ func (h *Handlers) GetSource(c *gin.Context) {
 // UpdateSource handles PUT /api/v1/sources/:id.
 // Applies partial updates to a state source. Sensitive config fields in the
 // update payload are encrypted before storage.
+// @Summary      Update state source
+// @Description  Applies partial updates to a state source; sensitive config fields are encrypted before storage
+// @Tags         Sources
+// @Accept       json
+// @Produce      json
+// @Param        id       path      string                           true  "Resource ID"
+// @Param        request  body      models.StateSourceUpdateRequest  true  "State source update request"
+// @Success      200  {object}  map[string]interface{}
+// @Failure      400  {object}  map[string]interface{}
+// @Failure      404  {object}  map[string]interface{}
+// @Failure      500  {object}  map[string]interface{}
+// @Security     BearerAuth
+// @Security     ApiKeyAuth
+// @Router       /sources/{id} [put]
 func (h *Handlers) UpdateSource(c *gin.Context) {
 	orgID, _ := c.Get("organization_id")
 	orgIDStr, ok := orgID.(string)
@@ -352,6 +401,18 @@ func (h *Handlers) UpdateSource(c *gin.Context) {
 }
 
 // DeleteSource handles DELETE /api/v1/sources/:id.
+// @Summary      Delete state source
+// @Description  Deletes a state source by ID
+// @Tags         Sources
+// @Produce      json
+// @Param        id  path      string  true  "Resource ID"
+// @Success      200  {object}  map[string]interface{}
+// @Failure      400  {object}  map[string]interface{}
+// @Failure      404  {object}  map[string]interface{}
+// @Failure      500  {object}  map[string]interface{}
+// @Security     BearerAuth
+// @Security     ApiKeyAuth
+// @Router       /sources/{id} [delete]
 func (h *Handlers) DeleteSource(c *gin.Context) {
 	orgID, _ := c.Get("organization_id")
 	orgIDStr, ok := orgID.(string)
@@ -393,6 +454,18 @@ func (h *Handlers) DeleteSource(c *gin.Context) {
 // TestSource handles POST /api/v1/sources/:id/test.
 // Decrypts the source configuration, creates the appropriate backend client,
 // tests the connection, and updates the source's test status fields.
+// @Summary      Test source connectivity
+// @Description  Tests the connectivity of the state source by creating a backend client and running a connection test
+// @Tags         Sources
+// @Produce      json
+// @Param        id  path      string  true  "Resource ID"
+// @Success      200  {object}  map[string]interface{}
+// @Failure      400  {object}  map[string]interface{}
+// @Failure      404  {object}  map[string]interface{}
+// @Failure      500  {object}  map[string]interface{}
+// @Security     BearerAuth
+// @Security     ApiKeyAuth
+// @Router       /sources/{id}/test [post]
 func (h *Handlers) TestSource(c *gin.Context) {
 	orgID, _ := c.Get("organization_id")
 	orgIDStr, ok := orgID.(string)

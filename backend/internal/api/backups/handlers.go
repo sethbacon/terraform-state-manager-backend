@@ -61,6 +61,18 @@ func NewHandlers(
 
 // ListBackups handles GET /api/v1/backups.
 // Returns a paginated list of state backups for the authenticated user's organization.
+// @Summary      List backups
+// @Description  Returns a paginated list of state backups for the organization
+// @Tags         Backups
+// @Produce      json
+// @Param        limit   query  int  false  "Page size (default 20, max 100)"
+// @Param        offset  query  int  false  "Page offset (default 0)"
+// @Success      200  {object}  map[string]interface{}
+// @Failure      400  {object}  map[string]interface{}
+// @Failure      500  {object}  map[string]interface{}
+// @Security     BearerAuth
+// @Security     ApiKeyAuth
+// @Router       /backups [get]
 func (h *Handlers) ListBackups(c *gin.Context) {
 	orgID, _ := c.Get("organization_id")
 	orgIDStr, ok := orgID.(string)
@@ -98,6 +110,19 @@ func (h *Handlers) ListBackups(c *gin.Context) {
 // Creates a new state backup for the specified source and workspace. In this
 // endpoint the state data is fetched from the source; the request body provides
 // the source_id and workspace_name only.
+// @Summary      Create backup
+// @Description  Creates a new state backup for the specified source and workspace
+// @Tags         Backups
+// @Accept       json
+// @Produce      json
+// @Param        request  body      models.StateBackupCreateRequest  true  "Backup create request"
+// @Success      201  {object}  map[string]interface{}
+// @Failure      400  {object}  map[string]interface{}
+// @Failure      404  {object}  map[string]interface{}
+// @Failure      500  {object}  map[string]interface{}
+// @Security     BearerAuth
+// @Security     ApiKeyAuth
+// @Router       /backups/create [post]
 func (h *Handlers) CreateBackup(c *gin.Context) {
 	orgID, _ := c.Get("organization_id")
 	orgIDStr, ok := orgID.(string)
@@ -162,6 +187,18 @@ func (h *Handlers) CreateBackup(c *gin.Context) {
 
 // GetBackup handles GET /api/v1/backups/:id.
 // Returns metadata for a single state backup.
+// @Summary      Get backup
+// @Description  Returns metadata for a single state backup
+// @Tags         Backups
+// @Produce      json
+// @Param        id  path  string  true  "Resource ID"
+// @Success      200  {object}  map[string]interface{}
+// @Failure      400  {object}  map[string]interface{}
+// @Failure      404  {object}  map[string]interface{}
+// @Failure      500  {object}  map[string]interface{}
+// @Security     BearerAuth
+// @Security     ApiKeyAuth
+// @Router       /backups/{id} [get]
 func (h *Handlers) GetBackup(c *gin.Context) {
 	orgID, _ := c.Get("organization_id")
 	orgIDStr, ok := orgID.(string)
@@ -192,6 +229,18 @@ func (h *Handlers) GetBackup(c *gin.Context) {
 }
 
 // DeleteBackup handles DELETE /api/v1/backups/:id.
+// @Summary      Delete backup
+// @Description  Deletes a state backup by ID
+// @Tags         Backups
+// @Produce      json
+// @Param        id  path  string  true  "Resource ID"
+// @Success      200  {object}  map[string]interface{}
+// @Failure      400  {object}  map[string]interface{}
+// @Failure      404  {object}  map[string]interface{}
+// @Failure      500  {object}  map[string]interface{}
+// @Security     BearerAuth
+// @Security     ApiKeyAuth
+// @Router       /backups/{id} [delete]
 func (h *Handlers) DeleteBackup(c *gin.Context) {
 	orgID, _ := c.Get("organization_id")
 	orgIDStr, ok := orgID.(string)
@@ -229,6 +278,18 @@ func (h *Handlers) DeleteBackup(c *gin.Context) {
 
 // RestoreBackup handles POST /api/v1/backups/:id/restore.
 // Retrieves the stored state data for a backup.
+// @Summary      Restore backup
+// @Description  Retrieves the stored state data for a backup
+// @Tags         Backups
+// @Produce      json
+// @Param        id  path  string  true  "Resource ID"
+// @Success      200  {object}  map[string]interface{}
+// @Failure      400  {object}  map[string]interface{}
+// @Failure      404  {object}  map[string]interface{}
+// @Failure      500  {object}  map[string]interface{}
+// @Security     BearerAuth
+// @Security     ApiKeyAuth
+// @Router       /backups/{id}/restore [post]
 func (h *Handlers) RestoreBackup(c *gin.Context) {
 	orgID, _ := c.Get("organization_id")
 	orgIDStr, ok := orgID.(string)
@@ -277,6 +338,18 @@ func (h *Handlers) RestoreBackup(c *gin.Context) {
 
 // VerifyBackup handles POST /api/v1/backups/:id/verify.
 // Re-computes the SHA-256 checksum and compares it to the stored value.
+// @Summary      Verify backup integrity
+// @Description  Re-computes the SHA-256 checksum and compares it to the stored value
+// @Tags         Backups
+// @Produce      json
+// @Param        id  path  string  true  "Resource ID"
+// @Success      200  {object}  map[string]interface{}
+// @Failure      400  {object}  map[string]interface{}
+// @Failure      404  {object}  map[string]interface{}
+// @Failure      500  {object}  map[string]interface{}
+// @Security     BearerAuth
+// @Security     ApiKeyAuth
+// @Router       /backups/{id}/verify [post]
 func (h *Handlers) VerifyBackup(c *gin.Context) {
 	orgID, _ := c.Get("organization_id")
 	orgIDStr, ok := orgID.(string)
@@ -350,6 +423,19 @@ type BulkBackupItemResult struct {
 // CreateBulkBackup handles POST /api/v1/backups/create-bulk.
 // Lists all workspaces associated with the given source and creates an
 // individual backup for each one.
+// @Summary      Create bulk backup
+// @Description  Creates backups for all workspaces associated with the given source
+// @Tags         Backups
+// @Accept       json
+// @Produce      json
+// @Param        request  body      BulkBackupRequest  true  "Bulk backup request"
+// @Success      201  {object}  map[string]interface{}
+// @Failure      400  {object}  map[string]interface{}
+// @Failure      404  {object}  map[string]interface{}
+// @Failure      500  {object}  map[string]interface{}
+// @Security     BearerAuth
+// @Security     ApiKeyAuth
+// @Router       /backups/create-bulk [post]
 func (h *Handlers) CreateBulkBackup(c *gin.Context) {
 	orgID, _ := c.Get("organization_id")
 	orgIDStr, ok := orgID.(string)
@@ -491,6 +577,16 @@ func (h *Handlers) listWorkspacesForSource(ctx context.Context, orgID, sourceID 
 // ---------------------------------------------------------------------------
 
 // ListRetentionPolicies handles GET /api/v1/backups/retention.
+// @Summary      List retention policies
+// @Description  Returns all retention policies for the organization
+// @Tags         Backups
+// @Produce      json
+// @Success      200  {object}  map[string]interface{}
+// @Failure      400  {object}  map[string]interface{}
+// @Failure      500  {object}  map[string]interface{}
+// @Security     BearerAuth
+// @Security     ApiKeyAuth
+// @Router       /backups/retention [get]
 func (h *Handlers) ListRetentionPolicies(c *gin.Context) {
 	orgID, _ := c.Get("organization_id")
 	orgIDStr, ok := orgID.(string)
@@ -511,6 +607,18 @@ func (h *Handlers) ListRetentionPolicies(c *gin.Context) {
 }
 
 // CreateRetentionPolicy handles POST /api/v1/backups/retention.
+// @Summary      Create retention policy
+// @Description  Creates a new retention policy for the organization
+// @Tags         Backups
+// @Accept       json
+// @Produce      json
+// @Param        request  body      models.RetentionPolicyCreateRequest  true  "Retention policy create request"
+// @Success      201  {object}  map[string]interface{}
+// @Failure      400  {object}  map[string]interface{}
+// @Failure      500  {object}  map[string]interface{}
+// @Security     BearerAuth
+// @Security     ApiKeyAuth
+// @Router       /backups/retention [post]
 func (h *Handlers) CreateRetentionPolicy(c *gin.Context) {
 	orgID, _ := c.Get("organization_id")
 	orgIDStr, ok := orgID.(string)
@@ -555,6 +663,18 @@ func (h *Handlers) CreateRetentionPolicy(c *gin.Context) {
 }
 
 // GetRetentionPolicy handles GET /api/v1/backups/retention/:id.
+// @Summary      Get retention policy
+// @Description  Returns a single retention policy by ID
+// @Tags         Backups
+// @Produce      json
+// @Param        id  path  string  true  "Resource ID"
+// @Success      200  {object}  map[string]interface{}
+// @Failure      400  {object}  map[string]interface{}
+// @Failure      404  {object}  map[string]interface{}
+// @Failure      500  {object}  map[string]interface{}
+// @Security     BearerAuth
+// @Security     ApiKeyAuth
+// @Router       /backups/retention/{id} [get]
 func (h *Handlers) GetRetentionPolicy(c *gin.Context) {
 	orgID, _ := c.Get("organization_id")
 	orgIDStr, ok := orgID.(string)
@@ -585,6 +705,20 @@ func (h *Handlers) GetRetentionPolicy(c *gin.Context) {
 }
 
 // UpdateRetentionPolicy handles PUT /api/v1/backups/retention/:id.
+// @Summary      Update retention policy
+// @Description  Applies partial updates to a retention policy
+// @Tags         Backups
+// @Accept       json
+// @Produce      json
+// @Param        id       path  string                               true  "Resource ID"
+// @Param        request  body  models.RetentionPolicyUpdateRequest  true  "Retention policy update request"
+// @Success      200  {object}  map[string]interface{}
+// @Failure      400  {object}  map[string]interface{}
+// @Failure      404  {object}  map[string]interface{}
+// @Failure      500  {object}  map[string]interface{}
+// @Security     BearerAuth
+// @Security     ApiKeyAuth
+// @Router       /backups/retention/{id} [put]
 func (h *Handlers) UpdateRetentionPolicy(c *gin.Context) {
 	orgID, _ := c.Get("organization_id")
 	orgIDStr, ok := orgID.(string)
@@ -645,6 +779,18 @@ func (h *Handlers) UpdateRetentionPolicy(c *gin.Context) {
 }
 
 // DeleteRetentionPolicy handles DELETE /api/v1/backups/retention/:id.
+// @Summary      Delete retention policy
+// @Description  Deletes a retention policy by ID
+// @Tags         Backups
+// @Produce      json
+// @Param        id  path  string  true  "Resource ID"
+// @Success      200  {object}  map[string]interface{}
+// @Failure      400  {object}  map[string]interface{}
+// @Failure      404  {object}  map[string]interface{}
+// @Failure      500  {object}  map[string]interface{}
+// @Security     BearerAuth
+// @Security     ApiKeyAuth
+// @Router       /backups/retention/{id} [delete]
 func (h *Handlers) DeleteRetentionPolicy(c *gin.Context) {
 	orgID, _ := c.Get("organization_id")
 	orgIDStr, ok := orgID.(string)
@@ -683,6 +829,16 @@ func (h *Handlers) DeleteRetentionPolicy(c *gin.Context) {
 
 // ApplyRetention handles POST /api/v1/backups/retention/apply.
 // Manually triggers retention policy enforcement for the organization.
+// @Summary      Apply retention policies
+// @Description  Manually triggers retention policy enforcement for the organization
+// @Tags         Backups
+// @Produce      json
+// @Success      200  {object}  map[string]interface{}
+// @Failure      400  {object}  map[string]interface{}
+// @Failure      500  {object}  map[string]interface{}
+// @Security     BearerAuth
+// @Security     ApiKeyAuth
+// @Router       /backups/retention/apply [post]
 func (h *Handlers) ApplyRetention(c *gin.Context) {
 	orgID, _ := c.Get("organization_id")
 	orgIDStr, ok := orgID.(string)
