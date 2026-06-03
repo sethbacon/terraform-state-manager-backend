@@ -23,7 +23,7 @@ TSM provides **centralised state analysis, drift health-checks, backup, migratio
 ## 3. Locked decisions (2026-06-03)
 
 | # | Decision |
-|---|----------|
+| --- | ---------- |
 | D1 | **Frontend:** re-baseline state-manager FE from the *current* registry FE (React 19 / MUI 9 / i18next+10 locales / FontAwesome+simple-icons / react-query). Defer shared-framework extraction. |
 | D2 | **Identity:** a shared identity/RBAC component **owned by neither app**. Either app stands it up at setup; the second app **detects and attaches**. Source of truth = registry's auth layer. Each app keeps its own feature tables. |
 | D3 | **TF execution:** **hybrid** — ADO pipelines (existing extension, `plan -detailed-exitcode`→`changesPresent`) for state-vs-code + version no-op testing; backend read-only cloud queries for state-vs-environment drift. |
@@ -37,6 +37,7 @@ TSM provides **centralised state analysis, drift health-checks, backup, migratio
 ## 4. Current-state assessment (provable)
 
 ### Backend (`terraform-state-manager-backend`) — first draft, 10 migrations
+
 - **Exists & reusable:** `analyzer` (parser/counter/provider/rum/metadata/batch), `snapshot` (snapshot-vs-snapshot diff), `backup` (+retention), `migration` (state-file-between-backends), `compliance` (custom naming/tagging/version rules), `notification`, `reporter`, `scheduler`. State clients for hcp/s3/azure/gcs/consul/pg/k8s/http/local. Repository pattern, JWT/API-key/OIDC auth, RBAC, audit, telemetry.
 - **Gaps vs goals:**
   - 3a repo metadata — `analyzer/metadata.go` reads TF version from state + HCP workspace only; no `required_version` / `.terraform.lock.hcl` from a linked repo.
@@ -46,14 +47,17 @@ TSM provides **centralised state analysis, drift health-checks, backup, migratio
   - Auth is a subset of the registry's (no LDAP/SAML/AzureAD/mTLS, no statestore/revocation).
 
 ### Frontend (`terraform-state-manager-frontend`) — v0.1
+
 - Seeded from an older registry FE (shares `AuthContext`/`ThemeContext`/`HelpContext`/`Layout`/`ProtectedRoute`/`DevUserSwitcher`/`SetupWizardPage`) and has pages for all major features.
 - **Behind on every parity axis:** React 18 vs 19, MUI 6 vs 9; **no i18n**, **no FontAwesome/simple-icons**, **no react-query**, **no command palette / a11y / consent / announcer** infra.
 
 ### Reference: registry FE (v2.4.1) & backend (37 migrations)
+
 - FE: the canonical design system (theme, i18n 10 locales, icons, react-query, contexts, command palette, a11y). Has DB-configurable `ui_theme`.
 - Backend: canonical identity/admin — `auth/{jwt,apikey,oidc,ldap,saml,azuread,mtls,statestore}`, models `user/organization/organization_member/role_template/api_key/oidc_config/audit_log/org_quota`, full `api/admin` surface (users+GDPR, orgs, apikeys, oidc, rbac, role-templates, audit+export+retention, quotas, stats).
 
 ### Existing TF execution: `azure-pipelines-terraform`
+
 - ADO extension: install TF; `init/plan/apply/...` with WIF/OIDC across Azure/AWS/GCP/OCI; backends azurerm/s3/gcs/oci/hcp/generic/local; **`changesPresent`** output on `plan -detailed-exitcode`; module publish. TSM orchestrates this rather than executing Terraform itself.
 
 ## 5. Target architecture
@@ -63,6 +67,7 @@ TSM provides **centralised state analysis, drift health-checks, backup, migratio
 **Goal:** one identity/RBAC/admin store, owned by neither app, with detect-and-attach setup and real SSO.
 
 **Realization (confirmed: new dedicated repo + shared database):**
+
 - A **shared Go module in its own repo, `terraform-suite-identity`** (owned by neither app, versioned/pinnable), packaging: auth methods (`jwt/apikey/oidc/ldap/saml/azuread/mtls`), the `statestore` (JWT revocation/sessions), identity models, the admin API handlers, RBAC middleware, **and its own migration set**.
 - Both backends run against the **same Postgres database** in every environment (confirmed O2), so the shared-schema model below applies directly.
 - Identity tables live in a dedicated Postgres **schema** (`identity`) with their **own golang-migrate version table** (`identity_schema_migrations`), separate from each app's migration chain.
@@ -96,44 +101,54 @@ Formalize a lightweight **capability contract** (no dynamic plugin system — ke
 Each phase has explicit success criteria (goal-driven). Phases 3–6 can parallelize after Phase 2 using the repo's parallel-agent coordination rules; Phase 1 is the keystone; Phase 7 is large and late.
 
 ### Phase 0 — Groundwork
+
 - Adopt the **registry workflow** (single `main`; `feat/`/`fix/`/`docs/`/`refactor/` branches; Conventional Commits; squash-merge) and wire its **CI/release automation** into this repo: release-please (+ goreleaser), Conventional-Commit PR-title validation, the `gosec` baseline comparison, and the coverage gate. Confirm the quality gate is green on the existing backend; write ADRs for D1–D4.
 - **Done when:** existing backend builds; `go test -race` + `gosec` pass; CI workflows + release-please land on `main`; ADRs committed; open questions O3–O8 answered.
 
 ### Phase 1 — Shared Identity Component *(keystone)*
+
 - Extract registry auth/identity into the shared module + `identity` schema + own migration chain + detect-and-attach bootstrap; wire shared JWT/ENCRYPTION secrets + statestore.
 - Make **both** registry-backend and TSM-backend consume it (registry change is feature-flagged + reversible).
 - **Done when:** a user/api-key/org created via one app authenticates against the other (SSO integration test); second-app setup detects existing identity and attaches (test); migrations idempotent under concurrent start (test); `gosec` clean.
 
 ### Phase 2 — Frontend re-baseline + admin parity
+
 - Re-baseline TSM FE on the registry scaffold; port TSM pages; full i18n keys; SSO login via shared identity.
 - **Done when:** shared shell + admin screens match the registry (visual/e2e), all TSM strings are i18n-keyed, login/SSO works, lint/test/a11y gates meet the registry's bar.
 
 ### Phase 3 — Analysis + repo metadata
+
 - Link state sources ↔ ADO repos; extract `required_version`, `.terraform.lock.hcl` provider constraints, module versions; enrich dashboards with constraint-vs-actual.
 - **Done when:** an analysis run on a repo-linked source reports TF/provider constraints vs in-state versions and flags pin drift; tests.
 
 ### Phase 4 — Drift health-check (hybrid)
+
 - 4a state-vs-code: schedule ADO pipeline plan per source; ingest plan JSON + `changesPresent` via webhook → drift events.
 - 4b state-vs-environment: read-only cloud clients (Azure first, then AWS/GCP/OCI) + consume HCP health assessments.
 - **Done when:** a scheduled run produces both code-drift and env-drift events end-to-end on the Azure path; pipeline ingestion works; tests with recorded fixtures.
 
 ### Phase 5 — Compliance policy abstraction (+ OPA fast-follow)
+
 - Wrap existing rules behind a policy-engine interface; add an OPA/conftest engine over plan/state JSON.
 - **Done when:** the same policy set evaluates via both custom and OPA engines with unified results; tests.
 
 ### Phase 6 — Backup/restore + state migration hardening
+
 - Integrity-verified backup→restore round-trip; cross-backend state-file migration dry-run + execute.
 - **Done when:** backup→restore verified by checksum; migration dry-run + execute tested across at least two backends.
 
 ### Phase 7 — ADO repo migration *(large)*
+
 - ADO REST client; migrate git history + state + pipeline definitions; **adopt** branch policies + variable groups + service connections in the target org; dry-run report + validation + resumability.
 - **Done when:** dry-run enumerates everything to move; execute migrates a sample repo incl. pipelines/policies/var-groups; idempotent/resumable; tests against mocked ADO API.
 
 ### Phase 8 — Extensibility framework + version no-op testing
+
 - Formalize the capability contract; implement the scheduled "TF/provider version bump no-op test" capability (trigger ADO plan against candidate versions; assert no-op).
 - **Done when:** a new capability is addable via the documented contract with a worked example; the version-test capability runs on schedule and reports no-op/drift per repo.
 
 ## 7. Cross-cutting (every phase)
+
 - **Workflow (registry-standardized):** issue → branch from `main` → quality gate → PR to `main` (Conventional Commit title) → squash-merge. release-please manages versioning/`CHANGELOG.md`/tags from Conventional Commits; never hand-edit `CHANGELOG.md`.
 - **Swagger:** every new/changed handler updates `backend/docs/swagger.yaml` before commit.
 - **Security:** `gosec` clean; careful handling of shared JWT/ENCRYPTION secrets and ADO/cloud credentials (prefer WIF/managed identity; no secrets in state-manager where pipelines can hold them).
