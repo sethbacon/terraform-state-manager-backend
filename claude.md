@@ -6,9 +6,18 @@ All changes follow this workflow. Do not deviate from it.
 
 ### Branches
 
-- `main` — production-ready, tagged releases only. **Must always exist — never delete.**
-- `development` — integration branch; all feature/fix branches merge here first. **Must always exist — never delete.**
-- Feature/fix branches are created from `development`, never from `main`. Delete them from remote after their PR is merged; clean up locally with `git branch -d`.
+- `main` — the single long-lived branch. Production-ready; releases are tagged here. **Must always exist — never delete.**
+- Work happens on short-lived branches created **from `main`** and merged back **into `main`** via PR. There is no `development` integration branch (standardized on the registry workflow).
+- Branch naming follows the registry convention:
+
+  | Type          | Pattern                  | Example                         |
+  | ------------- | ------------------------ | ------------------------------- |
+  | Feature       | `feat/short-description` | `feat/repo-metadata-extraction` |
+  | Bug fix       | `fix/issue-description`  | `fix/snapshot-diff-nil-panic`   |
+  | Documentation | `docs/topic`             | `docs/drift-runbook`            |
+  | Refactor      | `refactor/area`          | `refactor/analyzer-counter`     |
+
+- Delete the branch after its PR is squash-merged:
 
 ```bash
 # After a feature/fix PR is merged:
@@ -17,16 +26,36 @@ git branch -d fix/short-description              # remove local branch
 git remote prune origin                          # prune stale remote-tracking refs
 ```
 
+### Conventional Commits
+
+PR titles and commit messages follow [Conventional Commits](https://www.conventionalcommits.org/). This drives automated releases (see below) and is validated in CI.
+
+| Type       | When to use                                |
+| ---------- | ------------------------------------------ |
+| `feat`     | New user-facing feature (minor bump)       |
+| `fix`      | Bug fix, incl. security fixes (patch bump) |
+| `perf`     | Performance improvement (patch bump)       |
+| `refactor` | Code restructure, no behaviour change      |
+| `docs`     | Documentation only                         |
+| `style`    | Whitespace/formatting only                 |
+| `test`     | Adding or fixing tests                     |
+| `build`    | Build system / dependency updates          |
+| `ci`       | CI/CD workflow changes                     |
+| `chore`    | Maintenance, tooling                       |
+| `revert`   | Reverts a previous commit                  |
+
+Append `!` (`feat!:`) or add a `BREAKING CHANGE:` footer for a major bump. Keep the subject under 72 characters; reference the issue in the body with `Closes #<n>`.
+
 ### Step-by-step
 
-1. **Open a GitHub issue** describing the bug or feature before writing any code.
+1. **Open a GitHub issue** describing the bug or feature before writing any code (for substantial changes).
 
-2. **Create a branch from `development`**:
+2. **Create a branch from `main`**:
 
    ```bash
    git fetch origin
-   git checkout -b fix/short-description origin/development
-   # or: feature/short-description
+   git checkout -b feat/short-description origin/main
+   # or: fix/short-description
    ```
 
 3. **Implement the change.**
@@ -50,7 +79,7 @@ git remote prune origin                          # prune stale remote-tracking r
 
    Do not push until all of the above pass locally.
 
-5. **Commit — no co-author attribution**:
+5. **Commit with a Conventional Commit message — no co-author attribution**:
 
    ```bash
    git add <specific files>
@@ -59,85 +88,46 @@ git remote prune origin                          # prune stale remote-tracking r
    Closes #<issue-number>"
    ```
 
-6. **Rebase onto `development` before pushing** to minimise merge conflicts with sibling branches:
+6. **Rebase onto `main` before pushing** to minimise merge conflicts with sibling branches:
 
    ```bash
    git fetch origin
-   git rebase origin/development
+   git rebase origin/main
    ```
 
-7. **Push to origin**:
+7. **Push and open a PR targeting `main`** with a Conventional Commit title:
 
    ```bash
-   git push -u origin fix/short-description
-   ```
-
-8. **Open a PR from the feature branch → `development`**:
-
-   Include a `## Changelog` section in the PR body with the entry that should appear in `CHANGELOG.md` for this change (format: `- type: description`). **Do not edit `CHANGELOG.md` in the branch** — changelog entries are collected from merged PR bodies at release time.
-
-   ```bash
-   gh pr create --base development --title "fix: short description" --body "$(cat <<'EOF'
+   git push -u origin feat/short-description
+   gh pr create --base main --title "feat: short description" --body "$(cat <<'EOF'
    Closes #<issue>
 
-   ## Changelog
-   - fix: short description of what was fixed
+   <what changed, why, and how it was tested>
    EOF
    )"
    ```
 
-   - Squash-merge into `development` when approved.
+   Do **not** add a `## Changelog` section and do **not** edit `CHANGELOG.md` — release-please generates the changelog from Conventional Commit titles (see Releasing).
 
-9. **Open a PR from `development` → `main`** when the integration branch is ready to ship:
-
-   ```bash
-   gh pr create --base main --title "chore: release vX.Y.Z" --body "..."
-   ```
+8. **Merge:** once all CI checks are green and at least one reviewer approves, **squash-merge into `main`**. The PR title becomes the commit message; delete the branch afterward.
 
 ### Parallel agents — coordination rules
 
 When multiple agents run concurrently, follow these rules to avoid conflicts:
 
 - **Never assign two agents to work on the same files at the same time.** If their scopes overlap (e.g. both touch the same handler or config file), serialise them.
-- **Do not edit `CHANGELOG.md` in any branch.** Changelog entries live in PR bodies only (see step 8 above). This eliminates the most common parallel-agent conflict.
-- **Each agent rebases on `origin/development` immediately before pushing** (step 6 above). After any sibling PR is merged, remaining open branches must rebase again before their own merge.
+- **Do not edit `CHANGELOG.md` in any branch** — release-please owns it. This eliminates the most common parallel-agent conflict.
+- **Each agent rebases on `origin/main` immediately before pushing** (step 6 above). After any sibling PR is merged, remaining open branches must rebase again before their own merge.
 
 ### Releasing a version
 
-When a release is called for:
+Releases are automated with **release-please** (Conventional Commits → version bump + `CHANGELOG.md` + tag + GitHub release), with **goreleaser** building artifacts — matching the registry. The flow is:
 
-1. Collect the `## Changelog` sections from all PR bodies merged since the last release.
+1. Conventional Commits merged into `main` cause release-please to open and maintain a **release PR** that bumps the version and updates `CHANGELOG.md`.
 
-2. Update `CHANGELOG.md` on `development` — promote `[Unreleased]` to the new version with today's date and paste the collected entries:
+2. **Merging that release PR** creates the version tag and GitHub release on `main`. Do not hand-edit `CHANGELOG.md` and do not create tags manually.
 
-   ```markdown
-   ## [X.Y.Z] - YYYY-MM-DD
-   ### Fixed
-   - fix: ...
-   ### Added
-   - feat: ...
-   ```
-
-3. Commit directly on `development` and push (**no tag yet**):
-
-   ```bash
-   git commit -m "chore: release vX.Y.Z"
-   git push origin development
-   ```
-
-4. Merge `development` → `main` via PR (step 9 above).
-
-5. **After the PR is merged**, tag the commit that landed on `main` and push the tag:
-
-   ```bash
-   git fetch origin
-   git tag vX.Y.Z origin/main
-   git push origin vX.Y.Z
-   ```
-
-   > **Why tag after the merge?** The release PR produces a new merge commit SHA on `main`.
-   > Tagging on `development` before the merge leaves the tag pointing at the wrong commit —
-   > it will never appear in `main`'s history as a tagged release.
+> **Adoption note:** the registry's CI/release automation — release-please, Conventional-Commit PR-title validation, the `gosec` baseline comparison, and the coverage gate — is being wired into this repo as part of the revitalization (Phase 0). Until those workflows land, run the local quality gate manually and keep commits Conventional so release-please works the moment it is enabled.
 
 ---
 
