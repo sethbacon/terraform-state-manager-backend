@@ -143,3 +143,73 @@ jobs:
         with:
           name: gosec-results
           path: backend/gosec-results.json
+
+  docker-build:
+    name: Docker Build Smoke Test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - name: Build backend Docker image
+        run: docker build -t terraform-state-manager-backend:ci backend/
+
+      - name: Trivy filesystem scan (report-only)
+        # exit-code 0 = report but don't fail. Harden to exit-code 1 once the open
+        # dependabot security updates are merged and the dependency tree is clean.
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: backend/
+          severity: HIGH,CRITICAL
+          exit-code: 0
+          format: table
+
+      - name: Verify image starts (smoke test)
+        run: |
+          # Start with a bogus DB target; we only assert the built artifact's
+          # entrypoint executes (exiting fast because it can't reach a DB is fine).
+          docker run -d \
+            --name tsm-smoke \
+            -e TSM_DATABASE_HOST=nonexistent \
+            -p 18080:8080 \
+            terraform-state-manager-backend:ci || true
+          sleep 5
+          STATUS=$(docker inspect --format='{{.State.Status}}' tsm-smoke 2>/dev/null || echo "missing")
+          echo "Container status: $STATUS"
+          docker rm -f tsm-smoke 2>/dev/null || true
+          if [ "$STATUS" = "missing" ]; then
+            echo "Container never started — Docker build artifact broken"
+            exit 1
+          fi
+
+  deployment-validate:
+    name: Deployment Config Validation
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - name: Validate Docker Compose configs
+        run: |
+          docker compose -f deployments/docker-compose.yml config --quiet
+          docker compose -f deployments/docker-compose.prod.yml config --quiet
+          docker compose -f backend/docker-compose.yml config --quiet
+
+      - name: Install Helm
+        uses: azure/setup-helm@dda3372f752e03dde6b3237bc9431cdc2f7a02a2 # v5
+        with:
+          version: "latest"
+
+      - name: Helm lint
+        run: helm lint deployments/helm/tsm
+
+      - name: Kustomize validate (dev overlay)
+        run: kubectl kustomize deployments/kubernetes/overlays/dev > /dev/null
+
+      - name: Kustomize validate (prod overlay)
+        run: kubectl kustomize deployments/kubernetes/overlays/prod > /dev/null
