@@ -3,9 +3,34 @@
 // handler annotations — run `make swag` to regenerate after handler changes.
 package docs
 
-import _ "embed"
+import (
+	_ "embed"
+
+	"gopkg.in/yaml.v3"
+)
 
 // SwaggerJSON holds the raw bytes of the generated swagger.json spec.
 //
 //go:embed swagger.json
 var SwaggerJSON []byte
+
+// SwaggerYAML is the spec re-encoded as YAML, served at /swagger.yaml.
+// It is derived from SwaggerJSON at package initialization. If conversion
+// fails (it should not, since SwaggerJSON is a validated embedded asset),
+// it falls back to the JSON bytes — which are themselves valid YAML.
+var SwaggerYAML = jsonToYAML(SwaggerJSON)
+
+// jsonToYAML converts a JSON document to YAML. YAML is a superset of JSON, so
+// the JSON parses directly; using the YAML decoder (rather than encoding/json)
+// preserves integer types instead of widening them to float64.
+func jsonToYAML(jsonBytes []byte) []byte {
+	var doc interface{}
+	if err := yaml.Unmarshal(jsonBytes, &doc); err != nil {
+		return jsonBytes
+	}
+	out, err := yaml.Marshal(doc)
+	if err != nil {
+		return jsonBytes
+	}
+	return out
+}

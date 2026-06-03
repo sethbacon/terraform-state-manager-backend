@@ -124,7 +124,7 @@ func NewRouter(cfg *config.Config, db *sql.DB) (*gin.Engine, *BackgroundServices
 
 	// Serve OpenAPI spec (unauthenticated)
 	router.GET("/swagger.yaml", func(c *gin.Context) {
-		c.Data(http.StatusOK, "application/yaml; charset=utf-8", docs.SwaggerJSON)
+		c.Data(http.StatusOK, "application/yaml; charset=utf-8", docs.SwaggerYAML)
 	})
 	router.GET("/swagger.json", func(c *gin.Context) {
 		c.Data(http.StatusOK, "application/json; charset=utf-8", docs.SwaggerJSON)
