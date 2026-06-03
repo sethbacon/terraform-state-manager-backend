@@ -1,0 +1,26 @@
+name: Release Please
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  release-please:
+    name: Release Please
+    runs-on: ubuntu-latest
+    steps:
+      # NOTE: using the default GITHUB_TOKEN means the release PR will NOT trigger
+      # other workflows (GitHub recursion prevention). Upgrading to a GitHub App
+      # token (RELEASE_DISPATCH_APP_ID / _KEY), as the registry does, so CI runs on
+      # the release PR, is a follow-up.
+      - name: Run release-please
+        uses: googleapis/release-please-action@0dfd8538845b8e92600d271a895a5372865d4062 # v5
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          config-file: .release-please-config.json
+          manifest-file: .release-please-manifest.json

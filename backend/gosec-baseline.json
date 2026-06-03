@@ -1,0 +1,175 @@
+{
+	"Golang errors": {},
+	"Issues": [
+		{
+			"severity": "HIGH",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "200",
+				"url": "https://cwe.mitre.org/data/definitions/200.html"
+			},
+			"rule_id": "G108",
+			"details": "Profiling endpoint is automatically exposed on /debug/pprof",
+			"file": "C:\\dev\\gh\\terraform-state-manager-backend\\backend\\cmd\\server\\main.go",
+			"code": "28: \t\"net/http\"\n29: \t_ \"net/http/pprof\"\n30: \t\"os\"\n",
+			"line": "29",
+			"column": "2",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "HIGH",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "22",
+				"url": "https://cwe.mitre.org/data/definitions/22.html"
+			},
+			"rule_id": "G703",
+			"details": "Path traversal via taint analysis",
+			"file": "C:\\dev\\gh\\terraform-state-manager-backend\\backend\\internal\\clients\\k8s\\client.go",
+			"code": "402: \tif env := os.Getenv(\"KUBECONFIG\"); env != \"\" {\n403: \t\tif _, err := os.Stat(env); err == nil {\n404: \t\t\treturn env, nil\n",
+			"line": "403",
+			"column": "23",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "HIGH",
+			"confidence": "MEDIUM",
+			"cwe": {
+				"id": "400",
+				"url": "https://cwe.mitre.org/data/definitions/400.html"
+			},
+			"rule_id": "G118",
+			"details": "Goroutine uses context.Background/TODO while request-scoped context is available",
+			"file": "C:\\dev\\gh\\terraform-state-manager-backend\\backend\\internal\\services\\migration\\migration.go",
+			"code": "90: \t// Start the migration in a background goroutine.\n91: \tgo s.executeMigration(context.Background(), job)\n92: \n",
+			"line": "91",
+			"column": "2",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "MEDIUM",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "89",
+				"url": "https://cwe.mitre.org/data/definitions/89.html"
+			},
+			"rule_id": "G201",
+			"details": "SQL string formatting",
+			"file": "C:\\dev\\gh\\terraform-state-manager-backend\\backend\\internal\\db\\repositories\\analysis_result_repository.go",
+			"code": "119: \n120: \tquery := fmt.Sprintf(\n121: \t\t`INSERT INTO analysis_results (\n122: \t\t\trun_id, workspace_id, workspace_name, organization, status,\n123: \t\t\terror_type, error_message, total_resources, managed_count, rum_count,\n124: \t\t\tdata_source_count, null_resource_count, resources_by_type, resources_by_module,\n125: \t\t\tprovider_analysis, terraform_version, state_serial, state_lineage,\n126: \t\t\tlast_modified, analysis_method, raw_state_hash\n127: \t\t) VALUES %s`,\n128: \t\tstrings.Join(valueStrings, \", \"),\n129: \t)\n130: \n",
+			"line": "120-129",
+			"column": "11",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "MEDIUM",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "89",
+				"url": "https://cwe.mitre.org/data/definitions/89.html"
+			},
+			"rule_id": "G201",
+			"details": "SQL string formatting",
+			"file": "C:\\dev\\gh\\terraform-state-manager-backend\\backend\\internal\\clients\\pg\\client.go",
+			"code": "181: \n182: \tquery := fmt.Sprintf(\"SELECT data FROM %s WHERE name = $1\", c.schemaTable())\n183: \tvar data []byte\n",
+			"line": "182",
+			"column": "11",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "MEDIUM",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "89",
+				"url": "https://cwe.mitre.org/data/definitions/89.html"
+			},
+			"rule_id": "G202",
+			"details": "SQL string concatenation",
+			"file": "C:\\dev\\gh\\terraform-state-manager-backend\\backend\\internal\\db\\repositories\\alert_repository2.go",
+			"code": "118: \n119: \tselectQuery += fmt.Sprintf(\" ORDER BY created_at DESC LIMIT $%d OFFSET $%d\", selectIdx, selectIdx+1)\n120: \tselectArgs = append(selectArgs, limit, offset)\n",
+			"line": "119",
+			"column": "2",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "MEDIUM",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "22",
+				"url": "https://cwe.mitre.org/data/definitions/22.html"
+			},
+			"rule_id": "G304",
+			"details": "Potential file inclusion via variable",
+			"file": "C:\\dev\\gh\\terraform-state-manager-backend\\backend\\internal\\storage\\local\\local.go",
+			"code": "198: \n199: \tf, err := os.Open(full)\n200: \tif err != nil {\n",
+			"line": "199",
+			"column": "12",
+			"nosec": false,
+			"suppressions": null,
+			"autofix": "Consider using os.Root to scope file access under a fixed root (Go \u003e=1.24). Prefer root.Open/root.Stat over os.Open/os.Stat to prevent directory traversal."
+		},
+		{
+			"severity": "MEDIUM",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "22",
+				"url": "https://cwe.mitre.org/data/definitions/22.html"
+			},
+			"rule_id": "G304",
+			"details": "Potential file inclusion via variable",
+			"file": "C:\\dev\\gh\\terraform-state-manager-backend\\backend\\internal\\storage\\local\\local.go",
+			"code": "76: \n77: \tdata, err := os.ReadFile(full)\n78: \tif err != nil {\n",
+			"line": "77",
+			"column": "15",
+			"nosec": false,
+			"suppressions": null,
+			"autofix": "Consider using os.Root to scope file access under a fixed root (Go \u003e=1.24). Prefer root.Open/root.Stat over os.Open/os.Stat to prevent directory traversal."
+		},
+		{
+			"severity": "MEDIUM",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "22",
+				"url": "https://cwe.mitre.org/data/definitions/22.html"
+			},
+			"rule_id": "G304",
+			"details": "Potential file inclusion via variable",
+			"file": "C:\\dev\\gh\\terraform-state-manager-backend\\backend\\internal\\clients\\k8s\\client.go",
+			"code": "322: \n323: \tdata, err := os.ReadFile(path)\n324: \tif err != nil {\n",
+			"line": "323",
+			"column": "15",
+			"nosec": false,
+			"suppressions": null,
+			"autofix": "Consider using os.Root to scope file access under a fixed root (Go \u003e=1.24). Prefer root.Open/root.Stat over os.Open/os.Stat to prevent directory traversal."
+		},
+		{
+			"severity": "MEDIUM",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "276",
+				"url": "https://cwe.mitre.org/data/definitions/276.html"
+			},
+			"rule_id": "G306",
+			"details": "Expect WriteFile permissions to be 0600 or less",
+			"file": "C:\\dev\\gh\\terraform-state-manager-backend\\backend\\internal\\storage\\local\\local.go",
+			"code": "63: \n64: \tif err := os.WriteFile(full, data, 0o640); err != nil {\n65: \t\treturn fmt.Errorf(\"failed to write file %q: %w\", full, err)\n",
+			"line": "64",
+			"column": "12",
+			"nosec": false,
+			"suppressions": null
+		}
+	],
+	"Stats": {
+		"files": 135,
+		"lines": 26507,
+		"nosec": 0,
+		"found": 10
+	},
+	"GosecVersion": "dev"
+}
