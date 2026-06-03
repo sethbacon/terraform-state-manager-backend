@@ -42,13 +42,18 @@ jobs:
         working-directory: backend
         run: go vet ./...
 
-      - name: Validate OpenAPI spec (docs/swagger.json)
+      - name: Verify swagger.json is in sync with annotations
         working-directory: backend
-        # docs/swagger.json is the committed OpenAPI spec (embedded via docs/embed.go).
-        # Validate that it parses; full schema linting is a follow-up.
+        # swagger.json is generated from handler swag annotations (source of truth —
+        # see docs/adr/005). Regenerate and fail if the committed file is stale.
         run: |
-          python3 -c "import json; json.load(open('docs/swagger.json'))"
-          echo "swagger.json parsed OK"
+          go install github.com/swaggo/swag/cmd/swag@v1.16.4
+          export PATH="$PATH:$(go env GOPATH)/bin"
+          swag init -g cmd/server/main.go --outputTypes json
+          if ! git diff --exit-code docs/swagger.json; then
+            echo "docs/swagger.json is out of date — run 'make swag' and commit the result"
+            exit 1
+          fi
 
       - name: Run Go tests (with coverage)
         working-directory: backend
