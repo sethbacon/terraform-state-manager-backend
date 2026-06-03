@@ -42,13 +42,13 @@ jobs:
         working-directory: backend
         run: go vet ./...
 
-      - name: Validate OpenAPI spec (docs/swagger.yaml)
+      - name: Validate OpenAPI spec (docs/swagger.json)
         working-directory: backend
-        # swagger.yaml is hand-authored and is the source of truth (see CLAUDE.md).
-        # Validate that it parses as YAML; full schema linting is a follow-up.
+        # docs/swagger.json is the committed OpenAPI spec (embedded via docs/embed.go).
+        # Validate that it parses; full schema linting is a follow-up.
         run: |
-          python3 -c "import yaml; yaml.safe_load(open('docs/swagger.yaml'))"
-          echo "swagger.yaml parsed OK"
+          python3 -c "import json; json.load(open('docs/swagger.json'))"
+          echo "swagger.json parsed OK"
 
       - name: Run Go tests (with coverage)
         working-directory: backend
