@@ -42,7 +42,7 @@ func New(ctx context.Context, cfg config.GCSStorageConfig) (*Backend, error) {
 		opts = append(opts, option.WithCredentialsFile(cfg.CredentialsJSON))
 	case cfg.CredentialsFile != "":
 		opts = append(opts, option.WithCredentialsFile(cfg.CredentialsFile))
-	// default: ADC — no option needed
+		// default: ADC — no option needed
 	}
 
 	if cfg.Endpoint != "" {

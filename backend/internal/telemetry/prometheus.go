@@ -40,13 +40,13 @@ func SetupLogger(format, level string) {
 type dbStatsCollector struct {
 	db *sql.DB
 
-	maxOpen     *prometheus.Desc
-	open        *prometheus.Desc
-	inUse       *prometheus.Desc
-	idle        *prometheus.Desc
-	waitCount   *prometheus.Desc
-	waitDurSec  *prometheus.Desc
-	maxIdleClosed *prometheus.Desc
+	maxOpen           *prometheus.Desc
+	open              *prometheus.Desc
+	inUse             *prometheus.Desc
+	idle              *prometheus.Desc
+	waitCount         *prometheus.Desc
+	waitDurSec        *prometheus.Desc
+	maxIdleClosed     *prometheus.Desc
 	maxLifetimeClosed *prometheus.Desc
 }
 
@@ -54,14 +54,14 @@ type dbStatsCollector struct {
 // exports sql.DB pool statistics.
 func StartDBStatsCollector(db *sql.DB) {
 	c := &dbStatsCollector{
-		db: db,
-		maxOpen:     prometheus.NewDesc("tsm_db_max_open_connections", "Maximum number of open connections to the database.", nil, nil),
-		open:        prometheus.NewDesc("tsm_db_open_connections", "The number of established connections both in use and idle.", nil, nil),
-		inUse:       prometheus.NewDesc("tsm_db_in_use_connections", "The number of connections currently in use.", nil, nil),
-		idle:        prometheus.NewDesc("tsm_db_idle_connections", "The number of idle connections.", nil, nil),
-		waitCount:   prometheus.NewDesc("tsm_db_wait_count_total", "The total number of connections waited for.", nil, nil),
-		waitDurSec:  prometheus.NewDesc("tsm_db_wait_duration_seconds_total", "The total time blocked waiting for a new connection.", nil, nil),
-		maxIdleClosed: prometheus.NewDesc("tsm_db_max_idle_closed_total", "The total number of connections closed due to SetMaxIdleConns.", nil, nil),
+		db:                db,
+		maxOpen:           prometheus.NewDesc("tsm_db_max_open_connections", "Maximum number of open connections to the database.", nil, nil),
+		open:              prometheus.NewDesc("tsm_db_open_connections", "The number of established connections both in use and idle.", nil, nil),
+		inUse:             prometheus.NewDesc("tsm_db_in_use_connections", "The number of connections currently in use.", nil, nil),
+		idle:              prometheus.NewDesc("tsm_db_idle_connections", "The number of idle connections.", nil, nil),
+		waitCount:         prometheus.NewDesc("tsm_db_wait_count_total", "The total number of connections waited for.", nil, nil),
+		waitDurSec:        prometheus.NewDesc("tsm_db_wait_duration_seconds_total", "The total time blocked waiting for a new connection.", nil, nil),
+		maxIdleClosed:     prometheus.NewDesc("tsm_db_max_idle_closed_total", "The total number of connections closed due to SetMaxIdleConns.", nil, nil),
 		maxLifetimeClosed: prometheus.NewDesc("tsm_db_max_lifetime_closed_total", "The total number of connections closed due to SetConnMaxLifetime.", nil, nil),
 	}
 	prometheus.MustRegister(c)
