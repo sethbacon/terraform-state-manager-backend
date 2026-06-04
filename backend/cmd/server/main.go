@@ -42,6 +42,7 @@ import (
 	"github.com/terraform-state-manager/terraform-state-manager/internal/config"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/db"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/db/repositories"
+	"github.com/terraform-state-manager/terraform-state-manager/internal/identity"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/telemetry"
 	"golang.org/x/crypto/bcrypt"
 )
@@ -126,18 +127,32 @@ func serve(cfg *config.Config) error {
 	telemetry.StartDBStatsCollector(database)
 
 	// Run auto-migrations on startup.
-	slog.Info("running database migrations")
-	if err := db.RunMigrations(database, "up"); err != nil {
-		return fmt.Errorf("failed to run auto-migrations: %w", err)
+	slog.Info("running identity schema migrations")
+	if err := identity.RunMigrations(database, "up"); err != nil {
+		return fmt.Errorf("failed to run identity auto-migrations: %w", err)
 	}
-	slog.Info("database migrations completed")
+	slog.Info("identity schema migrations completed")
 
-	// Log migration version.
+	slog.Info("running application schema migrations")
+	if err := db.RunMigrations(database, "up"); err != nil {
+		return fmt.Errorf("failed to run application auto-migrations: %w", err)
+	}
+	slog.Info("application schema migrations completed")
+
+	// Log identity migration version.
+	identityMigrationVersion, identityDirty, err := identity.GetMigrationVersion(database)
+	if err != nil {
+		slog.Warn("could not determine identity migration version", "error", err)
+	} else {
+		slog.Info("identity migration status", "version", identityMigrationVersion, "dirty", identityDirty)
+	}
+
+	// Log application migration version.
 	migrationVersion, dirty, err := db.GetMigrationVersion(database)
 	if err != nil {
-		slog.Warn("could not determine migration version", "error", err)
+		slog.Warn("could not determine application migration version", "error", err)
 	} else {
-		slog.Info("database migration status", "version", migrationVersion, "dirty", dirty)
+		slog.Info("application migration status", "version", migrationVersion, "dirty", dirty)
 	}
 
 	// Handle setup token generation.
@@ -321,7 +336,7 @@ func handleSetupToken(repo *repositories.OIDCConfigRepository) error {
 func runMigrations(cfg *config.Config, direction string) error {
 	telemetry.SetupLogger(cfg.Logging.Format, cfg.Logging.Level)
 
-	slog.Info("running database migrations", "direction", direction)
+	slog.Info("running migrations", "direction", direction)
 
 	database, err := db.Connect(
 		cfg.Database.GetDSN(),
@@ -333,15 +348,26 @@ func runMigrations(cfg *config.Config, direction string) error {
 	}
 	defer func() { _ = database.Close() }()
 
+	if err := identity.RunMigrations(database, direction); err != nil {
+		return fmt.Errorf("identity migration %s failed: %w", direction, err)
+	}
+
+	identityVersion, identityDirty, err := identity.GetMigrationVersion(database)
+	if err != nil {
+		slog.Warn("could not determine identity migration version", "error", err)
+	} else {
+		slog.Info("identity migration completed", "version", identityVersion, "dirty", identityDirty)
+	}
+
 	if err := db.RunMigrations(database, direction); err != nil {
-		return fmt.Errorf("migration %s failed: %w", direction, err)
+		return fmt.Errorf("application migration %s failed: %w", direction, err)
 	}
 
 	ver, dirty, err := db.GetMigrationVersion(database)
 	if err != nil {
-		slog.Warn("could not determine migration version", "error", err)
+		slog.Warn("could not determine application migration version", "error", err)
 	} else {
-		slog.Info("migration completed", "version", ver, "dirty", dirty)
+		slog.Info("application migration completed", "version", ver, "dirty", dirty)
 	}
 
 	return nil
