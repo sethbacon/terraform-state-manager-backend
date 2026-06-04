@@ -1,5 +1,5 @@
-// Package auth - jwt.go handles JWT token creation, signing, and verification
-// using a shared secret, including lazy secret initialization and claims parsing.
+// Package auth - jwt.go resolves the JWT signing secret from the environment and
+// delegates token creation/validation to the shared identity TokenManager.
 package auth
 
 import (
@@ -12,22 +12,22 @@ import (
 	"sync"
 	"time"
 
-	"github.com/golang-jwt/jwt/v5"
+	identityauth "github.com/sethbacon/terraform-suite-identity/identity/auth"
 )
+
+// jwtIssuer stamps the iss claim on tokens this service generates.
+const jwtIssuer = "terraform-state-manager"
+
+// Claims is the suite identity JWT claims type, re-exported so existing call
+// sites keep referring to auth.Claims.
+type Claims = identityauth.Claims
 
 var (
 	jwtSecret     string
 	jwtSecretOnce sync.Once
 	jwtSecretErr  error
+	tokenManager  *identityauth.TokenManager
 )
-
-// Claims represents the JWT claims structure
-type Claims struct {
-	UserID string   `json:"user_id"`
-	Email  string   `json:"email"`
-	Scopes []string `json:"scopes,omitempty"`
-	jwt.RegisteredClaims
-}
 
 // isDevMode checks if we're in development mode
 func isDevMode() bool {
@@ -56,9 +56,9 @@ func configuredJWTSecret() string {
 	return os.Getenv("TSM_JWT_SECRET")
 }
 
-// ValidateJWTSecret checks that the JWT secret is properly configured.
-// In production, this will fail if neither TSM_AUTH_JWT_SECRET nor TSM_JWT_SECRET is set.
-// In dev mode, it will generate a random secret and log a warning.
+// ValidateJWTSecret resolves and caches the JWT signing secret and constructs the
+// shared TokenManager. In production it fails if neither TSM_AUTH_JWT_SECRET nor
+// TSM_JWT_SECRET is set; in dev mode it generates an ephemeral secret and warns.
 func ValidateJWTSecret() error {
 	jwtSecretOnce.Do(func() {
 		secret := configuredJWTSecret()
@@ -71,15 +71,16 @@ func ValidateJWTSecret() error {
 			} else {
 				jwtSecretErr = errors.New("SECURITY ERROR: TSM_AUTH_JWT_SECRET (or legacy TSM_JWT_SECRET) environment variable is required in production. " +
 					"Generate a secure secret with: openssl rand -hex 32")
+				return
 			}
-			return
+		} else {
+			if len(secret) < 32 {
+				log.Printf("WARNING: JWT secret is shorter than recommended 32 characters. Consider using a longer secret.")
+			}
+			jwtSecret = secret
 		}
 
-		if len(secret) < 32 {
-			log.Printf("WARNING: JWT secret is shorter than recommended 32 characters. Consider using a longer secret.")
-		}
-
-		jwtSecret = secret
+		tokenManager = identityauth.NewTokenManager(jwtSecret, jwtIssuer)
 	})
 
 	return jwtSecretErr
@@ -95,58 +96,15 @@ func GetJWTSecret() string {
 	return jwtSecret
 }
 
-// GenerateJWT creates a JWT token for an authenticated user.
+// GenerateJWT creates a JWT token for an authenticated user, delegating to the
+// shared identity TokenManager.
 func GenerateJWT(userID, email string, scopes []string, expiresIn time.Duration) (string, error) {
-	if expiresIn == 0 {
-		expiresIn = 1 * time.Hour
-	}
-
-	claims := &Claims{
-		UserID: userID,
-		Email:  email,
-		Scopes: scopes,
-		RegisteredClaims: jwt.RegisteredClaims{
-			ExpiresAt: jwt.NewNumericDate(time.Now().Add(expiresIn)),
-			IssuedAt:  jwt.NewNumericDate(time.Now()),
-			Issuer:    "terraform-state-manager",
-			Subject:   userID,
-		},
-	}
-
-	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
-	secret := GetJWTSecret()
-
-	tokenString, err := token.SignedString([]byte(secret))
-	if err != nil {
-		return "", err
-	}
-
-	return tokenString, nil
+	_ = GetJWTSecret() // ensure the secret is validated and the TokenManager is initialised
+	return tokenManager.Generate(userID, email, scopes, expiresIn)
 }
 
-// ValidateJWT parses and validates a JWT token
+// ValidateJWT parses and validates a JWT token via the shared identity TokenManager.
 func ValidateJWT(tokenString string) (*Claims, error) {
-	secret := GetJWTSecret()
-
-	token, err := jwt.ParseWithClaims(tokenString, &Claims{}, func(token *jwt.Token) (interface{}, error) {
-		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
-			return nil, errors.New("unexpected signing method")
-		}
-		return []byte(secret), nil
-	})
-
-	if err != nil {
-		return nil, err
-	}
-
-	if !token.Valid {
-		return nil, errors.New("invalid token")
-	}
-
-	claims, ok := token.Claims.(*Claims)
-	if !ok {
-		return nil, errors.New("invalid claims type")
-	}
-
-	return claims, nil
+	_ = GetJWTSecret()
+	return tokenManager.Validate(tokenString)
 }
