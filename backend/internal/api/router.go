@@ -140,9 +140,15 @@ func NewRouter(cfg *config.Config, db *sql.DB) (*gin.Engine, *BackgroundServices
 	// This takes precedence over static config file settings and allows OIDC to work
 	// without requiring config.yaml to have OIDC settings pre-configured.
 	if activeOIDCCfg, oidcErr := oidcConfigRepo.GetActiveOIDCConfig(context.Background()); oidcErr == nil && activeOIDCCfg != nil {
-		// Decrypt the client secret
+		// Decrypt the client secret. An env-managed placeholder (used by dev/OIDC
+		// stacks that configure the secret via TSM_AUTH_OIDC_* env vars) is not a
+		// real ciphertext, so treat it as "use static config" rather than logging a
+		// spurious decrypt error.
 		clientSecret, decErr := tokenCipher.Open(activeOIDCCfg.ClientSecretEncrypted)
-		if decErr != nil {
+		isEnvManaged := activeOIDCCfg.ClientSecretEncrypted == "" || activeOIDCCfg.ClientSecretEncrypted == "env-var-managed"
+		if isEnvManaged {
+			slog.Info("OIDC client secret is env-managed; using static OIDC configuration", "issuer", activeOIDCCfg.IssuerURL)
+		} else if decErr != nil {
 			slog.Error("Failed to decrypt OIDC client secret from database", "error", decErr)
 		} else {
 			liveCfg := &config.OIDCConfig{
