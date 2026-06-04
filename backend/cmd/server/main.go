@@ -37,12 +37,12 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/jmoiron/sqlx"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"github.com/sethbacon/terraform-suite-identity/identity"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/api"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/auth"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/config"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/db"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/db/repositories"
-	"github.com/terraform-state-manager/terraform-state-manager/internal/identity"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/telemetry"
 	"golang.org/x/crypto/bcrypt"
 )
