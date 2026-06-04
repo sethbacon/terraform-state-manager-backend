@@ -7,6 +7,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0](https://github.com/sethbacon/terraform-state-manager-backend/compare/v0.2.1...v0.3.0) (2026-06-04)
+
+
+### Features
+
+* **auth:** delegate scope-checking to identity module v0.3.0 ([#26](https://github.com/sethbacon/terraform-state-manager-backend/issues/26)) ([18b8a7e](https://github.com/sethbacon/terraform-state-manager-backend/commit/18b8a7ebf603a2e50628af4385139543b4ce0a1d))
+
 ## [0.2.1](https://github.com/sethbacon/terraform-state-manager-backend/compare/v0.2.0...v0.2.1) (2026-06-04)
 
 
