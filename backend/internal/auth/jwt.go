@@ -49,27 +49,34 @@ func generateRandomSecret() string {
 	return hex.EncodeToString(bytes)
 }
 
+func configuredJWTSecret() string {
+	if shared := os.Getenv("TSM_AUTH_JWT_SECRET"); shared != "" {
+		return shared
+	}
+	return os.Getenv("TSM_JWT_SECRET")
+}
+
 // ValidateJWTSecret checks that the JWT secret is properly configured.
-// In production, this will fail if TSM_JWT_SECRET is not set.
+// In production, this will fail if neither TSM_AUTH_JWT_SECRET nor TSM_JWT_SECRET is set.
 // In dev mode, it will generate a random secret and log a warning.
 func ValidateJWTSecret() error {
 	jwtSecretOnce.Do(func() {
-		secret := os.Getenv("TSM_JWT_SECRET")
+		secret := configuredJWTSecret()
 
 		if secret == "" {
 			if isDevMode() {
 				jwtSecret = generateRandomSecret()
-				log.Printf("WARNING: TSM_JWT_SECRET not set. Using auto-generated secret for development.")
-				log.Printf("WARNING: Sessions will not persist across restarts. Set TSM_JWT_SECRET for persistent sessions.")
+				log.Printf("WARNING: TSM_AUTH_JWT_SECRET/TSM_JWT_SECRET not set. Using auto-generated secret for development.")
+				log.Printf("WARNING: Sessions will not persist across restarts. Set TSM_AUTH_JWT_SECRET (preferred) for persistent sessions.")
 			} else {
-				jwtSecretErr = errors.New("SECURITY ERROR: TSM_JWT_SECRET environment variable is required in production. " +
+				jwtSecretErr = errors.New("SECURITY ERROR: TSM_AUTH_JWT_SECRET (or legacy TSM_JWT_SECRET) environment variable is required in production. " +
 					"Generate a secure secret with: openssl rand -hex 32")
 			}
 			return
 		}
 
 		if len(secret) < 32 {
-			log.Printf("WARNING: TSM_JWT_SECRET is shorter than recommended 32 characters. Consider using a longer secret.")
+			log.Printf("WARNING: JWT secret is shorter than recommended 32 characters. Consider using a longer secret.")
 		}
 
 		jwtSecret = secret

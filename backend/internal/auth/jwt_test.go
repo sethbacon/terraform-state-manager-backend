@@ -17,6 +17,7 @@ func resetJWTSecret(secret string) {
 	jwtSecretOnce = sync.Once{}
 	jwtSecretErr = nil
 	jwtSecret = ""
+	os.Unsetenv("TSM_AUTH_JWT_SECRET")
 	os.Setenv("TSM_JWT_SECRET", secret)
 }
 
@@ -122,4 +123,13 @@ func TestValidateJWTSecret_ShortSecretLogsWarning(t *testing.T) {
 	resetJWTSecret("short-secret")
 	err := ValidateJWTSecret()
 	assert.NoError(t, err)
+}
+
+func TestValidateJWTSecret_UsesSharedSecretWhenSet(t *testing.T) {
+	resetJWTSecret("legacy-secret-that-should-not-be-used")
+	os.Setenv("TSM_AUTH_JWT_SECRET", "shared-secret-key-that-is-long-enough")
+
+	err := ValidateJWTSecret()
+	require.NoError(t, err)
+	assert.Equal(t, "shared-secret-key-that-is-long-enough", GetJWTSecret())
 }
