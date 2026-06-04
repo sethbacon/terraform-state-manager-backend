@@ -7,6 +7,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0](https://github.com/sethbacon/terraform-state-manager-backend/compare/v0.1.0...v0.2.0) (2026-06-04)
+
+
+### Features
+
+* add shared identity schema migrations ([#20](https://github.com/sethbacon/terraform-state-manager-backend/issues/20)) ([04b990d](https://github.com/sethbacon/terraform-state-manager-backend/commit/04b990def4cfcba8607bf26e7f1b4fe6a9d5e392)), closes [#19](https://github.com/sethbacon/terraform-state-manager-backend/issues/19)
+
+
+### Bug Fixes
+
+* serve valid YAML from the /swagger.yaml endpoint ([#16](https://github.com/sethbacon/terraform-state-manager-backend/issues/16)) ([2406655](https://github.com/sethbacon/terraform-state-manager-backend/commit/240665565bf4816427a226b93e5909c54809a79e)), closes [#15](https://github.com/sethbacon/terraform-state-manager-backend/issues/15)
+
+
+### Documentation
+
+* add architecture decision records and correct OpenAPI doc ([#12](https://github.com/sethbacon/terraform-state-manager-backend/issues/12)) ([e40addd](https://github.com/sethbacon/terraform-state-manager-backend/commit/e40addde893fbd2eba895268fdf412a483e5c46a)), closes [#11](https://github.com/sethbacon/terraform-state-manager-backend/issues/11)
+
+
+### Refactor
+
+* consume identity from terraform-suite-identity module ([#22](https://github.com/sethbacon/terraform-state-manager-backend/issues/22)) ([c03fd22](https://github.com/sethbacon/terraform-state-manager-backend/commit/c03fd2275d8bb93ce62d47e8a200498110299c6c))
+
 ## [Unreleased]
 
 ---
