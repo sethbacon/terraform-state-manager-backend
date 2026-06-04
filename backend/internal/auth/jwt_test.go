@@ -17,6 +17,7 @@ func resetJWTSecret(secret string) {
 	jwtSecretOnce = sync.Once{}
 	jwtSecretErr = nil
 	jwtSecret = ""
+	tokenManager = nil
 	os.Unsetenv("TSM_AUTH_JWT_SECRET")
 	os.Setenv("TSM_JWT_SECRET", secret)
 }
