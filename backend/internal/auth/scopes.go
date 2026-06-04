@@ -5,6 +5,8 @@ package auth
 import (
 	"errors"
 	"fmt"
+
+	identityauth "github.com/sethbacon/terraform-suite-identity/identity/auth"
 )
 
 // Scope represents a permission/scope type
@@ -45,36 +47,28 @@ const (
 	// Alert scopes
 	ScopeAlertsAdmin Scope = "alerts:admin"
 
-	// User management scopes
-	ScopeUsersRead  Scope = "users:read"
-	ScopeUsersWrite Scope = "users:write"
-
-	// Organization management scopes
-	ScopeOrganizationsRead  Scope = "organizations:read"
-	ScopeOrganizationsWrite Scope = "organizations:write"
-
-	// API key management scopes
-	ScopeAPIKeysManage Scope = "api_keys:manage"
-
-	// Audit log scopes
-	ScopeAuditRead Scope = "audit:read"
-
-	// Admin scope (wildcard - all permissions)
-	ScopeAdmin Scope = "admin"
+	// Identity-core scopes (values defined in the shared identity module)
+	ScopeUsersRead          Scope = identityauth.ScopeUsersRead
+	ScopeUsersWrite         Scope = identityauth.ScopeUsersWrite
+	ScopeOrganizationsRead  Scope = identityauth.ScopeOrganizationsRead
+	ScopeOrganizationsWrite Scope = identityauth.ScopeOrganizationsWrite
+	ScopeAPIKeysManage      Scope = identityauth.ScopeAPIKeysManage
+	ScopeAuditRead          Scope = identityauth.ScopeAuditRead
+	ScopeAdmin              Scope = identityauth.ScopeAdmin
 )
 
 // readWritePairs maps read scopes to their corresponding write/manage scopes.
 // If a user has a write scope, they implicitly have the corresponding read scope.
-var readWritePairs = map[Scope]Scope{
-	ScopeAnalysisRead:       ScopeAnalysisWrite,
-	ScopeSourcesRead:        ScopeSourcesWrite,
-	ScopeBackupsRead:        ScopeBackupsWrite,
-	ScopeMigrationsRead:     ScopeMigrationsWrite,
-	ScopeReportsRead:        ScopeReportsWrite,
-	ScopeDashboardRead:      ScopeDashboardWrite,
-	ScopeComplianceRead:     ScopeComplianceWrite,
-	ScopeUsersRead:          ScopeUsersWrite,
-	ScopeOrganizationsRead:  ScopeOrganizationsWrite,
+var readWritePairs = identityauth.ReadWritePairs{
+	string(ScopeAnalysisRead):      string(ScopeAnalysisWrite),
+	string(ScopeSourcesRead):       string(ScopeSourcesWrite),
+	string(ScopeBackupsRead):       string(ScopeBackupsWrite),
+	string(ScopeMigrationsRead):    string(ScopeMigrationsWrite),
+	string(ScopeReportsRead):       string(ScopeReportsWrite),
+	string(ScopeDashboardRead):     string(ScopeDashboardWrite),
+	string(ScopeComplianceRead):    string(ScopeComplianceWrite),
+	string(ScopeUsersRead):         string(ScopeUsersWrite),
+	string(ScopeOrganizationsRead): string(ScopeOrganizationsWrite),
 }
 
 // AllScopes returns all valid scopes
@@ -131,46 +125,25 @@ func ValidateScopes(scopes []string) error {
 // HasScope checks if a user has a required scope.
 // Supports wildcard admin scope and write-implies-read logic.
 func HasScope(userScopes []string, required Scope) bool {
-	requiredStr := string(required)
-
-	for _, scope := range userScopes {
-		if scope == requiredStr {
-			return true
-		}
-
-		if scope == string(ScopeAdmin) {
-			return true
-		}
-
-		// Check write-implies-read
-		if writeScope, ok := readWritePairs[required]; ok {
-			if scope == string(writeScope) {
-				return true
-			}
-		}
-	}
-
-	return false
+	return identityauth.HasScope(userScopes, string(required), readWritePairs)
 }
 
 // HasAnyScope checks if a user has at least one of the required scopes
 func HasAnyScope(userScopes []string, requiredScopes []Scope) bool {
-	for _, required := range requiredScopes {
-		if HasScope(userScopes, required) {
-			return true
-		}
+	strs := make([]string, len(requiredScopes))
+	for i, s := range requiredScopes {
+		strs[i] = string(s)
 	}
-	return false
+	return identityauth.HasAnyScope(userScopes, strs, readWritePairs)
 }
 
 // HasAllScopes checks if a user has all of the required scopes
 func HasAllScopes(userScopes []string, requiredScopes []Scope) bool {
-	for _, required := range requiredScopes {
-		if !HasScope(userScopes, required) {
-			return false
-		}
+	strs := make([]string, len(requiredScopes))
+	for i, s := range requiredScopes {
+		strs[i] = string(s)
 	}
-	return true
+	return identityauth.HasAllScopes(userScopes, strs, readWritePairs)
 }
 
 // GetDefaultScopes returns default scopes for a new API key
