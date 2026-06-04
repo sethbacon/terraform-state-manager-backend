@@ -74,8 +74,8 @@ func TestMergeMetadata_WorkspaceOverridesStateFile(t *testing.T) {
 
 func TestMergeMetadata_ExistingVersionNotOverwrittenByStateFile(t *testing.T) {
 	counts := NewResourceCounts()
-	counts.TerraformVersion = "1.6.0"  // already set
-	counts.Serial = 99                 // already set
+	counts.TerraformVersion = "1.6.0" // already set
+	counts.Serial = 99                // already set
 
 	sf := &hcp.StateFile{TerraformVersion: "1.4.0", Serial: 1}
 

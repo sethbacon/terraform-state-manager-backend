@@ -266,4 +266,3 @@ func (r *AnalysisRunRepository) Delete(ctx context.Context, id string) error {
 	}
 	return nil
 }
-
