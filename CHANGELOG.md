@@ -7,6 +7,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.1](https://github.com/sethbacon/terraform-state-manager-backend/compare/v0.3.0...v0.3.1) (2026-06-04)
+
+
+### Refactor
+
+* **auth:** delegate API key gen/validation to the identity module ([#31](https://github.com/sethbacon/terraform-state-manager-backend/issues/31)) ([7706e52](https://github.com/sethbacon/terraform-state-manager-backend/commit/7706e52e1406cb652a8d687a031520cf4fb09195))
+* **auth:** delegate JWT to the identity TokenManager ([#28](https://github.com/sethbacon/terraform-state-manager-backend/issues/28)) ([b60fab7](https://github.com/sethbacon/terraform-state-manager-backend/commit/b60fab7209a45faad7a74c679eef2d11260531c8))
+
 ## [0.3.0](https://github.com/sethbacon/terraform-state-manager-backend/compare/v0.2.1...v0.3.0) (2026-06-04)
 
 
