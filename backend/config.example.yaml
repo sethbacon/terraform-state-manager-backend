@@ -22,6 +22,15 @@ auth:
   jwt_secret: ""  # Set via TSM_AUTH_JWT_SECRET env var
   jwt_expiry: "24h"
   jwt_issuer: "terraform-state-manager"
+  # Identity-schema cutover: when enabled, identity data (users, organizations,
+  # API keys, OIDC config, audit logs, role templates) is read/written from the
+  # shared "identity" Postgres schema instead of this app's public schema.
+  # Disabled by default; reversible. The schema is created by the embedded
+  # identity migrations regardless of this flag.
+  # Env: TSM_AUTH_IDENTITY_SCHEMA_ENABLED, TSM_AUTH_IDENTITY_SCHEMA_NAME
+  identity_schema:
+    enabled: false
+    name: "identity"
 
 oidc:
   enabled: false
