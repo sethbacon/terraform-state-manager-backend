@@ -7,6 +7,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0](https://github.com/sethbacon/terraform-state-manager-backend/compare/v0.3.3...v0.4.0) (2026-06-05)
+
+
+### Features
+
+* **auth:** add reversible identity-schema cutover flag ([#36](https://github.com/sethbacon/terraform-state-manager-backend/issues/36)) ([601f779](https://github.com/sethbacon/terraform-state-manager-backend/commit/601f7791156ecf5aa292b7541345688f211aaba9))
+
 ## [0.3.3](https://github.com/sethbacon/terraform-state-manager-backend/compare/v0.3.2...v0.3.3) (2026-06-05)
 
 
