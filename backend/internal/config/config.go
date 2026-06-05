@@ -72,6 +72,14 @@ func (c *DatabaseConfig) GetDSN() string {
 	)
 }
 
+// GetDSNWithSearchPath returns the DSN with the connection's search_path set,
+// so unqualified table names resolve against the given schemas in order. Used to
+// route identity data access at the dedicated identity schema while feature
+// tables fall back to public.
+func (c *DatabaseConfig) GetDSNWithSearchPath(searchPath string) string {
+	return c.GetDSN() + fmt.Sprintf(" options='-c search_path=%s'", searchPath)
+}
+
 // StorageConfig holds storage backend configuration
 type StorageConfig struct {
 	DefaultBackend string             `mapstructure:"default_backend"`
@@ -119,9 +127,19 @@ type LocalStorageConfig struct {
 
 // AuthConfig holds authentication configuration
 type AuthConfig struct {
-	APIKeys APIKeyConfig  `mapstructure:"api_keys"`
-	OIDC    OIDCConfig    `mapstructure:"oidc"`
-	AzureAD AzureADConfig `mapstructure:"azure_ad"`
+	APIKeys        APIKeyConfig         `mapstructure:"api_keys"`
+	OIDC           OIDCConfig           `mapstructure:"oidc"`
+	AzureAD        AzureADConfig        `mapstructure:"azure_ad"`
+	IdentitySchema IdentitySchemaConfig `mapstructure:"identity_schema"`
+}
+
+// IdentitySchemaConfig controls whether identity data (users, organizations,
+// API keys, OIDC config, audit logs, role templates) is read/written from the
+// dedicated shared "identity" Postgres schema instead of the app's public
+// schema. Disabled by default; flipping it on is reversible.
+type IdentitySchemaConfig struct {
+	Enabled bool   `mapstructure:"enabled"`
+	Name    string `mapstructure:"name"`
 }
 
 // APIKeyConfig holds API key authentication configuration
@@ -325,6 +343,7 @@ func bindEnvVars(v *viper.Viper) error {
 		"auth.azure_ad.enabled", "auth.azure_ad.tenant_id",
 		"auth.azure_ad.client_id", "auth.azure_ad.client_secret",
 		"auth.azure_ad.redirect_url",
+		"auth.identity_schema.enabled", "auth.identity_schema.name",
 
 		"multi_tenancy.enabled", "multi_tenancy.default_organization",
 		"multi_tenancy.allow_public_signup",
@@ -434,6 +453,8 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("auth.oidc.enabled", false)
 	v.SetDefault("auth.oidc.scopes", []string{"openid", "email", "profile"})
 	v.SetDefault("auth.azure_ad.enabled", false)
+	v.SetDefault("auth.identity_schema.enabled", false)
+	v.SetDefault("auth.identity_schema.name", "identity")
 
 	v.SetDefault("multi_tenancy.enabled", false)
 	v.SetDefault("multi_tenancy.default_organization", "default")

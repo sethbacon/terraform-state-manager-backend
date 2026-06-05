@@ -78,18 +78,22 @@ func (bg *BackgroundServices) Shutdown() {
 }
 
 // NewRouter creates and configures the Gin router with all TSM API routes.
-func NewRouter(cfg *config.Config, db *sql.DB) (*gin.Engine, *BackgroundServices) {
+// identityDB backs identity data access (users, organizations, API keys, OIDC
+// config, audit logs, role templates); it equals db unless the identity-schema
+// cutover is enabled, in which case it targets the shared identity schema.
+func NewRouter(cfg *config.Config, db, identityDB *sql.DB) (*gin.Engine, *BackgroundServices) {
 	router := gin.New()
 
-	// Initialize repositories (standard *sql.DB)
-	userRepo := repositories.NewUserRepository(db)
-	apiKeyRepo := repositories.NewAPIKeyRepository(db)
-	auditRepo := repositories.NewAuditRepository(db)
-	orgRepo := repositories.NewOrganizationRepository(db)
-	roleTemplateRepo := repositories.NewRoleTemplateRepository(db)
+	// Identity repositories use identityDB so they follow the configured
+	// identity schema; feature repositories below stay on db (public schema).
+	userRepo := repositories.NewUserRepository(identityDB)
+	apiKeyRepo := repositories.NewAPIKeyRepository(identityDB)
+	auditRepo := repositories.NewAuditRepository(identityDB)
+	orgRepo := repositories.NewOrganizationRepository(identityDB)
+	roleTemplateRepo := repositories.NewRoleTemplateRepository(identityDB)
 
-	// Wrap *sql.DB with sqlx for repositories that require it
-	sqlxDB := sqlx.NewDb(db, "postgres")
+	// Wrap the identity connection with sqlx for repositories that require it.
+	sqlxDB := sqlx.NewDb(identityDB, "postgres")
 	oidcConfigRepo := repositories.NewOIDCConfigRepository(sqlxDB)
 
 	// Phase 1 repositories
@@ -131,7 +135,7 @@ func NewRouter(cfg *config.Config, db *sql.DB) (*gin.Engine, *BackgroundServices
 	})
 
 	// Initialize auth handlers
-	authHandlers, err := admin.NewAuthHandlers(cfg, db, oidcConfigRepo)
+	authHandlers, err := admin.NewAuthHandlers(cfg, identityDB, oidcConfigRepo)
 	if err != nil {
 		log.Fatalf("Failed to initialize auth handlers: %v", err)
 	}
@@ -170,17 +174,19 @@ func NewRouter(cfg *config.Config, db *sql.DB) (*gin.Engine, *BackgroundServices
 		}
 	}
 
-	// Initialize admin handlers
-	apiKeyHandlers := admin.NewAPIKeyHandlers(cfg, db)
-	userHandlers := admin.NewUserHandlers(cfg, db)
-	orgHandlers := admin.NewOrganizationHandlers(cfg, db)
+	// Initialize admin handlers. Identity-backed handlers use identityDB; stats
+	// uses the identity sqlx wrapper (identity entities resolve to the identity
+	// schema, feature counts fall back to public via search_path).
+	apiKeyHandlers := admin.NewAPIKeyHandlers(cfg, identityDB)
+	userHandlers := admin.NewUserHandlers(cfg, identityDB)
+	orgHandlers := admin.NewOrganizationHandlers(cfg, identityDB)
 	statsHandlers := admin.NewStatsHandler(sqlxDB)
 	roleTemplateHandlers := admin.NewRoleHandlers(roleTemplateRepo)
 	oidcAdminHandlers := admin.NewOIDCHandlers(tokenCipher, oidcConfigRepo)
 
 	// Initialize setup wizard handlers
 	setupHandlers := setup.NewHandlers(
-		cfg, db, tokenCipher, oidcConfigRepo, userRepo, orgRepo, authHandlers.SetOIDCProvider,
+		cfg, identityDB, tokenCipher, oidcConfigRepo, userRepo, orgRepo, authHandlers.SetOIDCProvider,
 	)
 
 	// Initialize Phase 1 handlers

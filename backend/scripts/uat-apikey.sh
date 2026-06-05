@@ -11,10 +11,9 @@ BACKEND="http://localhost:8081"
 FRONTEND="http://localhost:3001"
 CJ="$(mktemp)"
 
-# Derive the default org id from the running DB (avoids hardcoding seed UUIDs).
-ORG="$(docker exec tsm-db psql -U tsm -d tsm -t -A -c \
-  "SELECT id FROM organizations ORDER BY created_at LIMIT 1;" 2>/dev/null | tr -d '[:space:]')"
-[[ -n "$ORG" ]] || { echo "FAIL: could not resolve an organization id from tsm-db"; exit 1; }
+# The organization id is resolved after login via the authenticated API (step
+# 5b) rather than the DB, so the UAT is schema-agnostic: it always uses the org
+# the backend sees, whether identity data lives in the public or identity schema.
 
 pass() { echo "PASS: $1"; }
 fail() { echo "FAIL: $1"; exit 1; }
@@ -50,6 +49,12 @@ echo "== 5. inspect JWT issuer =="
 PAYLOAD=$(printf '%s' "$JWT" | cut -d. -f2 | tr '_-' '/+'); while [ $((${#PAYLOAD} % 4)) -ne 0 ]; do PAYLOAD="${PAYLOAD}="; done
 ISS=$(printf '%s' "$PAYLOAD" | base64 -d 2>/dev/null | grep -o '"iss":"[^"]*"' | sed 's/.*"iss":"//; s/"$//')
 echo "   iss=$ISS"
+
+echo "== 5b. resolve org id via authenticated API =="
+ORGS=$(curl -s $R -b "$CJ" "$BACKEND/api/v1/organizations" -H "Authorization: Bearer $JWT")
+ORG=$(printf '%s' "$ORGS" | grep -o '"id":"[^"]*"' | head -1 | sed 's/.*"id":"//; s/"$//')
+[[ -n "$ORG" ]] || fail "could not resolve an org id from the API (resp: ${ORGS:0:120})"
+pass "org id: $ORG"
 
 echo "== 6. create API key (POST /api/v1/apikeys) =="
 CREATE=$(curl -s $R -b "$CJ" -X POST "$BACKEND/api/v1/apikeys" \

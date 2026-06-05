@@ -155,8 +155,33 @@ func serve(cfg *config.Config) error {
 		slog.Info("application migration status", "version", migrationVersion, "dirty", dirty)
 	}
 
-	// Handle setup token generation.
-	sqlxDB := sqlx.NewDb(database, "postgres")
+	// Determine the connection for identity data access. When the identity-schema
+	// cutover is enabled, open a dedicated pool whose search_path resolves identity
+	// tables against the shared identity schema (feature tables fall back to
+	// public). Otherwise identity data stays in the app's public schema.
+	identityDB := database
+	if cfg.Auth.IdentitySchema.Enabled {
+		schema := cfg.Auth.IdentitySchema.Name
+		if schema == "" {
+			schema = "identity"
+		}
+		searchPath := schema + ",public"
+		idb, connErr := db.Connect(
+			cfg.Database.GetDSNWithSearchPath(searchPath),
+			cfg.Database.MaxConnections,
+			cfg.Database.MinIdleConnections,
+		)
+		if connErr != nil {
+			return fmt.Errorf("failed to connect to identity schema: %w", connErr)
+		}
+		defer func() { _ = idb.Close() }()
+		identityDB = idb
+		slog.Info("identity schema cutover enabled", "search_path", searchPath)
+	}
+
+	// Handle setup token generation. The identity connection owns system_settings
+	// (where the setup token hash and completion flag live).
+	sqlxDB := sqlx.NewDb(identityDB, "postgres")
 	oidcConfigRepo := repositories.NewOIDCConfigRepository(sqlxDB)
 	if err := handleSetupToken(oidcConfigRepo); err != nil {
 		slog.Warn("setup token handling failed", "error", err)
@@ -200,8 +225,9 @@ func serve(cfg *config.Config) error {
 		}()
 	}
 
-	// Create API router.
-	router, bgServices := api.NewRouter(cfg, database)
+	// Create API router. identityDB backs identity data access (== database
+	// unless the identity-schema cutover is enabled).
+	router, bgServices := api.NewRouter(cfg, database, identityDB)
 
 	// Create HTTP server with configured timeouts.
 	addr := cfg.Server.GetAddress()
