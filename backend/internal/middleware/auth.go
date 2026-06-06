@@ -70,6 +70,7 @@ func AuthMiddleware(
 					c.Set("email", claims.Email)
 					c.Set("auth_method", "jwt")
 					c.Set("scopes", claims.Scopes)
+					c.Set("jwt_claims", claims)
 
 					// Resolve the user's organization so handlers can scope
 					// queries to the correct org without an extra DB lookup.
@@ -190,6 +191,7 @@ func OptionalAuthMiddleware(
 						c.Set("user_id", claims.UserID)
 						c.Set("auth_method", "jwt")
 						c.Set("scopes", claims.Scopes)
+						c.Set("jwt_claims", claims)
 
 						userWithOrg, orgErr := userRepo.GetUserWithOrgRoles(c.Request.Context(), claims.UserID)
 						if orgErr == nil && userWithOrg != nil && len(userWithOrg.Memberships) > 0 {

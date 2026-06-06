@@ -398,7 +398,8 @@ func (h *AuthHandlers) RefreshHandler() gin.HandlerFunc {
 
 // MeHandler returns the current authenticated user's profile, organisation
 // memberships, primary role template, and allowed scopes, using the registry's
-// /auth/me response envelope ({user, memberships, allowed_scopes, role_template}).
+// /auth/me response envelope ({user, memberships, allowed_scopes, role_template,
+// session_expires_at}).
 // GET /api/v1/auth/me
 // MeHandler godoc
 // @Summary      Get current user
@@ -477,6 +478,15 @@ func (h *AuthHandlers) MeHandler() gin.HandlerFunc {
 			}
 		} else {
 			response["role_template"] = nil
+		}
+
+		// Session expiry from the JWT claims, so the frontend can schedule its
+		// pre-expiry warning. Absent for API-key auth (the frontend then derives
+		// expiry from the token itself).
+		if claimsVal, ok := c.Get("jwt_claims"); ok {
+			if claims, ok := claimsVal.(*auth.Claims); ok && claims.ExpiresAt != nil {
+				response["session_expires_at"] = claims.ExpiresAt.Time
+			}
 		}
 
 		c.JSON(http.StatusOK, response)
