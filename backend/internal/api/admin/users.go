@@ -1,8 +1,10 @@
+// users.go implements handlers for user account CRUD operations including
+// listing, creating, updating, and deleting users. Mirrors the registry's
+// identity surface 1:1 on the shared canonical identity model.
 package admin
 
 import (
 	"database/sql"
-	"log/slog"
 	"net/http"
 	"strconv"
 
@@ -13,7 +15,7 @@ import (
 	"github.com/terraform-state-manager/terraform-state-manager/internal/db/repositories"
 )
 
-// UserHandlers provides HTTP handlers for user management CRUD operations.
+// UserHandlers handles user management endpoints.
 type UserHandlers struct {
 	cfg      *config.Config
 	db       *sql.DB
@@ -21,7 +23,7 @@ type UserHandlers struct {
 	orgRepo  *repositories.OrganizationRepository
 }
 
-// NewUserHandlers creates a new UserHandlers instance with the given config and database.
+// NewUserHandlers creates a new UserHandlers instance.
 func NewUserHandlers(cfg *config.Config, db *sql.DB) *UserHandlers {
 	return &UserHandlers{
 		cfg:      cfg,
@@ -31,40 +33,35 @@ func NewUserHandlers(cfg *config.Config, db *sql.DB) *UserHandlers {
 	}
 }
 
-// CreateUserRequest represents the request body for creating a new user.
-type CreateUserRequest struct {
-	Email   string  `json:"email" binding:"required,email"`
-	Name    string  `json:"name" binding:"required"`
-	OIDCSub *string `json:"oidc_sub"`
-}
-
-// UpdateUserRequest represents the request body for updating an existing user.
-type UpdateUserRequest struct {
-	Name  *string `json:"name"`
-	Email *string `json:"email"`
-}
-
-// ListUsersHandler returns a handler that lists users with pagination.
-// Query params: page (default 1), per_page (default 20, max 100).
+// ListUsersHandler lists all users with pagination (including their memberships).
 // @Summary      List users
+// @Description  Get a paginated list of all users with their organization role templates. Requires users:read scope.
 // @Tags         Users
-// @Security     BearerAuth
-// @Security     ApiKeyAuth
+// @Accept       json
 // @Produce      json
-// @Param        organization_id  query  string  false  "Filter by organization ID"
-// @Success      200  {object}  map[string]interface{}
+// @Param        page      query  int  false  "Page number (default 1)"
+// @Param        per_page  query  int  false  "Items per page, max 100 (default 20)"
+// @Success      200  {object}  admin.ListUsersResponse
 // @Failure      401  {object}  map[string]interface{}
 // @Failure      500  {object}  map[string]interface{}
+// @Security     BearerAuth
+// @Security     ApiKeyAuth
 // @Router       /users [get]
 func (h *UserHandlers) ListUsersHandler() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		page, perPage := parsePagination(c)
+		page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
+		perPage, _ := strconv.Atoi(c.DefaultQuery("per_page", "20"))
+		if page < 1 {
+			page = 1
+		}
+		if perPage < 1 || perPage > 100 {
+			perPage = 20
+		}
 		offset := (page - 1) * perPage
 
-		users, total, err := h.userRepo.ListUsers(c.Request.Context(), offset, perPage)
+		users, total, err := h.userRepo.ListUsersWithMemberships(c.Request.Context(), perPage, offset)
 		if err != nil {
-			slog.Error("failed to list users", "error", err)
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to list users"})
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to list users"})
 			return
 		}
 
@@ -79,43 +76,36 @@ func (h *UserHandlers) ListUsersHandler() gin.HandlerFunc {
 	}
 }
 
-// GetUserHandler returns a handler that retrieves a single user by ID,
-// including their organization memberships.
+// GetUserHandler retrieves a specific user by ID with their organizations.
 // @Summary      Get user
+// @Description  Get a user by ID with their organization memberships. Requires users:read scope.
 // @Tags         Users
-// @Security     BearerAuth
-// @Security     ApiKeyAuth
 // @Produce      json
-// @Param        id  path  string  true  "Resource ID"
-// @Success      200  {object}  map[string]interface{}
+// @Param        id  path  string  true  "User ID"
+// @Success      200  {object}  admin.UserWithOrgsResponse
 // @Failure      401  {object}  map[string]interface{}
 // @Failure      404  {object}  map[string]interface{}
 // @Failure      500  {object}  map[string]interface{}
+// @Security     BearerAuth
+// @Security     ApiKeyAuth
 // @Router       /users/{id} [get]
 func (h *UserHandlers) GetUserHandler() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		id := c.Param("id")
-		if id == "" {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "user id is required"})
-			return
-		}
+		userID := c.Param("id")
 
-		user, err := h.userRepo.GetUserByID(c.Request.Context(), id)
+		user, err := h.userRepo.GetUserByID(c.Request.Context(), userID)
 		if err != nil {
-			slog.Error("failed to get user", "id", id, "error", err)
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to get user"})
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve user"})
 			return
 		}
 		if user == nil {
-			c.JSON(http.StatusNotFound, gin.H{"error": "user not found"})
+			c.JSON(http.StatusNotFound, gin.H{"error": "User not found"})
 			return
 		}
 
-		// Fetch the user's organization memberships.
-		orgs, err := h.listUserOrganizations(c, id)
+		orgs, err := h.orgRepo.ListUserOrganizations(c.Request.Context(), userID)
 		if err != nil {
-			slog.Error("failed to list user organizations", "user_id", id, "error", err)
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to list user organizations"})
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve user organizations"})
 			return
 		}
 
@@ -126,52 +116,44 @@ func (h *UserHandlers) GetUserHandler() gin.HandlerFunc {
 	}
 }
 
-// CreateUserHandler returns a handler that creates a new user.
+// CreateUserRequest represents the request to create a new user.
+type CreateUserRequest struct {
+	Email   string  `json:"email" binding:"required,email"`
+	Name    string  `json:"name" binding:"required"`
+	OIDCSub *string `json:"oidc_sub"`
+}
+
+// CreateUserHandler creates a new user (admin only; users are typically created via OIDC).
 // @Summary      Create user
+// @Description  Create a new user. Typically users are created via OIDC; this endpoint is for admin use. Requires users:write scope.
 // @Tags         Users
-// @Security     BearerAuth
-// @Security     ApiKeyAuth
 // @Accept       json
 // @Produce      json
-// @Param        body  body  CreateUserRequest  true  "Create user request"
-// @Success      201  {object}  map[string]interface{}
+// @Param        body  body  CreateUserRequest  true  "User creation request"
+// @Success      201  {object}  admin.UserResponse
 // @Failure      400  {object}  map[string]interface{}
 // @Failure      401  {object}  map[string]interface{}
 // @Failure      409  {object}  map[string]interface{}
 // @Failure      500  {object}  map[string]interface{}
+// @Security     BearerAuth
+// @Security     ApiKeyAuth
 // @Router       /users [post]
 func (h *UserHandlers) CreateUserHandler() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		var req CreateUserRequest
 		if err := c.ShouldBindJSON(&req); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request: " + err.Error()})
 			return
 		}
 
-		// Check email uniqueness.
-		existing, err := h.userRepo.GetUserByEmail(c.Request.Context(), req.Email)
+		existingUser, err := h.userRepo.GetUserByEmail(c.Request.Context(), req.Email)
 		if err != nil {
-			slog.Error("failed to check email uniqueness", "error", err)
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to check email uniqueness"})
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to check existing user"})
 			return
 		}
-		if existing != nil {
-			c.JSON(http.StatusConflict, gin.H{"error": "a user with this email already exists"})
+		if existingUser != nil {
+			c.JSON(http.StatusConflict, gin.H{"error": "User with this email already exists"})
 			return
-		}
-
-		// Check OIDC sub uniqueness if provided.
-		if req.OIDCSub != nil && *req.OIDCSub != "" {
-			existingSub, err := h.userRepo.GetUserByOIDCSub(c.Request.Context(), *req.OIDCSub)
-			if err != nil {
-				slog.Error("failed to check OIDC sub uniqueness", "error", err)
-				c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to check OIDC sub uniqueness"})
-				return
-			}
-			if existingSub != nil {
-				c.JSON(http.StatusConflict, gin.H{"error": "a user with this OIDC subject already exists"})
-				return
-			}
 		}
 
 		user := &models.User{
@@ -179,10 +161,8 @@ func (h *UserHandlers) CreateUserHandler() gin.HandlerFunc {
 			Name:    req.Name,
 			OIDCSub: req.OIDCSub,
 		}
-
-		if err := h.userRepo.CreateUser(c.Request.Context(), user); err != nil {
-			slog.Error("failed to create user", "error", err)
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create user"})
+		if err := h.userRepo.Create(c.Request.Context(), user); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create user"})
 			return
 		}
 
@@ -190,69 +170,67 @@ func (h *UserHandlers) CreateUserHandler() gin.HandlerFunc {
 	}
 }
 
-// UpdateUserHandler returns a handler that updates an existing user by ID.
+// UpdateUserRequest represents the request to update a user.
+type UpdateUserRequest struct {
+	Name  *string `json:"name"`
+	Email *string `json:"email,omitempty"`
+}
+
+// UpdateUserHandler updates a user's name or email.
 // @Summary      Update user
+// @Description  Update a user's name or email. Requires users:write scope.
 // @Tags         Users
-// @Security     BearerAuth
-// @Security     ApiKeyAuth
 // @Accept       json
 // @Produce      json
-// @Param        id    path  string             true  "Resource ID"
-// @Param        body  body  UpdateUserRequest  true  "Update user request"
-// @Success      200  {object}  map[string]interface{}
+// @Param        id    path  string             true  "User ID"
+// @Param        body  body  UpdateUserRequest  true  "User update request"
+// @Success      200  {object}  admin.UserResponse
 // @Failure      400  {object}  map[string]interface{}
 // @Failure      401  {object}  map[string]interface{}
 // @Failure      404  {object}  map[string]interface{}
 // @Failure      409  {object}  map[string]interface{}
 // @Failure      500  {object}  map[string]interface{}
+// @Security     BearerAuth
+// @Security     ApiKeyAuth
 // @Router       /users/{id} [put]
 func (h *UserHandlers) UpdateUserHandler() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		id := c.Param("id")
-		if id == "" {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "user id is required"})
-			return
-		}
+		userID := c.Param("id")
 
 		var req UpdateUserRequest
 		if err := c.ShouldBindJSON(&req); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request: " + err.Error()})
 			return
 		}
 
-		user, err := h.userRepo.GetUserByID(c.Request.Context(), id)
+		user, err := h.userRepo.GetUserByID(c.Request.Context(), userID)
 		if err != nil {
-			slog.Error("failed to get user for update", "id", id, "error", err)
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to get user"})
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve user"})
 			return
 		}
 		if user == nil {
-			c.JSON(http.StatusNotFound, gin.H{"error": "user not found"})
+			c.JSON(http.StatusNotFound, gin.H{"error": "User not found"})
 			return
-		}
-
-		// Check email uniqueness if email is being changed.
-		if req.Email != nil && *req.Email != user.Email {
-			existing, err := h.userRepo.GetUserByEmail(c.Request.Context(), *req.Email)
-			if err != nil {
-				slog.Error("failed to check email uniqueness", "error", err)
-				c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to check email uniqueness"})
-				return
-			}
-			if existing != nil {
-				c.JSON(http.StatusConflict, gin.H{"error": "a user with this email already exists"})
-				return
-			}
-			user.Email = *req.Email
 		}
 
 		if req.Name != nil {
 			user.Name = *req.Name
 		}
+		if req.Email != nil {
+			existingUser, err := h.userRepo.GetUserByEmail(c.Request.Context(), *req.Email)
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to check email availability"})
+				return
+			}
+			if existingUser != nil && existingUser.ID != userID {
+				c.JSON(http.StatusConflict, gin.H{"error": "Email already in use by another user"})
+				return
+			}
+			user.Email = *req.Email
+		}
 
-		if err := h.userRepo.UpdateUser(c.Request.Context(), user); err != nil {
-			slog.Error("failed to update user", "id", id, "error", err)
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update user"})
+		if err := h.userRepo.Update(c.Request.Context(), user); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update user"})
 			return
 		}
 
@@ -260,74 +238,78 @@ func (h *UserHandlers) UpdateUserHandler() gin.HandlerFunc {
 	}
 }
 
-// DeleteUserHandler returns a handler that deletes a user by ID.
+// DeleteUserHandler deletes a user by ID.
 // @Summary      Delete user
+// @Description  Delete a user by ID. Cascading deletes will handle related records. Requires users:write scope.
 // @Tags         Users
-// @Security     BearerAuth
-// @Security     ApiKeyAuth
 // @Produce      json
-// @Param        id  path  string  true  "Resource ID"
-// @Success      200  {object}  map[string]interface{}
+// @Param        id  path  string  true  "User ID"
+// @Success      200  {object}  admin.MessageResponse
 // @Failure      401  {object}  map[string]interface{}
 // @Failure      404  {object}  map[string]interface{}
 // @Failure      500  {object}  map[string]interface{}
+// @Security     BearerAuth
+// @Security     ApiKeyAuth
 // @Router       /users/{id} [delete]
 func (h *UserHandlers) DeleteUserHandler() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		id := c.Param("id")
-		if id == "" {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "user id is required"})
-			return
-		}
+		userID := c.Param("id")
 
-		user, err := h.userRepo.GetUserByID(c.Request.Context(), id)
+		user, err := h.userRepo.GetUserByID(c.Request.Context(), userID)
 		if err != nil {
-			slog.Error("failed to get user for deletion", "id", id, "error", err)
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to get user"})
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve user"})
 			return
 		}
 		if user == nil {
-			c.JSON(http.StatusNotFound, gin.H{"error": "user not found"})
+			c.JSON(http.StatusNotFound, gin.H{"error": "User not found"})
 			return
 		}
 
-		if err := h.userRepo.DeleteUser(c.Request.Context(), id); err != nil {
-			slog.Error("failed to delete user", "id", id, "error", err)
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to delete user"})
+		if err := h.userRepo.Delete(c.Request.Context(), userID); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete user"})
 			return
 		}
 
-		c.JSON(http.StatusOK, gin.H{"message": "user deleted successfully"})
+		c.JSON(http.StatusOK, gin.H{"message": "User deleted successfully"})
 	}
 }
 
-// SearchUsersHandler returns a handler that searches users by query string.
-// Query params: q (required), page (default 1), per_page (default 20, max 100).
+// SearchUsersHandler searches users by email or name.
 // @Summary      Search users
+// @Description  Search users by email or name. Requires users:read scope.
 // @Tags         Users
-// @Security     BearerAuth
-// @Security     ApiKeyAuth
 // @Produce      json
-// @Param        q  query  string  true  "Search query"
-// @Success      200  {object}  map[string]interface{}
+// @Param        q         query  string  true   "Search query"
+// @Param        page      query  int     false  "Page number (default 1)"
+// @Param        per_page  query  int     false  "Items per page, max 100 (default 20)"
+// @Success      200  {object}  admin.ListUsersResponse
 // @Failure      400  {object}  map[string]interface{}
 // @Failure      401  {object}  map[string]interface{}
 // @Failure      500  {object}  map[string]interface{}
+// @Security     BearerAuth
+// @Security     ApiKeyAuth
 // @Router       /users/search [get]
 func (h *UserHandlers) SearchUsersHandler() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		query := c.Query("q")
 		if query == "" {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "query parameter 'q' is required"})
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Search query is required"})
 			return
 		}
 
-		page, perPage := parsePagination(c)
+		page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
+		perPage, _ := strconv.Atoi(c.DefaultQuery("per_page", "20"))
+		if page < 1 {
+			page = 1
+		}
+		if perPage < 1 || perPage > 100 {
+			perPage = 20
+		}
+		offset := (page - 1) * perPage
 
-		users, err := h.userRepo.Search(c.Request.Context(), query, perPage, 0)
+		users, err := h.userRepo.SearchWithMemberships(c.Request.Context(), query, perPage, offset)
 		if err != nil {
-			slog.Error("failed to search users", "query", query, "error", err)
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to search users"})
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to search users"})
 			return
 		}
 
@@ -336,41 +318,38 @@ func (h *UserHandlers) SearchUsersHandler() gin.HandlerFunc {
 			"pagination": gin.H{
 				"page":     page,
 				"per_page": perPage,
-				"total":    len(users),
 			},
 		})
 	}
 }
 
-// GetCurrentUserMembershipsHandler returns a handler that retrieves the
-// organization memberships for the currently authenticated user.
+// GetCurrentUserMembershipsHandler retrieves the current user's organization memberships.
 // @Summary      Get current user memberships
+// @Description  Get the organization memberships for the currently authenticated user. No special scopes required.
 // @Tags         Users
-// @Security     BearerAuth
-// @Security     ApiKeyAuth
 // @Produce      json
-// @Success      200  {object}  map[string]interface{}
+// @Success      200  {object}  admin.UserMembershipsResponse
 // @Failure      401  {object}  map[string]interface{}
 // @Failure      500  {object}  map[string]interface{}
+// @Security     BearerAuth
+// @Security     ApiKeyAuth
 // @Router       /users/me/memberships [get]
 func (h *UserHandlers) GetCurrentUserMembershipsHandler() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		userID, exists := c.Get("user_id")
+		userIDVal, exists := c.Get("user_id")
 		if !exists {
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "user not authenticated"})
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "User not authenticated"})
+			return
+		}
+		userID, ok := userIDVal.(string)
+		if !ok {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Invalid user ID format"})
 			return
 		}
 
-		uid, ok := userID.(string)
-		if !ok || uid == "" {
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid user identity"})
-			return
-		}
-
-		memberships, err := h.listUserMemberships(c, uid)
+		memberships, err := h.orgRepo.GetUserMemberships(c.Request.Context(), userID)
 		if err != nil {
-			slog.Error("failed to get current user memberships", "user_id", uid, "error", err)
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to get memberships"})
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve user memberships"})
 			return
 		}
 
@@ -378,169 +357,39 @@ func (h *UserHandlers) GetCurrentUserMembershipsHandler() gin.HandlerFunc {
 	}
 }
 
-// GetUserMembershipsHandler returns a handler that retrieves the organization
-// memberships for a specific user by ID.
+// GetUserMembershipsHandler retrieves a specific user's organization memberships.
 // @Summary      Get user memberships
+// @Description  Get the organization memberships for a specific user. Requires users:read scope.
 // @Tags         Users
-// @Security     BearerAuth
-// @Security     ApiKeyAuth
 // @Produce      json
-// @Param        id  path  string  true  "Resource ID"
-// @Success      200  {object}  map[string]interface{}
+// @Param        id  path  string  true  "User ID"
+// @Success      200  {object}  admin.UserMembershipsResponse
 // @Failure      401  {object}  map[string]interface{}
 // @Failure      404  {object}  map[string]interface{}
 // @Failure      500  {object}  map[string]interface{}
+// @Security     BearerAuth
+// @Security     ApiKeyAuth
 // @Router       /users/{id}/memberships [get]
 func (h *UserHandlers) GetUserMembershipsHandler() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		id := c.Param("id")
-		if id == "" {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "user id is required"})
-			return
-		}
+		userID := c.Param("id")
 
-		// Verify the user exists.
-		user, err := h.userRepo.GetUserByID(c.Request.Context(), id)
+		user, err := h.userRepo.GetUserByID(c.Request.Context(), userID)
 		if err != nil {
-			slog.Error("failed to get user for memberships", "id", id, "error", err)
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to get user"})
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve user"})
 			return
 		}
 		if user == nil {
-			c.JSON(http.StatusNotFound, gin.H{"error": "user not found"})
+			c.JSON(http.StatusNotFound, gin.H{"error": "User not found"})
 			return
 		}
 
-		memberships, err := h.listUserMemberships(c, id)
+		memberships, err := h.orgRepo.GetUserMemberships(c.Request.Context(), userID)
 		if err != nil {
-			slog.Error("failed to get user memberships", "user_id", id, "error", err)
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to get memberships"})
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve user memberships"})
 			return
 		}
 
 		c.JSON(http.StatusOK, gin.H{"memberships": memberships})
 	}
-}
-
-// listUserOrganizations queries organization memberships for a given user,
-// returning organization details along with the user's role in each.
-func (h *UserHandlers) listUserOrganizations(c *gin.Context, userID string) ([]gin.H, error) {
-	rows, err := h.db.QueryContext(c.Request.Context(),
-		`SELECT o.id, o.name, o.display_name, o.description, o.is_active,
-		        om.role_template_id, rt.name as role_template_name
-		 FROM organization_members om
-		 JOIN organizations o ON om.organization_id = o.id
-		 LEFT JOIN role_templates rt ON om.role_template_id = rt.id
-		 WHERE om.user_id = $1
-		 ORDER BY o.name`, userID,
-	)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = rows.Close() }()
-
-	var orgs []gin.H
-	for rows.Next() {
-		var (
-			orgID            string
-			orgName          string
-			orgDisplayName   string
-			orgDescription   *string
-			orgIsActive      bool
-			roleTemplateID   *string
-			roleTemplateName *string
-		)
-		if err := rows.Scan(&orgID, &orgName, &orgDisplayName, &orgDescription, &orgIsActive,
-			&roleTemplateID, &roleTemplateName); err != nil {
-			return nil, err
-		}
-		orgs = append(orgs, gin.H{
-			"id":                 orgID,
-			"name":               orgName,
-			"display_name":       orgDisplayName,
-			"description":        orgDescription,
-			"is_active":          orgIsActive,
-			"role_template_id":   roleTemplateID,
-			"role_template_name": roleTemplateName,
-		})
-	}
-	if orgs == nil {
-		orgs = []gin.H{}
-	}
-	return orgs, nil
-}
-
-// listUserMemberships queries all organization memberships for a given user,
-// returning membership details including role information.
-func (h *UserHandlers) listUserMemberships(c *gin.Context, userID string) ([]gin.H, error) {
-	rows, err := h.db.QueryContext(c.Request.Context(),
-		`SELECT om.id, om.organization_id, o.name as organization_name, o.display_name as organization_display_name,
-		        om.role_template_id, rt.name as role_template_name, om.created_at, om.updated_at
-		 FROM organization_members om
-		 JOIN organizations o ON om.organization_id = o.id
-		 LEFT JOIN role_templates rt ON om.role_template_id = rt.id
-		 WHERE om.user_id = $1
-		 ORDER BY o.name`, userID,
-	)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = rows.Close() }()
-
-	var memberships []gin.H
-	for rows.Next() {
-		var (
-			membershipID            string
-			organizationID          string
-			organizationName        string
-			organizationDisplayName string
-			roleTemplateID          *string
-			roleTemplateName        *string
-			createdAt               interface{}
-			updatedAt               interface{}
-		)
-		if err := rows.Scan(&membershipID, &organizationID, &organizationName, &organizationDisplayName,
-			&roleTemplateID, &roleTemplateName, &createdAt, &updatedAt); err != nil {
-			return nil, err
-		}
-		memberships = append(memberships, gin.H{
-			"id":                        membershipID,
-			"organization_id":           organizationID,
-			"organization_name":         organizationName,
-			"organization_display_name": organizationDisplayName,
-			"role_template_id":          roleTemplateID,
-			"role_template_name":        roleTemplateName,
-			"created_at":                createdAt,
-			"updated_at":                updatedAt,
-		})
-	}
-	if memberships == nil {
-		memberships = []gin.H{}
-	}
-	return memberships, nil
-}
-
-// parsePagination extracts page and per_page query parameters with defaults
-// and bounds checking.
-func parsePagination(c *gin.Context) (int, int) {
-	page := 1
-	perPage := 20
-
-	if p := c.Query("page"); p != "" {
-		if v, err := strconv.Atoi(p); err == nil && v > 0 {
-			page = v
-		}
-	}
-
-	if pp := c.Query("per_page"); pp != "" {
-		if v, err := strconv.Atoi(pp); err == nil && v > 0 {
-			perPage = v
-		}
-	}
-
-	if perPage > 100 {
-		perPage = 100
-	}
-
-	return page, perPage
 }

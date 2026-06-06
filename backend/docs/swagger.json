@@ -4457,6 +4457,7 @@
                         "ApiKeyAuth": []
                     }
                 ],
+                "description": "Get a paginated list of all organizations.",
                 "produces": [
                     "application/json"
                 ],
@@ -4464,12 +4465,25 @@
                     "Organizations"
                 ],
                 "summary": "List organizations",
+                "parameters": [
+                    {
+                        "type": "integer",
+                        "description": "Page number (default 1)",
+                        "name": "page",
+                        "in": "query"
+                    },
+                    {
+                        "type": "integer",
+                        "description": "Items per page, max 100 (default 20)",
+                        "name": "per_page",
+                        "in": "query"
+                    }
+                ],
                 "responses": {
                     "200": {
                         "description": "OK",
                         "schema": {
-                            "type": "object",
-                            "additionalProperties": true
+                            "$ref": "#/definitions/admin.ListOrganizationsResponse"
                         }
                     },
                     "401": {
@@ -4497,6 +4511,7 @@
                         "ApiKeyAuth": []
                     }
                 ],
+                "description": "Create a new organization.",
                 "consumes": [
                     "application/json"
                 ],
@@ -4509,7 +4524,7 @@
                 "summary": "Create organization",
                 "parameters": [
                     {
-                        "description": "Create organization request",
+                        "description": "Organization name and display name",
                         "name": "body",
                         "in": "body",
                         "required": true,
@@ -4522,8 +4537,7 @@
                     "201": {
                         "description": "Created",
                         "schema": {
-                            "type": "object",
-                            "additionalProperties": true
+                            "$ref": "#/definitions/admin.OrganizationResponse"
                         }
                     },
                     "400": {
@@ -4567,6 +4581,7 @@
                         "ApiKeyAuth": []
                     }
                 ],
+                "description": "Search organizations by name or display name with pagination.",
                 "produces": [
                     "application/json"
                 ],
@@ -4581,14 +4596,25 @@
                         "name": "q",
                         "in": "query",
                         "required": true
+                    },
+                    {
+                        "type": "integer",
+                        "description": "Page number (default 1)",
+                        "name": "page",
+                        "in": "query"
+                    },
+                    {
+                        "type": "integer",
+                        "description": "Items per page, max 100 (default 20)",
+                        "name": "per_page",
+                        "in": "query"
                     }
                 ],
                 "responses": {
                     "200": {
                         "description": "OK",
                         "schema": {
-                            "type": "object",
-                            "additionalProperties": true
+                            "$ref": "#/definitions/admin.ListOrganizationsResponse"
                         }
                     },
                     "400": {
@@ -4625,6 +4651,7 @@
                         "ApiKeyAuth": []
                     }
                 ],
+                "description": "Retrieve a specific organization by its ID, including member list.",
                 "produces": [
                     "application/json"
                 ],
@@ -4635,7 +4662,7 @@
                 "parameters": [
                     {
                         "type": "string",
-                        "description": "Resource ID",
+                        "description": "Organization ID",
                         "name": "id",
                         "in": "path",
                         "required": true
@@ -4645,8 +4672,7 @@
                     "200": {
                         "description": "OK",
                         "schema": {
-                            "type": "object",
-                            "additionalProperties": true
+                            "$ref": "#/definitions/admin.OrganizationWithMembersResponse"
                         }
                     },
                     "401": {
@@ -4681,6 +4707,7 @@
                         "ApiKeyAuth": []
                     }
                 ],
+                "description": "Update an existing organization's name, display name, and optional IdP binding. Memberships reference the organization by UUID and are unaffected by a rename. Set idp_type to \"oidc\", \"saml\", or \"ldap\" to restrict login; set to empty string to clear.",
                 "consumes": [
                     "application/json"
                 ],
@@ -4694,13 +4721,13 @@
                 "parameters": [
                     {
                         "type": "string",
-                        "description": "Resource ID",
+                        "description": "Organization ID",
                         "name": "id",
                         "in": "path",
                         "required": true
                     },
                     {
-                        "description": "Update organization request",
+                        "description": "Fields to update",
                         "name": "body",
                         "in": "body",
                         "required": true,
@@ -4713,8 +4740,7 @@
                     "200": {
                         "description": "OK",
                         "schema": {
-                            "type": "object",
-                            "additionalProperties": true
+                            "$ref": "#/definitions/admin.OrganizationResponse"
                         }
                     },
                     "400": {
@@ -4763,6 +4789,7 @@
                         "ApiKeyAuth": []
                     }
                 ],
+                "description": "Remove an organization and its associated records.",
                 "produces": [
                     "application/json"
                 ],
@@ -4773,7 +4800,7 @@
                 "parameters": [
                     {
                         "type": "string",
-                        "description": "Resource ID",
+                        "description": "Organization ID",
                         "name": "id",
                         "in": "path",
                         "required": true
@@ -4783,19 +4810,11 @@
                     "200": {
                         "description": "OK",
                         "schema": {
-                            "type": "object",
-                            "additionalProperties": true
+                            "$ref": "#/definitions/admin.MessageResponse"
                         }
                     },
                     "401": {
                         "description": "Unauthorized",
-                        "schema": {
-                            "type": "object",
-                            "additionalProperties": true
-                        }
-                    },
-                    "403": {
-                        "description": "Forbidden",
                         "schema": {
                             "type": "object",
                             "additionalProperties": true
@@ -4828,6 +4847,7 @@
                         "ApiKeyAuth": []
                     }
                 ],
+                "description": "Retrieve all members of a specific organization including user details.",
                 "produces": [
                     "application/json"
                 ],
@@ -4838,7 +4858,7 @@
                 "parameters": [
                     {
                         "type": "string",
-                        "description": "Resource ID",
+                        "description": "Organization ID",
                         "name": "id",
                         "in": "path",
                         "required": true
@@ -4848,8 +4868,7 @@
                     "200": {
                         "description": "OK",
                         "schema": {
-                            "type": "object",
-                            "additionalProperties": true
+                            "$ref": "#/definitions/admin.OrganizationMembersResponse"
                         }
                     },
                     "401": {
@@ -4884,6 +4903,7 @@
                         "ApiKeyAuth": []
                     }
                 ],
+                "description": "Add a user as a member to an organization, optionally assigning a role template.",
                 "consumes": [
                     "application/json"
                 ],
@@ -4897,13 +4917,13 @@
                 "parameters": [
                     {
                         "type": "string",
-                        "description": "Resource ID",
+                        "description": "Organization ID",
                         "name": "id",
                         "in": "path",
                         "required": true
                     },
                     {
-                        "description": "Add member request",
+                        "description": "Member user_id and optional role_template_id",
                         "name": "body",
                         "in": "body",
                         "required": true,
@@ -4916,8 +4936,7 @@
                     "201": {
                         "description": "Created",
                         "schema": {
-                            "type": "object",
-                            "additionalProperties": true
+                            "$ref": "#/definitions/admin.MemberResponse"
                         }
                     },
                     "400": {
@@ -4968,6 +4987,7 @@
                         "ApiKeyAuth": []
                     }
                 ],
+                "description": "Update a member's role template within an organization.",
                 "consumes": [
                     "application/json"
                 ],
@@ -4981,7 +5001,7 @@
                 "parameters": [
                     {
                         "type": "string",
-                        "description": "Resource ID",
+                        "description": "Organization ID",
                         "name": "id",
                         "in": "path",
                         "required": true
@@ -4994,7 +5014,7 @@
                         "required": true
                     },
                     {
-                        "description": "Update member request",
+                        "description": "role_template_id (UUID or null to clear)",
                         "name": "body",
                         "in": "body",
                         "required": true,
@@ -5007,8 +5027,7 @@
                     "200": {
                         "description": "OK",
                         "schema": {
-                            "type": "object",
-                            "additionalProperties": true
+                            "$ref": "#/definitions/admin.MemberResponse"
                         }
                     },
                     "400": {
@@ -5050,6 +5069,7 @@
                         "ApiKeyAuth": []
                     }
                 ],
+                "description": "Remove a user from an organization's membership.",
                 "produces": [
                     "application/json"
                 ],
@@ -5060,7 +5080,7 @@
                 "parameters": [
                     {
                         "type": "string",
-                        "description": "Resource ID",
+                        "description": "Organization ID",
                         "name": "id",
                         "in": "path",
                         "required": true
@@ -5077,19 +5097,11 @@
                     "200": {
                         "description": "OK",
                         "schema": {
-                            "type": "object",
-                            "additionalProperties": true
+                            "$ref": "#/definitions/admin.MessageResponse"
                         }
                     },
                     "401": {
                         "description": "Unauthorized",
-                        "schema": {
-                            "type": "object",
-                            "additionalProperties": true
-                        }
-                    },
-                    "404": {
-                        "description": "Not Found",
                         "schema": {
                             "type": "object",
                             "additionalProperties": true
@@ -6572,6 +6584,10 @@
                         "ApiKeyAuth": []
                     }
                 ],
+                "description": "Get a paginated list of all users with their organization role templates. Requires users:read scope.",
+                "consumes": [
+                    "application/json"
+                ],
                 "produces": [
                     "application/json"
                 ],
@@ -6581,9 +6597,15 @@
                 "summary": "List users",
                 "parameters": [
                     {
-                        "type": "string",
-                        "description": "Filter by organization ID",
-                        "name": "organization_id",
+                        "type": "integer",
+                        "description": "Page number (default 1)",
+                        "name": "page",
+                        "in": "query"
+                    },
+                    {
+                        "type": "integer",
+                        "description": "Items per page, max 100 (default 20)",
+                        "name": "per_page",
                         "in": "query"
                     }
                 ],
@@ -6591,8 +6613,7 @@
                     "200": {
                         "description": "OK",
                         "schema": {
-                            "type": "object",
-                            "additionalProperties": true
+                            "$ref": "#/definitions/admin.ListUsersResponse"
                         }
                     },
                     "401": {
@@ -6620,6 +6641,7 @@
                         "ApiKeyAuth": []
                     }
                 ],
+                "description": "Create a new user. Typically users are created via OIDC; this endpoint is for admin use. Requires users:write scope.",
                 "consumes": [
                     "application/json"
                 ],
@@ -6632,7 +6654,7 @@
                 "summary": "Create user",
                 "parameters": [
                     {
-                        "description": "Create user request",
+                        "description": "User creation request",
                         "name": "body",
                         "in": "body",
                         "required": true,
@@ -6645,8 +6667,7 @@
                     "201": {
                         "description": "Created",
                         "schema": {
-                            "type": "object",
-                            "additionalProperties": true
+                            "$ref": "#/definitions/admin.UserResponse"
                         }
                     },
                     "400": {
@@ -6690,6 +6711,7 @@
                         "ApiKeyAuth": []
                     }
                 ],
+                "description": "Get the organization memberships for the currently authenticated user. No special scopes required.",
                 "produces": [
                     "application/json"
                 ],
@@ -6701,8 +6723,7 @@
                     "200": {
                         "description": "OK",
                         "schema": {
-                            "type": "object",
-                            "additionalProperties": true
+                            "$ref": "#/definitions/admin.UserMembershipsResponse"
                         }
                     },
                     "401": {
@@ -6732,6 +6753,7 @@
                         "ApiKeyAuth": []
                     }
                 ],
+                "description": "Search users by email or name. Requires users:read scope.",
                 "produces": [
                     "application/json"
                 ],
@@ -6746,14 +6768,25 @@
                         "name": "q",
                         "in": "query",
                         "required": true
+                    },
+                    {
+                        "type": "integer",
+                        "description": "Page number (default 1)",
+                        "name": "page",
+                        "in": "query"
+                    },
+                    {
+                        "type": "integer",
+                        "description": "Items per page, max 100 (default 20)",
+                        "name": "per_page",
+                        "in": "query"
                     }
                 ],
                 "responses": {
                     "200": {
                         "description": "OK",
                         "schema": {
-                            "type": "object",
-                            "additionalProperties": true
+                            "$ref": "#/definitions/admin.ListUsersResponse"
                         }
                     },
                     "400": {
@@ -6790,6 +6823,7 @@
                         "ApiKeyAuth": []
                     }
                 ],
+                "description": "Get a user by ID with their organization memberships. Requires users:read scope.",
                 "produces": [
                     "application/json"
                 ],
@@ -6800,7 +6834,7 @@
                 "parameters": [
                     {
                         "type": "string",
-                        "description": "Resource ID",
+                        "description": "User ID",
                         "name": "id",
                         "in": "path",
                         "required": true
@@ -6810,8 +6844,7 @@
                     "200": {
                         "description": "OK",
                         "schema": {
-                            "type": "object",
-                            "additionalProperties": true
+                            "$ref": "#/definitions/admin.UserWithOrgsResponse"
                         }
                     },
                     "401": {
@@ -6846,6 +6879,7 @@
                         "ApiKeyAuth": []
                     }
                 ],
+                "description": "Update a user's name or email. Requires users:write scope.",
                 "consumes": [
                     "application/json"
                 ],
@@ -6859,13 +6893,13 @@
                 "parameters": [
                     {
                         "type": "string",
-                        "description": "Resource ID",
+                        "description": "User ID",
                         "name": "id",
                         "in": "path",
                         "required": true
                     },
                     {
-                        "description": "Update user request",
+                        "description": "User update request",
                         "name": "body",
                         "in": "body",
                         "required": true,
@@ -6878,8 +6912,7 @@
                     "200": {
                         "description": "OK",
                         "schema": {
-                            "type": "object",
-                            "additionalProperties": true
+                            "$ref": "#/definitions/admin.UserResponse"
                         }
                     },
                     "400": {
@@ -6928,6 +6961,7 @@
                         "ApiKeyAuth": []
                     }
                 ],
+                "description": "Delete a user by ID. Cascading deletes will handle related records. Requires users:write scope.",
                 "produces": [
                     "application/json"
                 ],
@@ -6938,7 +6972,7 @@
                 "parameters": [
                     {
                         "type": "string",
-                        "description": "Resource ID",
+                        "description": "User ID",
                         "name": "id",
                         "in": "path",
                         "required": true
@@ -6948,8 +6982,7 @@
                     "200": {
                         "description": "OK",
                         "schema": {
-                            "type": "object",
-                            "additionalProperties": true
+                            "$ref": "#/definitions/admin.MessageResponse"
                         }
                     },
                     "401": {
@@ -6986,6 +7019,7 @@
                         "ApiKeyAuth": []
                     }
                 ],
+                "description": "Get the organization memberships for a specific user. Requires users:read scope.",
                 "produces": [
                     "application/json"
                 ],
@@ -6996,7 +7030,7 @@
                 "parameters": [
                     {
                         "type": "string",
-                        "description": "Resource ID",
+                        "description": "User ID",
                         "name": "id",
                         "in": "path",
                         "required": true
@@ -7006,8 +7040,7 @@
                     "200": {
                         "description": "OK",
                         "schema": {
-                            "type": "object",
-                            "additionalProperties": true
+                            "$ref": "#/definitions/admin.UserMembershipsResponse"
                         }
                     },
                     "401": {
@@ -7148,11 +7181,11 @@
         "admin.AddMemberRequest": {
             "type": "object",
             "required": [
-                "role_template_name",
                 "user_id"
             ],
             "properties": {
-                "role_template_name": {
+                "role_template_id": {
+                    "description": "Optional, UUID of role template",
                     "type": "string"
                 },
                 "user_id": {
@@ -7282,9 +7315,6 @@
                 "name"
             ],
             "properties": {
-                "description": {
-                    "type": "string"
-                },
                 "display_name": {
                     "type": "string"
                 },
@@ -7322,12 +7352,60 @@
                 }
             }
         },
+        "admin.ListOrganizationsResponse": {
+            "type": "object",
+            "properties": {
+                "organizations": {},
+                "pagination": {
+                    "$ref": "#/definitions/admin.PaginationMeta"
+                }
+            }
+        },
+        "admin.ListUsersResponse": {
+            "type": "object",
+            "properties": {
+                "pagination": {
+                    "$ref": "#/definitions/admin.PaginationMeta"
+                },
+                "users": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/admin.UserItem"
+                    }
+                }
+            }
+        },
+        "admin.MemberResponse": {
+            "type": "object",
+            "properties": {
+                "member": {}
+            }
+        },
         "admin.MessageResponse": {
             "type": "object",
             "properties": {
                 "message": {
                     "type": "string"
                 }
+            }
+        },
+        "admin.OrganizationMembersResponse": {
+            "type": "object",
+            "properties": {
+                "members": {}
+            }
+        },
+        "admin.OrganizationResponse": {
+            "type": "object",
+            "properties": {
+                "organization": {}
+            }
+        },
+        "admin.OrganizationWithMembersResponse": {
+            "type": "object",
+            "properties": {
+                "members": {},
+                "organization": {}
             }
         },
         "admin.PaginationMeta": {
@@ -7369,11 +7447,9 @@
         },
         "admin.UpdateMemberRequest": {
             "type": "object",
-            "required": [
-                "role_template_name"
-            ],
             "properties": {
-                "role_template_name": {
+                "role_template_id": {
+                    "description": "UUID of role template, or null to clear",
                     "type": "string"
                 }
             }
@@ -7381,13 +7457,20 @@
         "admin.UpdateOrganizationRequest": {
             "type": "object",
             "properties": {
-                "description": {
+                "display_name": {
+                    "description": "Human-readable display name",
                     "type": "string"
                 },
-                "display_name": {
+                "idp_name": {
+                    "description": "IdP name within type, or null to clear",
+                    "type": "string"
+                },
+                "idp_type": {
+                    "description": "\"oidc\", \"saml\", \"ldap\", or empty to clear",
                     "type": "string"
                 },
                 "name": {
+                    "description": "Optional rename",
                     "type": "string"
                 }
             }
@@ -7400,6 +7483,49 @@
                 },
                 "name": {
                     "type": "string"
+                }
+            }
+        },
+        "admin.UserItem": {
+            "type": "object",
+            "properties": {
+                "created_at": {
+                    "type": "string"
+                },
+                "email": {
+                    "type": "string"
+                },
+                "id": {
+                    "type": "string"
+                },
+                "name": {
+                    "type": "string"
+                },
+                "updated_at": {
+                    "type": "string"
+                }
+            }
+        },
+        "admin.UserMembershipsResponse": {
+            "type": "object",
+            "properties": {
+                "memberships": {}
+            }
+        },
+        "admin.UserResponse": {
+            "type": "object",
+            "properties": {
+                "user": {
+                    "$ref": "#/definitions/admin.UserItem"
+                }
+            }
+        },
+        "admin.UserWithOrgsResponse": {
+            "type": "object",
+            "properties": {
+                "organizations": {},
+                "user": {
+                    "$ref": "#/definitions/admin.UserItem"
                 }
             }
         },

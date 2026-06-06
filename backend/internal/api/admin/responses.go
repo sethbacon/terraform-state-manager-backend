@@ -58,3 +58,61 @@ type ListAPIKeysResponse struct {
 type APIKeyResponse struct {
 	Key APIKeyItem `json:"key"`
 }
+
+// UserItem is the shape of a user in list/get/create/update responses.
+type UserItem struct {
+	ID        string    `json:"id"`
+	Email     string    `json:"email"`
+	Name      string    `json:"name"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+// ListUsersResponse is returned by GET /api/v1/users and /users/search.
+type ListUsersResponse struct {
+	Users      []UserItem     `json:"users"`
+	Pagination PaginationMeta `json:"pagination"`
+}
+
+// UserWithOrgsResponse is returned by GET /api/v1/users/{id}.
+type UserWithOrgsResponse struct {
+	User          UserItem    `json:"user"`
+	Organizations interface{} `json:"organizations"`
+}
+
+// UserResponse is returned by POST /api/v1/users and PUT /api/v1/users/{id}.
+type UserResponse struct {
+	User UserItem `json:"user"`
+}
+
+// UserMembershipsResponse is returned by the membership endpoints.
+type UserMembershipsResponse struct {
+	Memberships interface{} `json:"memberships"`
+}
+
+// ListOrganizationsResponse is returned by GET /api/v1/organizations and /organizations/search.
+type ListOrganizationsResponse struct {
+	Organizations interface{}    `json:"organizations"`
+	Pagination    PaginationMeta `json:"pagination"`
+}
+
+// OrganizationWithMembersResponse is returned by GET /api/v1/organizations/{id}.
+type OrganizationWithMembersResponse struct {
+	Organization interface{} `json:"organization"`
+	Members      interface{} `json:"members"`
+}
+
+// OrganizationMembersResponse is returned by GET /api/v1/organizations/{id}/members.
+type OrganizationMembersResponse struct {
+	Members interface{} `json:"members"`
+}
+
+// OrganizationResponse is returned by POST and PUT /api/v1/organizations.
+type OrganizationResponse struct {
+	Organization interface{} `json:"organization"`
+}
+
+// MemberResponse is returned by the member endpoints.
+type MemberResponse struct {
+	Member interface{} `json:"member"`
+}

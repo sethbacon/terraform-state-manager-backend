@@ -287,7 +287,7 @@ func (h *AuthHandlers) findOrCreateUser(c *gin.Context, sub, email, name string)
 
 	// Auto-assign to default organization if multi-tenancy is enabled
 	if h.cfg.MultiTenancy.Enabled && h.cfg.MultiTenancy.DefaultOrganization != "" {
-		org, err := h.orgRepo.GetOrganizationByName(ctx, h.cfg.MultiTenancy.DefaultOrganization)
+		org, err := h.orgRepo.GetByName(ctx, h.cfg.MultiTenancy.DefaultOrganization)
 		if err == nil && org != nil {
 			member := &models.OrganizationMember{
 				OrganizationID: org.ID,

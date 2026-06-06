@@ -420,7 +420,7 @@ func (h *AuthHandlers) addUserToDefaultOrg(ctx context.Context, userID string) {
 		defaultOrgName = "default"
 	}
 
-	org, err := h.orgRepo.GetOrganizationByName(ctx, defaultOrgName)
+	org, err := h.orgRepo.GetByName(ctx, defaultOrgName)
 	if err != nil || org == nil {
 		slog.Warn("Default organisation not found for new OIDC user",
 			"org_name", defaultOrgName, "user_id", userID)
