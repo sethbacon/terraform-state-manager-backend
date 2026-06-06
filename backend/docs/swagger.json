@@ -12,7 +12,7 @@
     },
     "basePath": "/api/v1",
     "paths": {
-        "/admin/oidc": {
+        "/admin/audit-logs": {
             "get": {
                 "security": [
                     {
@@ -22,41 +22,7 @@
                         "ApiKeyAuth": []
                     }
                 ],
-                "description": "Returns the current active OIDC configuration. The client_secret is always masked as \"***\".",
-                "produces": [
-                    "application/json"
-                ],
-                "tags": [
-                    "Admin"
-                ],
-                "summary": "Get OIDC configuration",
-                "responses": {
-                    "200": {
-                        "description": "OK",
-                        "schema": {
-                            "type": "object",
-                            "additionalProperties": true
-                        }
-                    },
-                    "404": {
-                        "description": "Not Found",
-                        "schema": {
-                            "type": "object",
-                            "additionalProperties": true
-                        }
-                    }
-                }
-            },
-            "put": {
-                "security": [
-                    {
-                        "BearerAuth": []
-                    },
-                    {
-                        "ApiKeyAuth": []
-                    }
-                ],
-                "description": "Saves a new OIDC configuration. If client_secret is empty or \"***\", the existing encrypted secret is reused.",
+                "description": "Get a paginated, filterable list of audit log entries. Requires audit:read scope.",
                 "consumes": [
                     "application/json"
                 ],
@@ -64,30 +30,82 @@
                     "application/json"
                 ],
                 "tags": [
-                    "Admin"
+                    "Audit"
                 ],
-                "summary": "Update OIDC configuration",
+                "summary": "List audit logs",
                 "parameters": [
                     {
-                        "description": "OIDC configuration to save",
-                        "name": "body",
-                        "in": "body",
-                        "required": true,
-                        "schema": {
-                            "$ref": "#/definitions/admin.UpdateOIDCConfigRequest"
-                        }
+                        "type": "integer",
+                        "description": "Page number (default 1)",
+                        "name": "page",
+                        "in": "query"
+                    },
+                    {
+                        "type": "integer",
+                        "description": "Items per page, max 200 (default 25)",
+                        "name": "per_page",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Filter by action string (exact match)",
+                        "name": "action",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Filter by resource type",
+                        "name": "resource_type",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Filter by actor user ID (exact match)",
+                        "name": "user_id",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Filter by actor email (partial, case-insensitive)",
+                        "name": "user_email",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Filter entries at or after this RFC3339 timestamp",
+                        "name": "start_date",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Filter entries at or before this RFC3339 timestamp",
+                        "name": "end_date",
+                        "in": "query"
                     }
                 ],
                 "responses": {
                     "200": {
                         "description": "OK",
                         "schema": {
-                            "type": "object",
-                            "additionalProperties": true
+                            "$ref": "#/definitions/admin.AuditLogListResponse"
                         }
                     },
                     "400": {
                         "description": "Bad Request",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "403": {
+                        "description": "Forbidden",
                         "schema": {
                             "type": "object",
                             "additionalProperties": true
@@ -103,8 +121,8 @@
                 }
             }
         },
-        "/admin/oidc/test": {
-            "post": {
+        "/admin/audit-logs/{id}": {
+            "get": {
                 "security": [
                     {
                         "BearerAuth": []
@@ -113,7 +131,121 @@
                         "ApiKeyAuth": []
                     }
                 ],
-                "description": "Verifies reachability of an OIDC provider by issuing a request to its well-known discovery endpoint.",
+                "description": "Retrieve a single audit log entry by ID. Requires audit:read scope.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Audit"
+                ],
+                "summary": "Get audit log entry",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Audit log entry ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/admin.AuditLogResponse"
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "403": {
+                        "description": "Forbidden",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    }
+                }
+            }
+        },
+        "/admin/oidc/config": {
+            "get": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    },
+                    {
+                        "ApiKeyAuth": []
+                    }
+                ],
+                "description": "Returns the currently active OIDC configuration including group mapping settings. Client secret is never returned. Requires admin scope.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "OIDC"
+                ],
+                "summary": "Get active OIDC configuration",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/models.OIDCConfigResponse"
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    }
+                }
+            }
+        },
+        "/admin/oidc/group-mapping": {
+            "put": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    },
+                    {
+                        "ApiKeyAuth": []
+                    }
+                ],
+                "description": "Updates the group claim name, group-to-role mappings, and default role for the active OIDC configuration. Takes effect on the next login. Requires admin scope.",
                 "consumes": [
                     "application/json"
                 ],
@@ -121,17 +253,17 @@
                     "application/json"
                 ],
                 "tags": [
-                    "Admin"
+                    "OIDC"
                 ],
-                "summary": "Test OIDC configuration",
+                "summary": "Update OIDC group mapping settings",
                 "parameters": [
                     {
-                        "description": "OIDC provider to test",
+                        "description": "Group mapping configuration",
                         "name": "body",
                         "in": "body",
                         "required": true,
                         "schema": {
-                            "$ref": "#/definitions/admin.TestOIDCConfigRequest"
+                            "$ref": "#/definitions/models.OIDCGroupMappingInput"
                         }
                     }
                 ],
@@ -139,8 +271,7 @@
                     "200": {
                         "description": "OK",
                         "schema": {
-                            "type": "object",
-                            "additionalProperties": true
+                            "$ref": "#/definitions/models.OIDCConfigResponse"
                         }
                     },
                     "400": {
@@ -150,8 +281,22 @@
                             "additionalProperties": true
                         }
                     },
-                    "502": {
-                        "description": "Bad Gateway",
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
                         "schema": {
                             "type": "object",
                             "additionalProperties": true
@@ -485,6 +630,137 @@
                 "responses": {
                     "200": {
                         "description": "OK",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    }
+                }
+            }
+        },
+        "/admin/users/{id}/erase": {
+            "post": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    },
+                    {
+                        "ApiKeyAuth": []
+                    }
+                ],
+                "description": "Anonymize a user's PII and revoke all access (GDPR Article 17 — right to erasure). Audit log entries are preserved with the anonymized user ID for compliance. Requires admin scope.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Users"
+                ],
+                "summary": "Erase user data (GDPR)",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "User ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "403": {
+                        "description": "Forbidden",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    }
+                }
+            }
+        },
+        "/admin/users/{id}/export": {
+            "get": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    },
+                    {
+                        "ApiKeyAuth": []
+                    }
+                ],
+                "description": "Export all personal data associated with a user as JSON. Implements GDPR Article 15 (right of access) and Article 20 (data portability). Requires admin scope.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Users"
+                ],
+                "summary": "Export user data (GDPR)",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "User ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/services.UserDataExport"
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "403": {
+                        "description": "Forbidden",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
                         "schema": {
                             "type": "object",
                             "additionalProperties": true
@@ -1333,6 +1609,10 @@
                         "ApiKeyAuth": []
                     }
                 ],
+                "description": "List API keys with optional filtering by organization. Users with api_keys:manage scope can view all keys in an organization, otherwise only their own keys are visible.",
+                "consumes": [
+                    "application/json"
+                ],
                 "produces": [
                     "application/json"
                 ],
@@ -1343,7 +1623,7 @@
                 "parameters": [
                     {
                         "type": "string",
-                        "description": "Filter by organization ID",
+                        "description": "Filter by organization ID (optional)",
                         "name": "organization_id",
                         "in": "query"
                     }
@@ -1352,8 +1632,7 @@
                     "200": {
                         "description": "OK",
                         "schema": {
-                            "type": "object",
-                            "additionalProperties": true
+                            "$ref": "#/definitions/admin.ListAPIKeysResponse"
                         }
                     },
                     "401": {
@@ -1381,6 +1660,7 @@
                         "ApiKeyAuth": []
                     }
                 ],
+                "description": "Create a new API key with specified scopes. The full API key is only returned once during creation.",
                 "consumes": [
                     "application/json"
                 ],
@@ -1393,7 +1673,7 @@
                 "summary": "Create API key",
                 "parameters": [
                     {
-                        "description": "Create API key request",
+                        "description": "API key creation request",
                         "name": "body",
                         "in": "body",
                         "required": true,
@@ -1406,8 +1686,7 @@
                     "201": {
                         "description": "Created",
                         "schema": {
-                            "type": "object",
-                            "additionalProperties": true
+                            "$ref": "#/definitions/admin.CreateAPIKeyResponse"
                         }
                     },
                     "400": {
@@ -1451,6 +1730,10 @@
                         "ApiKeyAuth": []
                     }
                 ],
+                "description": "Retrieve a specific API key by ID. Users can only access their own keys unless they have admin scope.",
+                "consumes": [
+                    "application/json"
+                ],
                 "produces": [
                     "application/json"
                 ],
@@ -1461,7 +1744,7 @@
                 "parameters": [
                     {
                         "type": "string",
-                        "description": "Resource ID",
+                        "description": "API key ID",
                         "name": "id",
                         "in": "path",
                         "required": true
@@ -1471,8 +1754,7 @@
                     "200": {
                         "description": "OK",
                         "schema": {
-                            "type": "object",
-                            "additionalProperties": true
+                            "$ref": "#/definitions/admin.APIKeyResponse"
                         }
                     },
                     "401": {
@@ -1514,6 +1796,7 @@
                         "ApiKeyAuth": []
                     }
                 ],
+                "description": "Update an API key's name, scopes, or expiration. Users can only update their own keys unless they have admin scope.",
                 "consumes": [
                     "application/json"
                 ],
@@ -1527,13 +1810,13 @@
                 "parameters": [
                     {
                         "type": "string",
-                        "description": "Resource ID",
+                        "description": "API key ID",
                         "name": "id",
                         "in": "path",
                         "required": true
                     },
                     {
-                        "description": "Update API key request",
+                        "description": "Update request",
                         "name": "body",
                         "in": "body",
                         "required": true,
@@ -1547,8 +1830,7 @@
                     "200": {
                         "description": "OK",
                         "schema": {
-                            "type": "object",
-                            "additionalProperties": true
+                            "$ref": "#/definitions/admin.APIKeyResponse"
                         }
                     },
                     "400": {
@@ -1597,6 +1879,10 @@
                         "ApiKeyAuth": []
                     }
                 ],
+                "description": "Delete a specific API key by ID. Users can only delete their own keys unless they have admin scope.",
+                "consumes": [
+                    "application/json"
+                ],
                 "produces": [
                     "application/json"
                 ],
@@ -1607,7 +1893,7 @@
                 "parameters": [
                     {
                         "type": "string",
-                        "description": "Resource ID",
+                        "description": "API key ID",
                         "name": "id",
                         "in": "path",
                         "required": true
@@ -1617,8 +1903,7 @@
                     "200": {
                         "description": "OK",
                         "schema": {
-                            "type": "object",
-                            "additionalProperties": true
+                            "$ref": "#/definitions/admin.MessageResponse"
                         }
                     },
                     "401": {
@@ -1662,6 +1947,7 @@
                         "ApiKeyAuth": []
                     }
                 ],
+                "description": "Rotate an API key by creating a new key and optionally scheduling the old key's expiration. Users can only rotate their own keys unless they have admin scope.",
                 "consumes": [
                     "application/json"
                 ],
@@ -1675,13 +1961,13 @@
                 "parameters": [
                     {
                         "type": "string",
-                        "description": "Resource ID",
+                        "description": "API key ID",
                         "name": "id",
                         "in": "path",
                         "required": true
                     },
                     {
-                        "description": "Rotate API key request",
+                        "description": "Rotation request",
                         "name": "body",
                         "in": "body",
                         "required": true,
@@ -1694,8 +1980,7 @@
                     "200": {
                         "description": "OK",
                         "schema": {
-                            "type": "object",
-                            "additionalProperties": true
+                            "$ref": "#/definitions/admin.RotateAPIKeyResponse"
                         }
                     },
                     "400": {
@@ -6814,6 +7099,52 @@
         }
     },
     "definitions": {
+        "admin.APIKeyItem": {
+            "type": "object",
+            "properties": {
+                "created_at": {
+                    "type": "string"
+                },
+                "description": {
+                    "type": "string"
+                },
+                "expires_at": {
+                    "type": "string"
+                },
+                "id": {
+                    "type": "string"
+                },
+                "key_prefix": {
+                    "type": "string"
+                },
+                "last_used_at": {
+                    "type": "string"
+                },
+                "name": {
+                    "type": "string"
+                },
+                "scopes": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "user_id": {
+                    "type": "string"
+                },
+                "user_name": {
+                    "type": "string"
+                }
+            }
+        },
+        "admin.APIKeyResponse": {
+            "type": "object",
+            "properties": {
+                "key": {
+                    "$ref": "#/definitions/admin.APIKeyItem"
+                }
+            }
+        },
         "admin.AddMemberRequest": {
             "type": "object",
             "required": [
@@ -6825,6 +7156,59 @@
                     "type": "string"
                 },
                 "user_id": {
+                    "type": "string"
+                }
+            }
+        },
+        "admin.AuditLogListResponse": {
+            "type": "object",
+            "properties": {
+                "logs": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/admin.AuditLogResponse"
+                    }
+                },
+                "pagination": {
+                    "$ref": "#/definitions/admin.PaginationMeta"
+                }
+            }
+        },
+        "admin.AuditLogResponse": {
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string"
+                },
+                "created_at": {
+                    "type": "string"
+                },
+                "id": {
+                    "type": "string"
+                },
+                "ip_address": {
+                    "type": "string"
+                },
+                "metadata": {
+                    "type": "object",
+                    "additionalProperties": true
+                },
+                "organization_id": {
+                    "type": "string"
+                },
+                "resource_id": {
+                    "type": "string"
+                },
+                "resource_type": {
+                    "type": "string"
+                },
+                "user_email": {
+                    "type": "string"
+                },
+                "user_id": {
+                    "type": "string"
+                },
+                "user_name": {
                     "type": "string"
                 }
             }
@@ -6841,12 +7225,46 @@
                     "type": "string"
                 },
                 "expires_at": {
+                    "description": "RFC3339 format",
                     "type": "string"
                 },
                 "name": {
                     "type": "string"
                 },
                 "organization_id": {
+                    "type": "string"
+                },
+                "scopes": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                }
+            }
+        },
+        "admin.CreateAPIKeyResponse": {
+            "type": "object",
+            "properties": {
+                "created_at": {
+                    "type": "string"
+                },
+                "description": {
+                    "type": "string"
+                },
+                "expires_at": {
+                    "type": "string"
+                },
+                "id": {
+                    "type": "string"
+                },
+                "key": {
+                    "description": "Only returned once during creation",
+                    "type": "string"
+                },
+                "key_prefix": {
+                    "type": "string"
+                },
+                "name": {
                     "type": "string"
                 },
                 "scopes": {
@@ -6893,25 +7311,58 @@
                 }
             }
         },
-        "admin.RotateAPIKeyRequest": {
+        "admin.ListAPIKeysResponse": {
             "type": "object",
             "properties": {
-                "grace_period_hours": {
+                "keys": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/admin.APIKeyItem"
+                    }
+                }
+            }
+        },
+        "admin.MessageResponse": {
+            "type": "object",
+            "properties": {
+                "message": {
+                    "type": "string"
+                }
+            }
+        },
+        "admin.PaginationMeta": {
+            "type": "object",
+            "properties": {
+                "page": {
+                    "type": "integer"
+                },
+                "per_page": {
+                    "type": "integer"
+                },
+                "total": {
                     "type": "integer"
                 }
             }
         },
-        "admin.TestOIDCConfigRequest": {
+        "admin.RotateAPIKeyRequest": {
             "type": "object",
-            "required": [
-                "client_id",
-                "issuer_url"
-            ],
             "properties": {
-                "client_id": {
+                "grace_period_hours": {
+                    "description": "GracePeriodHours is how long the old key remains valid (0 = immediate revocation).",
+                    "type": "integer"
+                }
+            }
+        },
+        "admin.RotateAPIKeyResponse": {
+            "type": "object",
+            "properties": {
+                "new_key": {
+                    "$ref": "#/definitions/admin.CreateAPIKeyResponse"
+                },
+                "old_expires_at": {
                     "type": "string"
                 },
-                "issuer_url": {
+                "old_key_status": {
                     "type": "string"
                 }
             }
@@ -6924,36 +7375,6 @@
             "properties": {
                 "role_template_name": {
                     "type": "string"
-                }
-            }
-        },
-        "admin.UpdateOIDCConfigRequest": {
-            "type": "object",
-            "required": [
-                "client_id",
-                "issuer_url"
-            ],
-            "properties": {
-                "client_id": {
-                    "type": "string"
-                },
-                "client_secret": {
-                    "type": "string"
-                },
-                "enabled": {
-                    "type": "boolean"
-                },
-                "issuer_url": {
-                    "type": "string"
-                },
-                "redirect_url": {
-                    "type": "string"
-                },
-                "scopes": {
-                    "type": "array",
-                    "items": {
-                        "type": "string"
-                    }
                 }
             }
         },
@@ -7062,6 +7483,97 @@
         "models.NotificationChannelUpdateRequest": {
             "type": "object"
         },
+        "models.OIDCConfigResponse": {
+            "type": "object",
+            "properties": {
+                "client_id": {
+                    "type": "string"
+                },
+                "created_at": {
+                    "type": "string"
+                },
+                "created_by": {
+                    "type": "string"
+                },
+                "default_role": {
+                    "type": "string"
+                },
+                "extra_config": {
+                    "type": "object",
+                    "additionalProperties": true
+                },
+                "group_claim_name": {
+                    "type": "string"
+                },
+                "group_mappings": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/models.OIDCGroupMapping"
+                    }
+                },
+                "id": {
+                    "type": "string"
+                },
+                "is_active": {
+                    "type": "boolean"
+                },
+                "issuer_url": {
+                    "type": "string"
+                },
+                "name": {
+                    "type": "string"
+                },
+                "provider_type": {
+                    "type": "string"
+                },
+                "redirect_url": {
+                    "type": "string"
+                },
+                "scopes": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "updated_at": {
+                    "type": "string"
+                },
+                "updated_by": {
+                    "type": "string"
+                }
+            }
+        },
+        "models.OIDCGroupMapping": {
+            "type": "object",
+            "properties": {
+                "group": {
+                    "type": "string"
+                },
+                "organization": {
+                    "type": "string"
+                },
+                "role": {
+                    "type": "string"
+                }
+            }
+        },
+        "models.OIDCGroupMappingInput": {
+            "type": "object",
+            "properties": {
+                "default_role": {
+                    "type": "string"
+                },
+                "group_claim_name": {
+                    "type": "string"
+                },
+                "group_mappings": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/models.OIDCGroupMapping"
+                    }
+                }
+            }
+        },
         "models.ReportCreateRequest": {
             "type": "object",
             "required": [
@@ -7146,6 +7658,89 @@
         },
         "models.StateSourceUpdateRequest": {
             "type": "object"
+        },
+        "services.APIKeyRecord": {
+            "type": "object",
+            "properties": {
+                "created_at": {
+                    "type": "string"
+                },
+                "expires_at": {
+                    "type": "string"
+                },
+                "id": {
+                    "type": "string"
+                },
+                "last_used_at": {
+                    "type": "string"
+                },
+                "name": {
+                    "type": "string"
+                }
+            }
+        },
+        "services.MembershipRecord": {
+            "type": "object",
+            "properties": {
+                "organization_id": {
+                    "type": "string"
+                },
+                "organization_name": {
+                    "type": "string"
+                },
+                "role_template_name": {
+                    "type": "string"
+                }
+            }
+        },
+        "services.UserDataExport": {
+            "type": "object",
+            "properties": {
+                "api_keys": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/services.APIKeyRecord"
+                    }
+                },
+                "audit_entry_count": {
+                    "type": "integer"
+                },
+                "exported_at": {
+                    "type": "string"
+                },
+                "memberships": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/services.MembershipRecord"
+                    }
+                },
+                "user": {
+                    "$ref": "#/definitions/services.UserExportRecord"
+                }
+            }
+        },
+        "services.UserExportRecord": {
+            "type": "object",
+            "properties": {
+                "created_at": {
+                    "type": "string"
+                },
+                "email": {
+                    "type": "string"
+                },
+                "id": {
+                    "type": "string"
+                },
+                "name": {
+                    "type": "string"
+                },
+                "oidc_sub": {
+                    "type": "string"
+                },
+                "updated_at": {
+                    "type": "string"
+                }
+            }
         },
         "setup.AdminConfigInput": {
             "type": "object",
