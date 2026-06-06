@@ -183,6 +183,7 @@ func NewRouter(cfg *config.Config, db, identityDB *sql.DB) (*gin.Engine, *Backgr
 	statsHandlers := admin.NewStatsHandler(sqlxDB)
 	roleTemplateHandlers := admin.NewRoleHandlers(roleTemplateRepo)
 	oidcAdminHandlers := admin.NewOIDCConfigAdminHandlers(oidcConfigRepo)
+	auditLogHandlers := admin.NewAuditLogHandlers(identityDB)
 
 	// Initialize setup wizard handlers
 	setupHandlers := setup.NewHandlers(
@@ -371,6 +372,14 @@ func NewRouter(cfg *config.Config, db, identityDB *sql.DB) (*gin.Engine, *Backgr
 			{
 				oidcAdminGroup.GET("/config", oidcAdminHandlers.GetActiveOIDCConfig)
 				oidcAdminGroup.PUT("/group-mapping", oidcAdminHandlers.UpdateGroupMapping)
+			}
+
+			// Audit logs (read-only, admin)
+			auditLogsGroup := authenticatedGroup.Group("/admin/audit-logs")
+			auditLogsGroup.Use(middleware.RequireScope(auth.ScopeAuditRead))
+			{
+				auditLogsGroup.GET("", auditLogHandlers.ListAuditLogsHandler())
+				auditLogsGroup.GET("/:id", auditLogHandlers.GetAuditLogHandler())
 			}
 
 			// ---------------------------------------------------------------
