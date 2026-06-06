@@ -45,6 +45,7 @@ import (
 	"github.com/terraform-state-manager/terraform-state-manager/internal/crypto"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/db/repositories"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/middleware"
+	"github.com/terraform-state-manager/terraform-state-manager/internal/services"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/services/backup"
 	complianceSvc "github.com/terraform-state-manager/terraform-state-manager/internal/services/compliance"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/services/migration"
@@ -184,6 +185,7 @@ func NewRouter(cfg *config.Config, db, identityDB *sql.DB) (*gin.Engine, *Backgr
 	roleTemplateHandlers := admin.NewRoleHandlers(roleTemplateRepo)
 	oidcAdminHandlers := admin.NewOIDCConfigAdminHandlers(oidcConfigRepo)
 	auditLogHandlers := admin.NewAuditLogHandlers(identityDB)
+	gdprHandlers := admin.NewGDPRHandlers(services.NewUserService(identityDB))
 
 	// Initialize setup wizard handlers
 	setupHandlers := setup.NewHandlers(
@@ -331,6 +333,14 @@ func NewRouter(cfg *config.Config, db, identityDB *sql.DB) (*gin.Engine, *Backgr
 				usersWriteGroup.POST("", userHandlers.CreateUserHandler())
 				usersWriteGroup.PUT("/:id", userHandlers.UpdateUserHandler())
 				usersWriteGroup.DELETE("/:id", userHandlers.DeleteUserHandler())
+			}
+
+			// GDPR data-subject endpoints (admin scope — reveal/destroy PII).
+			adminUsersGroup := authenticatedGroup.Group("/admin/users")
+			adminUsersGroup.Use(middleware.RequireScope(auth.ScopeAdmin))
+			{
+				adminUsersGroup.GET("/:id/export", gdprHandlers.ExportUserDataHandler())
+				adminUsersGroup.POST("/:id/erase", gdprHandlers.EraseUserHandler())
 			}
 
 			// Organizations management
