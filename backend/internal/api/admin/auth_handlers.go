@@ -396,7 +396,9 @@ func (h *AuthHandlers) RefreshHandler() gin.HandlerFunc {
 	}
 }
 
-// MeHandler returns the current authenticated user's profile and scopes.
+// MeHandler returns the current authenticated user's profile, organisation
+// memberships, primary role template, and allowed scopes, using the registry's
+// /auth/me response envelope ({user, memberships, allowed_scopes, role_template}).
 // GET /api/v1/auth/me
 // MeHandler godoc
 // @Summary      Get current user
@@ -418,26 +420,63 @@ func (h *AuthHandlers) MeHandler() gin.HandlerFunc {
 			return
 		}
 
-		user, err := h.userRepo.GetUserByID(c.Request.Context(), userIDStr)
-		if err != nil || user == nil {
+		userWithRoles, err := h.userRepo.GetUserWithOrgRoles(c.Request.Context(), userIDStr)
+		if err != nil {
+			slog.Error("failed to load user for /me", "error", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get user information"})
+			return
+		}
+		if userWithRoles == nil {
 			c.JSON(http.StatusNotFound, gin.H{"error": "User not found"})
 			return
 		}
 
-		userWithRoles, err := h.userRepo.GetUserWithOrgRoles(c.Request.Context(), userIDStr)
-		if err != nil {
-			slog.Warn("failed to load user org roles for /me", "error", err)
-		}
-
+		// Nested user object — matches the registry's /auth/me envelope.
 		response := gin.H{
-			"id":    user.ID,
-			"email": user.Email,
-			"name":  user.Name,
+			"user": gin.H{
+				"id":         userWithRoles.ID,
+				"email":      userWithRoles.Email,
+				"name":       userWithRoles.Name,
+				"oidc_sub":   userWithRoles.OIDCSub,
+				"created_at": userWithRoles.CreatedAt,
+				"updated_at": userWithRoles.UpdatedAt,
+			},
 		}
 
-		if userWithRoles != nil {
-			response["memberships"] = userWithRoles.Memberships
-			response["scopes"] = userWithRoles.GetAllowedScopes()
+		// Per-organization memberships, each carrying its nested role template.
+		memberships := make([]gin.H, 0, len(userWithRoles.Memberships))
+		for _, m := range userWithRoles.Memberships {
+			entry := gin.H{
+				"organization_id":   m.OrganizationID,
+				"organization_name": m.OrganizationName,
+				"created_at":        m.CreatedAt,
+			}
+			if m.RoleTemplateID != nil {
+				entry["role_template"] = gin.H{
+					"id":           m.RoleTemplateID,
+					"name":         m.RoleTemplateName,
+					"display_name": m.RoleTemplateDisplayName,
+					"scopes":       m.RoleTemplateScopes,
+				}
+			} else {
+				entry["role_template"] = nil
+			}
+			memberships = append(memberships, entry)
+		}
+		response["memberships"] = memberships
+		response["allowed_scopes"] = userWithRoles.GetAllowedScopes()
+
+		// Primary role template (first membership) for the response envelope.
+		if len(userWithRoles.Memberships) > 0 && userWithRoles.Memberships[0].RoleTemplateID != nil {
+			m := userWithRoles.Memberships[0]
+			response["role_template"] = gin.H{
+				"id":           m.RoleTemplateID,
+				"name":         m.RoleTemplateName,
+				"display_name": m.RoleTemplateDisplayName,
+				"scopes":       m.RoleTemplateScopes,
+			}
+		} else {
+			response["role_template"] = nil
 		}
 
 		c.JSON(http.StatusOK, response)
