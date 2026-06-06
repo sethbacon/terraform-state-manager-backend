@@ -182,7 +182,7 @@ func NewRouter(cfg *config.Config, db, identityDB *sql.DB) (*gin.Engine, *Backgr
 	orgHandlers := admin.NewOrganizationHandlers(cfg, identityDB)
 	statsHandlers := admin.NewStatsHandler(sqlxDB)
 	roleTemplateHandlers := admin.NewRoleHandlers(roleTemplateRepo)
-	oidcAdminHandlers := admin.NewOIDCHandlers(tokenCipher, oidcConfigRepo)
+	oidcAdminHandlers := admin.NewOIDCConfigAdminHandlers(oidcConfigRepo)
 
 	// Initialize setup wizard handlers
 	setupHandlers := setup.NewHandlers(
@@ -369,9 +369,8 @@ func NewRouter(cfg *config.Config, db, identityDB *sql.DB) (*gin.Engine, *Backgr
 			oidcAdminGroup := authenticatedGroup.Group("/admin/oidc")
 			oidcAdminGroup.Use(middleware.RequireScope(auth.ScopeAdmin))
 			{
-				oidcAdminGroup.GET("", oidcAdminHandlers.GetOIDCConfig)
-				oidcAdminGroup.PUT("", oidcAdminHandlers.UpdateOIDCConfig)
-				oidcAdminGroup.POST("/test", oidcAdminHandlers.TestOIDCConfig)
+				oidcAdminGroup.GET("/config", oidcAdminHandlers.GetActiveOIDCConfig)
+				oidcAdminGroup.PUT("/group-mapping", oidcAdminHandlers.UpdateGroupMapping)
 			}
 
 			// ---------------------------------------------------------------
