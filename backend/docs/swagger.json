@@ -2144,6 +2144,27 @@
                 }
             }
         },
+        "/auth/providers": {
+            "get": {
+                "description": "Returns the authentication providers available for login (e.g. OIDC). Public; consumed by the login page to render the provider picker.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Auth"
+                ],
+                "summary": "List authentication providers",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    }
+                }
+            }
+        },
         "/auth/refresh": {
             "post": {
                 "security": [

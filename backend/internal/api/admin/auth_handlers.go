@@ -443,3 +443,30 @@ func (h *AuthHandlers) MeHandler() gin.HandlerFunc {
 		c.JSON(http.StatusOK, response)
 	}
 }
+
+// ProvidersHandler returns the list of available authentication providers,
+// consumed by the frontend login page to render the provider picker. The
+// response shape matches the registry's GET /auth/providers. TSM currently
+// supports OIDC; the registry's LDAP/SAML/Azure AD providers are not yet
+// available here (tracked as module-promotion follow-ups), so they are simply
+// not advertised — the data-driven login page renders only what is returned.
+// GET /api/v1/auth/providers
+// ProvidersHandler godoc
+// @Summary      List authentication providers
+// @Description  Returns the authentication providers available for login (e.g. OIDC). Public; consumed by the login page to render the provider picker.
+// @Tags         Auth
+// @Produce      json
+// @Success      200  {object}  map[string]interface{}
+// @Router       /auth/providers [get]
+func (h *AuthHandlers) ProvidersHandler() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		providers := make([]gin.H, 0, 1)
+		if h.oidcProvider.Load() != nil {
+			providers = append(providers, gin.H{
+				"type": "oidc",
+				"name": "OpenID Connect",
+			})
+		}
+		c.JSON(http.StatusOK, gin.H{"providers": providers})
+	}
+}
