@@ -3,6 +3,7 @@
 package admin
 
 import (
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -75,7 +76,7 @@ func (h *OIDCHandlers) GetOIDCConfig(c *gin.Context) {
 	ctx := c.Request.Context()
 
 	cfg, err := h.oidcConfigRepo.GetActiveOIDCConfig(ctx)
-	if err != nil {
+	if err != nil || cfg == nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "no OIDC configuration found"})
 		return
 	}
@@ -120,7 +121,7 @@ func (h *OIDCHandlers) UpdateOIDCConfig(c *gin.Context) {
 	// Preserve existing encrypted secret when the caller sends the masked placeholder.
 	if req.ClientSecret == "" || req.ClientSecret == "***" {
 		existing, err := h.oidcConfigRepo.GetActiveOIDCConfig(ctx)
-		if err != nil {
+		if err != nil || existing == nil {
 			c.JSON(http.StatusBadRequest, gin.H{
 				"error": "client_secret is required when no existing OIDC configuration is present",
 			})
@@ -142,12 +143,19 @@ func (h *OIDCHandlers) UpdateOIDCConfig(c *gin.Context) {
 		scopes = []string{"openid", "email", "profile"}
 	}
 
+	scopesJSON, err := json.Marshal(scopes)
+	if err != nil {
+		slog.Error("failed to encode OIDC scopes", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to encode OIDC scopes"})
+		return
+	}
+
 	oidcConfig := &models.OIDCConfig{
 		IssuerURL:             req.IssuerURL,
 		ClientID:              req.ClientID,
 		ClientSecretEncrypted: encryptedSecret,
 		RedirectURL:           req.RedirectURL,
-		ScopesJSON:            strings.Join(scopes, ","),
+		Scopes:                json.RawMessage(scopesJSON),
 		IsActive:              true,
 	}
 

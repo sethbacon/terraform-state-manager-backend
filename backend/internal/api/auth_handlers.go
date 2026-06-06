@@ -212,11 +212,6 @@ func (h *AuthHandlers) CallbackHandler() gin.HandlerFunc {
 			return
 		}
 
-		if !user.IsActive {
-			redirectWithError(c, frontendURL, "account_disabled", "Your account has been deactivated. Please contact an administrator.")
-			return
-		}
-
 		// Collect the combined RBAC scopes across all organisation memberships.
 		scopes, err := h.getUserCombinedScopes(ctx, user.ID)
 		if err != nil {
@@ -289,11 +284,6 @@ func (h *AuthHandlers) RefreshHandler() gin.HandlerFunc {
 			return
 		}
 
-		if !user.IsActive {
-			c.JSON(http.StatusForbidden, gin.H{"error": "account disabled"})
-			return
-		}
-
 		scopes, err := h.getUserCombinedScopes(ctx, uid)
 		if err != nil {
 			slog.Error("Failed to refresh user scopes", "error", err, "user_id", uid)
@@ -358,7 +348,6 @@ func (h *AuthHandlers) MeHandler() gin.HandlerFunc {
 			"email":          user.Email,
 			"name":           user.Name,
 			"oidc_sub":       user.OIDCSub,
-			"is_active":      user.IsActive,
 			"created_at":     user.CreatedAt,
 			"memberships":    memberships,
 			"allowed_scopes": scopes,
@@ -407,10 +396,9 @@ func (h *AuthHandlers) getOrCreateUserByOIDC(ctx context.Context, sub, email, na
 
 	// No existing account -- create a new one.
 	newUser := &models.User{
-		Email:    email,
-		Name:     name,
-		OIDCSub:  &sub,
-		IsActive: true,
+		Email:   email,
+		Name:    name,
+		OIDCSub: &sub,
 	}
 	if err := h.userRepo.CreateUser(ctx, newUser); err != nil {
 		return nil, fmt.Errorf("create user: %w", err)

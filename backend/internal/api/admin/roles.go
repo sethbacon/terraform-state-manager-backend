@@ -3,8 +3,10 @@ package admin
 import (
 	"log/slog"
 	"net/http"
+	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 
 	"github.com/terraform-state-manager/terraform-state-manager/internal/db/models"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/db/repositories"
@@ -79,7 +81,13 @@ func (h *RoleHandlers) GetRoleTemplate(c *gin.Context) {
 		return
 	}
 
-	template, err := h.roleRepo.GetRoleTemplateByID(c.Request.Context(), id)
+	uid, err := uuid.Parse(id)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid role template id"})
+		return
+	}
+
+	template, err := h.roleRepo.GetRoleTemplate(c.Request.Context(), uid)
 	if err != nil {
 		slog.Error("failed to get role template", "id", id, "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to get role template"})
@@ -127,12 +135,16 @@ func (h *RoleHandlers) CreateRoleTemplate(c *gin.Context) {
 		return
 	}
 
+	now := time.Now()
 	template := &models.RoleTemplate{
+		ID:          uuid.New(),
 		Name:        req.Name,
 		DisplayName: req.DisplayName,
 		Description: req.Description,
 		Scopes:      req.Scopes,
 		IsSystem:    false,
+		CreatedAt:   now,
+		UpdatedAt:   now,
 	}
 
 	if err := h.roleRepo.CreateRoleTemplate(c.Request.Context(), template); err != nil {
@@ -169,7 +181,13 @@ func (h *RoleHandlers) UpdateRoleTemplate(c *gin.Context) {
 		return
 	}
 
-	template, err := h.roleRepo.GetRoleTemplateByID(c.Request.Context(), id)
+	uid, err := uuid.Parse(id)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid role template id"})
+		return
+	}
+
+	template, err := h.roleRepo.GetRoleTemplate(c.Request.Context(), uid)
 	if err != nil {
 		slog.Error("failed to get role template for update", "id", id, "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to get role template"})
@@ -247,7 +265,13 @@ func (h *RoleHandlers) DeleteRoleTemplate(c *gin.Context) {
 		return
 	}
 
-	template, err := h.roleRepo.GetRoleTemplateByID(c.Request.Context(), id)
+	uid, err := uuid.Parse(id)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid role template id"})
+		return
+	}
+
+	template, err := h.roleRepo.GetRoleTemplate(c.Request.Context(), uid)
 	if err != nil {
 		slog.Error("failed to get role template for deletion", "id", id, "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to get role template"})
@@ -263,7 +287,7 @@ func (h *RoleHandlers) DeleteRoleTemplate(c *gin.Context) {
 		return
 	}
 
-	if err := h.roleRepo.DeleteRoleTemplate(c.Request.Context(), id); err != nil {
+	if err := h.roleRepo.DeleteRoleTemplate(c.Request.Context(), uid); err != nil {
 		slog.Error("failed to delete role template", "id", id, "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to delete role template"})
 		return

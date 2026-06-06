@@ -175,10 +175,9 @@ func (h *UserHandlers) CreateUserHandler() gin.HandlerFunc {
 		}
 
 		user := &models.User{
-			Email:    req.Email,
-			Name:     req.Name,
-			OIDCSub:  req.OIDCSub,
-			IsActive: true,
+			Email:   req.Email,
+			Name:    req.Name,
+			OIDCSub: req.OIDCSub,
 		}
 
 		if err := h.userRepo.CreateUser(c.Request.Context(), user); err != nil {
@@ -325,7 +324,7 @@ func (h *UserHandlers) SearchUsersHandler() gin.HandlerFunc {
 
 		page, perPage := parsePagination(c)
 
-		users, err := h.userRepo.SearchUsers(c.Request.Context(), query, perPage)
+		users, err := h.userRepo.Search(c.Request.Context(), query, perPage, 0)
 		if err != nil {
 			slog.Error("failed to search users", "query", query, "error", err)
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to search users"})

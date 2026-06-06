@@ -170,8 +170,6 @@ func (h *OrganizationHandlers) CreateOrganizationHandler() gin.HandlerFunc {
 		org := &models.Organization{
 			Name:        req.Name,
 			DisplayName: req.DisplayName,
-			Description: req.Description,
-			IsActive:    true,
 		}
 
 		if err := h.orgRepo.CreateOrganization(c.Request.Context(), org); err != nil {
@@ -237,15 +235,16 @@ func (h *OrganizationHandlers) UpdateOrganizationHandler() gin.HandlerFunc {
 				c.JSON(http.StatusConflict, gin.H{"error": "an organization with this name already exists"})
 				return
 			}
+			if err := h.orgRepo.Rename(c.Request.Context(), org.ID, *req.Name); err != nil {
+				slog.Error("failed to rename organization", "id", id, "error", err)
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to rename organization"})
+				return
+			}
 			org.Name = *req.Name
 		}
 
 		if req.DisplayName != nil {
 			org.DisplayName = *req.DisplayName
-		}
-
-		if req.Description != nil {
-			org.Description = req.Description
 		}
 
 		if err := h.orgRepo.UpdateOrganization(c.Request.Context(), org); err != nil {
@@ -472,10 +471,11 @@ func (h *OrganizationHandlers) AddMemberHandler() gin.HandlerFunc {
 			return
 		}
 
+		roleID := roleTemplate.ID.String()
 		member := &models.OrganizationMember{
 			OrganizationID: orgID,
 			UserID:         req.UserID,
-			RoleTemplateID: &roleTemplate.ID,
+			RoleTemplateID: &roleID,
 		}
 
 		if err := h.orgRepo.AddMember(c.Request.Context(), member); err != nil {
@@ -544,7 +544,8 @@ func (h *OrganizationHandlers) UpdateMemberHandler() gin.HandlerFunc {
 			return
 		}
 
-		if err := h.orgRepo.UpdateMember(c.Request.Context(), orgID, userID, &roleTemplate.ID); err != nil {
+		roleID := roleTemplate.ID.String()
+		if err := h.orgRepo.UpdateMemberRoleTemplate(c.Request.Context(), orgID, userID, &roleID); err != nil {
 			slog.Error("failed to update member", "org_id", orgID, "user_id", userID, "error", err)
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update member"})
 			return

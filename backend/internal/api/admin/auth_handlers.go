@@ -227,11 +227,6 @@ func (h *AuthHandlers) CallbackHandler() gin.HandlerFunc {
 			return
 		}
 
-		if !user.IsActive {
-			c.JSON(http.StatusForbidden, gin.H{"error": "User account is disabled"})
-			return
-		}
-
 		// Resolve user scopes from organization membership
 		scopes := h.resolveUserScopes(c, user.ID)
 
@@ -280,10 +275,9 @@ func (h *AuthHandlers) findOrCreateUser(c *gin.Context, sub, email, name string)
 
 	// Create new user
 	newUser := &models.User{
-		Email:    email,
-		Name:     name,
-		OIDCSub:  &sub,
-		IsActive: true,
+		Email:   email,
+		Name:    name,
+		OIDCSub: &sub,
 	}
 	if err := h.userRepo.CreateUser(ctx, newUser); err != nil {
 		return nil, err
@@ -436,17 +430,14 @@ func (h *AuthHandlers) MeHandler() gin.HandlerFunc {
 		}
 
 		response := gin.H{
-			"id":        user.ID,
-			"email":     user.Email,
-			"name":      user.Name,
-			"is_active": user.IsActive,
+			"id":    user.ID,
+			"email": user.Email,
+			"name":  user.Name,
 		}
 
 		if userWithRoles != nil {
-			response["organization_id"] = userWithRoles.OrganizationID
-			response["organization_name"] = userWithRoles.OrganizationName
-			response["role"] = userWithRoles.RoleTemplateName
-			response["scopes"] = userWithRoles.Scopes
+			response["memberships"] = userWithRoles.Memberships
+			response["scopes"] = userWithRoles.GetAllowedScopes()
 		}
 
 		c.JSON(http.StatusOK, response)

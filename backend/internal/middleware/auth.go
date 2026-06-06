@@ -74,8 +74,8 @@ func AuthMiddleware(
 					// Resolve the user's organization so handlers can scope
 					// queries to the correct org without an extra DB lookup.
 					userWithOrg, orgErr := userRepo.GetUserWithOrgRoles(c.Request.Context(), claims.UserID)
-					if orgErr == nil && userWithOrg != nil && userWithOrg.OrganizationID != nil {
-						c.Set("organization_id", *userWithOrg.OrganizationID)
+					if orgErr == nil && userWithOrg != nil && len(userWithOrg.Memberships) > 0 {
+						c.Set("organization_id", userWithOrg.Memberships[0].OrganizationID)
 					}
 
 					c.Next()
@@ -192,8 +192,8 @@ func OptionalAuthMiddleware(
 						c.Set("scopes", claims.Scopes)
 
 						userWithOrg, orgErr := userRepo.GetUserWithOrgRoles(c.Request.Context(), claims.UserID)
-						if orgErr == nil && userWithOrg != nil && userWithOrg.OrganizationID != nil {
-							c.Set("organization_id", *userWithOrg.OrganizationID)
+						if orgErr == nil && userWithOrg != nil && len(userWithOrg.Memberships) > 0 {
+							c.Set("organization_id", userWithOrg.Memberships[0].OrganizationID)
 						}
 					}
 					c.Next()
