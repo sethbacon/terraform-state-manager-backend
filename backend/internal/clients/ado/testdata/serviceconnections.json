@@ -1,0 +1,30 @@
+{
+  "count": 2,
+  "value": [
+    {
+      "data": {
+        "subscriptionId": "11111111-2222-3333-4444-555555555555",
+        "subscriptionName": "Contoso Production",
+        "environment": "AzureCloud",
+        "scopeLevel": "Subscription"
+      },
+      "id": "c2b3a4d5-6789-4abc-def0-123456789abc",
+      "name": "azure-prod-connection",
+      "type": "azurerm",
+      "url": "https://management.azure.com/",
+      "isShared": false,
+      "isReady": true,
+      "owner": "Library"
+    },
+    {
+      "data": {},
+      "id": "d3c4b5a6-789a-4bcd-ef01-23456789abcd",
+      "name": "github-contoso",
+      "type": "github",
+      "url": "https://github.com",
+      "isShared": false,
+      "isReady": true,
+      "owner": "Library"
+    }
+  ]
+}

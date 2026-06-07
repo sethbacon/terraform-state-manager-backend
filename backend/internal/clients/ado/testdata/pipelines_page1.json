@@ -1,0 +1,19 @@
+{
+  "count": 2,
+  "value": [
+    {
+      "id": 1,
+      "name": "platform-infra-CI",
+      "folder": "\\Infrastructure",
+      "revision": 3,
+      "url": "https://dev.azure.com/contoso/Contoso/_apis/pipelines/1?revision=3"
+    },
+    {
+      "id": 2,
+      "name": "app-services-CI",
+      "folder": "\\Applications",
+      "revision": 5,
+      "url": "https://dev.azure.com/contoso/Contoso/_apis/pipelines/2?revision=5"
+    }
+  ]
+}
