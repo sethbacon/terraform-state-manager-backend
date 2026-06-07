@@ -2,6 +2,7 @@ backend/config.yaml
 backend/*.exe
 backend/terraform-registry
 backend/dist/
+dist/
 backend/bin/
 backend/coverage.out
 backend/gosec-results.json

@@ -1,0 +1,65 @@
+# yaml-language-server: $schema=https://goreleaser.com/static/schema.json
+version: 2
+
+builds:
+  - id: terraform-state-manager
+    dir: backend
+    main: ./cmd/server
+    binary: terraform-state-manager
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ignore:
+      - goos: windows
+        goarch: arm64
+    ldflags:
+      - -s -w
+      - -X main.Version={{ .Version }}
+      - -X main.BuildDate={{ .Date }}
+    mod_timestamp: "{{ .CommitTimestamp }}"
+
+archives:
+  - id: terraform-state-manager-binaries
+    ids: [terraform-state-manager]
+    formats: [binary]
+    name_template: "terraform-state-manager-{{ .Os }}-{{ .Arch }}"
+
+checksum:
+  name_template: checksums.txt
+  algorithm: sha256
+
+# Release creation is disabled here because release-please creates a draft
+# GitHub Release (with changelog) when the release PR is merged.  The
+# publish-release job in release.yml uploads binary assets to the draft and
+# then publishes it, which is compatible with Immutable Releases.
+release:
+  disable: true
+
+sboms:
+  - artifacts: archive
+    cmd: syft
+
+signs:
+  - cmd: cosign
+    signature: "${artifact}.sigstore.json"
+    artifacts: checksum
+    args:
+      - sign-blob
+      - --bundle=${signature}
+      - --yes
+      - ${artifact}
+
+changelog:
+  use: github-native
+
+gomod:
+  proxy: false
+
+snapshot:
+  version_template: "{{ .Tag }}-dev"

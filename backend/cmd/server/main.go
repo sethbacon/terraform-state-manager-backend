@@ -48,7 +48,16 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
-const version = "0.1.0"
+// Version and BuildDate are injected at build time by GoReleaser (and the
+// Docker build) via ldflags:
+//
+//	-X main.Version=x.y.z  -X main.BuildDate=<RFC3339>
+//
+// They default to dev values for local builds.
+var (
+	Version   = "dev"
+	BuildDate = "unknown"
+)
 
 func main() {
 	if err := run(); err != nil {
@@ -77,7 +86,7 @@ func run() error {
 		}
 		return runMigrations(cfg, os.Args[2])
 	case "version":
-		fmt.Printf("Terraform State Manager v%s\n", version)
+		fmt.Printf("Terraform State Manager v%s (built %s)\n", Version, BuildDate)
 		return nil
 	default:
 		return fmt.Errorf("unknown command: %s (available: serve, migrate, version)", command)
@@ -89,7 +98,7 @@ func serve(cfg *config.Config) error {
 	telemetry.SetupLogger(cfg.Logging.Format, cfg.Logging.Level)
 
 	slog.Info("starting Terraform State Manager",
-		"version", version,
+		"version", Version,
 		"host", cfg.Server.Host,
 		"port", cfg.Server.Port,
 	)
