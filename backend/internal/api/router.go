@@ -510,6 +510,7 @@ func NewRouter(cfg *config.Config, db, identityDB *sql.DB) (*gin.Engine, *Backgr
 				dashboardGroup.GET("/providers", dashboardHandlers.GetProviderDistribution)
 				dashboardGroup.GET("/trends", dashboardHandlers.GetTrends)
 				dashboardGroup.GET("/terraform-versions", dashboardHandlers.GetTerraformVersions)
+				dashboardGroup.GET("/version-drift", dashboardHandlers.GetVersionDrift)
 				dashboardGroup.GET("/organizations", dashboardHandlers.GetOrganizationBreakdown)
 				dashboardGroup.GET("/workspaces", dashboardHandlers.GetWorkspaceHealth)
 			}

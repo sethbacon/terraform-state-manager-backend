@@ -36,13 +36,15 @@ func (r *AnalysisResultRepository) Create(ctx context.Context, result *models.An
 			error_type, error_message, total_resources, managed_count, rum_count,
 			data_source_count, null_resource_count, resources_by_type, resources_by_module,
 			provider_analysis, terraform_version, state_serial, state_lineage,
-			last_modified, analysis_method, raw_state_hash
+			last_modified, analysis_method, raw_state_hash,
+			required_version_spec, provider_lock_pins, module_constraints, version_drift_report
 		) VALUES (
 			$1, $2, $3, $4, $5,
 			$6, $7, $8, $9, $10,
 			$11, $12, $13, $14,
 			$15, $16, $17, $18,
-			$19, $20, $21
+			$19, $20, $21,
+			$22, $23, $24, $25
 		) RETURNING id, created_at`,
 		result.RunID,
 		result.WorkspaceID,
@@ -65,6 +67,10 @@ func (r *AnalysisResultRepository) Create(ctx context.Context, result *models.An
 		result.LastModified,
 		result.AnalysisMethod,
 		result.RawStateHash,
+		result.RequiredVersionSpec,
+		result.ProviderLockPins,
+		result.ModuleConstraints,
+		result.VersionDriftReport,
 	).Scan(&result.ID, &result.CreatedAt)
 	if err != nil {
 		return fmt.Errorf("failed to create analysis result: %w", err)
@@ -78,19 +84,20 @@ func (r *AnalysisResultRepository) BulkCreate(ctx context.Context, results []mod
 		return nil
 	}
 
-	const colCount = 21
+	const colCount = 25
 	valueStrings := make([]string, 0, len(results))
 	valueArgs := make([]interface{}, 0, len(results)*colCount)
 
 	for i, res := range results {
 		base := i * colCount
 		valueStrings = append(valueStrings, fmt.Sprintf(
-			"($%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d)",
+			"($%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d)",
 			base+1, base+2, base+3, base+4, base+5,
 			base+6, base+7, base+8, base+9, base+10,
 			base+11, base+12, base+13, base+14,
 			base+15, base+16, base+17, base+18,
 			base+19, base+20, base+21,
+			base+22, base+23, base+24, base+25,
 		))
 		valueArgs = append(valueArgs,
 			res.RunID,
@@ -114,6 +121,10 @@ func (r *AnalysisResultRepository) BulkCreate(ctx context.Context, results []mod
 			res.LastModified,
 			res.AnalysisMethod,
 			res.RawStateHash,
+			res.RequiredVersionSpec,
+			res.ProviderLockPins,
+			res.ModuleConstraints,
+			res.VersionDriftReport,
 		)
 	}
 
@@ -123,7 +134,8 @@ func (r *AnalysisResultRepository) BulkCreate(ctx context.Context, results []mod
 			error_type, error_message, total_resources, managed_count, rum_count,
 			data_source_count, null_resource_count, resources_by_type, resources_by_module,
 			provider_analysis, terraform_version, state_serial, state_lineage,
-			last_modified, analysis_method, raw_state_hash
+			last_modified, analysis_method, raw_state_hash,
+			required_version_spec, provider_lock_pins, module_constraints, version_drift_report
 		) VALUES %s`,
 		strings.Join(valueStrings, ", "),
 	)
@@ -143,7 +155,9 @@ func (r *AnalysisResultRepository) GetByID(ctx context.Context, id string) (*mod
 		        error_type, error_message, total_resources, managed_count, rum_count,
 		        data_source_count, null_resource_count, resources_by_type, resources_by_module,
 		        provider_analysis, terraform_version, state_serial, state_lineage,
-		        last_modified, analysis_method, raw_state_hash, created_at
+		        last_modified, analysis_method, raw_state_hash,
+		        required_version_spec, provider_lock_pins, module_constraints, version_drift_report,
+		        created_at
 		 FROM analysis_results
 		 WHERE id = $1`,
 		id,
@@ -170,6 +184,10 @@ func (r *AnalysisResultRepository) GetByID(ctx context.Context, id string) (*mod
 		&res.LastModified,
 		&res.AnalysisMethod,
 		&res.RawStateHash,
+		&res.RequiredVersionSpec,
+		&res.ProviderLockPins,
+		&res.ModuleConstraints,
+		&res.VersionDriftReport,
 		&res.CreatedAt,
 	)
 	if err == sql.ErrNoRows {
@@ -197,7 +215,9 @@ func (r *AnalysisResultRepository) ListByRunID(ctx context.Context, runID string
 		        error_type, error_message, total_resources, managed_count, rum_count,
 		        data_source_count, null_resource_count, resources_by_type, resources_by_module,
 		        provider_analysis, terraform_version, state_serial, state_lineage,
-		        last_modified, analysis_method, raw_state_hash, created_at
+		        last_modified, analysis_method, raw_state_hash,
+		        required_version_spec, provider_lock_pins, module_constraints, version_drift_report,
+		        created_at
 		 FROM analysis_results
 		 WHERE run_id = $1
 		 ORDER BY workspace_name
@@ -235,6 +255,10 @@ func (r *AnalysisResultRepository) ListByRunID(ctx context.Context, runID string
 			&res.LastModified,
 			&res.AnalysisMethod,
 			&res.RawStateHash,
+			&res.RequiredVersionSpec,
+			&res.ProviderLockPins,
+			&res.ModuleConstraints,
+			&res.VersionDriftReport,
 			&res.CreatedAt,
 		); err != nil {
 			return nil, 0, fmt.Errorf("failed to scan analysis result: %w", err)
@@ -286,7 +310,9 @@ func (r *AnalysisResultRepository) GetAllByRunID(ctx context.Context, runID stri
 		        error_type, error_message, total_resources, managed_count, rum_count,
 		        data_source_count, null_resource_count, resources_by_type, resources_by_module,
 		        provider_analysis, terraform_version, state_serial, state_lineage,
-		        last_modified, analysis_method, raw_state_hash, created_at
+		        last_modified, analysis_method, raw_state_hash,
+		        required_version_spec, provider_lock_pins, module_constraints, version_drift_report,
+		        created_at
 		 FROM analysis_results
 		 WHERE run_id = $1
 		 ORDER BY workspace_name`,
@@ -323,6 +349,10 @@ func (r *AnalysisResultRepository) GetAllByRunID(ctx context.Context, runID stri
 			&res.LastModified,
 			&res.AnalysisMethod,
 			&res.RawStateHash,
+			&res.RequiredVersionSpec,
+			&res.ProviderLockPins,
+			&res.ModuleConstraints,
+			&res.VersionDriftReport,
 			&res.CreatedAt,
 		); err != nil {
 			return nil, fmt.Errorf("failed to scan analysis result: %w", err)

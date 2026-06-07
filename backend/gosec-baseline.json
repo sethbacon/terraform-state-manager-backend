@@ -11,8 +11,8 @@
 			"rule_id": "G108",
 			"details": "Profiling endpoint is automatically exposed on /debug/pprof",
 			"file": "C:\\dev\\gh\\terraform-state-manager-backend\\backend\\cmd\\server\\main.go",
-			"code": "28: \t\"net/http\"\n29: \t_ \"net/http/pprof\"\n30: \t\"os\"\n",
-			"line": "29",
+			"code": "33: \t\"net/http\"\n34: \t_ \"net/http/pprof\"\n35: \t\"os\"\n",
+			"line": "34",
 			"column": "2",
 			"nosec": false,
 			"suppressions": null
@@ -43,8 +43,8 @@
 			"rule_id": "G118",
 			"details": "Goroutine uses context.Background/TODO while request-scoped context is available",
 			"file": "C:\\dev\\gh\\terraform-state-manager-backend\\backend\\internal\\services\\migration\\migration.go",
-			"code": "90: \t// Start the migration in a background goroutine.\n91: \tgo s.executeMigration(context.Background(), job)\n92: \n",
-			"line": "91",
+			"code": "110: \t// Start the migration in a background goroutine.\n111: \tgo s.executeMigration(context.Background(), job)\n112: \n",
+			"line": "111",
 			"column": "2",
 			"nosec": false,
 			"suppressions": null
@@ -59,8 +59,8 @@
 			"rule_id": "G201",
 			"details": "SQL string formatting",
 			"file": "C:\\dev\\gh\\terraform-state-manager-backend\\backend\\internal\\db\\repositories\\analysis_result_repository.go",
-			"code": "119: \n120: \tquery := fmt.Sprintf(\n121: \t\t`INSERT INTO analysis_results (\n122: \t\t\trun_id, workspace_id, workspace_name, organization, status,\n123: \t\t\terror_type, error_message, total_resources, managed_count, rum_count,\n124: \t\t\tdata_source_count, null_resource_count, resources_by_type, resources_by_module,\n125: \t\t\tprovider_analysis, terraform_version, state_serial, state_lineage,\n126: \t\t\tlast_modified, analysis_method, raw_state_hash\n127: \t\t) VALUES %s`,\n128: \t\tstrings.Join(valueStrings, \", \"),\n129: \t)\n130: \n",
-			"line": "120-129",
+			"code": "130: \n131: \tquery := fmt.Sprintf(\n132: \t\t`INSERT INTO analysis_results (\n133: \t\t\trun_id, workspace_id, workspace_name, organization, status,\n134: \t\t\terror_type, error_message, total_resources, managed_count, rum_count,\n135: \t\t\tdata_source_count, null_resource_count, resources_by_type, resources_by_module,\n136: \t\t\tprovider_analysis, terraform_version, state_serial, state_lineage,\n137: \t\t\tlast_modified, analysis_method, raw_state_hash,\n138: \t\t\trequired_version_spec, provider_lock_pins, module_constraints, version_drift_report\n139: \t\t) VALUES %s`,\n140: \t\tstrings.Join(valueStrings, \", \"),\n141: \t)\n142: \n",
+			"line": "131-141",
 			"column": "11",
 			"nosec": false,
 			"suppressions": null
@@ -166,9 +166,9 @@
 		}
 	],
 	"Stats": {
-		"files": 135,
-		"lines": 26507,
-		"nosec": 0,
+		"files": 159,
+		"lines": 28408,
+		"nosec": 1,
 		"found": 10
 	},
 	"GosecVersion": "dev"
