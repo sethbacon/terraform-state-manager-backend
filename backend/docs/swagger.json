@@ -7622,7 +7622,36 @@
             "type": "object"
         },
         "models.MigrationJobCreateRequest": {
-            "type": "object"
+            "type": "object",
+            "required": [
+                "name",
+                "source_backend",
+                "source_config",
+                "target_backend",
+                "target_config"
+            ],
+            "properties": {
+                "dry_run": {
+                    "type": "boolean"
+                },
+                "name": {
+                    "type": "string"
+                },
+                "source_backend": {
+                    "type": "string"
+                },
+                "source_config": {
+                    "description": "SourceConfig holds the source backend connection details. Keys depend on source_backend: local {base_path}; s3 {bucket, region, access_key_id, secret_access_key, endpoint, prefix, force_path_style}; azure {account_name, account_key, container_name, prefix, endpoint}; gcs {bucket, project_id, credentials_json, credentials_file, endpoint}.",
+                    "type": "object"
+                },
+                "target_backend": {
+                    "type": "string"
+                },
+                "target_config": {
+                    "description": "TargetConfig holds the target backend connection details. Same shape as source_config, keyed by target_backend.",
+                    "type": "object"
+                }
+            }
         },
         "models.NotificationChannelCreateRequest": {
             "type": "object"
