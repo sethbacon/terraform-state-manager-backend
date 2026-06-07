@@ -393,6 +393,65 @@ func (h *Handlers) VerifyBackup(c *gin.Context) {
 	})
 }
 
+// VerifyRestoreBackup handles POST /api/v1/backups/:id/verify-restore.
+// Performs a checksum-verified restore round-trip: it reads the stored object,
+// recomputes the SHA-256 checksum, and compares it to the recorded value.
+// @Summary      Verify restore round-trip
+// @Description  Reads the stored backup object and verifies its SHA-256 checksum against the recorded value before restore
+// @Tags         Backups
+// @Produce      json
+// @Param        id  path  string  true  "Resource ID"
+// @Success      200  {object}  map[string]interface{}
+// @Failure      400  {object}  map[string]interface{}
+// @Failure      404  {object}  map[string]interface{}
+// @Failure      500  {object}  map[string]interface{}
+// @Security     BearerAuth
+// @Security     ApiKeyAuth
+// @Router       /backups/{id}/verify-restore [post]
+func (h *Handlers) VerifyRestoreBackup(c *gin.Context) {
+	orgID, _ := c.Get("organization_id")
+	orgIDStr, ok := orgID.(string)
+	if !ok || orgIDStr == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "organization_id not found in context"})
+		return
+	}
+
+	id := c.Param("id")
+	if _, err := uuid.Parse(id); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid backup ID"})
+		return
+	}
+
+	ctx := c.Request.Context()
+
+	// Verify the backup belongs to the caller's organization.
+	b, err := h.backupRepo.GetByID(ctx, id)
+	if err != nil {
+		slog.Error("Failed to get state backup for restore verification", "error", err, "id", id)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to retrieve state backup"})
+		return
+	}
+	if b == nil || b.OrganizationID != orgIDStr {
+		c.JSON(http.StatusNotFound, gin.H{"error": "state backup not found"})
+		return
+	}
+
+	valid, _, backup, err := h.backupSvc.VerifyRestoreRoundTrip(ctx, id)
+	if err != nil {
+		slog.Error("Failed to verify restore round-trip", "error", err, "id", id)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to verify restore round-trip"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"data": gin.H{
+			"valid":     valid,
+			"backup_id": id,
+			"checksum":  backup.ChecksumSHA256,
+		},
+	})
+}
+
 // ---------------------------------------------------------------------------
 // Bulk backup
 // ---------------------------------------------------------------------------

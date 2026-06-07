@@ -506,6 +506,7 @@ func NewRouter(cfg *config.Config, db, identityDB *sql.DB) (*gin.Engine, *Backgr
 				backupsGroup.DELETE("/:id", middleware.RequireScope(auth.ScopeBackupsWrite), backupHandlers.DeleteBackup)
 				backupsGroup.POST("/:id/restore", middleware.RequireScope(auth.ScopeBackupsWrite), backupHandlers.RestoreBackup)
 				backupsGroup.POST("/:id/verify", middleware.RequireScope(auth.ScopeBackupsRead), backupHandlers.VerifyBackup)
+				backupsGroup.POST("/:id/verify-restore", middleware.RequireScope(auth.ScopeBackupsRead), backupHandlers.VerifyRestoreBackup)
 
 				// Retention policy sub-group
 				retentionGroup := backupsGroup.Group("/retention")
