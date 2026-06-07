@@ -14,7 +14,6 @@ package api
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"fmt"
 	"log"
 	"log/slog"
@@ -232,11 +231,9 @@ func NewRouter(cfg *config.Config, db, identityDB *sql.DB) (*gin.Engine, *Backgr
 	snapshotHandlers := snapshots.NewHandlers(snapshotRepo, driftRepo, analysisResultRepo, analysisRunRepo, snapshotService)
 
 	// (Phase 4 backup service already initialized above)
-	storageFactory := func(backendType string, rawCfg json.RawMessage) (storage.Backend, error) {
-		storageCfg := &config.StorageConfig{DefaultBackend: backendType}
-		return storage.NewBackend(storageCfg)
-	}
-	migrationService := migration.NewService(migrationRepo, storageFactory, nil)
+	// Build per-job storage backends from the migration job's source_config /
+	// target_config so each side resolves to its own connection details.
+	migrationService := migration.NewService(migrationRepo, storage.NewBackendFromRawConfig, nil)
 
 	backupHandlers := backupsAPI.NewHandlers(cfg, db, backupService, retentionPolicyRepo, backupRepo, sourceRepo, tokenCipher)
 	migrationHandlers := migrationsAPI.NewHandlers(cfg, migrationService, migrationRepo)

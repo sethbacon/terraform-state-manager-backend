@@ -39,10 +39,12 @@ type MigrationJob struct {
 
 // MigrationJobCreateRequest is the API binding for creating a new migration job.
 type MigrationJobCreateRequest struct {
-	Name          string          `json:"name" binding:"required"`
-	SourceBackend string          `json:"source_backend" binding:"required"`
-	SourceConfig  json.RawMessage `json:"source_config" binding:"required"`
+	Name          string `json:"name" binding:"required"`
+	SourceBackend string `json:"source_backend" binding:"required"`
+	// SourceConfig holds the source backend connection details. Keys depend on source_backend: local {base_path}; s3 {bucket, region, access_key_id, secret_access_key, endpoint, prefix, force_path_style}; azure {account_name, account_key, container_name, prefix, endpoint}; gcs {bucket, project_id, credentials_json, credentials_file, endpoint}.
+	SourceConfig  json.RawMessage `json:"source_config" binding:"required" swaggertype:"object"`
 	TargetBackend string          `json:"target_backend" binding:"required"`
-	TargetConfig  json.RawMessage `json:"target_config" binding:"required"`
-	DryRun        *bool           `json:"dry_run,omitempty"`
+	// TargetConfig holds the target backend connection details. Same shape as source_config, keyed by target_backend.
+	TargetConfig json.RawMessage `json:"target_config" binding:"required" swaggertype:"object"`
+	DryRun       *bool           `json:"dry_run,omitempty"`
 }
