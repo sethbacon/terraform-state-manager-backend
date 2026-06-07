@@ -1,0 +1,173 @@
+// Package uitheme implements the public read and admin/setup write handlers for
+// the singleton white-label theme configuration. The frontend ThemeContext
+// consumes the public GET endpoint to brand the login page (reached before any
+// authentication), so the read endpoint is intentionally unauthenticated and
+// always returns a valid theme — the built-in default when nothing is configured.
+package uitheme
+
+import (
+	"errors"
+	"fmt"
+	"net/http"
+	"regexp"
+	"strings"
+	"time"
+
+	"github.com/gin-gonic/gin"
+	"github.com/jmoiron/sqlx"
+
+	"github.com/terraform-state-manager/terraform-state-manager/internal/db/models"
+	"github.com/terraform-state-manager/terraform-state-manager/internal/db/repositories"
+)
+
+// Handlers holds the UI theme endpoints.
+type Handlers struct {
+	repo *repositories.UIThemeRepository
+}
+
+// NewHandlers constructs a Handlers backed by the system_settings store.
+func NewHandlers(db *sqlx.DB) *Handlers {
+	return &Handlers{repo: repositories.NewUIThemeRepository(db)}
+}
+
+// strptr returns a pointer to s. Used to build the default theme.
+func strptr(s string) *string { return &s }
+
+// DefaultTheme returns the built-in white-label theme served when nothing has
+// been configured, so the frontend always receives a valid theme. UpdatedAt is
+// the zero time to signal "default / never configured".
+func DefaultTheme() *models.UIThemeConfig {
+	return &models.UIThemeConfig{
+		ProductName:         strptr("Terraform State Manager"),
+		PrimaryColor:        strptr("#5C4EE5"),
+		SecondaryColorLight: strptr("#F4F4F5"),
+		SecondaryColorDark:  strptr("#18181B"),
+		UpdatedAt:           time.Time{},
+	}
+}
+
+// GetTheme returns the white-label theme configuration.
+//
+// @Summary      Get UI theme configuration
+// @Description  Returns the white-label theme configuration consumed by the frontend ThemeContext to brand the application. Public — no authentication required so the login page can brand itself before sign-in. When nothing has been configured the built-in default theme is returned, so the frontend always receives a valid theme.
+// @Tags         UI Theme
+// @Produce      json
+// @Success      200  {object}  models.UIThemeConfig
+// @Failure      500  {object}  map[string]interface{}  "Internal server error"
+// @Router       /ui/theme [get]
+func (h *Handlers) GetTheme() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		cfg, err := h.repo.Get(c.Request.Context())
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"status": http.StatusInternalServerError, "message": "failed to load ui theme"})
+			return
+		}
+		if cfg == nil {
+			cfg = DefaultTheme()
+		}
+		c.Header("Cache-Control", "public, max-age=60")
+		c.JSON(http.StatusOK, cfg)
+	}
+}
+
+// PutTheme upserts the white-label theme configuration.
+//
+// @Summary      Upsert UI theme configuration
+// @Description  Writes the white-label theme used by the frontend. Accepts the same shape returned by GET /api/v1/ui/theme. Two routes share this handler: PUT /api/v1/admin/ui-theme (Bearer auth, requires the admin scope) for post-setup edits, and PUT /api/v1/setup/ui-theme (Authorization: SetupToken <token>) for the setup wizard's branding step before any admin user exists. Validation: color fields must match #RGB or #RRGGBB; URL fields must be absolute https:// URLs or relative paths beginning with /.
+// @Tags         UI Theme
+// @Security     BearerAuth
+// @Accept       json
+// @Produce      json
+// @Param        body  body  models.UIThemeConfig  true  "Theme configuration"
+// @Success      200  {object}  models.UIThemeConfig
+// @Failure      400  {object}  map[string]interface{}  "Invalid input"
+// @Failure      401  {object}  map[string]interface{}  "Unauthorized"
+// @Failure      403  {object}  map[string]interface{}  "Forbidden"
+// @Failure      500  {object}  map[string]interface{}  "Internal server error"
+// @Router       /admin/ui-theme [put]
+// @Router       /setup/ui-theme [put]
+func (h *Handlers) PutTheme() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		var in models.UIThemeConfig
+		if err := c.ShouldBindJSON(&in); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"status": http.StatusBadRequest, "message": err.Error()})
+			return
+		}
+		if err := validateTheme(&in); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"status": http.StatusBadRequest, "message": err.Error()})
+			return
+		}
+
+		saved, err := h.repo.Upsert(c.Request.Context(), &in)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"status": http.StatusInternalServerError, "message": "failed to save ui theme"})
+			return
+		}
+		c.JSON(http.StatusOK, saved)
+	}
+}
+
+var (
+	// reHexColor matches `#RGB` or `#RRGGBB` (case-insensitive).
+	reHexColor = regexp.MustCompile(`^#[0-9a-fA-F]{3}([0-9a-fA-F]{3})?$`)
+
+	// errBadURL is returned for URL fields that are neither an absolute https URL
+	// nor a relative path. This rejects values that could escape an <img src> or
+	// CSS variable into JS (e.g. javascript: schemes, protocol-relative URLs).
+	errBadURL = errors.New("must be an https:// URL or a relative path starting with /")
+)
+
+// validateTheme enforces that color fields are hex colors, URL fields are safe,
+// and the product name is bounded in length.
+func validateTheme(in *models.UIThemeConfig) error {
+	colorFields := []struct {
+		name string
+		val  *string
+	}{
+		{"primary_color", in.PrimaryColor},
+		{"secondary_color_light", in.SecondaryColorLight},
+		{"secondary_color_dark", in.SecondaryColorDark},
+	}
+	for _, f := range colorFields {
+		if f.val == nil || *f.val == "" {
+			continue
+		}
+		if !reHexColor.MatchString(*f.val) {
+			return fmt.Errorf("%s: must be a hex color like #5C4EE5 or #abc", f.name)
+		}
+	}
+
+	urlFields := []struct {
+		name string
+		val  *string
+	}{
+		{"logo_url", in.LogoURL},
+		{"favicon_url", in.FaviconURL},
+		{"login_hero_url", in.LoginHeroURL},
+	}
+	for _, f := range urlFields {
+		if f.val == nil || *f.val == "" {
+			continue
+		}
+		if err := validateURL(*f.val); err != nil {
+			return fmt.Errorf("%s: %w", f.name, err)
+		}
+	}
+
+	if in.ProductName != nil && len(*in.ProductName) > 200 {
+		return errors.New("product_name: must be 200 characters or fewer")
+	}
+	return nil
+}
+
+// validateURL accepts relative paths (starting with a single "/") and absolute
+// https URLs that contain no characters capable of breaking out of an attribute.
+func validateURL(s string) error {
+	if strings.HasPrefix(s, "/") && !strings.HasPrefix(s, "//") {
+		return nil
+	}
+	if strings.HasPrefix(s, "https://") && !strings.ContainsAny(s, "\"' \t\n\r<>") {
+		return nil
+	}
+	return errBadURL
+}
