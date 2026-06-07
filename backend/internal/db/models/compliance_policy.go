@@ -21,6 +21,7 @@ type CompliancePolicy struct {
 	PolicyType     string          `db:"policy_type" json:"policy_type"`
 	Config         json.RawMessage `db:"config" json:"config"`
 	Severity       string          `db:"severity" json:"severity"`
+	EngineType     string          `db:"engine_type" json:"engine_type"`
 	IsActive       bool            `db:"is_active" json:"is_active"`
 	CreatedAt      time.Time       `db:"created_at" json:"created_at"`
 	UpdatedAt      time.Time       `db:"updated_at" json:"updated_at"`

@@ -53,9 +53,17 @@ func (CustomRulesEngine) Evaluate(policy models.CompliancePolicy, result models.
 }
 
 // newEngineRegistry builds the default engine registry, keyed by engine name.
-func newEngineRegistry() map[string]PolicyEngine {
+// It registers the built-in custom rules engine and the embedded OPA/Rego
+// engine; the latter compiles its modules eagerly, so a build error here means
+// the embedded Rego is malformed.
+func newEngineRegistry() (map[string]PolicyEngine, error) {
 	custom := CustomRulesEngine{}
+	opa, err := NewOPAEngine()
+	if err != nil {
+		return nil, fmt.Errorf("failed to build OPA engine: %w", err)
+	}
 	return map[string]PolicyEngine{
 		custom.Name(): custom,
-	}
+		opa.Name():    opa,
+	}, nil
 }
