@@ -3,19 +3,18 @@ package compliance
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log/slog"
 
 	"github.com/terraform-state-manager/terraform-state-manager/internal/db/models"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/db/repositories"
-	"github.com/terraform-state-manager/terraform-state-manager/internal/services/compliance/rules"
 )
 
 // Checker evaluates compliance policies against analysis results.
 type Checker struct {
 	policyRepo *repositories.CompliancePolicyRepository
 	resultRepo *repositories.ComplianceResultRepository
+	engines    map[string]PolicyEngine
 }
 
 // NewChecker creates a new compliance Checker.
@@ -26,6 +25,7 @@ func NewChecker(
 	return &Checker{
 		policyRepo: policyRepo,
 		resultRepo: resultRepo,
+		engines:    newEngineRegistry(),
 	}
 }
 
@@ -83,22 +83,13 @@ func (c *Checker) CheckRun(ctx context.Context, orgID, runID string, results []m
 	return nil
 }
 
-// checkPolicy dispatches to the appropriate rule checker based on policy type.
+// checkPolicy resolves the policy engine and evaluates the policy against the
+// analysis result. Engine resolution is currently hardcoded to the built-in
+// "custom" engine; a future change will make this configurable per policy.
 func (c *Checker) checkPolicy(policy models.CompliancePolicy, result models.AnalysisResult) (*models.ComplianceResult, error) {
-	switch policy.PolicyType {
-	case models.PolicyTypeTagging:
-		return rules.CheckTagging(policy, result)
-	case models.PolicyTypeNaming:
-		return rules.CheckNaming(policy, result)
-	case models.PolicyTypeVersion:
-		return rules.CheckVersion(policy, result)
-	case models.PolicyTypeCustom:
-		// Custom policies pass by default; extend as needed.
-		return &models.ComplianceResult{
-			Status:     models.ComplianceStatusPass,
-			Violations: json.RawMessage("[]"),
-		}, nil
-	default:
-		return nil, fmt.Errorf("unsupported policy type: %s", policy.PolicyType)
+	engine, ok := c.engines["custom"]
+	if !ok {
+		return nil, fmt.Errorf("no compliance policy engine registered")
 	}
+	return engine.Evaluate(policy, result)
 }
