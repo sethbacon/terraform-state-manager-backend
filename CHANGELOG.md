@@ -7,6 +7,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.1](https://github.com/sethbacon/terraform-state-manager-backend/compare/v0.5.0...v0.5.1) (2026-06-07)
+
+
+### Bug Fixes
+
+* **deps:** bump terraform-suite-identity to v0.12.0 ([#43](https://github.com/sethbacon/terraform-state-manager-backend/issues/43)) ([8aeafba](https://github.com/sethbacon/terraform-state-manager-backend/commit/8aeafbade8f683e78560660c89b7c2d0dfe6a8e8))
+
 ## [0.5.0](https://github.com/sethbacon/terraform-state-manager-backend/compare/v0.4.0...v0.5.0) (2026-06-07)
 
 
