@@ -7,6 +7,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0](https://github.com/sethbacon/terraform-state-manager-backend/compare/v0.5.1...v0.6.0) (2026-06-07)
+
+
+### Features
+
+* **backup,migration:** checksum-verified restore round-trip and post-transfer migration verification ([#52](https://github.com/sethbacon/terraform-state-manager-backend/issues/52)) ([a6d2f3c](https://github.com/sethbacon/terraform-state-manager-backend/commit/a6d2f3c0306f8d4a677464137e5ce135f5891dac)), closes [#48](https://github.com/sethbacon/terraform-state-manager-backend/issues/48)
+* **clients:** add read-only Azure DevOps REST client + dry-run migration plan ([#51](https://github.com/sethbacon/terraform-state-manager-backend/issues/51)) ([fb6b723](https://github.com/sethbacon/terraform-state-manager-backend/commit/fb6b7238e804e18530b50a21ea8c2636fa7c830a)), closes [#47](https://github.com/sethbacon/terraform-state-manager-backend/issues/47)
+
+
+### Bug Fixes
+
+* **migration:** honor per-job storage config in migration factory ([#49](https://github.com/sethbacon/terraform-state-manager-backend/issues/49)) ([d778862](https://github.com/sethbacon/terraform-state-manager-backend/commit/d77886253d806184b463f66f3a27c44e3b9741fc)), closes [#45](https://github.com/sethbacon/terraform-state-manager-backend/issues/45)
+
+
+### Refactor
+
+* **compliance:** extract PolicyEngine interface + CustomRulesEngine behind Checker ([#50](https://github.com/sethbacon/terraform-state-manager-backend/issues/50)) ([56c6c03](https://github.com/sethbacon/terraform-state-manager-backend/commit/56c6c0321cac620cd4ae07487bef018d81aac3ee))
+
 ## [0.5.1](https://github.com/sethbacon/terraform-state-manager-backend/compare/v0.5.0...v0.5.1) (2026-06-07)
 
 
