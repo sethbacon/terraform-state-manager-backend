@@ -2,6 +2,7 @@ package compliance
 
 import (
 	"encoding/json"
+	"sort"
 	"testing"
 
 	"github.com/terraform-state-manager/terraform-state-manager/internal/db/models"
@@ -9,6 +10,41 @@ import (
 )
 
 func strptr(s string) *string { return &s }
+
+// violationsEqualUnordered reports whether two violations JSON arrays contain
+// the same elements regardless of order. CheckTagging builds violations while
+// ranging over a map, so Go's randomized map iteration can reorder them between
+// two identical calls; only inter-element order needs normalizing (encoding/json
+// already sorts object keys deterministically).
+func violationsEqualUnordered(t *testing.T, a, b json.RawMessage) bool {
+	t.Helper()
+	norm := func(raw json.RawMessage) []string {
+		var items []map[string]interface{}
+		if err := json.Unmarshal(raw, &items); err != nil {
+			t.Fatalf("unmarshal violations %q: %v", string(raw), err)
+		}
+		out := make([]string, 0, len(items))
+		for _, it := range items {
+			enc, err := json.Marshal(it)
+			if err != nil {
+				t.Fatalf("marshal violation: %v", err)
+			}
+			out = append(out, string(enc))
+		}
+		sort.Strings(out)
+		return out
+	}
+	na, nb := norm(a), norm(b)
+	if len(na) != len(nb) {
+		return false
+	}
+	for i := range na {
+		if na[i] != nb[i] {
+			return false
+		}
+	}
+	return true
+}
 
 // resourcesByTypeJSON builds a resources_by_type JSONB value with the given
 // resource types, each carrying the provided tags map (or no tags when nil).
@@ -272,7 +308,7 @@ func TestCustomRulesEngine_ParityWithRules(t *testing.T) {
 			if viaEngine.Status != viaDirect.Status {
 				t.Errorf("status mismatch: engine=%q direct=%q", viaEngine.Status, viaDirect.Status)
 			}
-			if string(viaEngine.Violations) != string(viaDirect.Violations) {
+			if !violationsEqualUnordered(t, viaEngine.Violations, viaDirect.Violations) {
 				t.Errorf("violations bytes mismatch:\n engine=%s\n direct=%s",
 					string(viaEngine.Violations), string(viaDirect.Violations))
 			}
