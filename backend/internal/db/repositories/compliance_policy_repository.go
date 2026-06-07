@@ -22,14 +22,15 @@ func NewCompliancePolicyRepository(db *sql.DB) *CompliancePolicyRepository {
 // Create inserts a new compliance policy into the database.
 func (r *CompliancePolicyRepository) Create(ctx context.Context, policy *models.CompliancePolicy) error {
 	err := r.db.QueryRowContext(ctx,
-		`INSERT INTO compliance_policies (organization_id, name, policy_type, config, severity, is_active)
-		 VALUES ($1, $2, $3, $4, $5, $6)
+		`INSERT INTO compliance_policies (organization_id, name, policy_type, config, severity, engine_type, is_active)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7)
 		 RETURNING id, created_at, updated_at`,
 		policy.OrganizationID,
 		policy.Name,
 		policy.PolicyType,
 		policy.Config,
 		policy.Severity,
+		policy.EngineType,
 		policy.IsActive,
 	).Scan(&policy.ID, &policy.CreatedAt, &policy.UpdatedAt)
 	if err != nil {
@@ -42,7 +43,7 @@ func (r *CompliancePolicyRepository) Create(ctx context.Context, policy *models.
 func (r *CompliancePolicyRepository) GetByID(ctx context.Context, id string) (*models.CompliancePolicy, error) {
 	var p models.CompliancePolicy
 	err := r.db.QueryRowContext(ctx,
-		`SELECT id, organization_id, name, policy_type, config, severity, is_active, created_at, updated_at
+		`SELECT id, organization_id, name, policy_type, config, severity, engine_type, is_active, created_at, updated_at
 		 FROM compliance_policies
 		 WHERE id = $1`,
 		id,
@@ -53,6 +54,7 @@ func (r *CompliancePolicyRepository) GetByID(ctx context.Context, id string) (*m
 		&p.PolicyType,
 		&p.Config,
 		&p.Severity,
+		&p.EngineType,
 		&p.IsActive,
 		&p.CreatedAt,
 		&p.UpdatedAt,
@@ -78,7 +80,7 @@ func (r *CompliancePolicyRepository) ListByOrganization(ctx context.Context, org
 	}
 
 	rows, err := r.db.QueryContext(ctx,
-		`SELECT id, organization_id, name, policy_type, config, severity, is_active, created_at, updated_at
+		`SELECT id, organization_id, name, policy_type, config, severity, engine_type, is_active, created_at, updated_at
 		 FROM compliance_policies
 		 WHERE organization_id = $1
 		 ORDER BY name
@@ -100,6 +102,7 @@ func (r *CompliancePolicyRepository) ListByOrganization(ctx context.Context, org
 			&p.PolicyType,
 			&p.Config,
 			&p.Severity,
+			&p.EngineType,
 			&p.IsActive,
 			&p.CreatedAt,
 			&p.UpdatedAt,
@@ -117,7 +120,7 @@ func (r *CompliancePolicyRepository) ListByOrganization(ctx context.Context, org
 // GetActiveByOrganization returns all active compliance policies for a given organization.
 func (r *CompliancePolicyRepository) GetActiveByOrganization(ctx context.Context, orgID string) ([]models.CompliancePolicy, error) {
 	rows, err := r.db.QueryContext(ctx,
-		`SELECT id, organization_id, name, policy_type, config, severity, is_active, created_at, updated_at
+		`SELECT id, organization_id, name, policy_type, config, severity, engine_type, is_active, created_at, updated_at
 		 FROM compliance_policies
 		 WHERE organization_id = $1 AND is_active = true
 		 ORDER BY name`,
@@ -138,6 +141,7 @@ func (r *CompliancePolicyRepository) GetActiveByOrganization(ctx context.Context
 			&p.PolicyType,
 			&p.Config,
 			&p.Severity,
+			&p.EngineType,
 			&p.IsActive,
 			&p.CreatedAt,
 			&p.UpdatedAt,
@@ -156,12 +160,13 @@ func (r *CompliancePolicyRepository) GetActiveByOrganization(ctx context.Context
 func (r *CompliancePolicyRepository) Update(ctx context.Context, policy *models.CompliancePolicy) error {
 	_, err := r.db.ExecContext(ctx,
 		`UPDATE compliance_policies
-		 SET name = $1, policy_type = $2, config = $3, severity = $4, is_active = $5, updated_at = $6
-		 WHERE id = $7`,
+		 SET name = $1, policy_type = $2, config = $3, severity = $4, engine_type = $5, is_active = $6, updated_at = $7
+		 WHERE id = $8`,
 		policy.Name,
 		policy.PolicyType,
 		policy.Config,
 		policy.Severity,
+		policy.EngineType,
 		policy.IsActive,
 		time.Now(),
 		policy.ID,

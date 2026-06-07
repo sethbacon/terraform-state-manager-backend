@@ -18,14 +18,26 @@ type Checker struct {
 }
 
 // NewChecker creates a new compliance Checker.
+//
+// The engine registry includes the built-in custom rules engine and the
+// embedded OPA/Rego engine. If the OPA engine fails to compile its embedded
+// modules — only possible if the embedded Rego is malformed, which the tests
+// guard against — the Checker logs the failure and continues with just the
+// custom engine so compliance evaluation degrades rather than crashing.
 func NewChecker(
 	policyRepo *repositories.CompliancePolicyRepository,
 	resultRepo *repositories.ComplianceResultRepository,
 ) *Checker {
+	engines, err := newEngineRegistry()
+	if err != nil {
+		slog.Error("Falling back to custom-only compliance engine registry", "error", err)
+		custom := CustomRulesEngine{}
+		engines = map[string]PolicyEngine{custom.Name(): custom}
+	}
 	return &Checker{
 		policyRepo: policyRepo,
 		resultRepo: resultRepo,
-		engines:    newEngineRegistry(),
+		engines:    engines,
 	}
 }
 
@@ -83,11 +95,16 @@ func (c *Checker) CheckRun(ctx context.Context, orgID, runID string, results []m
 	return nil
 }
 
-// checkPolicy resolves the policy engine and evaluates the policy against the
-// analysis result. Engine resolution is currently hardcoded to the built-in
-// "custom" engine; a future change will make this configurable per policy.
+// checkPolicy resolves the policy engine from policy.EngineType and evaluates
+// the policy against the analysis result. An empty or unknown engine type falls
+// back to the built-in "custom" engine, so policies written before per-policy
+// engine selection (or pointing at an unregistered engine) keep working.
 func (c *Checker) checkPolicy(policy models.CompliancePolicy, result models.AnalysisResult) (*models.ComplianceResult, error) {
-	engine, ok := c.engines["custom"]
+	engineType := policy.EngineType
+	if _, ok := c.engines[engineType]; !ok {
+		engineType = "custom"
+	}
+	engine, ok := c.engines[engineType]
 	if !ok {
 		return nil, fmt.Errorf("no compliance policy engine registered")
 	}
