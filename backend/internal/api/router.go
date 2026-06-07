@@ -290,6 +290,21 @@ func NewRouter(cfg *config.Config, db, identityDB *sql.DB) (*gin.Engine, *Backgr
 			authGroup.GET("/providers", authHandlers.ProvidersHandler())
 		}
 
+		// Development-only endpoints (gated by DEV_MODE; 403 in production).
+		// Ported 1:1 from the registry so the frontend's dev-mode probes resolve.
+		devGroup := apiV1.Group("/dev")
+		devGroup.Use(admin.DevModeMiddleware())
+		{
+			devHandlers := admin.NewDevHandlers(cfg, identityDB)
+			devGroup.GET("/status", devHandlers.DevStatusHandler())
+			devGroup.POST("/login", devHandlers.DevLoginHandler())
+
+			// Impersonation requires authentication + admin scope.
+			devGroup.Use(middleware.AuthMiddleware(cfg, userRepo, apiKeyRepo, orgRepo))
+			devGroup.GET("/users", middleware.RequireScope(auth.ScopeAdmin), devHandlers.ListUsersForImpersonationHandler())
+			devGroup.POST("/impersonate/:user_id", middleware.RequireScope(auth.ScopeAdmin), devHandlers.ImpersonateUserHandler())
+		}
+
 		// Authenticated-only endpoints
 		authenticatedGroup := apiV1.Group("")
 		authenticatedGroup.Use(middleware.AuthMiddleware(cfg, userRepo, apiKeyRepo, orgRepo))
