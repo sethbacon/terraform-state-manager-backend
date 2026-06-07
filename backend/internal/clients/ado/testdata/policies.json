@@ -1,0 +1,60 @@
+{
+  "count": 2,
+  "value": [
+    {
+      "createdBy": {
+        "displayName": "Project Collection Build Service",
+        "id": "3b3c1c63-8b1d-4b1d-9c2a-1a2b3c4d5e6f"
+      },
+      "createdDate": "2024-01-15T10:00:00Z",
+      "isEnabled": true,
+      "isBlocking": true,
+      "isDeleted": false,
+      "settings": {
+        "minimumApproverCount": 2,
+        "creatorVoteCounts": false,
+        "scope": [
+          {
+            "refName": "refs/heads/main",
+            "matchKind": "exact",
+            "repositoryId": "5febef5a-833d-4e14-b9c0-14cb638f91e6"
+          }
+        ]
+      },
+      "id": 11,
+      "url": "https://dev.azure.com/contoso/Contoso/_apis/policy/configurations/11",
+      "type": {
+        "id": "fa4e907d-c16b-4a4c-9dfa-4906e5d171dd",
+        "url": "https://dev.azure.com/contoso/Contoso/_apis/policy/types/fa4e907d-c16b-4a4c-9dfa-4906e5d171dd",
+        "displayName": "Minimum number of reviewers"
+      }
+    },
+    {
+      "createdBy": {
+        "displayName": "Project Collection Build Service",
+        "id": "3b3c1c63-8b1d-4b1d-9c2a-1a2b3c4d5e6f"
+      },
+      "createdDate": "2024-01-15T10:05:00Z",
+      "isEnabled": false,
+      "isBlocking": true,
+      "isDeleted": false,
+      "settings": {
+        "buildDefinitionId": 1,
+        "scope": [
+          {
+            "refName": "refs/heads/main",
+            "matchKind": "exact",
+            "repositoryId": "5febef5a-833d-4e14-b9c0-14cb638f91e6"
+          }
+        ]
+      },
+      "id": 12,
+      "url": "https://dev.azure.com/contoso/Contoso/_apis/policy/configurations/12",
+      "type": {
+        "id": "0609b952-1397-4640-95ec-e00a01b2c241",
+        "url": "https://dev.azure.com/contoso/Contoso/_apis/policy/types/0609b952-1397-4640-95ec-e00a01b2c241",
+        "displayName": "Build"
+      }
+    }
+  ]
+}

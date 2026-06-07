@@ -1,0 +1,48 @@
+{
+  "count": 2,
+  "value": [
+    {
+      "id": 4,
+      "type": "Vsts",
+      "name": "platform-shared",
+      "description": "Shared platform configuration",
+      "variables": {
+        "TF_BACKEND_RESOURCE_GROUP": {
+          "value": "rg-tfstate-prod"
+        },
+        "TF_BACKEND_STORAGE_ACCOUNT": {
+          "value": "sttfstateprod"
+        },
+        "ARM_CLIENT_SECRET": {
+          "value": null,
+          "isSecret": true
+        }
+      },
+      "createdBy": {
+        "displayName": "Ada Lovelace",
+        "id": "aa11bb22-cc33-dd44-ee55-ff6677889900"
+      },
+      "createdOn": "2024-02-01T08:30:00Z"
+    },
+    {
+      "id": 5,
+      "type": "Vsts",
+      "name": "app-secrets",
+      "description": "Application secrets",
+      "variables": {
+        "DB_CONNECTION_STRING": {
+          "value": null,
+          "isSecret": true
+        },
+        "API_BASE_URL": {
+          "value": "https://api.contoso.example"
+        }
+      },
+      "createdBy": {
+        "displayName": "Grace Hopper",
+        "id": "bb22cc33-dd44-ee55-ff66-778899001122"
+      },
+      "createdOn": "2024-02-02T09:15:00Z"
+    }
+  ]
+}

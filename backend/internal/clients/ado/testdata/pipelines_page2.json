@@ -1,0 +1,12 @@
+{
+  "count": 1,
+  "value": [
+    {
+      "id": 3,
+      "name": "nightly-drift-detect",
+      "folder": "\\Operations",
+      "revision": 1,
+      "url": "https://dev.azure.com/contoso/Contoso/_apis/pipelines/3?revision=1"
+    }
+  ]
+}
