@@ -87,6 +87,27 @@ type VersionDistributionEntry struct {
 	Count   int    `json:"count"`
 }
 
+// VersionDriftEntry is a single workspace's Terraform version pin-drift result:
+// the declared required_version constraint vs the in-state terraform_version.
+type VersionDriftEntry struct {
+	WorkspaceName string `json:"workspace_name"`
+	Required      string `json:"required"`
+	Actual        string `json:"actual"`
+	Satisfies     bool   `json:"satisfies"`
+	Status        string `json:"status"`
+}
+
+// VersionDriftResponse summarises Terraform version pin-drift across the latest
+// completed run: per-workspace entries plus rollup counts by status.
+type VersionDriftResponse struct {
+	RunID     string              `json:"run_id"`
+	Total     int                 `json:"total"`
+	Satisfied int                 `json:"satisfied"`
+	Drift     int                 `json:"drift"`
+	Unknown   int                 `json:"unknown"`
+	Entries   []VersionDriftEntry `json:"entries"`
+}
+
 // ---------------------------------------------------------------------------
 // Handler methods
 // ---------------------------------------------------------------------------
@@ -344,6 +365,54 @@ func (h *Handlers) GetTerraformVersions(c *gin.Context) {
 	})
 }
 
+// GetVersionDrift handles GET /api/v1/dashboard/version-drift.
+// Returns the Terraform version pin-drift summary (required_version constraint
+// vs in-state terraform_version) across the latest completed analysis run.
+//
+// @Summary      Get Terraform version pin-drift
+// @Description  Returns the Terraform version pin-drift summary (required_version constraint vs in-state terraform_version) across the latest completed run. Only workspaces whose analysis run was supplied repo metadata carry a drift report.
+// @Tags         Dashboard
+// @Produce      json
+// @Success      200  {object}  map[string]interface{}
+// @Failure      400  {object}  map[string]interface{}
+// @Failure      500  {object}  map[string]interface{}
+// @Security     BearerAuth
+// @Security     ApiKeyAuth
+// @Router       /dashboard/version-drift [get]
+func (h *Handlers) GetVersionDrift(c *gin.Context) {
+	orgID, _ := c.Get("organization_id")
+	orgIDStr, ok := orgID.(string)
+	if !ok || orgIDStr == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "organization_id not found in context"})
+		return
+	}
+
+	ctx := c.Request.Context()
+
+	run, err := h.getLatestCompletedRun(ctx, orgIDStr)
+	if err != nil {
+		slog.Error("Failed to get latest completed run for version drift", "error", err, "org_id", orgIDStr)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to retrieve version drift"})
+		return
+	}
+	if run == nil {
+		c.JSON(http.StatusOK, gin.H{
+			"data":    &VersionDriftResponse{Entries: []VersionDriftEntry{}},
+			"message": "no completed analysis runs found",
+		})
+		return
+	}
+
+	summary, err := h.aggregateVersionDrift(ctx, run.ID)
+	if err != nil {
+		slog.Error("Failed to aggregate version drift", "error", err, "run_id", run.ID)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to aggregate version drift"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"data": summary})
+}
+
 // ---------------------------------------------------------------------------
 // Data access helpers
 // ---------------------------------------------------------------------------
@@ -586,6 +655,69 @@ func (h *Handlers) aggregateTerraformVersions(ctx context.Context, runID string)
 	}
 
 	return versions, nil
+}
+
+// aggregateVersionDrift collects the version_drift_report from every successful
+// result of a given run that carries one, returning per-workspace entries and
+// status rollup counts. Results without a drift report (no repo metadata
+// supplied) are omitted from the entries but do not error.
+func (h *Handlers) aggregateVersionDrift(ctx context.Context, runID string) (*VersionDriftResponse, error) {
+	rows, err := h.db.QueryContext(ctx,
+		`SELECT workspace_name, version_drift_report
+		 FROM analysis_results
+		 WHERE run_id = $1 AND status = $2 AND version_drift_report IS NOT NULL
+		 ORDER BY workspace_name`,
+		runID, models.ResultStatusSuccess,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query version drift reports: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	resp := &VersionDriftResponse{RunID: runID, Entries: []VersionDriftEntry{}}
+
+	for rows.Next() {
+		var workspaceName string
+		var rawJSON json.RawMessage
+		if err := rows.Scan(&workspaceName, &rawJSON); err != nil {
+			return nil, fmt.Errorf("failed to scan version drift report: %w", err)
+		}
+		if len(rawJSON) == 0 {
+			continue
+		}
+
+		var report struct {
+			Required  string `json:"required"`
+			Actual    string `json:"actual"`
+			Satisfies bool   `json:"satisfies"`
+			Status    string `json:"status"`
+		}
+		if err := json.Unmarshal(rawJSON, &report); err != nil {
+			continue // skip malformed report
+		}
+
+		resp.Entries = append(resp.Entries, VersionDriftEntry{
+			WorkspaceName: workspaceName,
+			Required:      report.Required,
+			Actual:        report.Actual,
+			Satisfies:     report.Satisfies,
+			Status:        report.Status,
+		})
+		resp.Total++
+		switch report.Status {
+		case "satisfied":
+			resp.Satisfied++
+		case "drift":
+			resp.Drift++
+		default:
+			resp.Unknown++
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("failed to iterate version drift rows: %w", err)
+	}
+
+	return resp, nil
 }
 
 // ---------------------------------------------------------------------------

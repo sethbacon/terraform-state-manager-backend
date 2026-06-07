@@ -21,6 +21,7 @@ import (
 	"github.com/terraform-state-manager/terraform-state-manager/internal/crypto"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/db/models"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/db/repositories"
+	"github.com/terraform-state-manager/terraform-state-manager/internal/services/analyzer"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/validation"
 )
 
@@ -119,10 +120,26 @@ func (h *Handlers) StartRun(c *gin.Context) {
 		}
 	}
 
-	// Create the run record with status=pending.
-	runConfig, _ := json.Marshal(map[string]interface{}{})
+	// Create the run record with status=pending. The optional repo_metadata is
+	// folded into the run config JSONB under the "repo_metadata" key so the
+	// background analysis goroutine can read it back without a separate column.
+	configMap := map[string]json.RawMessage{}
 	if req.Config != nil {
-		runConfig = *req.Config
+		if err := json.Unmarshal(*req.Config, &configMap); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"error":   "invalid config",
+				"details": err.Error(),
+			})
+			return
+		}
+	}
+	if req.RepoMetadata != nil {
+		configMap["repo_metadata"] = *req.RepoMetadata
+	}
+	runConfig, err := json.Marshal(configMap)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to encode run config"})
+		return
 	}
 
 	run := &models.AnalysisRun{
@@ -534,12 +551,16 @@ func (h *Handlers) executeAnalysis(ctx context.Context, runID, orgID string) {
 		return
 	}
 
-	// d. Run the analysis based on client type.
+	// d. Parse optional repo metadata folded into the run config. Parse failures
+	// are logged as warnings; analysis continues without version-drift data.
+	repoAnalysis := parseRunRepoMetadata(run.Config, logger)
+
+	// e. Run the analysis based on client type.
 	var results []models.AnalysisResult
 
 	switch c := client.(type) {
 	case *clients.HCPClientAdapter:
-		results = h.analyzeHCP(ctx, c, runID, source)
+		results = h.analyzeHCP(ctx, c, runID, source, repoAnalysis)
 	default:
 		// For other backends, test connection only (full analysis in future phases).
 		if testErr := client.TestConnection(ctx); testErr != nil {
@@ -556,7 +577,7 @@ func (h *Handlers) executeAnalysis(ctx context.Context, runID, orgID string) {
 		return
 	}
 
-	// e. Save results to DB.
+	// f. Save results to DB.
 	if len(results) > 0 {
 		if err := h.resultRepo.BulkCreate(dbCtx, results); err != nil {
 			logger.Error("Failed to save analysis results", "error", err)
@@ -565,7 +586,7 @@ func (h *Handlers) executeAnalysis(ctx context.Context, runID, orgID string) {
 		}
 	}
 
-	// f. Calculate summary counts and update run record.
+	// g. Calculate summary counts and update run record.
 	var (
 		totalWorkspaces  = len(results)
 		successCount     int
@@ -622,6 +643,7 @@ func (h *Handlers) analyzeHCP(
 	client *clients.HCPClientAdapter,
 	runID string,
 	source *models.StateSource,
+	repoAnalysis *analyzer.RepoMetadataAnalysis,
 ) []models.AnalysisResult {
 	logger := slog.With("run_id", runID, "source_type", "hcp_terraform")
 
@@ -643,6 +665,7 @@ func (h *Handlers) analyzeHCP(
 		}
 
 		result := h.analyzeHCPWorkspace(ctx, client, runID, ws)
+		applyRepoMetadata(&result, repoAnalysis)
 		results = append(results, result)
 	}
 
@@ -807,6 +830,75 @@ func analyzeResources(state *hcp.StateFile, result *models.AnalysisResult) {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+// parseRunRepoMetadata extracts and parses the optional repo_metadata folded
+// into the run config JSONB. It returns nil when no metadata is present. Parse
+// errors are logged as warnings and whatever parsed successfully is returned.
+func parseRunRepoMetadata(runConfig json.RawMessage, logger *slog.Logger) *analyzer.RepoMetadataAnalysis {
+	if len(runConfig) == 0 {
+		return nil
+	}
+
+	var cfg struct {
+		RepoMetadata *analyzer.RepoMetadata `json:"repo_metadata"`
+	}
+	if err := json.Unmarshal(runConfig, &cfg); err != nil {
+		logger.Warn("Failed to decode run config for repo metadata", "error", err)
+		return nil
+	}
+	if cfg.RepoMetadata == nil || cfg.RepoMetadata.IsEmpty() {
+		return nil
+	}
+
+	analysis, err := analyzer.AnalyzeRepoMetadata(cfg.RepoMetadata)
+	if err != nil {
+		// Soft failure: a malformed lock file or config still yields whatever
+		// parsed. Record the warning and continue.
+		logger.Warn("Repo metadata partially failed to parse", "error", err)
+	}
+	return analysis
+}
+
+// applyRepoMetadata attaches parsed repo-metadata fields and the computed
+// Terraform version pin-drift report to a single analysis result. It is a no-op
+// when repoAnalysis is nil. The drift report compares the declared
+// required_version against the result's in-state terraform_version.
+//
+// Provider lock pins are stored but NOT compared to actuals (deferred — no
+// provider-version data source exists yet).
+func applyRepoMetadata(result *models.AnalysisResult, repoAnalysis *analyzer.RepoMetadataAnalysis) {
+	if repoAnalysis == nil {
+		return
+	}
+
+	if repoAnalysis.RequiredVersionSpec != "" {
+		spec := repoAnalysis.RequiredVersionSpec
+		result.RequiredVersionSpec = &spec
+	}
+	if len(repoAnalysis.ProviderLockPins) > 0 {
+		if data, err := json.Marshal(repoAnalysis.ProviderLockPins); err == nil {
+			result.ProviderLockPins = data
+		}
+	}
+	if len(repoAnalysis.ModuleConstraints) > 0 {
+		if data, err := json.Marshal(repoAnalysis.ModuleConstraints); err == nil {
+			result.ModuleConstraints = data
+		}
+	}
+
+	// Compute version pin-drift: required_version (constraint) vs in-state
+	// terraform_version (actual). Only when a required_version was supplied.
+	if repoAnalysis.RequiredVersionSpec != "" {
+		actual := ""
+		if result.TerraformVersion != nil {
+			actual = *result.TerraformVersion
+		}
+		report := analyzer.ComputeVersionDrift(repoAnalysis.RequiredVersionSpec, actual)
+		if data, err := json.Marshal(report); err == nil {
+			result.VersionDriftReport = data
+		}
+	}
+}
 
 // decryptConfig decrypts sensitive values within a JSON config map.
 func (h *Handlers) decryptConfig(rawConfig json.RawMessage) (json.RawMessage, error) {

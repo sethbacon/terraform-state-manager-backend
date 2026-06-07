@@ -46,5 +46,11 @@ type AnalysisResult struct {
 	LastModified      *time.Time      `db:"last_modified" json:"last_modified,omitempty"`
 	AnalysisMethod    *string         `db:"analysis_method" json:"analysis_method,omitempty"`
 	RawStateHash      *string         `db:"raw_state_hash" json:"raw_state_hash,omitempty"`
-	CreatedAt         time.Time       `db:"created_at" json:"created_at"`
+	// Repo-metadata-derived fields (migration 000014). Nullable; populated only
+	// when an analysis run is supplied explicit repo metadata.
+	RequiredVersionSpec *string         `db:"required_version_spec" json:"required_version_spec,omitempty"`
+	ProviderLockPins    json.RawMessage `db:"provider_lock_pins" json:"provider_lock_pins,omitempty"`
+	ModuleConstraints   json.RawMessage `db:"module_constraints" json:"module_constraints,omitempty"`
+	VersionDriftReport  json.RawMessage `db:"version_drift_report" json:"version_drift_report,omitempty"`
+	CreatedAt           time.Time       `db:"created_at" json:"created_at"`
 }

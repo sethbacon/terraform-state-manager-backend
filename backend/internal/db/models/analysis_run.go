@@ -50,4 +50,10 @@ type AnalysisRunCreateRequest struct {
 	SourceID    *string          `json:"source_id,omitempty"`
 	TriggerType string           `json:"trigger_type" binding:"required"`
 	Config      *json.RawMessage `json:"config,omitempty"`
+	// RepoMetadata is optional explicit repo metadata used to compute Terraform
+	// version pin-drift (required_version vs in-state terraform_version) and to
+	// record provider lock pins / module constraints. No outbound fetch is
+	// performed; the caller supplies the raw file contents (or pre-parsed pins).
+	// It is persisted on the run config under the "repo_metadata" key.
+	RepoMetadata *json.RawMessage `json:"repo_metadata,omitempty"`
 }
