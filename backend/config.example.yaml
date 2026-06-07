@@ -45,6 +45,19 @@ oidc:
     - profile
     - email
 
+# Inbound code-drift ingest (POST /api/v1/drift/ingest). A CI pipeline (e.g.
+# Azure DevOps backed by Entra workload identity) presents an OIDC/ID token that
+# TSM verifies against this issuer's JWKS and audience. This is a SEPARATE issuer
+# from the interactive login OIDC above. When issuer is empty the endpoint is
+# disabled and returns 503.
+# Env: TSM_DRIFT_INGEST_OIDC_ISSUER, TSM_DRIFT_INGEST_OIDC_AUDIENCE
+# NOTE: issuer/audience are placeholders pending the outbound-trigger slice that
+# finalizes the real ADO/Entra values.
+drift_ingest:
+  oidc:
+    issuer: ""
+    audience: ""
+
 security:
   cors:
     allowed_origins:

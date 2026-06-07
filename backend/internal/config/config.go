@@ -27,6 +27,7 @@ type Config struct {
 	Telemetry     TelemetryConfig     `mapstructure:"telemetry"`
 	Audit         AuditConfig         `mapstructure:"audit"`
 	Notifications NotificationsConfig `mapstructure:"notifications"`
+	DriftIngest   DriftIngestConfig   `mapstructure:"drift_ingest"`
 }
 
 // ServerConfig holds HTTP server configuration
@@ -131,6 +132,27 @@ type AuthConfig struct {
 	OIDC           OIDCConfig           `mapstructure:"oidc"`
 	AzureAD        AzureADConfig        `mapstructure:"azure_ad"`
 	IdentitySchema IdentitySchemaConfig `mapstructure:"identity_schema"`
+}
+
+// DriftIngestConfig holds the OIDC workload-identity validator settings for the
+// inbound code-drift ingest endpoint (POST /api/v1/drift/ingest). The CI pipeline
+// (e.g. Azure DevOps backed by Entra workload identity) presents an OIDC/ID token
+// that TSM verifies against this issuer's JWKS and audience. This is a SEPARATE
+// issuer from the interactive login IdP, so it has its own validator instance.
+//
+// NOTE: IssuerURL and Audience are placeholders until the outbound-trigger slice
+// finalizes the real ADO/Entra issuer and audience.
+type DriftIngestConfig struct {
+	OIDC DriftIngestOIDCConfig `mapstructure:"oidc"`
+}
+
+// DriftIngestOIDCConfig holds the issuer and audience for the drift-ingest OIDC
+// validator. Configured via TSM_DRIFT_INGEST_OIDC_ISSUER and
+// TSM_DRIFT_INGEST_OIDC_AUDIENCE. When Issuer is empty the ingest endpoint
+// rejects all requests (validator not configured).
+type DriftIngestOIDCConfig struct {
+	Issuer   string `mapstructure:"issuer"`
+	Audience string `mapstructure:"audience"`
 }
 
 // IdentitySchemaConfig controls whether identity data (users, organizations,
@@ -369,6 +391,8 @@ func bindEnvVars(v *viper.Viper) error {
 		"notifications.smtp.from", "notifications.smtp.use_tls",
 		"notifications.api_key_expiry_warning_days",
 		"notifications.api_key_expiry_check_interval_hours",
+
+		"drift_ingest.oidc.issuer", "drift_ingest.oidc.audience",
 	}
 	for _, key := range keys {
 		if err := v.BindEnv(key); err != nil {

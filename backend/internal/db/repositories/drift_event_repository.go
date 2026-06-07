@@ -18,12 +18,14 @@ func NewDriftEventRepository(db *sql.DB) *DriftEventRepository {
 	return &DriftEventRepository{db: db}
 }
 
-// Create inserts a new drift event into the database.
+// Create inserts a new drift event into the database. Callers must set
+// DriftSource (e.g. models.DriftSourceSnapshot or models.DriftSourceCode);
+// ExternalRef is optional and used for idempotent ingestion.
 func (r *DriftEventRepository) Create(ctx context.Context, event *models.DriftEvent) error {
 	err := r.db.QueryRowContext(ctx,
 		`INSERT INTO drift_events (organization_id, workspace_name, snapshot_before,
-		        snapshot_after, changes, severity)
-		 VALUES ($1, $2, $3, $4, $5, $6)
+		        snapshot_after, changes, severity, drift_source, external_ref)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 		 RETURNING id, detected_at`,
 		event.OrganizationID,
 		event.WorkspaceName,
@@ -31,6 +33,8 @@ func (r *DriftEventRepository) Create(ctx context.Context, event *models.DriftEv
 		event.SnapshotAfter,
 		event.Changes,
 		event.Severity,
+		event.DriftSource,
+		event.ExternalRef,
 	).Scan(&event.ID, &event.DetectedAt)
 	if err != nil {
 		return fmt.Errorf("failed to create drift event: %w", err)
@@ -38,12 +42,46 @@ func (r *DriftEventRepository) Create(ctx context.Context, event *models.DriftEv
 	return nil
 }
 
+// GetByExternalRef returns the drift event with the given external reference
+// within the organization, or nil if none exists. Used to make plan-JSON
+// ingestion idempotent against repeated CI deliveries.
+func (r *DriftEventRepository) GetByExternalRef(ctx context.Context, orgID, externalRef string) (*models.DriftEvent, error) {
+	var event models.DriftEvent
+	err := r.db.QueryRowContext(ctx,
+		`SELECT id, organization_id, workspace_name, snapshot_before,
+		        snapshot_after, changes, severity, drift_source, external_ref, detected_at
+		 FROM drift_events
+		 WHERE organization_id = $1 AND external_ref = $2
+		 ORDER BY detected_at DESC
+		 LIMIT 1`,
+		orgID, externalRef,
+	).Scan(
+		&event.ID,
+		&event.OrganizationID,
+		&event.WorkspaceName,
+		&event.SnapshotBefore,
+		&event.SnapshotAfter,
+		&event.Changes,
+		&event.Severity,
+		&event.DriftSource,
+		&event.ExternalRef,
+		&event.DetectedAt,
+	)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("failed to get drift event by external ref: %w", err)
+	}
+	return &event, nil
+}
+
 // GetByID retrieves a drift event by its ID.
 func (r *DriftEventRepository) GetByID(ctx context.Context, id string) (*models.DriftEvent, error) {
 	var event models.DriftEvent
 	err := r.db.QueryRowContext(ctx,
 		`SELECT id, organization_id, workspace_name, snapshot_before,
-		        snapshot_after, changes, severity, detected_at
+		        snapshot_after, changes, severity, drift_source, external_ref, detected_at
 		 FROM drift_events
 		 WHERE id = $1`,
 		id,
@@ -55,6 +93,8 @@ func (r *DriftEventRepository) GetByID(ctx context.Context, id string) (*models.
 		&event.SnapshotAfter,
 		&event.Changes,
 		&event.Severity,
+		&event.DriftSource,
+		&event.ExternalRef,
 		&event.DetectedAt,
 	)
 	if err == sql.ErrNoRows {
@@ -80,7 +120,7 @@ func (r *DriftEventRepository) ListByOrganization(ctx context.Context, orgID str
 
 	rows, err := r.db.QueryContext(ctx,
 		`SELECT id, organization_id, workspace_name, snapshot_before,
-		        snapshot_after, changes, severity, detected_at
+		        snapshot_after, changes, severity, drift_source, external_ref, detected_at
 		 FROM drift_events
 		 WHERE organization_id = $1
 		 ORDER BY detected_at DESC
@@ -103,6 +143,8 @@ func (r *DriftEventRepository) ListByOrganization(ctx context.Context, orgID str
 			&event.SnapshotAfter,
 			&event.Changes,
 			&event.Severity,
+			&event.DriftSource,
+			&event.ExternalRef,
 			&event.DetectedAt,
 		); err != nil {
 			return nil, 0, fmt.Errorf("failed to scan drift event: %w", err)
@@ -129,7 +171,7 @@ func (r *DriftEventRepository) ListByWorkspace(ctx context.Context, orgID, works
 
 	rows, err := r.db.QueryContext(ctx,
 		`SELECT id, organization_id, workspace_name, snapshot_before,
-		        snapshot_after, changes, severity, detected_at
+		        snapshot_after, changes, severity, drift_source, external_ref, detected_at
 		 FROM drift_events
 		 WHERE organization_id = $1 AND workspace_name = $2
 		 ORDER BY detected_at DESC
@@ -152,6 +194,8 @@ func (r *DriftEventRepository) ListByWorkspace(ctx context.Context, orgID, works
 			&event.SnapshotAfter,
 			&event.Changes,
 			&event.Severity,
+			&event.DriftSource,
+			&event.ExternalRef,
 			&event.DetectedAt,
 		); err != nil {
 			return nil, 0, fmt.Errorf("failed to scan drift event: %w", err)

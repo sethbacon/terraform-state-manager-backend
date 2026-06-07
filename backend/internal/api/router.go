@@ -30,6 +30,7 @@ import (
 	backupsAPI "github.com/terraform-state-manager/terraform-state-manager/internal/api/backups"
 	complianceAPI "github.com/terraform-state-manager/terraform-state-manager/internal/api/compliance"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/api/dashboards"
+	driftAPI "github.com/terraform-state-manager/terraform-state-manager/internal/api/drift"
 	migrationsAPI "github.com/terraform-state-manager/terraform-state-manager/internal/api/migrations"
 	notificationsAPI "github.com/terraform-state-manager/terraform-state-manager/internal/api/notifications"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/api/reports"
@@ -40,6 +41,7 @@ import (
 	"github.com/terraform-state-manager/terraform-state-manager/internal/api/uitheme"
 	webhooksAPI "github.com/terraform-state-manager/terraform-state-manager/internal/api/webhooks"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/auth"
+	"github.com/terraform-state-manager/terraform-state-manager/internal/auth/driftingest"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/auth/oidc"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/config"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/crypto"
@@ -260,6 +262,29 @@ func NewRouter(cfg *config.Config, db, identityDB *sql.DB) (*gin.Engine, *Backgr
 	complianceHandlers := complianceAPI.NewHandlers(compliancePolicyRepo, complianceResultRepo, complianceChecker)
 	webhookHandlers := webhooksAPI.NewHandlers(sourceRepo, analysisRunRepo)
 
+	// Phase 4a: inbound code-drift ingest. The validator verifies OIDC
+	// workload-identity tokens from the CI pipeline against a configurable issuer
+	// (separate from the login IdP). When the issuer is unconfigured the validator
+	// stays nil and the ingest endpoint returns 503.
+	var driftIngestValidator *driftingest.Validator
+	if cfg.DriftIngest.OIDC.Issuer != "" {
+		v, vErr := driftingest.NewValidator(
+			context.Background(),
+			cfg.DriftIngest.OIDC.Issuer,
+			cfg.DriftIngest.OIDC.Audience,
+		)
+		if vErr != nil {
+			slog.Error("Failed to initialize drift-ingest OIDC validator",
+				"error", vErr, "issuer", cfg.DriftIngest.OIDC.Issuer)
+		} else {
+			driftIngestValidator = v
+			slog.Info("drift-ingest OIDC validator loaded", "issuer", cfg.DriftIngest.OIDC.Issuer)
+		}
+	} else {
+		slog.Info("drift-ingest OIDC issuer not configured; POST /drift/ingest disabled")
+	}
+	driftIngestHandlers := driftAPI.NewHandlers(driftIngestValidator, driftRepo, sourceRepo)
+
 	// Initialize rate limiters
 	authRateLimiter := middleware.NewRateLimiter(middleware.AuthRateLimitConfig())
 	generalRateLimiter := middleware.NewRateLimiter(middleware.DefaultRateLimitConfig())
@@ -299,6 +324,16 @@ func NewRouter(cfg *config.Config, db, identityDB *sql.DB) (*gin.Engine, *Backgr
 			authGroup.GET("/callback", authHandlers.CallbackHandler())
 			authGroup.GET("/logout", authHandlers.LogoutHandler())
 			authGroup.GET("/providers", authHandlers.ProvidersHandler())
+		}
+
+		// Phase 4a: inbound code-drift ingest (OIDC workload-identity auth).
+		// Authenticated inside the handler via the drift-ingest OIDC validator,
+		// not by AuthMiddleware (JWT/API key), so it lives outside the
+		// authenticated group. Rate limited like other externally-called routes.
+		driftIngestGroup := apiV1.Group("/drift")
+		driftIngestGroup.Use(middleware.RateLimitMiddleware(generalRateLimiter))
+		{
+			driftIngestGroup.POST("/ingest", driftIngestHandlers.IngestPlan)
 		}
 
 		// Development-only endpoints (gated by DEV_MODE; 403 in production).

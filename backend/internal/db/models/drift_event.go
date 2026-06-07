@@ -12,8 +12,19 @@ const (
 	DriftSeverityCritical = "critical"
 )
 
-// DriftEvent records a detected change between two state snapshots for a workspace.
-// The changes field stores a DriftChanges struct as JSONB.
+// DriftSource constants identify the origin of a drift event.
+const (
+	// DriftSourceSnapshot marks events detected by comparing two state snapshots.
+	DriftSourceSnapshot = "snapshot"
+	// DriftSourceCode marks events ingested from a Terraform plan JSON via the
+	// external drift-ingest endpoint.
+	DriftSourceCode = "code"
+)
+
+// DriftEvent records a detected change for a workspace. It covers both
+// snapshot-vs-snapshot drift (DriftSourceSnapshot) and code drift ingested from
+// a Terraform plan JSON (DriftSourceCode). The changes field stores a
+// DriftChanges struct as JSONB.
 type DriftEvent struct {
 	ID             string          `db:"id" json:"id"`
 	OrganizationID string          `db:"organization_id" json:"organization_id"`
@@ -22,6 +33,8 @@ type DriftEvent struct {
 	SnapshotAfter  *string         `db:"snapshot_after" json:"snapshot_after,omitempty"`
 	Changes        json.RawMessage `db:"changes" json:"changes"`
 	Severity       string          `db:"severity" json:"severity"`
+	DriftSource    string          `db:"drift_source" json:"drift_source"`
+	ExternalRef    *string         `db:"external_ref" json:"external_ref,omitempty"`
 	DetectedAt     time.Time       `db:"detected_at" json:"detected_at"`
 }
 
