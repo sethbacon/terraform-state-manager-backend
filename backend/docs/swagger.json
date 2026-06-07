@@ -645,6 +645,73 @@
                 }
             }
         },
+        "/admin/ui-theme": {
+            "put": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "Writes the white-label theme used by the frontend. Accepts the same shape returned by GET /api/v1/ui/theme. Two routes share this handler: PUT /api/v1/admin/ui-theme (Bearer auth, requires the admin scope) for post-setup edits, and PUT /api/v1/setup/ui-theme (Authorization: SetupToken \u003ctoken\u003e) for the setup wizard's branding step before any admin user exists. Validation: color fields must match #RGB or #RRGGBB; URL fields must be absolute https:// URLs or relative paths beginning with /.",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "UI Theme"
+                ],
+                "summary": "Upsert UI theme configuration",
+                "parameters": [
+                    {
+                        "description": "Theme configuration",
+                        "name": "body",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/models.UIThemeConfig"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/models.UIThemeConfig"
+                        }
+                    },
+                    "400": {
+                        "description": "Invalid input",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "403": {
+                        "description": "Forbidden",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "500": {
+                        "description": "Internal server error",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    }
+                }
+            }
+        },
         "/admin/users/{id}/erase": {
             "post": {
                 "security": [
@@ -6039,6 +6106,73 @@
                 }
             }
         },
+        "/setup/ui-theme": {
+            "put": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "Writes the white-label theme used by the frontend. Accepts the same shape returned by GET /api/v1/ui/theme. Two routes share this handler: PUT /api/v1/admin/ui-theme (Bearer auth, requires the admin scope) for post-setup edits, and PUT /api/v1/setup/ui-theme (Authorization: SetupToken \u003ctoken\u003e) for the setup wizard's branding step before any admin user exists. Validation: color fields must match #RGB or #RRGGBB; URL fields must be absolute https:// URLs or relative paths beginning with /.",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "UI Theme"
+                ],
+                "summary": "Upsert UI theme configuration",
+                "parameters": [
+                    {
+                        "description": "Theme configuration",
+                        "name": "body",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/models.UIThemeConfig"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/models.UIThemeConfig"
+                        }
+                    },
+                    "400": {
+                        "description": "Invalid input",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "403": {
+                        "description": "Forbidden",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "500": {
+                        "description": "Internal server error",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    }
+                }
+            }
+        },
         "/setup/validate-token": {
             "post": {
                 "produces": [
@@ -6646,6 +6780,33 @@
                     },
                     "500": {
                         "description": "Internal Server Error",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    }
+                }
+            }
+        },
+        "/ui/theme": {
+            "get": {
+                "description": "Returns the white-label theme configuration consumed by the frontend ThemeContext to brand the application. Public — no authentication required so the login page can brand itself before sign-in. When nothing has been configured the built-in default theme is returned, so the frontend always receives a valid theme.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "UI Theme"
+                ],
+                "summary": "Get UI theme configuration",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/models.UIThemeConfig"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal server error",
                         "schema": {
                             "type": "object",
                             "additionalProperties": true
@@ -7893,6 +8054,35 @@
         },
         "models.StateSourceUpdateRequest": {
             "type": "object"
+        },
+        "models.UIThemeConfig": {
+            "type": "object",
+            "properties": {
+                "favicon_url": {
+                    "type": "string"
+                },
+                "login_hero_url": {
+                    "type": "string"
+                },
+                "logo_url": {
+                    "type": "string"
+                },
+                "primary_color": {
+                    "type": "string"
+                },
+                "product_name": {
+                    "type": "string"
+                },
+                "secondary_color_dark": {
+                    "type": "string"
+                },
+                "secondary_color_light": {
+                    "type": "string"
+                },
+                "updated_at": {
+                    "type": "string"
+                }
+            }
         },
         "services.APIKeyRecord": {
             "type": "object",

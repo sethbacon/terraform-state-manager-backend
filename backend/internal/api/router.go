@@ -37,6 +37,7 @@ import (
 	"github.com/terraform-state-manager/terraform-state-manager/internal/api/setup"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/api/snapshots"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/api/sources"
+	"github.com/terraform-state-manager/terraform-state-manager/internal/api/uitheme"
 	webhooksAPI "github.com/terraform-state-manager/terraform-state-manager/internal/api/webhooks"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/auth"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/auth/oidc"
@@ -191,6 +192,10 @@ func NewRouter(cfg *config.Config, db, identityDB *sql.DB) (*gin.Engine, *Backgr
 		cfg, identityDB, tokenCipher, oidcConfigRepo, userRepo, orgRepo, authHandlers.SetOIDCProvider,
 	)
 
+	// White-label UI theme handlers. The theme is stored in system_settings,
+	// which is owned by the identity connection, so back it with sqlxDB.
+	uiThemeHandlers := uitheme.NewHandlers(sqlxDB)
+
 	// Initialize Phase 1 handlers
 	sourceHandlers := sources.NewHandlers(cfg, sourceRepo, tokenCipher)
 	analysisHandlers := analysis.NewHandlers(cfg, analysisRunRepo, analysisResultRepo, sourceRepo, tokenCipher)
@@ -265,6 +270,11 @@ func NewRouter(cfg *config.Config, db, identityDB *sql.DB) (*gin.Engine, *Backgr
 		// Setup status endpoint (public, no auth required)
 		apiV1.GET("/setup/status", setupHandlers.GetSetupStatus)
 
+		// White-label UI theme — read endpoint is public so the unauthenticated
+		// login page can render branded colors/logo before sign-in. Returns the
+		// built-in default theme when nothing has been configured.
+		apiV1.GET("/ui/theme", uiThemeHandlers.GetTheme())
+
 		// Setup wizard endpoints (setup token auth, rate limited)
 		// Permanently disabled after initial setup completes.
 		setupGroup := apiV1.Group("/setup")
@@ -275,6 +285,10 @@ func NewRouter(cfg *config.Config, db, identityDB *sql.DB) (*gin.Engine, *Backgr
 			setupGroup.POST("/oidc", setupHandlers.SaveOIDCConfig)
 			setupGroup.POST("/admin", setupHandlers.ConfigureAdmin)
 			setupGroup.POST("/complete", setupHandlers.CompleteSetup)
+
+			// White-label theme — wizard branding step upserts via setup-token auth.
+			// The same handler is mounted under /admin/ui-theme below for post-setup edits.
+			setupGroup.PUT("/ui-theme", uiThemeHandlers.PutTheme())
 		}
 
 		// Public authentication endpoints (no auth required, but rate limited)
@@ -396,6 +410,12 @@ func NewRouter(cfg *config.Config, db, identityDB *sql.DB) (*gin.Engine, *Backgr
 				oidcAdminGroup.GET("/config", oidcAdminHandlers.GetActiveOIDCConfig)
 				oidcAdminGroup.PUT("/group-mapping", oidcAdminHandlers.UpdateGroupMapping)
 			}
+
+			// White-label theme writes for admins (post-setup edits).
+			// Setup-wizard writes use PUT /api/v1/setup/ui-theme above.
+			authenticatedGroup.PUT("/admin/ui-theme",
+				middleware.RequireScope(auth.ScopeAdmin),
+				uiThemeHandlers.PutTheme())
 
 			// Audit logs (read-only, admin)
 			auditLogsGroup := authenticatedGroup.Group("/admin/audit-logs")
