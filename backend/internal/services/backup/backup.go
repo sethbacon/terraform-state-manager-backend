@@ -53,8 +53,7 @@ func (s *Service) CreateBackup(
 	serial int,
 ) (*models.StateBackup, error) {
 	// Compute SHA-256 checksum.
-	hash := sha256.Sum256(stateData)
-	checksum := hex.EncodeToString(hash[:])
+	checksum := sha256Hex(stateData)
 
 	// Build storage path: backups/{org_id}/{workspace_name}/{timestamp}.tfstate
 	timestamp := time.Now().UTC().Format("20060102T150405Z")
@@ -136,6 +135,48 @@ func (s *Service) RestoreBackup(ctx context.Context, backupID string) ([]byte, *
 	return data, backup, nil
 }
 
+// VerifyRestoreRoundTrip retrieves the stored state data for a backup and
+// verifies its integrity before returning it. It loads the backup record, reads
+// the at-rest object from storage, recomputes the SHA-256 checksum, and compares
+// it to the recorded ChecksumSHA256. The returned bool reports whether the data
+// is valid; the data is returned regardless so callers can inspect it. An error
+// is returned when the record or object cannot be loaded, or when the backup has
+// no stored checksum to verify against.
+func (s *Service) VerifyRestoreRoundTrip(ctx context.Context, backupID string) (bool, []byte, *models.StateBackup, error) {
+	backup, err := s.backupRepo.GetByID(ctx, backupID)
+	if err != nil {
+		return false, nil, nil, fmt.Errorf("failed to retrieve backup record: %w", err)
+	}
+	if backup == nil {
+		return false, nil, nil, fmt.Errorf("backup not found: %s", backupID)
+	}
+
+	if backup.ChecksumSHA256 == nil {
+		return false, nil, backup, fmt.Errorf("backup %s has no stored checksum", backupID)
+	}
+
+	data, err := s.storage.Get(ctx, backup.StoragePath)
+	if err != nil {
+		return false, nil, backup, fmt.Errorf("failed to retrieve backup data from storage: %w", err)
+	}
+
+	computed := sha256Hex(data)
+	valid := computed == *backup.ChecksumSHA256
+	if !valid {
+		slog.Warn("Backup restore round-trip integrity check failed",
+			"backup_id", backupID,
+			"expected", *backup.ChecksumSHA256,
+			"computed", computed)
+	} else {
+		slog.Info("Backup restore round-trip verified",
+			"backup_id", backupID,
+			"workspace", backup.WorkspaceName,
+			"checksum", computed)
+	}
+
+	return valid, data, backup, nil
+}
+
 // VerifyBackup re-computes the SHA-256 checksum of the stored state data and
 // compares it against the recorded checksum to verify data integrity.
 func (s *Service) VerifyBackup(ctx context.Context, backupID string) (bool, error) {
@@ -156,8 +197,7 @@ func (s *Service) VerifyBackup(ctx context.Context, backupID string) (bool, erro
 		return false, fmt.Errorf("failed to retrieve backup data from storage: %w", err)
 	}
 
-	hash := sha256.Sum256(data)
-	computed := hex.EncodeToString(hash[:])
+	computed := sha256Hex(data)
 
 	valid := computed == *backup.ChecksumSHA256
 	if !valid {
@@ -202,6 +242,12 @@ func (s *Service) DeleteBackup(ctx context.Context, backupID string) error {
 // It delegates to EnforceRetention in the retention service logic.
 func (s *Service) ApplyRetention(ctx context.Context, orgID string) error {
 	return EnforceRetention(ctx, orgID, s.retentionRepo, s.backupRepo, s.storage)
+}
+
+// sha256Hex returns the hex-encoded SHA-256 checksum of data.
+func sha256Hex(data []byte) string {
+	hash := sha256.Sum256(data)
+	return hex.EncodeToString(hash[:])
 }
 
 // nilIfEmpty returns a pointer to s if non-empty, otherwise nil.

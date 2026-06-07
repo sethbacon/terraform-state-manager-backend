@@ -4,6 +4,8 @@ package migration
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -13,6 +15,24 @@ import (
 	"github.com/terraform-state-manager/terraform-state-manager/internal/db/repositories"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/storage"
 )
+
+// transferStatus describes the outcome of transferring a single file.
+type transferStatus string
+
+const (
+	// statusMigrated indicates the file was (re-)transferred to the target.
+	statusMigrated transferStatus = "migrated"
+	// statusSkipped indicates an identical file already existed at the target.
+	statusSkipped transferStatus = "skipped"
+	// statusFailed indicates the transfer could not be completed or verified.
+	statusFailed transferStatus = "failed"
+)
+
+// sha256Hex returns the hex-encoded SHA-256 checksum of data.
+func sha256Hex(data []byte) string {
+	hash := sha256.Sum256(data)
+	return hex.EncodeToString(hash[:])
+}
 
 // validBackends lists the accepted storage backend identifiers.
 var validBackends = map[string]bool{
@@ -259,40 +279,20 @@ func (s *Service) executeMigration(ctx context.Context, job *models.MigrationJob
 			break
 		}
 
-		// Download from source.
-		data, err := sourceClient.Get(ctx, filePath)
-		if err != nil {
-			failed++
-			errLog = append(errLog, map[string]string{
-				"file":  filePath,
-				"error": fmt.Sprintf("failed to download: %v", err),
-			})
-			logger.Warn("Failed to download file", "file", filePath, "error", err)
-			s.updateProgress(ctx, job.ID, migrated, failed)
-			continue
-		}
-
-		// Check if file already exists in target.
-		exists, err := targetClient.Exists(ctx, filePath)
-		if err == nil && exists {
+		status, err := transferFile(ctx, sourceClient, targetClient, filePath)
+		switch status {
+		case statusSkipped:
 			skipped++
-			s.updateProgress(ctx, job.ID, migrated, failed)
-			continue
-		}
-
-		// Upload to target.
-		if err := targetClient.Put(ctx, filePath, data); err != nil {
+		case statusMigrated:
+			migrated++
+		default: // statusFailed
 			failed++
 			errLog = append(errLog, map[string]string{
 				"file":  filePath,
-				"error": fmt.Sprintf("failed to upload: %v", err),
+				"error": err.Error(),
 			})
-			logger.Warn("Failed to upload file", "file", filePath, "error", err)
-			s.updateProgress(ctx, job.ID, migrated, failed)
-			continue
+			logger.Warn("Failed to transfer file", "file", filePath, "error", err)
 		}
-
-		migrated++
 		s.updateProgress(ctx, job.ID, migrated, failed)
 	}
 
@@ -326,6 +326,48 @@ func (s *Service) executeMigration(ctx context.Context, job *models.MigrationJob
 		"failed", failed,
 		"skipped", skipped,
 		"duration", time.Since(now).String())
+}
+
+// transferFile copies a single file from src to dst with checksum verification.
+//
+// It downloads the file from src and computes its SHA-256 checksum. If the file
+// already exists at dst, it is downloaded and its checksum compared to the
+// source: an identical file is skipped, while a divergent one is overwritten so
+// the target converges on the source. After writing, the file is read back from
+// dst and its checksum compared to the source to confirm an intact landing. A
+// checksum mismatch (or any I/O error) is reported as statusFailed with a
+// descriptive error.
+func transferFile(ctx context.Context, src, dst storage.Backend, path string) (transferStatus, error) {
+	data, err := src.Get(ctx, path)
+	if err != nil {
+		return statusFailed, fmt.Errorf("failed to download: %w", err)
+	}
+	srcChecksum := sha256Hex(data)
+
+	// If the file already exists at the target, skip it only when its contents
+	// are byte-identical to the source; otherwise overwrite to correct drift.
+	if exists, existsErr := dst.Exists(ctx, path); existsErr == nil && exists {
+		existing, getErr := dst.Get(ctx, path)
+		if getErr == nil && sha256Hex(existing) == srcChecksum {
+			return statusSkipped, nil
+		}
+	}
+
+	if err := dst.Put(ctx, path, data); err != nil {
+		return statusFailed, fmt.Errorf("failed to upload: %w", err)
+	}
+
+	// Read the file back from the target and verify it matches the source.
+	written, err := dst.Get(ctx, path)
+	if err != nil {
+		return statusFailed, fmt.Errorf("failed to read back from target: %w", err)
+	}
+	if dstChecksum := sha256Hex(written); dstChecksum != srcChecksum {
+		return statusFailed, fmt.Errorf(
+			"checksum mismatch after transfer: source %s, target %s", srcChecksum, dstChecksum)
+	}
+
+	return statusMigrated, nil
 }
 
 // updateProgress is a helper that updates the progress counters in the database.
