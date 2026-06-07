@@ -42,6 +42,7 @@ import (
 	"github.com/terraform-state-manager/terraform-state-manager/internal/auth"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/config"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/db"
+	"github.com/terraform-state-manager/terraform-state-manager/internal/db/models"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/db/repositories"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/telemetry"
 	"golang.org/x/crypto/bcrypt"
@@ -177,6 +178,18 @@ func serve(cfg *config.Config) error {
 		defer func() { _ = idb.Close() }()
 		identityDB = idb
 		slog.Info("identity schema cutover enabled", "search_path", searchPath)
+
+		// The shared identity schema seeds role templates with identity-core
+		// scopes only (admin wildcard + cross-cutting reads). Layer TSM's own
+		// domain scopes onto the system roles so non-admin roles behave the same
+		// as in the default public-schema configuration ("identity-core +
+		// app-extended"). Idempotent; no-op on steady-state restarts.
+		if err := repositories.SeedSystemRoleTemplates(
+			context.Background(), identityDB, models.PredefinedRoleTemplates(),
+		); err != nil {
+			return fmt.Errorf("failed to seed system role templates: %w", err)
+		}
+		slog.Info("system role templates seeded into identity schema")
 	}
 
 	// Handle setup token generation. The identity connection owns system_settings

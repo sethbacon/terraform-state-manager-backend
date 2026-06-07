@@ -1,8 +1,11 @@
+// Package admin implements the administrative HTTP handlers for the Terraform
+// State Manager. These handlers require authentication and appropriate RBAC
+// scopes. The identity surface (users, organizations, API keys, roles, OIDC,
+// audit) mirrors the registry's 1:1 on the shared canonical identity model.
 package admin
 
 import (
 	"database/sql"
-	"log/slog"
 	"net/http"
 	"time"
 
@@ -14,7 +17,7 @@ import (
 	"github.com/terraform-state-manager/terraform-state-manager/internal/db/repositories"
 )
 
-// APIKeyHandlers provides HTTP handlers for API key management.
+// APIKeyHandlers handles API key management endpoints.
 type APIKeyHandlers struct {
 	cfg        *config.Config
 	db         *sql.DB
@@ -34,238 +37,277 @@ func NewAPIKeyHandlers(cfg *config.Config, db *sql.DB) *APIKeyHandlers {
 	}
 }
 
-// CreateAPIKeyRequest represents the request body for creating a new API key.
+// apiKeyPrefix is the State Manager's API-key prefix (keys look like tsm_...).
+const apiKeyPrefix = "tsm"
+
+// CreateAPIKeyRequest represents the request to create a new API key.
 type CreateAPIKeyRequest struct {
-	Name           string     `json:"name" binding:"required"`
-	Description    *string    `json:"description"`
-	OrganizationID string     `json:"organization_id" binding:"required"`
-	Scopes         []string   `json:"scopes" binding:"required"`
-	ExpiresAt      *time.Time `json:"expires_at"`
+	Name           string   `json:"name" binding:"required"`
+	OrganizationID string   `json:"organization_id" binding:"required"`
+	Description    *string  `json:"description"`
+	Scopes         []string `json:"scopes" binding:"required"`
+	ExpiresAt      *string  `json:"expires_at"` // RFC3339 format
 }
 
-// CreateAPIKeyResponse represents the response when creating a new API key.
-// The full key value is returned only once at creation time.
+// CreateAPIKeyResponse represents the response when creating an API key.
 type CreateAPIKeyResponse struct {
-	Key       string         `json:"key"`
-	KeyPrefix string         `json:"key_prefix"`
-	APIKey    *models.APIKey `json:"api_key"`
+	ID          string     `json:"id"`
+	Name        string     `json:"name"`
+	Description *string    `json:"description"`
+	Key         string     `json:"key"` // Only returned once during creation
+	KeyPrefix   string     `json:"key_prefix"`
+	Scopes      []string   `json:"scopes"`
+	ExpiresAt   *time.Time `json:"expires_at"`
+	CreatedAt   time.Time  `json:"created_at"`
 }
 
-// RotateAPIKeyRequest represents the request body for rotating an API key.
-type RotateAPIKeyRequest struct {
-	GracePeriodHours int `json:"grace_period_hours"`
-}
-
-// RotateAPIKeyResponse represents the response when rotating an API key.
-type RotateAPIKeyResponse struct {
-	Key             string         `json:"key"`
-	KeyPrefix       string         `json:"key_prefix"`
-	APIKey          *models.APIKey `json:"api_key"`
-	OldKeyExpiresAt *time.Time     `json:"old_key_expires_at,omitempty"`
-}
-
-// ListAPIKeysHandler returns a handler that lists API keys.
-// If the user has the api_keys:manage scope, all keys for the organization are
-// returned. Otherwise only keys owned by the current user are returned.
+// ListAPIKeysHandler lists API keys for the authenticated user.
+// If organization_id is provided, users with api_keys:manage scope see all keys
+// in that org; otherwise only their own. With no org, returns the user's own keys.
 // @Summary      List API keys
+// @Description  List API keys with optional filtering by organization. Users with api_keys:manage scope can view all keys in an organization, otherwise only their own keys are visible.
 // @Tags         API Keys
-// @Security     BearerAuth
-// @Security     ApiKeyAuth
+// @Accept       json
 // @Produce      json
-// @Param        organization_id  query  string  false  "Filter by organization ID"
-// @Success      200  {object}  map[string]interface{}
+// @Param        organization_id  query  string  false  "Filter by organization ID (optional)"
+// @Success      200  {object}  admin.ListAPIKeysResponse
 // @Failure      401  {object}  map[string]interface{}
 // @Failure      500  {object}  map[string]interface{}
+// @Security     BearerAuth
+// @Security     ApiKeyAuth
 // @Router       /apikeys [get]
 func (h *APIKeyHandlers) ListAPIKeysHandler() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		userID, _ := c.Get("user_id")
-		uid, _ := userID.(string)
-		scopes, _ := c.Get("scopes")
-		userScopes, _ := scopes.([]string)
-
-		// If the user has api_keys:manage scope, optionally filter by org.
-		// Otherwise only show the user's own keys.
-		if auth.HasScope(userScopes, auth.ScopeAPIKeysManage) {
-			orgID := c.Query("organization_id")
-			if orgID != "" {
-				keys, err := h.listAPIKeysByOrg(c, orgID)
-				if err != nil {
-					slog.Error("failed to list API keys by org", "org_id", orgID, "error", err)
-					c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to list API keys"})
-					return
-				}
-				c.JSON(http.StatusOK, gin.H{"api_keys": keys})
-				return
-			}
-			// Return all keys (no filter) via a broader query.
-			keys, err := h.listAllAPIKeys(c)
-			if err != nil {
-				slog.Error("failed to list all API keys", "error", err)
-				c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to list API keys"})
-				return
-			}
-			c.JSON(http.StatusOK, gin.H{"api_keys": keys})
+		userIDVal, exists := c.Get("user_id")
+		if !exists {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "User not authenticated"})
+			return
+		}
+		userID, ok := userIDVal.(string)
+		if !ok {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Invalid user ID format"})
 			return
 		}
 
-		// Non-admin: list only the current user's keys.
-		if uid == "" {
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "user not authenticated"})
-			return
+		orgID := c.Query("organization_id")
+
+		scopesVal, _ := c.Get("scopes")
+		scopes, _ := scopesVal.([]string)
+		canManageAll := auth.HasScope(scopes, auth.ScopeAPIKeysManage) || auth.HasScope(scopes, auth.ScopeAdmin)
+
+		var keys []*models.APIKey
+		var err error
+
+		if orgID != "" {
+			if canManageAll {
+				keys, err = h.apiKeyRepo.ListByOrganization(c.Request.Context(), orgID)
+			} else {
+				keys, err = h.apiKeyRepo.ListByUserAndOrganization(c.Request.Context(), userID, orgID)
+			}
+		} else if canManageAll {
+			keys, err = h.apiKeyRepo.ListAll(c.Request.Context())
+		} else {
+			keys, err = h.apiKeyRepo.ListByUser(c.Request.Context(), userID)
 		}
 
-		keys, err := h.apiKeyRepo.ListAPIKeys(c.Request.Context(), uid)
 		if err != nil {
-			slog.Error("failed to list user API keys", "user_id", uid, "error", err)
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to list API keys"})
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to list API keys"})
 			return
 		}
 
-		c.JSON(http.StatusOK, gin.H{"api_keys": keys})
+		// Map to a JSON-friendly shape; never expose the key hash.
+		resp := make([]gin.H, 0, len(keys))
+		for _, k := range keys {
+			var expiresAt interface{}
+			var lastUsed interface{}
+			if k.ExpiresAt != nil {
+				expiresAt = k.ExpiresAt.Format(time.RFC3339)
+			}
+			if k.LastUsedAt != nil {
+				lastUsed = k.LastUsedAt.Format(time.RFC3339)
+			}
+			desc := ""
+			if k.Description != nil {
+				desc = *k.Description
+			}
+			resp = append(resp, gin.H{
+				"id":           k.ID,
+				"user_id":      k.UserID,
+				"user_name":    k.UserName,
+				"name":         k.Name,
+				"description":  desc,
+				"key_prefix":   k.KeyPrefix,
+				"scopes":       k.Scopes,
+				"expires_at":   expiresAt,
+				"last_used_at": lastUsed,
+				"created_at":   k.CreatedAt.Format(time.RFC3339),
+			})
+		}
+
+		c.JSON(http.StatusOK, gin.H{"keys": resp})
 	}
 }
 
-// CreateAPIKeyHandler returns a handler that creates a new API key.
-// It validates the requested scopes, verifies organization membership and role
-// permissions, and returns the full key value only once.
+// CreateAPIKeyHandler creates a new API key. The full key is returned only once.
 // @Summary      Create API key
+// @Description  Create a new API key with specified scopes. The full API key is only returned once during creation.
 // @Tags         API Keys
-// @Security     BearerAuth
-// @Security     ApiKeyAuth
 // @Accept       json
 // @Produce      json
-// @Param        body  body  CreateAPIKeyRequest  true  "Create API key request"
-// @Success      201  {object}  map[string]interface{}
+// @Param        body  body  CreateAPIKeyRequest  true  "API key creation request"
+// @Success      201  {object}  CreateAPIKeyResponse
 // @Failure      400  {object}  map[string]interface{}
 // @Failure      401  {object}  map[string]interface{}
 // @Failure      403  {object}  map[string]interface{}
 // @Failure      500  {object}  map[string]interface{}
+// @Security     BearerAuth
+// @Security     ApiKeyAuth
 // @Router       /apikeys [post]
 func (h *APIKeyHandlers) CreateAPIKeyHandler() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		var req CreateAPIKeyRequest
 		if err := c.ShouldBindJSON(&req); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request"})
 			return
 		}
 
-		userID, _ := c.Get("user_id")
-		uid, _ := userID.(string)
-		if uid == "" {
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "user not authenticated"})
+		userIDVal, exists := c.Get("user_id")
+		if !exists {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "User not authenticated"})
+			return
+		}
+		userID, ok := userIDVal.(string)
+		if !ok {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Invalid user ID format"})
 			return
 		}
 
-		// Validate all requested scopes.
 		if err := auth.ValidateScopes(req.Scopes); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid scopes: " + err.Error()})
 			return
 		}
 
-		// Verify the organization exists.
-		org, err := h.orgRepo.GetOrganizationByID(c.Request.Context(), req.OrganizationID)
+		// Resolve organization ID — 'default' / empty resolves to the default org.
+		orgID := req.OrganizationID
+		if orgID == "default" || orgID == "" {
+			defaultOrg, err := h.orgRepo.GetDefaultOrganization(c.Request.Context())
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get default organization"})
+				return
+			}
+			if defaultOrg == nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "Default organization not found"})
+				return
+			}
+			orgID = defaultOrg.ID
+		}
+
+		memberWithRole, err := h.orgRepo.GetMemberWithRole(c.Request.Context(), orgID, userID)
 		if err != nil {
-			slog.Error("failed to get organization", "id", req.OrganizationID, "error", err)
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to verify organization"})
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get user role information"})
 			return
 		}
-		if org == nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "organization not found"})
+		if memberWithRole == nil {
+			c.JSON(http.StatusForbidden, gin.H{"error": "You are not a member of this organization"})
 			return
 		}
-
-		// Verify user is a member of the organization.
-		member, err := h.orgRepo.GetMemberWithRole(c.Request.Context(), req.OrganizationID, uid)
-		if err != nil {
-			slog.Error("failed to check org membership", "org_id", req.OrganizationID, "user_id", uid, "error", err)
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to verify membership"})
+		if memberWithRole.RoleTemplateID == nil {
+			c.JSON(http.StatusForbidden, gin.H{"error": "No role template assigned for this organization. Contact an administrator to assign a role."})
 			return
 		}
 
-		// Allow admins to create keys even without explicit membership.
-		scopes, _ := c.Get("scopes")
-		userScopes, _ := scopes.([]string)
-		isAdmin := auth.HasScope(userScopes, auth.ScopeAdmin)
-
-		if member == nil && !isAdmin {
-			c.JSON(http.StatusForbidden, gin.H{"error": "you are not a member of this organization"})
-			return
+		// Requested scopes must be within the user's role scopes (admin grants all).
+		userHasAdmin := false
+		for _, scope := range memberWithRole.RoleTemplateScopes {
+			if scope == "admin" {
+				userHasAdmin = true
+				break
+			}
 		}
-
-		// Verify the user's role permits the requested scopes (unless admin).
-		if !isAdmin && member != nil {
+		if !userHasAdmin {
+			allowedScopeSet := make(map[string]bool)
+			for _, s := range memberWithRole.RoleTemplateScopes {
+				allowedScopeSet[s] = true
+			}
 			for _, requestedScope := range req.Scopes {
-				if !auth.HasScope(member.RoleTemplateScopes, auth.Scope(requestedScope)) {
+				if !allowedScopeSet[requestedScope] {
 					c.JSON(http.StatusForbidden, gin.H{
-						"error": "your role does not permit the scope: " + requestedScope,
+						"error":          "Scope '" + requestedScope + "' exceeds your role permissions for this organization",
+						"allowed_scopes": memberWithRole.RoleTemplateScopes,
+						"role_template":  *memberWithRole.RoleTemplateName,
 					})
 					return
 				}
 			}
 		}
 
-		// Generate the API key.
-		fullKey, keyHash, keyPrefix, err := auth.GenerateAPIKey("tsm")
+		var expiresAt *time.Time
+		if req.ExpiresAt != nil {
+			parsed, err := time.Parse(time.RFC3339, *req.ExpiresAt)
+			if err != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid expires_at format. Use RFC3339"})
+				return
+			}
+			expiresAt = &parsed
+		}
+
+		fullKey, keyHash, displayPrefix, err := auth.GenerateAPIKey(apiKeyPrefix)
 		if err != nil {
-			slog.Error("failed to generate API key", "error", err)
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate API key"})
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to generate API key"})
 			return
 		}
 
 		apiKey := &models.APIKey{
-			UserID:         &uid,
-			OrganizationID: req.OrganizationID,
+			UserID:         &userID,
+			OrganizationID: orgID,
 			Name:           req.Name,
 			Description:    req.Description,
 			KeyHash:        keyHash,
-			KeyPrefix:      keyPrefix,
+			KeyPrefix:      displayPrefix,
 			Scopes:         req.Scopes,
-			ExpiresAt:      req.ExpiresAt,
-			IsActive:       true,
+			ExpiresAt:      expiresAt,
+			CreatedAt:      time.Now(),
 		}
 
-		if err := h.apiKeyRepo.CreateAPIKey(c.Request.Context(), apiKey); err != nil {
-			slog.Error("failed to create API key", "error", err)
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create API key"})
+		if err := h.apiKeyRepo.Create(c.Request.Context(), apiKey); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create API key"})
 			return
 		}
 
 		c.JSON(http.StatusCreated, CreateAPIKeyResponse{
-			Key:       fullKey,
-			KeyPrefix: keyPrefix,
-			APIKey:    apiKey,
+			ID:        apiKey.ID,
+			Name:      apiKey.Name,
+			Key:       fullKey, // Only returned once.
+			KeyPrefix: displayPrefix,
+			Scopes:    apiKey.Scopes,
+			ExpiresAt: apiKey.ExpiresAt,
+			CreatedAt: apiKey.CreatedAt,
 		})
 	}
 }
 
-// GetAPIKeyHandler returns a handler that retrieves a single API key by ID.
-// Users can retrieve their own keys; users with api_keys:manage scope can
-// retrieve any key.
+// GetAPIKeyHandler retrieves a specific API key by ID.
 // @Summary      Get API key
+// @Description  Retrieve a specific API key by ID. Users can only access their own keys unless they have admin scope.
 // @Tags         API Keys
-// @Security     BearerAuth
-// @Security     ApiKeyAuth
+// @Accept       json
 // @Produce      json
-// @Param        id  path  string  true  "Resource ID"
-// @Success      200  {object}  map[string]interface{}
+// @Param        id  path  string  true  "API key ID"
+// @Success      200  {object}  admin.APIKeyResponse
 // @Failure      401  {object}  map[string]interface{}
 // @Failure      403  {object}  map[string]interface{}
 // @Failure      404  {object}  map[string]interface{}
 // @Failure      500  {object}  map[string]interface{}
+// @Security     BearerAuth
+// @Security     ApiKeyAuth
 // @Router       /apikeys/{id} [get]
 func (h *APIKeyHandlers) GetAPIKeyHandler() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		id := c.Param("id")
-		if id == "" {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "API key id is required"})
-			return
-		}
+		keyID := c.Param("id")
 
-		apiKey, err := h.apiKeyRepo.GetAPIKeyByID(c.Request.Context(), id)
+		apiKey, err := h.apiKeyRepo.GetByID(c.Request.Context(), keyID)
 		if err != nil {
-			slog.Error("failed to get API key", "id", id, "error", err)
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to get API key"})
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve API key"})
 			return
 		}
 		if apiKey == nil {
@@ -273,143 +315,43 @@ func (h *APIKeyHandlers) GetAPIKeyHandler() gin.HandlerFunc {
 			return
 		}
 
-		// Check ownership or admin scope.
-		userID, _ := c.Get("user_id")
-		uid, _ := userID.(string)
-		scopes, _ := c.Get("scopes")
-		userScopes, _ := scopes.([]string)
-
-		isOwner := apiKey.UserID != nil && *apiKey.UserID == uid
-		isAdmin := auth.HasScope(userScopes, auth.ScopeAPIKeysManage)
-
-		if !isOwner && !isAdmin {
-			c.JSON(http.StatusForbidden, gin.H{"error": "you do not have permission to view this API key"})
-			return
-		}
-
-		c.JSON(http.StatusOK, gin.H{"api_key": apiKey})
-	}
-}
-
-// UpdateAPIKeyHandler returns a handler that updates an existing API key.
-// Only the key owner can update it. Validates scopes on update.
-// @Summary      Update API key
-// @Tags         API Keys
-// @Security     BearerAuth
-// @Security     ApiKeyAuth
-// @Accept       json
-// @Produce      json
-// @Param        id    path  string                  true  "Resource ID"
-// @Param        body  body  map[string]interface{}  true  "Update API key request"
-// @Success      200  {object}  map[string]interface{}
-// @Failure      400  {object}  map[string]interface{}
-// @Failure      401  {object}  map[string]interface{}
-// @Failure      403  {object}  map[string]interface{}
-// @Failure      404  {object}  map[string]interface{}
-// @Failure      500  {object}  map[string]interface{}
-// @Router       /apikeys/{id} [put]
-func (h *APIKeyHandlers) UpdateAPIKeyHandler() gin.HandlerFunc {
-	return func(c *gin.Context) {
-		id := c.Param("id")
-		if id == "" {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "API key id is required"})
-			return
-		}
-
-		apiKey, err := h.apiKeyRepo.GetAPIKeyByID(c.Request.Context(), id)
-		if err != nil {
-			slog.Error("failed to get API key for update", "id", id, "error", err)
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to get API key"})
-			return
-		}
-		if apiKey == nil {
-			c.JSON(http.StatusNotFound, gin.H{"error": "API key not found"})
-			return
-		}
-
-		// Check ownership.
-		userID, _ := c.Get("user_id")
-		uid, _ := userID.(string)
-		scopes, _ := c.Get("scopes")
-		userScopes, _ := scopes.([]string)
-
-		isOwner := apiKey.UserID != nil && *apiKey.UserID == uid
-		isAdmin := auth.HasScope(userScopes, auth.ScopeAPIKeysManage)
-
-		if !isOwner && !isAdmin {
-			c.JSON(http.StatusForbidden, gin.H{"error": "you do not have permission to update this API key"})
-			return
-		}
-
-		var updateReq struct {
-			Name        *string    `json:"name"`
-			Description *string    `json:"description"`
-			Scopes      []string   `json:"scopes"`
-			ExpiresAt   *time.Time `json:"expires_at"`
-			IsActive    *bool      `json:"is_active"`
-		}
-		if err := c.ShouldBindJSON(&updateReq); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-			return
-		}
-
-		if updateReq.Scopes != nil {
-			if err := auth.ValidateScopes(updateReq.Scopes); err != nil {
-				c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		userIDVal, _ := c.Get("user_id")
+		userID, _ := userIDVal.(string)
+		if apiKey.UserID == nil || *apiKey.UserID != userID {
+			scopesVal, _ := c.Get("scopes")
+			scopes, _ := scopesVal.([]string)
+			if !auth.HasScope(scopes, auth.ScopeAdmin) {
+				c.JSON(http.StatusForbidden, gin.H{"error": "Access denied"})
 				return
 			}
-			apiKey.Scopes = updateReq.Scopes
 		}
 
-		if updateReq.Name != nil {
-			apiKey.Name = *updateReq.Name
-		}
-		if updateReq.Description != nil {
-			apiKey.Description = updateReq.Description
-		}
-		if updateReq.ExpiresAt != nil {
-			apiKey.ExpiresAt = updateReq.ExpiresAt
-		}
-		if updateReq.IsActive != nil {
-			apiKey.IsActive = *updateReq.IsActive
-		}
-
-		if err := h.apiKeyRepo.UpdateAPIKey(c.Request.Context(), apiKey); err != nil {
-			slog.Error("failed to update API key", "id", id, "error", err)
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update API key"})
-			return
-		}
-
-		c.JSON(http.StatusOK, gin.H{"api_key": apiKey})
+		c.JSON(http.StatusOK, gin.H{"key": apiKey})
 	}
 }
 
-// DeleteAPIKeyHandler returns a handler that deletes an API key by ID.
-// The key owner or a user with api_keys:manage scope can delete a key.
+// DeleteAPIKeyHandler deletes (revokes) an API key by ID.
 // @Summary      Delete API key
+// @Description  Delete a specific API key by ID. Users can only delete their own keys unless they have admin scope.
 // @Tags         API Keys
-// @Security     BearerAuth
-// @Security     ApiKeyAuth
+// @Accept       json
 // @Produce      json
-// @Param        id  path  string  true  "Resource ID"
-// @Success      200  {object}  map[string]interface{}
+// @Param        id  path  string  true  "API key ID"
+// @Success      200  {object}  admin.MessageResponse
 // @Failure      401  {object}  map[string]interface{}
 // @Failure      403  {object}  map[string]interface{}
 // @Failure      404  {object}  map[string]interface{}
 // @Failure      500  {object}  map[string]interface{}
+// @Security     BearerAuth
+// @Security     ApiKeyAuth
 // @Router       /apikeys/{id} [delete]
 func (h *APIKeyHandlers) DeleteAPIKeyHandler() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		id := c.Param("id")
-		if id == "" {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "API key id is required"})
-			return
-		}
+		keyID := c.Param("id")
 
-		apiKey, err := h.apiKeyRepo.GetAPIKeyByID(c.Request.Context(), id)
+		apiKey, err := h.apiKeyRepo.GetByID(c.Request.Context(), keyID)
 		if err != nil {
-			slog.Error("failed to get API key for deletion", "id", id, "error", err)
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to get API key"})
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve API key"})
 			return
 		}
 		if apiKey == nil {
@@ -417,23 +359,19 @@ func (h *APIKeyHandlers) DeleteAPIKeyHandler() gin.HandlerFunc {
 			return
 		}
 
-		// Check ownership or admin.
-		userID, _ := c.Get("user_id")
-		uid, _ := userID.(string)
-		scopes, _ := c.Get("scopes")
-		userScopes, _ := scopes.([]string)
-
-		isOwner := apiKey.UserID != nil && *apiKey.UserID == uid
-		isAdmin := auth.HasScope(userScopes, auth.ScopeAPIKeysManage)
-
-		if !isOwner && !isAdmin {
-			c.JSON(http.StatusForbidden, gin.H{"error": "you do not have permission to delete this API key"})
-			return
+		userIDVal, _ := c.Get("user_id")
+		userID, _ := userIDVal.(string)
+		if apiKey.UserID == nil || *apiKey.UserID != userID {
+			scopesVal, _ := c.Get("scopes")
+			scopes, _ := scopesVal.([]string)
+			if !auth.HasScope(scopes, auth.ScopeAdmin) {
+				c.JSON(http.StatusForbidden, gin.H{"error": "Access denied"})
+				return
+			}
 		}
 
-		if err := h.apiKeyRepo.DeleteAPIKey(c.Request.Context(), id); err != nil {
-			slog.Error("failed to delete API key", "id", id, "error", err)
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to delete API key"})
+		if err := h.apiKeyRepo.Delete(c.Request.Context(), keyID); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete API key"})
 			return
 		}
 
@@ -441,37 +379,40 @@ func (h *APIKeyHandlers) DeleteAPIKeyHandler() gin.HandlerFunc {
 	}
 }
 
-// RotateAPIKeyHandler returns a handler that rotates an existing API key.
-// A new key is generated with the same properties as the old key. An optional
-// grace period (0-72 hours) may be specified during which the old key remains
-// valid.
-// @Summary      Rotate API key
+// UpdateAPIKeyHandler updates an API key's name, scopes, or expiration.
+// @Summary      Update API key
+// @Description  Update an API key's name, scopes, or expiration. Users can only update their own keys unless they have admin scope.
 // @Tags         API Keys
-// @Security     BearerAuth
-// @Security     ApiKeyAuth
 // @Accept       json
 // @Produce      json
-// @Param        id    path  string               true  "Resource ID"
-// @Param        body  body  RotateAPIKeyRequest  true  "Rotate API key request"
-// @Success      200  {object}  map[string]interface{}
+// @Param        id    path  string                  true  "API key ID"
+// @Param        body  body  map[string]interface{}  true  "Update request"
+// @Success      200  {object}  admin.APIKeyResponse
 // @Failure      400  {object}  map[string]interface{}
 // @Failure      401  {object}  map[string]interface{}
 // @Failure      403  {object}  map[string]interface{}
 // @Failure      404  {object}  map[string]interface{}
 // @Failure      500  {object}  map[string]interface{}
-// @Router       /apikeys/{id}/rotate [post]
-func (h *APIKeyHandlers) RotateAPIKeyHandler() gin.HandlerFunc {
+// @Security     BearerAuth
+// @Security     ApiKeyAuth
+// @Router       /apikeys/{id} [put]
+func (h *APIKeyHandlers) UpdateAPIKeyHandler() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		id := c.Param("id")
-		if id == "" {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "API key id is required"})
+		keyID := c.Param("id")
+
+		var req struct {
+			Name      *string  `json:"name"`
+			Scopes    []string `json:"scopes"`
+			ExpiresAt *string  `json:"expires_at"`
+		}
+		if err := c.ShouldBindJSON(&req); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request"})
 			return
 		}
 
-		apiKey, err := h.apiKeyRepo.GetAPIKeyByID(c.Request.Context(), id)
+		apiKey, err := h.apiKeyRepo.GetByID(c.Request.Context(), keyID)
 		if err != nil {
-			slog.Error("failed to get API key for rotation", "id", id, "error", err)
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to get API key"})
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve API key"})
 			return
 		}
 		if apiKey == nil {
@@ -479,204 +420,195 @@ func (h *APIKeyHandlers) RotateAPIKeyHandler() gin.HandlerFunc {
 			return
 		}
 
-		// Check ownership or admin.
-		userID, _ := c.Get("user_id")
-		uid, _ := userID.(string)
-		scopes, _ := c.Get("scopes")
-		userScopes, _ := scopes.([]string)
+		userIDVal, _ := c.Get("user_id")
+		userID, _ := userIDVal.(string)
+		if apiKey.UserID == nil || *apiKey.UserID != userID {
+			scopesVal, _ := c.Get("scopes")
+			scopes, _ := scopesVal.([]string)
+			if !auth.HasScope(scopes, auth.ScopeAdmin) {
+				c.JSON(http.StatusForbidden, gin.H{"error": "Access denied"})
+				return
+			}
+		}
 
-		isOwner := apiKey.UserID != nil && *apiKey.UserID == uid
-		isAdmin := auth.HasScope(userScopes, auth.ScopeAPIKeysManage)
+		if req.Name != nil {
+			apiKey.Name = *req.Name
+		}
 
-		if !isOwner && !isAdmin {
-			c.JSON(http.StatusForbidden, gin.H{"error": "you do not have permission to rotate this API key"})
+		if req.Scopes != nil {
+			if err := auth.ValidateScopes(req.Scopes); err != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid scopes: " + err.Error()})
+				return
+			}
+			memberWithRole, err := h.orgRepo.GetMemberWithRole(c.Request.Context(), apiKey.OrganizationID, userID)
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get user role information"})
+				return
+			}
+			if memberWithRole != nil && memberWithRole.RoleTemplateID != nil {
+				userHasAdmin := false
+				for _, scope := range memberWithRole.RoleTemplateScopes {
+					if scope == "admin" {
+						userHasAdmin = true
+						break
+					}
+				}
+				if !userHasAdmin {
+					allowedScopeSet := make(map[string]bool)
+					for _, s := range memberWithRole.RoleTemplateScopes {
+						allowedScopeSet[s] = true
+					}
+					for _, requestedScope := range req.Scopes {
+						if !allowedScopeSet[requestedScope] {
+							c.JSON(http.StatusForbidden, gin.H{
+								"error":          "Scope '" + requestedScope + "' exceeds your role permissions for this organization",
+								"allowed_scopes": memberWithRole.RoleTemplateScopes,
+								"role_template":  *memberWithRole.RoleTemplateName,
+							})
+							return
+						}
+					}
+				}
+			}
+			apiKey.Scopes = req.Scopes
+		}
+
+		if req.ExpiresAt != nil {
+			parsed, err := time.Parse(time.RFC3339, *req.ExpiresAt)
+			if err != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid expires_at format. Use RFC3339"})
+				return
+			}
+			apiKey.ExpiresAt = &parsed
+		}
+
+		if err := h.apiKeyRepo.Update(c.Request.Context(), apiKey); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update API key"})
 			return
 		}
+
+		c.JSON(http.StatusOK, gin.H{"key": apiKey})
+	}
+}
+
+// RotateAPIKeyRequest represents the request to rotate an API key.
+type RotateAPIKeyRequest struct {
+	// GracePeriodHours is how long the old key remains valid (0 = immediate revocation).
+	GracePeriodHours int `json:"grace_period_hours"`
+}
+
+// RotateAPIKeyResponse represents the response when rotating an API key.
+type RotateAPIKeyResponse struct {
+	NewKey       CreateAPIKeyResponse `json:"new_key"`
+	OldKeyStatus string               `json:"old_key_status"`
+	OldExpiresAt *time.Time           `json:"old_expires_at,omitempty"`
+}
+
+// RotateAPIKeyHandler rotates an API key — creates a new key and optionally
+// schedules the old key's expiration.
+// @Summary      Rotate API key
+// @Description  Rotate an API key by creating a new key and optionally scheduling the old key's expiration. Users can only rotate their own keys unless they have admin scope.
+// @Tags         API Keys
+// @Accept       json
+// @Produce      json
+// @Param        id    path  string               true  "API key ID"
+// @Param        body  body  RotateAPIKeyRequest  true  "Rotation request"
+// @Success      200  {object}  RotateAPIKeyResponse
+// @Failure      400  {object}  map[string]interface{}
+// @Failure      401  {object}  map[string]interface{}
+// @Failure      403  {object}  map[string]interface{}
+// @Failure      404  {object}  map[string]interface{}
+// @Failure      500  {object}  map[string]interface{}
+// @Security     BearerAuth
+// @Security     ApiKeyAuth
+// @Router       /apikeys/{id}/rotate [post]
+func (h *APIKeyHandlers) RotateAPIKeyHandler() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		keyID := c.Param("id")
 
 		var req RotateAPIKeyRequest
 		if err := c.ShouldBindJSON(&req); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-			return
+			req.GracePeriodHours = 0
 		}
-
-		// Validate grace period: 0..72 hours.
 		if req.GracePeriodHours < 0 || req.GracePeriodHours > 72 {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "grace_period_hours must be between 0 and 72"})
 			return
 		}
 
-		// Generate new key credentials.
-		fullKey, newHash, newPrefix, err := auth.GenerateAPIKey("tsm")
+		oldKey, err := h.apiKeyRepo.GetByID(c.Request.Context(), keyID)
 		if err != nil {
-			slog.Error("failed to generate rotated API key", "error", err)
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate new API key"})
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve API key"})
+			return
+		}
+		if oldKey == nil {
+			c.JSON(http.StatusNotFound, gin.H{"error": "API key not found"})
 			return
 		}
 
-		var oldKeyExpiresAt *time.Time
-
-		if req.GracePeriodHours > 0 {
-			// During the grace period, create a new key entry with the same
-			// properties and deactivate the old key after the grace period.
-			graceDuration := time.Duration(req.GracePeriodHours) * time.Hour
-			expiresAt := time.Now().Add(graceDuration)
-			oldKeyExpiresAt = &expiresAt
-
-			// Set the old key to expire after the grace period.
-			apiKey.ExpiresAt = oldKeyExpiresAt
-			if err := h.apiKeyRepo.UpdateAPIKey(c.Request.Context(), apiKey); err != nil {
-				slog.Error("failed to set grace period on old key", "id", id, "error", err)
-				c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to set grace period"})
+		userIDVal, _ := c.Get("user_id")
+		userID, _ := userIDVal.(string)
+		if oldKey.UserID == nil || *oldKey.UserID != userID {
+			scopesVal, _ := c.Get("scopes")
+			scopes, _ := scopesVal.([]string)
+			if !auth.HasScope(scopes, auth.ScopeAdmin) {
+				c.JSON(http.StatusForbidden, gin.H{"error": "Access denied"})
 				return
 			}
-
-			// Create the new key as a separate entry.
-			newAPIKey := &models.APIKey{
-				UserID:         apiKey.UserID,
-				OrganizationID: apiKey.OrganizationID,
-				Name:           apiKey.Name,
-				Description:    apiKey.Description,
-				KeyHash:        newHash,
-				KeyPrefix:      newPrefix,
-				Scopes:         apiKey.Scopes,
-				ExpiresAt:      nil, // The new key does not inherit the old expiry.
-				IsActive:       true,
-			}
-
-			if err := h.apiKeyRepo.CreateAPIKey(c.Request.Context(), newAPIKey); err != nil {
-				slog.Error("failed to create rotated API key", "error", err)
-				c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create rotated API key"})
-				return
-			}
-
-			c.JSON(http.StatusOK, RotateAPIKeyResponse{
-				Key:             fullKey,
-				KeyPrefix:       newPrefix,
-				APIKey:          newAPIKey,
-				OldKeyExpiresAt: oldKeyExpiresAt,
-			})
-			return
 		}
 
-		// No grace period: rotate the key in-place.
-		if err := h.apiKeyRepo.RotateAPIKey(c.Request.Context(), id, newHash, newPrefix); err != nil {
-			slog.Error("failed to rotate API key", "id", id, "error", err)
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to rotate API key"})
-			return
-		}
-
-		// Refresh the key after rotation.
-		rotatedKey, err := h.apiKeyRepo.GetAPIKeyByID(c.Request.Context(), id)
+		fullKey, keyHash, displayPrefix, err := auth.GenerateAPIKey(apiKeyPrefix)
 		if err != nil {
-			slog.Error("failed to get rotated API key", "id", id, "error", err)
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to get rotated API key"})
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to generate new API key"})
 			return
+		}
+
+		newKey := &models.APIKey{
+			UserID:         oldKey.UserID,
+			OrganizationID: oldKey.OrganizationID,
+			Name:           oldKey.Name + " (rotated)",
+			Description:    oldKey.Description,
+			KeyHash:        keyHash,
+			KeyPrefix:      displayPrefix,
+			Scopes:         oldKey.Scopes,
+			ExpiresAt:      oldKey.ExpiresAt,
+			CreatedAt:      time.Now(),
+		}
+		if err := h.apiKeyRepo.Create(c.Request.Context(), newKey); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create new API key"})
+			return
+		}
+
+		var oldKeyStatus string
+		var oldExpiresAt *time.Time
+		if req.GracePeriodHours == 0 {
+			if err := h.apiKeyRepo.Delete(c.Request.Context(), oldKey.ID); err != nil {
+				oldKeyStatus = "revocation_failed"
+			} else {
+				oldKeyStatus = "revoked"
+			}
+		} else {
+			gracePeriodEnd := time.Now().Add(time.Duration(req.GracePeriodHours) * time.Hour)
+			oldKey.ExpiresAt = &gracePeriodEnd
+			if err := h.apiKeyRepo.Update(c.Request.Context(), oldKey); err != nil {
+				oldKeyStatus = "grace_period_update_failed"
+			} else {
+				oldKeyStatus = "expires_at"
+				oldExpiresAt = &gracePeriodEnd
+			}
 		}
 
 		c.JSON(http.StatusOK, RotateAPIKeyResponse{
-			Key:       fullKey,
-			KeyPrefix: newPrefix,
-			APIKey:    rotatedKey,
+			NewKey: CreateAPIKeyResponse{
+				ID:        newKey.ID,
+				Name:      newKey.Name,
+				Key:       fullKey,
+				KeyPrefix: displayPrefix,
+				Scopes:    newKey.Scopes,
+				ExpiresAt: newKey.ExpiresAt,
+				CreatedAt: newKey.CreatedAt,
+			},
+			OldKeyStatus: oldKeyStatus,
+			OldExpiresAt: oldExpiresAt,
 		})
 	}
-}
-
-// listAPIKeysByOrg queries API keys filtered by organization.
-func (h *APIKeyHandlers) listAPIKeysByOrg(c *gin.Context, orgID string) ([]*models.APIKey, error) {
-	rows, err := h.db.QueryContext(c.Request.Context(),
-		`SELECT id, user_id, organization_id, name, description, key_hash, key_prefix, scopes,
-		        expires_at, last_used_at, is_active, created_at, updated_at
-		 FROM api_keys WHERE organization_id = $1 ORDER BY created_at DESC`, orgID,
-	)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = rows.Close() }()
-
-	return scanAPIKeys(rows)
-}
-
-// listAllAPIKeys returns all API keys across all organizations.
-func (h *APIKeyHandlers) listAllAPIKeys(c *gin.Context) ([]*models.APIKey, error) {
-	rows, err := h.db.QueryContext(c.Request.Context(),
-		`SELECT id, user_id, organization_id, name, description, key_hash, key_prefix, scopes,
-		        expires_at, last_used_at, is_active, created_at, updated_at
-		 FROM api_keys ORDER BY created_at DESC`,
-	)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = rows.Close() }()
-
-	return scanAPIKeys(rows)
-}
-
-// scanAPIKeys scans API key rows into a slice of APIKey models.
-func scanAPIKeys(rows *sql.Rows) ([]*models.APIKey, error) {
-	var keys []*models.APIKey
-	for rows.Next() {
-		var k models.APIKey
-		var scopesStr []byte
-		if err := rows.Scan(&k.ID, &k.UserID, &k.OrganizationID, &k.Name, &k.Description,
-			&k.KeyHash, &k.KeyPrefix, &scopesStr,
-			&k.ExpiresAt, &k.LastUsedAt, &k.IsActive, &k.CreatedAt, &k.UpdatedAt); err != nil {
-			return nil, err
-		}
-		// Parse scopes from the postgres array representation.
-		k.Scopes = parsePgStringArray(scopesStr)
-		keys = append(keys, &k)
-	}
-	return keys, nil
-}
-
-// parsePgStringArray is a minimal parser for PostgreSQL text-array literals
-// that are returned when scanning into []byte instead of using pq.Array.
-func parsePgStringArray(data []byte) []string {
-	s := string(data)
-	if s == "" || s == "{}" {
-		return []string{}
-	}
-	// Strip surrounding braces.
-	if len(s) >= 2 && s[0] == '{' && s[len(s)-1] == '}' {
-		s = s[1 : len(s)-1]
-	}
-	var result []string
-	for _, item := range splitPgArray(s) {
-		item = stripQuotes(item)
-		if item != "" {
-			result = append(result, item)
-		}
-	}
-	return result
-}
-
-// splitPgArray splits a PostgreSQL array interior, respecting quoted strings.
-func splitPgArray(s string) []string {
-	var result []string
-	var current []byte
-	inQuote := false
-	for i := 0; i < len(s); i++ {
-		ch := s[i]
-		if ch == '"' {
-			inQuote = !inQuote
-			current = append(current, ch)
-		} else if ch == ',' && !inQuote {
-			result = append(result, string(current))
-			current = nil
-		} else {
-			current = append(current, ch)
-		}
-	}
-	if len(current) > 0 {
-		result = append(result, string(current))
-	}
-	return result
-}
-
-// stripQuotes removes surrounding double quotes from a string.
-func stripQuotes(s string) string {
-	if len(s) >= 2 && s[0] == '"' && s[len(s)-1] == '"' {
-		return s[1 : len(s)-1]
-	}
-	return s
 }

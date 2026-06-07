@@ -45,6 +45,7 @@ import (
 	"github.com/terraform-state-manager/terraform-state-manager/internal/crypto"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/db/repositories"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/middleware"
+	"github.com/terraform-state-manager/terraform-state-manager/internal/services"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/services/backup"
 	complianceSvc "github.com/terraform-state-manager/terraform-state-manager/internal/services/compliance"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/services/migration"
@@ -182,7 +183,9 @@ func NewRouter(cfg *config.Config, db, identityDB *sql.DB) (*gin.Engine, *Backgr
 	orgHandlers := admin.NewOrganizationHandlers(cfg, identityDB)
 	statsHandlers := admin.NewStatsHandler(sqlxDB)
 	roleTemplateHandlers := admin.NewRoleHandlers(roleTemplateRepo)
-	oidcAdminHandlers := admin.NewOIDCHandlers(tokenCipher, oidcConfigRepo)
+	oidcAdminHandlers := admin.NewOIDCConfigAdminHandlers(oidcConfigRepo)
+	auditLogHandlers := admin.NewAuditLogHandlers(identityDB)
+	gdprHandlers := admin.NewGDPRHandlers(services.NewUserService(identityDB))
 
 	// Initialize setup wizard handlers
 	setupHandlers := setup.NewHandlers(
@@ -284,6 +287,22 @@ func NewRouter(cfg *config.Config, db, identityDB *sql.DB) (*gin.Engine, *Backgr
 			authGroup.GET("/login", authHandlers.LoginHandler())
 			authGroup.GET("/callback", authHandlers.CallbackHandler())
 			authGroup.GET("/logout", authHandlers.LogoutHandler())
+			authGroup.GET("/providers", authHandlers.ProvidersHandler())
+		}
+
+		// Development-only endpoints (gated by DEV_MODE; 403 in production).
+		// Ported 1:1 from the registry so the frontend's dev-mode probes resolve.
+		devGroup := apiV1.Group("/dev")
+		devGroup.Use(admin.DevModeMiddleware())
+		{
+			devHandlers := admin.NewDevHandlers(cfg, identityDB)
+			devGroup.GET("/status", devHandlers.DevStatusHandler())
+			devGroup.POST("/login", devHandlers.DevLoginHandler())
+
+			// Impersonation requires authentication + admin scope.
+			devGroup.Use(middleware.AuthMiddleware(cfg, userRepo, apiKeyRepo, orgRepo))
+			devGroup.GET("/users", middleware.RequireScope(auth.ScopeAdmin), devHandlers.ListUsersForImpersonationHandler())
+			devGroup.POST("/impersonate/:user_id", middleware.RequireScope(auth.ScopeAdmin), devHandlers.ImpersonateUserHandler())
 		}
 
 		// Authenticated-only endpoints
@@ -332,6 +351,14 @@ func NewRouter(cfg *config.Config, db, identityDB *sql.DB) (*gin.Engine, *Backgr
 				usersWriteGroup.DELETE("/:id", userHandlers.DeleteUserHandler())
 			}
 
+			// GDPR data-subject endpoints (admin scope — reveal/destroy PII).
+			adminUsersGroup := authenticatedGroup.Group("/admin/users")
+			adminUsersGroup.Use(middleware.RequireScope(auth.ScopeAdmin))
+			{
+				adminUsersGroup.GET("/:id/export", gdprHandlers.ExportUserDataHandler())
+				adminUsersGroup.POST("/:id/erase", gdprHandlers.EraseUserHandler())
+			}
+
 			// Organizations management
 			orgsGroup := authenticatedGroup.Group("/organizations")
 			{
@@ -369,9 +396,16 @@ func NewRouter(cfg *config.Config, db, identityDB *sql.DB) (*gin.Engine, *Backgr
 			oidcAdminGroup := authenticatedGroup.Group("/admin/oidc")
 			oidcAdminGroup.Use(middleware.RequireScope(auth.ScopeAdmin))
 			{
-				oidcAdminGroup.GET("", oidcAdminHandlers.GetOIDCConfig)
-				oidcAdminGroup.PUT("", oidcAdminHandlers.UpdateOIDCConfig)
-				oidcAdminGroup.POST("/test", oidcAdminHandlers.TestOIDCConfig)
+				oidcAdminGroup.GET("/config", oidcAdminHandlers.GetActiveOIDCConfig)
+				oidcAdminGroup.PUT("/group-mapping", oidcAdminHandlers.UpdateGroupMapping)
+			}
+
+			// Audit logs (read-only, admin)
+			auditLogsGroup := authenticatedGroup.Group("/admin/audit-logs")
+			auditLogsGroup.Use(middleware.RequireScope(auth.ScopeAuditRead))
+			{
+				auditLogsGroup.GET("", auditLogHandlers.ListAuditLogsHandler())
+				auditLogsGroup.GET("/:id", auditLogHandlers.GetAuditLogHandler())
 			}
 
 			// ---------------------------------------------------------------

@@ -18,7 +18,7 @@ require (
 	github.com/lib/pq v1.10.9
 	github.com/prometheus/client_golang v1.23.2
 	github.com/robfig/cron/v3 v3.0.1
-	github.com/sethbacon/terraform-suite-identity v0.10.0
+	github.com/sethbacon/terraform-suite-identity v0.11.3
 	github.com/spf13/viper v1.18.2
 	github.com/stretchr/testify v1.11.1
 	golang.org/x/crypto v0.52.0

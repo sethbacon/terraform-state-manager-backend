@@ -26,7 +26,9 @@ auth:
   # API keys, OIDC config, audit logs, role templates) is read/written from the
   # shared "identity" Postgres schema instead of this app's public schema.
   # Disabled by default; reversible. The schema is created by the embedded
-  # identity migrations regardless of this flag.
+  # identity migrations regardless of this flag. When enabled, the system role
+  # templates in the identity schema are seeded with this app's domain scopes on
+  # startup (idempotent), so roles grant the same access as in the public schema.
   # Env: TSM_AUTH_IDENTITY_SCHEMA_ENABLED, TSM_AUTH_IDENTITY_SCHEMA_NAME
   identity_schema:
     enabled: false

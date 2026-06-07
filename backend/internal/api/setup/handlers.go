@@ -6,6 +6,7 @@ package setup
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -97,7 +98,7 @@ func (h *Handlers) GetSetupStatus(c *gin.Context) {
 	}
 
 	oidcConfigured := false
-	if _, err := h.oidcConfigRepo.GetActiveOIDCConfig(ctx); err == nil {
+	if cfg, err := h.oidcConfigRepo.GetActiveOIDCConfig(ctx); err == nil && cfg != nil {
 		oidcConfigured = true
 	}
 
@@ -219,12 +220,21 @@ func (h *Handlers) SaveOIDCConfig(c *gin.Context) {
 		scopes = []string{"openid", "email", "profile"}
 	}
 
+	scopesJSON, err := json.Marshal(scopes)
+	if err != nil {
+		slog.Error("Failed to encode OIDC scopes", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to encode OIDC scopes"})
+		return
+	}
+
 	oidcConfig := &models.OIDCConfig{
+		Name:                  input.Name,
+		ProviderType:          input.ProviderType,
 		IssuerURL:             input.IssuerURL,
 		ClientID:              input.ClientID,
 		ClientSecretEncrypted: encryptedSecret,
 		RedirectURL:           input.RedirectURL,
-		ScopesJSON:            strings.Join(scopes, ","),
+		Scopes:                json.RawMessage(scopesJSON),
 		IsActive:              true,
 	}
 
@@ -312,9 +322,8 @@ func (h *Handlers) ConfigureAdmin(c *gin.Context) {
 
 	// Create the admin user.
 	user := &models.User{
-		Email:    input.Email,
-		Name:     input.Name,
-		IsActive: true,
+		Email: input.Email,
+		Name:  input.Name,
 	}
 	if err := h.userRepo.CreateUser(ctx, user); err != nil {
 		slog.Error("Failed to create admin user", "error", err)
@@ -328,7 +337,7 @@ func (h *Handlers) ConfigureAdmin(c *gin.Context) {
 		defaultOrgName = "default"
 	}
 
-	org, err := h.orgRepo.GetOrganizationByName(ctx, defaultOrgName)
+	org, err := h.orgRepo.GetByName(ctx, defaultOrgName)
 	if err != nil {
 		slog.Warn("Error looking up default organisation", "org_name", defaultOrgName, "error", err)
 	}
@@ -340,7 +349,6 @@ func (h *Handlers) ConfigureAdmin(c *gin.Context) {
 		org = &models.Organization{
 			Name:        defaultOrgName,
 			DisplayName: displayName,
-			IsActive:    true,
 		}
 		if err := h.orgRepo.CreateOrganization(ctx, org); err != nil {
 			slog.Error("Failed to create default organisation", "error", err)
@@ -400,7 +408,7 @@ func (h *Handlers) CompleteSetup(c *gin.Context) {
 	ctx := c.Request.Context()
 
 	// Verify OIDC is configured.
-	if _, err := h.oidcConfigRepo.GetActiveOIDCConfig(ctx); err != nil {
+	if cfg, err := h.oidcConfigRepo.GetActiveOIDCConfig(ctx); err != nil || cfg == nil {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"error":   "OIDC not configured",
 			"message": "Please configure OIDC authentication before completing setup.",

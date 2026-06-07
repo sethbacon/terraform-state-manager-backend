@@ -227,11 +227,6 @@ func (h *AuthHandlers) CallbackHandler() gin.HandlerFunc {
 			return
 		}
 
-		if !user.IsActive {
-			c.JSON(http.StatusForbidden, gin.H{"error": "User account is disabled"})
-			return
-		}
-
 		// Resolve user scopes from organization membership
 		scopes := h.resolveUserScopes(c, user.ID)
 
@@ -280,10 +275,9 @@ func (h *AuthHandlers) findOrCreateUser(c *gin.Context, sub, email, name string)
 
 	// Create new user
 	newUser := &models.User{
-		Email:    email,
-		Name:     name,
-		OIDCSub:  &sub,
-		IsActive: true,
+		Email:   email,
+		Name:    name,
+		OIDCSub: &sub,
 	}
 	if err := h.userRepo.CreateUser(ctx, newUser); err != nil {
 		return nil, err
@@ -293,7 +287,7 @@ func (h *AuthHandlers) findOrCreateUser(c *gin.Context, sub, email, name string)
 
 	// Auto-assign to default organization if multi-tenancy is enabled
 	if h.cfg.MultiTenancy.Enabled && h.cfg.MultiTenancy.DefaultOrganization != "" {
-		org, err := h.orgRepo.GetOrganizationByName(ctx, h.cfg.MultiTenancy.DefaultOrganization)
+		org, err := h.orgRepo.GetByName(ctx, h.cfg.MultiTenancy.DefaultOrganization)
 		if err == nil && org != nil {
 			member := &models.OrganizationMember{
 				OrganizationID: org.ID,
@@ -402,7 +396,10 @@ func (h *AuthHandlers) RefreshHandler() gin.HandlerFunc {
 	}
 }
 
-// MeHandler returns the current authenticated user's profile and scopes.
+// MeHandler returns the current authenticated user's profile, organisation
+// memberships, primary role template, and allowed scopes, using the registry's
+// /auth/me response envelope ({user, memberships, allowed_scopes, role_template,
+// session_expires_at}).
 // GET /api/v1/auth/me
 // MeHandler godoc
 // @Summary      Get current user
@@ -424,31 +421,101 @@ func (h *AuthHandlers) MeHandler() gin.HandlerFunc {
 			return
 		}
 
-		user, err := h.userRepo.GetUserByID(c.Request.Context(), userIDStr)
-		if err != nil || user == nil {
+		userWithRoles, err := h.userRepo.GetUserWithOrgRoles(c.Request.Context(), userIDStr)
+		if err != nil {
+			slog.Error("failed to load user for /me", "error", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get user information"})
+			return
+		}
+		if userWithRoles == nil {
 			c.JSON(http.StatusNotFound, gin.H{"error": "User not found"})
 			return
 		}
 
-		userWithRoles, err := h.userRepo.GetUserWithOrgRoles(c.Request.Context(), userIDStr)
-		if err != nil {
-			slog.Warn("failed to load user org roles for /me", "error", err)
-		}
-
+		// Nested user object — matches the registry's /auth/me envelope.
 		response := gin.H{
-			"id":        user.ID,
-			"email":     user.Email,
-			"name":      user.Name,
-			"is_active": user.IsActive,
+			"user": gin.H{
+				"id":         userWithRoles.ID,
+				"email":      userWithRoles.Email,
+				"name":       userWithRoles.Name,
+				"oidc_sub":   userWithRoles.OIDCSub,
+				"created_at": userWithRoles.CreatedAt,
+				"updated_at": userWithRoles.UpdatedAt,
+			},
 		}
 
-		if userWithRoles != nil {
-			response["organization_id"] = userWithRoles.OrganizationID
-			response["organization_name"] = userWithRoles.OrganizationName
-			response["role"] = userWithRoles.RoleTemplateName
-			response["scopes"] = userWithRoles.Scopes
+		// Per-organization memberships, each carrying its nested role template.
+		memberships := make([]gin.H, 0, len(userWithRoles.Memberships))
+		for _, m := range userWithRoles.Memberships {
+			entry := gin.H{
+				"organization_id":   m.OrganizationID,
+				"organization_name": m.OrganizationName,
+				"created_at":        m.CreatedAt,
+			}
+			if m.RoleTemplateID != nil {
+				entry["role_template"] = gin.H{
+					"id":           m.RoleTemplateID,
+					"name":         m.RoleTemplateName,
+					"display_name": m.RoleTemplateDisplayName,
+					"scopes":       m.RoleTemplateScopes,
+				}
+			} else {
+				entry["role_template"] = nil
+			}
+			memberships = append(memberships, entry)
+		}
+		response["memberships"] = memberships
+		response["allowed_scopes"] = userWithRoles.GetAllowedScopes()
+
+		// Primary role template (first membership) for the response envelope.
+		if len(userWithRoles.Memberships) > 0 && userWithRoles.Memberships[0].RoleTemplateID != nil {
+			m := userWithRoles.Memberships[0]
+			response["role_template"] = gin.H{
+				"id":           m.RoleTemplateID,
+				"name":         m.RoleTemplateName,
+				"display_name": m.RoleTemplateDisplayName,
+				"scopes":       m.RoleTemplateScopes,
+			}
+		} else {
+			response["role_template"] = nil
+		}
+
+		// Session expiry from the JWT claims, so the frontend can schedule its
+		// pre-expiry warning. Absent for API-key auth (the frontend then derives
+		// expiry from the token itself).
+		if claimsVal, ok := c.Get("jwt_claims"); ok {
+			if claims, ok := claimsVal.(*auth.Claims); ok && claims.ExpiresAt != nil {
+				response["session_expires_at"] = claims.ExpiresAt.Time
+			}
 		}
 
 		c.JSON(http.StatusOK, response)
+	}
+}
+
+// ProvidersHandler returns the list of available authentication providers,
+// consumed by the frontend login page to render the provider picker. The
+// response shape matches the registry's GET /auth/providers. TSM currently
+// supports OIDC; the registry's LDAP/SAML/Azure AD providers are not yet
+// available here (tracked as module-promotion follow-ups), so they are simply
+// not advertised — the data-driven login page renders only what is returned.
+// GET /api/v1/auth/providers
+// ProvidersHandler godoc
+// @Summary      List authentication providers
+// @Description  Returns the authentication providers available for login (e.g. OIDC). Public; consumed by the login page to render the provider picker.
+// @Tags         Auth
+// @Produce      json
+// @Success      200  {object}  map[string]interface{}
+// @Router       /auth/providers [get]
+func (h *AuthHandlers) ProvidersHandler() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		providers := make([]gin.H, 0, 1)
+		if h.oidcProvider.Load() != nil {
+			providers = append(providers, gin.H{
+				"type": "oidc",
+				"name": "OpenID Connect",
+			})
+		}
+		c.JSON(http.StatusOK, gin.H{"providers": providers})
 	}
 }
