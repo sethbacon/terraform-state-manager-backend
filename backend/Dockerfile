@@ -10,7 +10,13 @@ RUN go mod download
 
 COPY . .
 
-RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /app/server ./cmd/server
+# Version metadata injected at build time (passed by the release workflow).
+ARG VERSION=dev
+ARG BUILD_DATE=unknown
+RUN CLEAN_VERSION="${VERSION#v}" && \
+    CGO_ENABLED=0 GOOS=linux go build \
+    -ldflags="-s -w -X main.Version=${CLEAN_VERSION} -X main.BuildDate=${BUILD_DATE}" \
+    -o /app/server ./cmd/server
 
 # Runtime stage
 FROM alpine:3.20
