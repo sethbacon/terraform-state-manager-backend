@@ -41,6 +41,10 @@ const (
 	ScopeComplianceRead  Scope = "compliance:read"
 	ScopeComplianceWrite Scope = "compliance:write"
 
+	// Drift scopes
+	ScopeDriftRead  Scope = "drift:read"
+	ScopeDriftWrite Scope = "drift:write"
+
 	// Scheduler scopes
 	ScopeSchedulerAdmin Scope = "scheduler:admin"
 
@@ -67,6 +71,7 @@ var readWritePairs = identityauth.ReadWritePairs{
 	string(ScopeReportsRead):       string(ScopeReportsWrite),
 	string(ScopeDashboardRead):     string(ScopeDashboardWrite),
 	string(ScopeComplianceRead):    string(ScopeComplianceWrite),
+	string(ScopeDriftRead):         string(ScopeDriftWrite),
 	string(ScopeUsersRead):         string(ScopeUsersWrite),
 	string(ScopeOrganizationsRead): string(ScopeOrganizationsWrite),
 }
@@ -88,6 +93,8 @@ func AllScopes() []Scope {
 		ScopeDashboardWrite,
 		ScopeComplianceRead,
 		ScopeComplianceWrite,
+		ScopeDriftRead,
+		ScopeDriftWrite,
 		ScopeSchedulerAdmin,
 		ScopeAlertsAdmin,
 		ScopeUsersRead,

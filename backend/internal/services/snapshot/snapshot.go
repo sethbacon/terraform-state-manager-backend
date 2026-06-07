@@ -129,6 +129,7 @@ func (s *Service) CaptureFromAnalysisResults(
 						SnapshotAfter:  &snapshot.ID,
 						Changes:        changesBytes,
 						Severity:       severity,
+						DriftSource:    models.DriftSourceSnapshot,
 					}
 					if createErr := s.driftRepo.Create(ctx, event); createErr != nil {
 						logger.Error("Failed to create drift event",

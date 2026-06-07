@@ -13,6 +13,11 @@
 // @in                          header
 // @name                        X-API-Key
 // @description                 API key for service-to-service authentication
+//
+// @securityDefinitions.apiKey  OIDCIngestAuth
+// @in                          header
+// @name                        Authorization
+// @description                 OIDC workload-identity bearer token for the code-drift ingest endpoint. Format: "Bearer {oidc-token}"
 
 // Package main is the entry point for the Terraform State Manager server binary.
 // It dispatches three subcommands — serve, migrate, and version — via os.Args.
