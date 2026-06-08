@@ -7,6 +7,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0](https://github.com/sethbacon/terraform-state-manager-backend/compare/v0.6.0...v0.7.0) (2026-06-08)
+
+
+### Features
+
+* **analysis:** extract required_version + lockfile pins and flag TF version drift ([#62](https://github.com/sethbacon/terraform-state-manager-backend/issues/62)) ([430c49f](https://github.com/sethbacon/terraform-state-manager-backend/commit/430c49ffaace4d0b6a67b23de47a9c6821f29072))
+* **compliance:** add embedded OPA/Rego engine with cross-engine parity ([#59](https://github.com/sethbacon/terraform-state-manager-backend/issues/59)) ([6eecd1d](https://github.com/sethbacon/terraform-state-manager-backend/commit/6eecd1d91935f74bb3b7b9ba2d93fcac402e42ae)), closes [#57](https://github.com/sethbacon/terraform-state-manager-backend/issues/57)
+* **config:** add ui_theme/whitelabel config endpoint for FE parity ([#55](https://github.com/sethbacon/terraform-state-manager-backend/issues/55)) ([ef8926c](https://github.com/sethbacon/terraform-state-manager-backend/commit/ef8926c4b57bc9dfa32c74524cd056efdc88e53f)), closes [#54](https://github.com/sethbacon/terraform-state-manager-backend/issues/54)
+* **drift:** ingest ADO plan-JSON via OIDC-authenticated webhook into code-drift events ([#60](https://github.com/sethbacon/terraform-state-manager-backend/issues/60)) ([2679622](https://github.com/sethbacon/terraform-state-manager-backend/commit/26796229f680100b1577a62a2fe86ecb951e03ed)), closes [#58](https://github.com/sethbacon/terraform-state-manager-backend/issues/58)
+* **extensibility:** capability contract + version-no-op-test capability ([#65](https://github.com/sethbacon/terraform-state-manager-backend/issues/65)) ([a84e875](https://github.com/sethbacon/terraform-state-manager-backend/commit/a84e87512c5b2c9f521419d6e0162d207514f91d)), closes [#64](https://github.com/sethbacon/terraform-state-manager-backend/issues/64)
+
 ## [0.6.0](https://github.com/sethbacon/terraform-state-manager-backend/compare/v0.5.1...v0.6.0) (2026-06-07)
 
 
