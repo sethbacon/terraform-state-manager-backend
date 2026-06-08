@@ -7,6 +7,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.0](https://github.com/sethbacon/terraform-state-manager-backend/compare/v0.7.0...v0.8.0) (2026-06-08)
+
+
+### Features
+
+* **compliance:** expose engine_type via the policy API + engines list ([#67](https://github.com/sethbacon/terraform-state-manager-backend/issues/67)) ([8d6e39a](https://github.com/sethbacon/terraform-state-manager-backend/commit/8d6e39a72a09fe3f75da9f61c7bc82f9c84600d4)), closes [#66](https://github.com/sethbacon/terraform-state-manager-backend/issues/66)
+
+
+### Bug Fixes
+
+* **auth:** redirect to OIDC end-session on logout instead of returning JSON ([#69](https://github.com/sethbacon/terraform-state-manager-backend/issues/69)) ([4c1ae16](https://github.com/sethbacon/terraform-state-manager-backend/commit/4c1ae1674c34185b1e32b300c865e08e4ac832cc))
+
 ## [0.7.0](https://github.com/sethbacon/terraform-state-manager-backend/compare/v0.6.0...v0.7.0) (2026-06-08)
 
 
