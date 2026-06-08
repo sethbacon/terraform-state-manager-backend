@@ -1,0 +1,40 @@
+{
+  "format_version": "1.2",
+  "terraform_version": "1.9.5",
+  "resource_changes": [
+    {
+      "address": "aws_s3_bucket.logs",
+      "mode": "managed",
+      "type": "aws_s3_bucket",
+      "name": "logs",
+      "provider_name": "registry.terraform.io/hashicorp/aws",
+      "change": {
+        "actions": ["update"],
+        "before": {
+          "id": "logs-bucket"
+        },
+        "after": {
+          "id": "logs-bucket"
+        }
+      }
+    },
+    {
+      "address": "null_resource.pinned",
+      "mode": "managed",
+      "type": "null_resource",
+      "name": "pinned",
+      "provider_name": "registry.terraform.io/hashicorp/null",
+      "change": {
+        "actions": ["no-op"],
+        "before": {
+          "id": "1123456789012345678",
+          "triggers": null
+        },
+        "after": {
+          "id": "1123456789012345678",
+          "triggers": null
+        }
+      }
+    }
+  ]
+}

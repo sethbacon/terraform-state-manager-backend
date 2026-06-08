@@ -76,8 +76,39 @@ var readWritePairs = identityauth.ReadWritePairs{
 	string(ScopeOrganizationsRead): string(ScopeOrganizationsWrite),
 }
 
-// AllScopes returns all valid scopes
+// capabilityScopes holds RBAC scopes contributed by registered capabilities
+// (internal/capability). They are merged into AllScopes/ValidScopes so
+// RequireScope can enforce capability-introduced scopes such as
+// "versiontest:admin". Registration happens once at startup (router.go), before
+// any request is served, so a plain slice without locking is sufficient.
+var capabilityScopes []Scope
+
+// RegisterCapabilityScopes adds capability-contributed scope strings to the valid
+// scope set. Duplicates (already-known or repeated) are ignored. Call this at
+// startup, before the HTTP server begins serving.
+func RegisterCapabilityScopes(scopes []string) {
+	known := ValidScopes()
+	seen := make(map[string]bool)
+	for _, s := range capabilityScopes {
+		seen[string(s)] = true
+	}
+	for _, s := range scopes {
+		if s == "" || known[s] || seen[s] {
+			continue
+		}
+		seen[s] = true
+		capabilityScopes = append(capabilityScopes, Scope(s))
+	}
+}
+
+// AllScopes returns all valid scopes, including any registered capability scopes.
 func AllScopes() []Scope {
+	builtin := builtinScopes()
+	return append(builtin, capabilityScopes...)
+}
+
+// builtinScopes returns the fixed set of scopes defined by the backend itself.
+func builtinScopes() []Scope {
 	return []Scope{
 		ScopeAnalysisRead,
 		ScopeAnalysisWrite,

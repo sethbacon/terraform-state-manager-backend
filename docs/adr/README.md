@@ -16,6 +16,7 @@ The first ADRs (001–005) record the decisions that frame the revitalization in
 | [003](003-hybrid-terraform-execution.md)         | Hybrid Terraform Execution                     | Accepted |
 | [004](004-evolve-existing-backend.md)            | Evolve the Existing Backend                    | Accepted |
 | [005](005-openapi-spec-from-swag-annotations.md) | OpenAPI Spec Generated from swag Annotations   | Accepted |
+| [006](006-capability-contract.md)                | Capability Contract for Pluggable Features      | Accepted |
 
 ## Creating a New ADR
 

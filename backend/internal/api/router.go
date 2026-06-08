@@ -28,6 +28,7 @@ import (
 	alertsAPI "github.com/terraform-state-manager/terraform-state-manager/internal/api/alerts"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/api/analysis"
 	backupsAPI "github.com/terraform-state-manager/terraform-state-manager/internal/api/backups"
+	capabilitiesAPI "github.com/terraform-state-manager/terraform-state-manager/internal/api/capabilities"
 	complianceAPI "github.com/terraform-state-manager/terraform-state-manager/internal/api/compliance"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/api/dashboards"
 	driftAPI "github.com/terraform-state-manager/terraform-state-manager/internal/api/drift"
@@ -43,6 +44,8 @@ import (
 	"github.com/terraform-state-manager/terraform-state-manager/internal/auth"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/auth/driftingest"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/auth/oidc"
+	"github.com/terraform-state-manager/terraform-state-manager/internal/capability"
+	"github.com/terraform-state-manager/terraform-state-manager/internal/capability/versiontest"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/config"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/crypto"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/db/repositories"
@@ -231,10 +234,23 @@ func NewRouter(cfg *config.Config, db, identityDB *sql.DB) (*gin.Engine, *Backgr
 	// Phase 4 services and handlers
 	backupService := backup.NewService(backupRepo, retentionPolicyRepo, sourceRepo, storageBackend)
 
-	taskScheduler := schedulerSvc.New(scheduledTaskRepo, analysisRunRepo, analysisResultRepo, sourceRepo, snapshotService, backupService)
+	// Phase 8: capability registry. Capabilities are assembled here at startup and
+	// handed to the scheduler (for task-type dispatch) and the router (for routes
+	// and discovery). The version-no-op-test capability is the first worked example
+	// (its live ADO plan provider is deferred; it uses the fixture provider).
+	capabilityRegistry := capability.NewRegistry()
+	capabilityRegistry.Register(
+		versiontest.New(versiontest.NewFixturePlanProvider(), driftRepo),
+	)
+	// Merge capability-introduced RBAC scopes (e.g. versiontest:admin) into the
+	// auth scope set so RequireScope can enforce them.
+	auth.RegisterCapabilityScopes(capabilityRegistry.Scopes())
+
+	taskScheduler := schedulerSvc.New(scheduledTaskRepo, analysisRunRepo, analysisResultRepo, sourceRepo, snapshotService, backupService, capabilityRegistry)
 	taskScheduler.Start()
 
 	schedulerHandlers := schedulerAPI.NewHandlers(scheduledTaskRepo, taskScheduler)
+	capabilityHandlers := capabilitiesAPI.NewHandlers(capabilityRegistry)
 	snapshotHandlers := snapshots.NewHandlers(snapshotRepo, driftRepo, analysisResultRepo, analysisRunRepo, snapshotService)
 
 	// (Phase 4 backup service already initialized above)
@@ -528,6 +544,11 @@ func NewRouter(cfg *config.Config, db, identityDB *sql.DB) (*gin.Engine, *Backgr
 				schedulerGroup.DELETE("/:id", schedulerHandlers.DeleteTask)
 				schedulerGroup.POST("/:id/trigger", schedulerHandlers.TriggerTask)
 			}
+
+			// ---------------------------------------------------------------
+			// Phase 8: Capability discovery (any authenticated user)
+			// ---------------------------------------------------------------
+			authenticatedGroup.GET("/capabilities", capabilityHandlers.ListCapabilities)
 
 			// ---------------------------------------------------------------
 			// Phase 3: Snapshots and Drift
