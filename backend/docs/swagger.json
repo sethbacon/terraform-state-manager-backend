@@ -2151,6 +2151,7 @@
         },
         "/auth/logout": {
             "get": {
+                "description": "Terminates the session. When OIDC is active, redirects the browser to the provider's end_session_endpoint to end the SSO session; otherwise redirects to the application root.",
                 "produces": [
                     "application/json"
                 ],
@@ -2159,11 +2160,10 @@
                 ],
                 "summary": "Logout user",
                 "responses": {
-                    "200": {
-                        "description": "OK",
+                    "302": {
+                        "description": "Redirects to the OIDC end_session_endpoint or the application root",
                         "schema": {
-                            "type": "object",
-                            "additionalProperties": true
+                            "type": "string"
                         }
                     }
                 }

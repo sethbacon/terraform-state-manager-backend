@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -320,31 +321,48 @@ func (h *AuthHandlers) resolveUserScopes(c *gin.Context, userID string) []string
 	return scopes
 }
 
-// LogoutHandler handles user logout.
+// LogoutHandler terminates the user's session. The frontend triggers logout via
+// a full-page navigation to this endpoint, so it must respond with a redirect
+// rather than JSON. When OIDC is active and the provider advertises an
+// end_session_endpoint, the browser is redirected there to terminate the SSO
+// session at the IdP; otherwise it falls back to a redirect to the app root.
+// TSM auth tokens live in localStorage (cleared by the frontend), so there is no
+// server-side auth cookie to clear here.
 // GET /api/v1/auth/logout
 // LogoutHandler godoc
 // @Summary      Logout user
+// @Description  Terminates the session. When OIDC is active, redirects the browser to the provider's end_session_endpoint to end the SSO session; otherwise redirects to the application root.
 // @Tags         Auth
 // @Produce      json
-// @Success      200  {object}  map[string]interface{}
+// @Success      302  {string}  string  "Redirects to the OIDC end_session_endpoint or the application root"
 // @Router       /auth/logout [get]
 func (h *AuthHandlers) LogoutHandler() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		// For OIDC, we can optionally redirect to the IdP's end-session endpoint
+		// After the IdP terminates the session, return the user to the app root.
+		postLogoutRedirect := h.cfg.Server.GetPublicURL() + "/"
+
+		// If the OIDC provider exposes an end_session_endpoint, redirect there so
+		// the IdP SSO session is also terminated. Without this, clicking "Login"
+		// after logout silently re-authenticates via the still-active IdP cookie.
 		provider := h.oidcProvider.Load()
 		if provider != nil {
-			endSessionURL := provider.GetEndSessionEndpoint()
-			if endSessionURL != "" {
-				c.JSON(http.StatusOK, gin.H{
-					"message":          "Logged out successfully",
-					"end_session_url":  endSessionURL,
-					"post_logout_hint": h.cfg.Server.GetPublicURL(),
-				})
-				return
+			if endSessionURL := provider.GetEndSessionEndpoint(); endSessionURL != "" {
+				if logoutURL, err := url.Parse(endSessionURL); err == nil {
+					q := logoutURL.Query()
+					q.Set("post_logout_redirect_uri", postLogoutRedirect)
+					// Keycloak requires either id_token_hint or client_id when
+					// post_logout_redirect_uri is set (returns 400 without one).
+					// client_id is public config and needs nothing stored client-side.
+					q.Set("client_id", h.cfg.Auth.OIDC.ClientID)
+					logoutURL.RawQuery = q.Encode()
+					c.Redirect(http.StatusFound, logoutURL.String())
+					return
+				}
 			}
 		}
 
-		c.JSON(http.StatusOK, gin.H{"message": "Logged out successfully"})
+		// No OIDC end_session_endpoint available — redirect to the app root.
+		c.Redirect(http.StatusFound, postLogoutRedirect)
 	}
 }
 
