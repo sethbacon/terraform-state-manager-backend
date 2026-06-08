@@ -99,3 +99,34 @@ func TestNewChecker_RegistersBothEngines(t *testing.T) {
 		}
 	}
 }
+
+// TestChecker_EngineNames returns the registered engine names sorted.
+func TestChecker_EngineNames(t *testing.T) {
+	c := newCheckerWithEngines(map[string]PolicyEngine{
+		"opa":    &stubEngine{name: "opa"},
+		"custom": &stubEngine{name: "custom"},
+	})
+	got := c.EngineNames()
+	want := []string{"custom", "opa"}
+	if len(got) != len(want) {
+		t.Fatalf("EngineNames() = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("EngineNames()[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+// TestChecker_HasEngine reports membership against the registry.
+func TestChecker_HasEngine(t *testing.T) {
+	c := newCheckerWithEngines(map[string]PolicyEngine{
+		"custom": &stubEngine{name: "custom"},
+	})
+	if !c.HasEngine("custom") {
+		t.Error("HasEngine(\"custom\") = false, want true")
+	}
+	if c.HasEngine("opa") {
+		t.Error("HasEngine(\"opa\") = true, want false")
+	}
+}

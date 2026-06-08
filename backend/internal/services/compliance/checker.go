@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"sort"
 
 	"github.com/terraform-state-manager/terraform-state-manager/internal/db/models"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/db/repositories"
@@ -39,6 +40,25 @@ func NewChecker(
 		resultRepo: resultRepo,
 		engines:    engines,
 	}
+}
+
+// EngineNames returns the sorted names of the registered policy engines. It is
+// the single source of truth the API layer uses to advertise the selectable
+// engines and to validate a policy's engine_type, so the set never drifts from
+// what the engine registry actually supports.
+func (c *Checker) EngineNames() []string {
+	names := make([]string, 0, len(c.engines))
+	for name := range c.engines {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// HasEngine reports whether an engine with the given name is registered.
+func (c *Checker) HasEngine(name string) bool {
+	_, ok := c.engines[name]
+	return ok
 }
 
 // CheckRun evaluates all active compliance policies for an organization against

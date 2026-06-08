@@ -655,6 +655,7 @@ func NewRouter(cfg *config.Config, db, identityDB *sql.DB) (*gin.Engine, *Backgr
 			}
 			authenticatedGroup.GET("/compliance/results", middleware.RequireScope(auth.ScopeComplianceRead), complianceHandlers.ListResults)
 			authenticatedGroup.GET("/compliance/score", middleware.RequireScope(auth.ScopeComplianceRead), complianceHandlers.GetComplianceScore)
+			authenticatedGroup.GET("/compliance/engines", middleware.RequireScope(auth.ScopeComplianceRead), complianceHandlers.ListEngines)
 
 			// ---------------------------------------------------------------
 			// Phase 5: Webhooks (CI/CD triggers)

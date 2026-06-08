@@ -13,6 +13,11 @@ const (
 	PolicyTypeCustom  = "custom"
 )
 
+// DefaultEngineType is the policy engine applied when a compliance policy does
+// not specify one. It matches the built-in custom rules engine, so policies
+// created before per-policy engine selection keep their original behaviour.
+const DefaultEngineType = "custom"
+
 // CompliancePolicy represents a compliance policy that defines rules for resource validation.
 type CompliancePolicy struct {
 	ID             string          `db:"id" json:"id"`
@@ -33,6 +38,7 @@ type CompliancePolicyCreateRequest struct {
 	PolicyType string          `json:"policy_type" binding:"required"`
 	Config     json.RawMessage `json:"config" binding:"required"`
 	Severity   string          `json:"severity,omitempty"`
+	EngineType string          `json:"engine_type,omitempty"`
 	IsActive   *bool           `json:"is_active,omitempty"`
 }
 
@@ -42,5 +48,6 @@ type CompliancePolicyUpdateRequest struct {
 	PolicyType *string          `json:"policy_type,omitempty"`
 	Config     *json.RawMessage `json:"config,omitempty"`
 	Severity   *string          `json:"severity,omitempty"`
+	EngineType *string          `json:"engine_type,omitempty"`
 	IsActive   *bool            `json:"is_active,omitempty"`
 }

@@ -74,6 +74,15 @@ func (h *Handlers) CreatePolicy(c *gin.Context) {
 		severity = req.Severity
 	}
 
+	engineType := models.DefaultEngineType
+	if req.EngineType != "" {
+		engineType = req.EngineType
+	}
+	if !h.checker.HasEngine(engineType) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid engine_type: " + engineType})
+		return
+	}
+
 	isActive := true
 	if req.IsActive != nil {
 		isActive = *req.IsActive
@@ -85,6 +94,7 @@ func (h *Handlers) CreatePolicy(c *gin.Context) {
 		PolicyType:     req.PolicyType,
 		Config:         req.Config,
 		Severity:       severity,
+		EngineType:     engineType,
 		IsActive:       isActive,
 	}
 
@@ -230,6 +240,20 @@ func (h *Handlers) UpdatePolicy(c *gin.Context) {
 		return
 	}
 
+	// Validate engine_type before any DB work. An empty string clears nothing —
+	// callers omit the field to leave the engine unchanged.
+	if req.EngineType != nil {
+		engineType := *req.EngineType
+		if engineType == "" {
+			engineType = models.DefaultEngineType
+		}
+		if !h.checker.HasEngine(engineType) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid engine_type: " + engineType})
+			return
+		}
+		*req.EngineType = engineType
+	}
+
 	ctx := c.Request.Context()
 	policy, err := h.policyRepo.GetByID(ctx, id)
 	if err != nil {
@@ -254,6 +278,9 @@ func (h *Handlers) UpdatePolicy(c *gin.Context) {
 	}
 	if req.Severity != nil {
 		policy.Severity = *req.Severity
+	}
+	if req.EngineType != nil {
+		policy.EngineType = *req.EngineType
 	}
 	if req.IsActive != nil {
 		policy.IsActive = *req.IsActive
@@ -441,4 +468,33 @@ func (h *Handlers) GetComplianceScore(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"data": score})
+}
+
+// engineView is the public projection of a registered compliance policy engine.
+type engineView struct {
+	Name string `json:"name"`
+}
+
+// ListEngines handles GET /api/v1/compliance/engines.
+// Returns the policy engines available for selection on a compliance policy,
+// so clients can populate an engine picker without hardcoding the set.
+//
+// @Summary      List compliance policy engines
+// @Tags         Compliance
+// @Produce      json
+// @Success      200  {object}  map[string]interface{}
+// @Security     BearerAuth
+// @Security     ApiKeyAuth
+// @Router       /compliance/engines [get]
+func (h *Handlers) ListEngines(c *gin.Context) {
+	names := h.checker.EngineNames()
+	engines := make([]engineView, 0, len(names))
+	for _, name := range names {
+		engines = append(engines, engineView{Name: name})
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"data":  engines,
+		"total": len(engines),
+	})
 }
