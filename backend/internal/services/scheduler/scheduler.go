@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/robfig/cron/v3"
+	"github.com/terraform-state-manager/terraform-state-manager/internal/capability"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/db/models"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/db/repositories"
 	backupSvc "github.com/terraform-state-manager/terraform-state-manager/internal/services/backup"
@@ -29,12 +30,16 @@ type Scheduler struct {
 	sourceRepo  *repositories.StateSourceRepository
 	snapshotSvc *snapshotSvc.Service
 	backupSvc   *backupSvc.Service
+	registry    *capability.Registry
 	ticker      *time.Ticker
 	stopCh      chan struct{}
 	logger      *slog.Logger
 }
 
-// New creates a new Scheduler instance with the required repository and service dependencies.
+// New creates a new Scheduler instance with the required repository and service
+// dependencies. registry may be nil; when set, scheduled tasks whose type is not
+// a built-in are dispatched to the matching registered capability (see
+// executeTask).
 func New(
 	taskRepo *repositories.ScheduledTaskRepository,
 	runRepo *repositories.AnalysisRunRepository,
@@ -42,6 +47,7 @@ func New(
 	sourceRepo *repositories.StateSourceRepository,
 	snapshotService *snapshotSvc.Service,
 	backupService *backupSvc.Service,
+	registry *capability.Registry,
 ) *Scheduler {
 	return &Scheduler{
 		taskRepo:    taskRepo,
@@ -50,6 +56,7 @@ func New(
 		sourceRepo:  sourceRepo,
 		snapshotSvc: snapshotService,
 		backupSvc:   backupService,
+		registry:    registry,
 		stopCh:      make(chan struct{}),
 		logger:      slog.With("component", "scheduler"),
 	}
@@ -129,8 +136,9 @@ func (s *Scheduler) executeTask(ctx context.Context, task *models.ScheduledTask)
 	case models.TaskTypeBackup:
 		status = s.executeBackupTask(ctx, task)
 	default:
-		logger.Warn("Unknown task type", "task_type", task.TaskType)
-		status = models.TaskRunStatusFailed
+		// Fallback: a capability may own this task type. Built-in types above
+		// keep their fast-path; only unrecognised types reach the registry.
+		status = s.executeCapabilityTask(ctx, task)
 	}
 
 	// Compute the next run time from the schedule string.
@@ -260,6 +268,28 @@ func (s *Scheduler) executeBackupTask(ctx context.Context, task *models.Schedule
 
 	logger.Info("Backup retention task completed", "org_id", task.OrganizationID)
 	return models.TaskRunStatusSuccess
+}
+
+// executeCapabilityTask dispatches a task whose type is not a built-in to the
+// registered capability that owns it. This is the extension seam: a capability
+// adds a scheduled task type by registering with TaskType + TaskHandler set.
+// Returns failed when no registry is configured or no capability matches.
+func (s *Scheduler) executeCapabilityTask(ctx context.Context, task *models.ScheduledTask) string {
+	logger := s.logger.With("task_id", task.ID, "task_type", task.TaskType)
+
+	if s.registry == nil {
+		logger.Warn("Unknown task type and no capability registry configured")
+		return models.TaskRunStatusFailed
+	}
+
+	cap, ok := s.registry.LookupByTaskType(task.TaskType)
+	if !ok {
+		logger.Warn("Unknown task type; no capability handles it")
+		return models.TaskRunStatusFailed
+	}
+
+	logger.Info("Dispatching task to capability", "capability", cap.Key)
+	return cap.TaskHandler(ctx, task)
 }
 
 // computeNextRun calculates the next execution time based on a schedule string.

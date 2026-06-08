@@ -3078,6 +3078,35 @@
                 }
             }
         },
+        "/capabilities": {
+            "get": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    },
+                    {
+                        "ApiKeyAuth": []
+                    }
+                ],
+                "description": "Returns the capabilities registered at startup, including each capability's scheduled task type (if any) and the RBAC scopes it introduces.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Capabilities"
+                ],
+                "summary": "List registered capabilities",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    }
+                }
+            }
+        },
         "/compliance/policies": {
             "get": {
                 "security": [

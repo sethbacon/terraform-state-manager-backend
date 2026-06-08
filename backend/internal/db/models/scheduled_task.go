@@ -11,6 +11,12 @@ const (
 	TaskTypeReport   = "report"
 	TaskTypeBackup   = "backup"
 	TaskTypeSnapshot = "snapshot"
+	// TaskTypeVersionTest is owned by the version-no-op-test capability
+	// (internal/capability/versiontest). It is dispatched via the scheduler's
+	// capability-registry fallback rather than the built-in switch. The literal
+	// is mirrored here (the capability package imports models, not vice versa) so
+	// ValidTaskTypes accepts API-created versiontest tasks.
+	TaskTypeVersionTest = "versiontest"
 )
 
 // TaskRunStatus constants for the outcome of a scheduled task execution.
@@ -58,9 +64,10 @@ type ScheduledTaskUpdateRequest struct {
 // ValidTaskTypes returns the set of valid task type strings.
 func ValidTaskTypes() map[string]bool {
 	return map[string]bool{
-		TaskTypeAnalysis: true,
-		TaskTypeReport:   true,
-		TaskTypeBackup:   true,
-		TaskTypeSnapshot: true,
+		TaskTypeAnalysis:    true,
+		TaskTypeReport:      true,
+		TaskTypeBackup:      true,
+		TaskTypeSnapshot:    true,
+		TaskTypeVersionTest: true,
 	}
 }

@@ -1,0 +1,24 @@
+{
+  "format_version": "1.2",
+  "terraform_version": "1.9.5",
+  "resource_changes": [
+    {
+      "address": "null_resource.pinned",
+      "mode": "managed",
+      "type": "null_resource",
+      "name": "pinned",
+      "provider_name": "registry.terraform.io/hashicorp/null",
+      "change": {
+        "actions": ["no-op"],
+        "before": {
+          "id": "1123456789012345678",
+          "triggers": null
+        },
+        "after": {
+          "id": "1123456789012345678",
+          "triggers": null
+        }
+      }
+    }
+  ]
+}
