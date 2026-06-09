@@ -60,6 +60,7 @@ import (
 	"github.com/terraform-state-manager/terraform-state-manager/internal/services/drifttrigger"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/services/migration"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/services/notification"
+	"github.com/terraform-state-manager/terraform-state-manager/internal/services/repolink"
 	schedulerSvc "github.com/terraform-state-manager/terraform-state-manager/internal/services/scheduler"
 	snapshotSvc "github.com/terraform-state-manager/terraform-state-manager/internal/services/snapshot"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/storage"
@@ -109,6 +110,7 @@ func NewRouter(cfg *config.Config, db, identityDB *sql.DB) (*gin.Engine, *Backgr
 
 	// Phase 1 repositories
 	sourceRepo := repositories.NewStateSourceRepository(db)
+	sourceRepoLinkRepo := repositories.NewSourceRepoLinkRepository(db)
 	analysisRunRepo := repositories.NewAnalysisRunRepository(db)
 	analysisResultRepo := repositories.NewAnalysisResultRepository(db)
 
@@ -208,6 +210,12 @@ func NewRouter(cfg *config.Config, db, identityDB *sql.DB) (*gin.Engine, *Backgr
 
 	// Initialize Phase 1 handlers
 	sourceHandlers := sources.NewHandlers(cfg, sourceRepo, tokenCipher)
+	// Source-to-ADO repo link (manual CRUD now; auto-discovery seamed for later).
+	// The auto-discover path is credential-gated: a stub discoverer is wired by
+	// default so the discover endpoint returns 503 ("not configured") until a live
+	// ADO client is provided. Swap in repolink.NewADODiscoverer(client) once an
+	// authenticated ADO client exists (follow-up).
+	repoLinkHandlers := sources.NewRepoLinkHandlers(sourceRepo, sourceRepoLinkRepo, repolink.NewStubDiscoverer())
 	analysisHandlers := analysis.NewHandlers(cfg, analysisRunRepo, analysisResultRepo, sourceRepo, tokenCipher)
 
 	// Phase 2 repositories
@@ -518,6 +526,15 @@ func NewRouter(cfg *config.Config, db, identityDB *sql.DB) (*gin.Engine, *Backgr
 				sourcesGroup.PUT("/:id", middleware.RequireScope(auth.ScopeSourcesWrite), sourceHandlers.UpdateSource)
 				sourcesGroup.DELETE("/:id", middleware.RequireScope(auth.ScopeSourcesWrite), sourceHandlers.DeleteSource)
 				sourcesGroup.POST("/:id/test", middleware.RequireScope(auth.ScopeSourcesWrite), sourceHandlers.TestSource)
+
+				// Source-to-ADO repo link (consumed by the outbound drift-trigger
+				// and repo-metadata analysis). Reuses the sources scopes: read for
+				// GET, write for PUT/DELETE/discover. The discover endpoint returns
+				// 503 until live ADO auto-discovery is configured.
+				sourcesGroup.GET("/:id/repo-link", middleware.RequireScope(auth.ScopeSourcesRead), repoLinkHandlers.GetRepoLink)
+				sourcesGroup.PUT("/:id/repo-link", middleware.RequireScope(auth.ScopeSourcesWrite), repoLinkHandlers.SetRepoLink)
+				sourcesGroup.DELETE("/:id/repo-link", middleware.RequireScope(auth.ScopeSourcesWrite), repoLinkHandlers.DeleteRepoLink)
+				sourcesGroup.POST("/:id/repo-link/discover", middleware.RequireScope(auth.ScopeSourcesWrite), repoLinkHandlers.DiscoverRepoLink)
 			}
 
 			// ---------------------------------------------------------------
