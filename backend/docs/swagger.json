@@ -3796,7 +3796,7 @@
                         "ApiKeyAuth": []
                     }
                 ],
-                "description": "Returns the Terraform version pin-drift summary (required_version constraint vs in-state terraform_version) across the latest completed run. Only workspaces whose analysis run was supplied repo metadata carry a drift report.",
+                "description": "Returns the Terraform version pin-drift summary (required_version constraint vs in-state terraform_version) across the latest completed run, plus a provider_pins section comparing each locked provider version against the latest version on the public Terraform Registry. Only workspaces whose analysis run was supplied repo metadata carry a drift report or lock pins.",
                 "produces": [
                     "application/json"
                 ],

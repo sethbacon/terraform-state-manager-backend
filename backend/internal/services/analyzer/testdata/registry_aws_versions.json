@@ -1,0 +1,9 @@
+{
+  "id": "hashicorp/aws",
+  "versions": [
+    { "version": "5.30.0", "protocols": ["5.0"] },
+    { "version": "5.31.0", "protocols": ["5.0"] },
+    { "version": "5.40.0", "protocols": ["5.0"] },
+    { "version": "6.0.0-beta1", "protocols": ["5.0"] }
+  ]
+}
