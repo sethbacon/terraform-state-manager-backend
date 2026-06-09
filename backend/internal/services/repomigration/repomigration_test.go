@@ -71,6 +71,9 @@ func (f *fakeStore) stepStatus(rt, rk string) string {
 type fakeTarget struct {
 	conflictRepos map[string]bool
 	failPipelines map[string]error
+	// repoRemoteURL, when set, is returned as the created repository's RemoteURL
+	// so a real GoGitPusher has a fixture target to push history into.
+	repoRemoteURL string
 
 	createdRepos  []string
 	createdPipes  []string
@@ -86,7 +89,7 @@ func (t *fakeTarget) CreateRepository(_ context.Context, name string) (*ado.Repo
 	}
 	t.createdRepos = append(t.createdRepos, name)
 	t.repoCounter++
-	return &ado.Repository{ID: name + "-id", Name: name}, nil
+	return &ado.Repository{ID: name + "-id", Name: name, RemoteURL: t.repoRemoteURL}, nil
 }
 
 func (t *fakeTarget) CreatePipeline(_ context.Context, req ado.CreatePipelineRequest) (*ado.Pipeline, error) {

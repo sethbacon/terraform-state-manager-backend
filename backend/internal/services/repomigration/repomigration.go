@@ -54,20 +54,29 @@ type TargetClient interface {
 type Service struct {
 	store      CheckpointStore
 	gitHistory GitHistoryPusher
-	logger     *slog.Logger
+	// gitHistoryActive is true when a real pusher was supplied (not the no-op
+	// default). When active the orchestrator records a distinct git_history
+	// checkpoint step per repository and counts it in the run total; with the
+	// no-op default no such step is recorded, so repositories are simply
+	// provisioned empty and the resource total is unchanged.
+	gitHistoryActive bool
+	logger           *slog.Logger
 }
 
 // NewService creates an execute orchestrator. If gitHistory is nil the deferred
-// git-history step is a no-op (repositories are provisioned empty). If logger is
-// nil the default slog logger is used.
+// git-history step is a no-op (repositories are provisioned empty) and no
+// git_history checkpoint is recorded. Supplying a real pusher (e.g.
+// NewGoGitPusher) activates the git-history step. If logger is nil the default
+// slog logger is used.
 func NewService(store CheckpointStore, gitHistory GitHistoryPusher, logger *slog.Logger) *Service {
+	active := gitHistory != nil
 	if gitHistory == nil {
 		gitHistory = noopGitHistoryPusher{}
 	}
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &Service{store: store, gitHistory: gitHistory, logger: logger}
+	return &Service{store: store, gitHistory: gitHistory, gitHistoryActive: active, logger: logger}
 }
 
 // ResourceResult is the per-resource outcome surfaced in an ExecuteSummary.
@@ -118,6 +127,11 @@ func (s *Service) Execute(ctx context.Context, migrationID string, plan *ado.Mig
 		migration.StartedAt = &now
 	}
 	migration.TotalResources = totalResources(plan)
+	if s.gitHistoryActive {
+		// Each repository contributes an extra git_history step when a real pusher
+		// is active.
+		migration.TotalResources += len(plan.Repositories)
+	}
 	if err := s.store.UpdateMigration(ctx, migration); err != nil {
 		s.logger.Warn("failed to mark repo migration running", "migration_id", migrationID, "error", err)
 	}
@@ -128,10 +142,13 @@ func (s *Service) Execute(ctx context.Context, migrationID string, plan *ado.Mig
 	// repositories are created so pipelines can reference their backing repo.
 	repoIDs := map[string]string{}
 
-	// 1. Repositories (and the deferred git-history push seam).
+	// 1. Repositories, each followed by its git-history push (when active).
 	for _, repo := range plan.Repositories {
-		res := s.ensureRepository(ctx, migrationID, target, repo, done, repoIDs)
+		res, created := s.ensureRepository(ctx, migrationID, target, repo, done, repoIDs)
 		summary.record(res)
+		if s.gitHistoryActive {
+			summary.record(s.ensureGitHistory(ctx, migrationID, repo, created, done))
+		}
 	}
 
 	// 2. Pipelines — referenced against a target repository.
@@ -184,28 +201,52 @@ func (s *Service) Execute(ctx context.Context, migrationID string, plan *ado.Mig
 	return summary, nil
 }
 
-// ensureRepository creates the target repository (or skips an existing one) and
-// invokes the deferred git-history push seam on success.
-func (s *Service) ensureRepository(ctx context.Context, migrationID string, target TargetClient, repo ado.Repository, done map[stepKey]string, repoIDs map[string]string) ResourceResult {
+// ensureRepository creates the target repository (or skips an existing one). It
+// returns the per-resource result and, when a repository was freshly created in
+// this run, the created *ado.Repository (carrying its id and push URL) so the
+// caller can run the git-history step against it. The pointer is nil when the
+// repository was skipped (resumed/conflict) or failed, in which case no history
+// push is attempted.
+func (s *Service) ensureRepository(ctx context.Context, migrationID string, target TargetClient, repo ado.Repository, done map[stepKey]string, repoIDs map[string]string) (ResourceResult, *ado.Repository) {
 	key := stepKey{models.RepoMigrationResourceRepository, repo.Name}
 	if prior, ok := done[key]; ok {
-		return s.skipResume(ctx, migrationID, key, prior)
+		return s.skipResume(ctx, migrationID, key, prior), nil
 	}
 
 	created, err := target.CreateRepository(ctx, repo.Name)
 	if err != nil {
 		if ado.IsConflict(err) {
-			return s.recordSkippedExists(ctx, migrationID, key, "repository already exists in target")
+			return s.recordSkippedExists(ctx, migrationID, key, "repository already exists in target"), nil
 		}
-		return s.recordFailed(ctx, migrationID, key, err)
+		return s.recordFailed(ctx, migrationID, key, err), nil
 	}
 
 	repoIDs[repo.Name] = created.ID
-	// Deferred git-history push (no-op by default).
-	if pushErr := s.gitHistory.Push(ctx, repo, *created); pushErr != nil {
-		return s.recordFailed(ctx, migrationID, key, fmt.Errorf("git history push: %w", pushErr))
+	return s.recordCreated(ctx, migrationID, key, fmt.Sprintf("repository id %s", created.ID)), created
+}
+
+// ensureGitHistory pushes the source repository's git history into the freshly
+// created target repository via the configured GitHistoryPusher. It is only
+// invoked when a real pusher is active (gitHistoryActive). The step is
+// checkpointed under its own resource type so a resumed run can re-run just the
+// history transfer; a re-push of already-present refs is a no-op by contract.
+//
+// When created is nil the backing repository was skipped or failed in this run,
+// so there is nothing to push into — the step is recorded as skipped-exists
+// (idempotent, not a failure) and the push is not attempted.
+func (s *Service) ensureGitHistory(ctx context.Context, migrationID string, source ado.Repository, created *ado.Repository, done map[stepKey]string) ResourceResult {
+	key := stepKey{models.RepoMigrationResourceGitHistory, source.Name}
+	if prior, ok := done[key]; ok {
+		return s.skipResume(ctx, migrationID, key, prior)
 	}
-	return s.recordCreated(ctx, migrationID, key, fmt.Sprintf("repository id %s", created.ID))
+	if created == nil {
+		return s.recordSkippedExists(ctx, migrationID, key, "repository not created in this run; git history not pushed")
+	}
+
+	if err := s.gitHistory.Push(ctx, source, *created); err != nil {
+		return s.recordFailed(ctx, migrationID, key, err)
+	}
+	return s.recordCreated(ctx, migrationID, key, fmt.Sprintf("git history pushed to repository id %s", created.ID))
 }
 
 // ensurePipeline defines a pipeline in the target, linked to a target repository.

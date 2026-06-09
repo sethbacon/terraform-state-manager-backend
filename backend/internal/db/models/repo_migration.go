@@ -19,9 +19,12 @@ const (
 	RepoMigrationStepFailed        = "failed"
 )
 
-// Repo migration resource types, one per provisioning phase.
+// Repo migration resource types, one per provisioning phase. GitHistory is the
+// post-repository git push (commits/branches/tags) and is checkpointed as its
+// own step so a resumed run can re-run just the history transfer.
 const (
 	RepoMigrationResourceRepository        = "repository"
+	RepoMigrationResourceGitHistory        = "git_history"
 	RepoMigrationResourcePipeline          = "pipeline"
 	RepoMigrationResourceBranchPolicy      = "branch_policy"
 	RepoMigrationResourceVariableGroup     = "variable_group"
