@@ -1,0 +1,22 @@
+# Binaries
+backend/terraform-state-manager
+backend/terraform-state-manager-fips
+*.exe
+
+# Local config / secrets
+config.yaml
+*.local.yaml
+.env
+
+# Go
+backend/vendor/
+
+# OS / editor
+.DS_Store
+
+# CI / test artifacts
+backend/coverage.out
+backend/coverage.html
+backend/gosec-results.json
+backend/dist/
+backend/bin/

@@ -1,0 +1,55 @@
+# Example configuration for the Terraform State Manager backend.
+#
+# Every key can be overridden by an environment variable with the TSM_ prefix and
+# underscores for nesting, e.g. server.public_url -> TSM_SERVER_PUBLIC_URL,
+# auth.oidc.client_secret -> TSM_AUTH_OIDC_CLIENT_SECRET. Env vars win over this file.
+#
+# Two secrets are intentionally NOT in this file and are read only from the
+# environment (never commit them):
+#   TSM_JWT_SECRET       - HMAC secret for signing session JWTs (>= 32 bytes)
+#   TSM_ENCRYPTION_KEY   - 32-byte key for AES-256-GCM encryption of stored
+#                          per-source credentials at rest
+
+server:
+  host: "0.0.0.0"
+  port: 8080
+  base_url: "http://localhost:8080"
+  # Browser-facing SPA URL; used for post-login redirects and to decide whether
+  # session cookies get the Secure attribute (https => Secure).
+  public_url: "http://localhost:3000"
+  callback_url: ""
+  read_timeout: 30s
+  write_timeout: 30s
+
+database:
+  host: "localhost"
+  port: 5432
+  name: "terraform_state_manager"
+  user: "tsm"
+  password: ""
+  ssl_mode: "prefer"        # disable | prefer | require | verify-full
+  max_connections: 25
+  min_idle_connections: 5
+
+logging:
+  level: "info"             # debug | info | warn | error
+  format: "json"            # json | text
+
+telemetry:
+  metrics:
+    enabled: true
+    prometheus_port: 9090
+
+auth:
+  oidc:
+    enabled: false
+    issuer_url: ""
+    client_id: ""
+    client_secret: ""
+    redirect_url: ""
+    scopes: ["openid", "email", "profile"]
+    group_claim_name: "groups"
+    # Role template granted to a user in the default organization on their FIRST
+    # login only (logging in never escalates an existing member). Leave empty in
+    # production and drive roles from IdP group claims; "admin" is for local dev.
+    default_role: ""

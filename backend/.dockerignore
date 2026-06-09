@@ -1,0 +1,4 @@
+.git
+*.md
+terraform-state-manager
+terraform-state-manager-fips

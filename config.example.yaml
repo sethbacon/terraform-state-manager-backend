@@ -1,0 +1,34 @@
+# Terraform State Manager — example configuration.
+#
+# Layering: built-in defaults < this file < TSM_-prefixed environment variables.
+# e.g. TSM_DATABASE_HOST overrides database.host below. A config file is optional;
+# the service runs on defaults + env vars alone. Point the binary at this file with
+# CONFIG_PATH=/path/to/config.yaml.
+
+server:
+  host: 0.0.0.0
+  port: 8080
+  base_url: http://localhost:8080
+  # public_url is the user-facing frontend URL (used later for OIDC redirects).
+  public_url: http://localhost:3000
+  read_timeout: 30s
+  write_timeout: 30s
+
+database:
+  host: localhost
+  port: 5432
+  name: terraform_state_manager
+  user: tsm
+  password: "" # set via TSM_DATABASE_PASSWORD in real deployments
+  ssl_mode: prefer
+  max_connections: 25
+  min_idle_connections: 5
+
+logging:
+  level: info # debug | info | warn | error
+  format: json # json | text
+
+telemetry:
+  metrics:
+    enabled: true
+    prometheus_port: 9090
