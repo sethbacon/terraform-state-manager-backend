@@ -38,6 +38,10 @@ type ServerConfig struct {
 	CallbackURL  string        `mapstructure:"callback_url"`
 	ReadTimeout  time.Duration `mapstructure:"read_timeout"`
 	WriteTimeout time.Duration `mapstructure:"write_timeout"`
+	// TLSCertFile / TLSKeyFile enable HTTPS directly on the server. Required for
+	// the direct-TLS mTLS path; leave empty when TLS is terminated by a proxy.
+	TLSCertFile string `mapstructure:"tls_cert_file"`
+	TLSKeyFile  string `mapstructure:"tls_key_file"`
 }
 
 // CallbackBase returns the base URL for CI result callbacks (CallbackURL, else BaseURL).
@@ -102,6 +106,23 @@ type MetricsConfig struct {
 // Azure AD) can be layered on later, mirroring the registry backend.
 type AuthConfig struct {
 	OIDC OIDCConfig `mapstructure:"oidc"`
+	MTLS MTLSConfig `mapstructure:"mtls"`
+}
+
+// MTLSConfig holds mutual-TLS client-certificate authentication settings. The
+// TLS server verifies presented certs against ClientCAFile; mappings then grant
+// scopes to verified subjects.
+type MTLSConfig struct {
+	Enabled      bool                 `mapstructure:"enabled"`
+	ClientCAFile string               `mapstructure:"client_ca_file"`
+	Mappings     []MTLSSubjectMapping `mapstructure:"mappings"`
+}
+
+// MTLSSubjectMapping maps a verified client-cert subject (CN=…, dns:<san>, or a
+// full DN) to scopes.
+type MTLSSubjectMapping struct {
+	Subject string   `mapstructure:"subject"`
+	Scopes  []string `mapstructure:"scopes"`
 }
 
 // OIDCConfig holds generic OpenID Connect provider configuration.
@@ -168,6 +189,8 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("server.callback_url", "")
 	v.SetDefault("server.read_timeout", 30*time.Second)
 	v.SetDefault("server.write_timeout", 30*time.Second)
+	v.SetDefault("server.tls_cert_file", "")
+	v.SetDefault("server.tls_key_file", "")
 
 	v.SetDefault("database.host", "localhost")
 	v.SetDefault("database.port", 5432)
@@ -192,4 +215,7 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("auth.oidc.scopes", []string{"openid", "email", "profile"})
 	v.SetDefault("auth.oidc.group_claim_name", "groups")
 	v.SetDefault("auth.oidc.default_role", "")
+
+	v.SetDefault("auth.mtls.enabled", false)
+	v.SetDefault("auth.mtls.client_ca_file", "")
 }

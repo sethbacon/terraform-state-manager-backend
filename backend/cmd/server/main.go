@@ -32,6 +32,8 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"fmt"
 	"log"
 	"log/slog"
@@ -201,10 +203,33 @@ func serve(cfg *config.Config) error {
 		IdleTimeout:       120 * time.Second,
 	}
 
+	// Serve HTTPS when a cert/key is configured. When mTLS is also enabled, load
+	// the client CA pool and verify presented client certs against it (optional,
+	// so other auth methods still work). Go populates ConnectionState.VerifiedChains
+	// only for certs that pass this verification — which the mTLS middleware requires.
+	useTLS := cfg.Server.TLSCertFile != "" && cfg.Server.TLSKeyFile != ""
+	if useTLS && cfg.Auth.MTLS.Enabled {
+		caPool, err := loadClientCAPool(cfg.Auth.MTLS.ClientCAFile)
+		if err != nil {
+			return fmt.Errorf("failed to load mTLS client CA: %w", err)
+		}
+		server.TLSConfig = &tls.Config{
+			ClientCAs:  caPool,
+			ClientAuth: tls.VerifyClientCertIfGiven,
+			MinVersion: tls.VersionTLS12,
+		}
+	}
+
 	go func() {
-		slog.Info("server ready", "addr", cfg.Server.GetAddress(), "base_url", cfg.Server.BaseURL)
-		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("failed to start server: %v", err)
+		slog.Info("server ready", "addr", cfg.Server.GetAddress(), "base_url", cfg.Server.BaseURL, "tls", useTLS, "mtls", cfg.Auth.MTLS.Enabled)
+		var srvErr error
+		if useTLS {
+			srvErr = server.ListenAndServeTLS(cfg.Server.TLSCertFile, cfg.Server.TLSKeyFile)
+		} else {
+			srvErr = server.ListenAndServe()
+		}
+		if srvErr != nil && srvErr != http.ErrServerClosed {
+			log.Fatalf("failed to start server: %v", srvErr)
 		}
 	}()
 
@@ -220,6 +245,19 @@ func serve(cfg *config.Config) error {
 	}
 	slog.Info("server stopped gracefully")
 	return nil
+}
+
+// loadClientCAPool reads a PEM bundle of trusted client-certificate CAs for mTLS.
+func loadClientCAPool(caFile string) (*x509.CertPool, error) {
+	pemBytes, err := os.ReadFile(caFile) // #nosec G304 -- operator-configured CA path
+	if err != nil {
+		return nil, fmt.Errorf("read client CA file %q: %w", caFile, err)
+	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(pemBytes) {
+		return nil, fmt.Errorf("no certificates found in client CA file %q", caFile)
+	}
+	return pool, nil
 }
 
 func runMigrations(cfg *config.Config, direction string) error {

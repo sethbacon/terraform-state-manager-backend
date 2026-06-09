@@ -6,6 +6,7 @@ package api
 
 import (
 	"database/sql"
+	"fmt"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/terraform-state-manager/terraform-state-manager/docs"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/auth"
+	"github.com/terraform-state-manager/terraform-state-manager/internal/auth/mtls"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/config"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/middleware"
 )
@@ -26,6 +28,17 @@ func NewRouter(cfg *config.Config, database *sql.DB, identityDB *sql.DB) (*gin.E
 	r.Use(middleware.RequestID())
 	r.Use(middleware.SecurityHeaders())
 	r.Use(middleware.Metrics())
+
+	// mTLS: when enabled, a verified client cert (against the configured client CA)
+	// authenticates the request additively, before JWT auth. No-op if not enabled
+	// or if the TLS layer didn't verify a client cert.
+	if cfg.Auth.MTLS.Enabled {
+		mtlsProvider, err := mtls.NewProvider(cfg.Auth.MTLS)
+		if err != nil {
+			return nil, fmt.Errorf("failed to initialise mTLS provider: %w", err)
+		}
+		r.Use(mtls.AuthMiddleware(mtlsProvider))
+	}
 
 	// System endpoints (unversioned; used by orchestrators and probes).
 	r.GET("/health", health)

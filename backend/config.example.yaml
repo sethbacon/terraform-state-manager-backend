@@ -49,7 +49,23 @@ auth:
     redirect_url: ""
     scopes: ["openid", "email", "profile"]
     group_claim_name: "groups"
-    # Role template granted to a user in the default organization on their FIRST
-    # login only (logging in never escalates an existing member). Leave empty in
-    # production and drive roles from IdP group claims; "admin" is for local dev.
+    # Map verified IdP groups to org/role memberships. Orgs referenced here are
+    # IdP-authoritative: a user's membership is reconciled on every login (and
+    # revoked when they lose the group). Admin-configured; never user-supplied.
+    group_mappings: []
+    #   - { group: "tf-admins",  organization: "default", role: "admin" }
+    #   - { group: "tf-viewers", organization: "default", role: "viewer" }
+    # Role template granted in the default organization on a user's FIRST login
+    # only (never overwrites an existing role) when no group mapping applies.
     default_role: ""
+
+  # Mutual-TLS client-certificate auth (additive, machine-to-machine). Requires
+  # the server to serve HTTPS (server.tls_cert_file/tls_key_file) so it can verify
+  # presented client certs against client_ca_file. Only certs from a verified
+  # chain are honored. When TLS is terminated by a proxy, do mTLS there instead.
+  mtls:
+    enabled: false
+    client_ca_file: ""   # PEM bundle of trusted client-cert CAs
+    mappings: []
+    #   - { subject: "CN=svc-drift",            scopes: ["state:drift"] }
+    #   - { subject: "dns:machine.example.com", scopes: ["state:read"] }

@@ -18,6 +18,13 @@ const AuthCookieName = "tsm_auth_token"
 // context with user_id, scopes (from claims), and jwt_claims.
 func AuthMiddleware(userRepo *idstore.UserRepository, tokenRepo *idstore.TokenRepository) gin.HandlerFunc {
 	return func(c *gin.Context) {
+		// A verified mTLS client certificate (set by mtls.AuthMiddleware earlier in
+		// the chain) already authenticated this request and populated scopes.
+		if m, ok := c.Get("auth_method"); ok && m == "mtls" {
+			c.Next()
+			return
+		}
+
 		token, fromCookie := extractToken(c)
 		if token == "" {
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "Missing authorization credentials"})
