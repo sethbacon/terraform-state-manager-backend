@@ -1,0 +1,11 @@
+{
+	"Golang errors": {},
+	"Issues": [],
+	"Stats": {
+		"files": 48,
+		"lines": 5945,
+		"nosec": 8,
+		"found": 0
+	},
+	"GosecVersion": "dev"
+}

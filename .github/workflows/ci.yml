@@ -1,0 +1,185 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch: {}
+  workflow_call: {} # allows release.yml to call this
+
+concurrency:
+  group: ci-${{ github.event_name }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend-test:
+    name: Backend Tests & Quality
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - name: Set up Go toolchain
+        uses: ./.github/actions/setup-backend
+
+      - name: Check go mod tidy
+        working-directory: backend
+        run: |
+          go mod tidy
+          if ! git diff --exit-code go.mod go.sum; then
+            echo "go.mod or go.sum is out of date — run 'go mod tidy' and commit the result"
+            exit 1
+          fi
+
+      - name: Build
+        working-directory: backend
+        run: go build ./...
+
+      - name: Vet
+        working-directory: backend
+        run: go vet ./...
+
+      # Enabled in Phase B (Swagger). swagger.json is generated from handler swag
+      # annotations; regenerate and fail if the committed file is stale.
+      # - name: Verify swagger.json is in sync with annotations
+      #   working-directory: backend
+      #   run: |
+      #     go install github.com/swaggo/swag/cmd/swag@v1.16.4
+      #     export PATH="$PATH:$(go env GOPATH)/bin"
+      #     swag init -g cmd/server/main.go --outputTypes json
+      #     if ! git diff --exit-code docs/swagger.json; then
+      #       echo "docs/swagger.json is out of date — run 'make swag' and commit the result"
+      #       exit 1
+      #     fi
+
+      - name: Run Go tests (with coverage)
+        working-directory: backend
+        run: |
+          go clean -testcache
+          go test ./internal/... -race -coverprofile=coverage.out -covermode=atomic
+
+      - name: Check coverage threshold
+        working-directory: backend
+        # Bootstrap floor — guards against regression; ratchet upward as coverage grows.
+        run: |
+          THRESHOLD=4
+          COVERAGE=$(go tool cover -func=coverage.out | grep "^total:" | awk '{print $3}' | tr -d '%')
+          echo "Coverage: ${COVERAGE}%  (floor: ${THRESHOLD}%)"
+          awk -v cov="$COVERAGE" -v thr="$THRESHOLD" 'BEGIN {
+            if (cov + 0 < thr + 0) {
+              print "FAIL: " cov "% is below the " thr "% floor."
+              exit 1
+            }
+            print "PASS: " cov "% meets the " thr "% floor."
+          }'
+
+      - name: Upload Go coverage
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: go-coverage
+          path: backend/coverage.out
+
+  gosec:
+    name: Security Scan (gosec)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - name: Set up Go toolchain
+        uses: ./.github/actions/setup-backend
+        with:
+          install-gosec: "true"
+
+      - name: Run gosec
+        working-directory: backend
+        # Accepted risks are suppressed inline with // #nosec <rule> -- <reason>.
+        run: gosec -fmt json -out gosec-results.json ./... || true
+
+      - name: Compare against baseline
+        id: compare
+        working-directory: backend
+        run: |
+          python3 scripts/gosec-compare.py \
+            --results  gosec-results.json \
+            --baseline gosec-baseline.json \
+            --base-dir . \
+            --output   /tmp/issue-body.md
+        continue-on-error: true
+
+      - name: Open GitHub issue for new findings
+        if: steps.compare.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh label create "security"  --color "d73a4a" --description "Security finding"           --repo "$GITHUB_REPOSITORY" --force || true
+          gh label create "automated" --color "0075ca" --description "Created automatically by CI"  --repo "$GITHUB_REPOSITORY" --force || true
+          TITLE="security: new gosec findings on ${GITHUB_REF_NAME} ($(date -u +%Y-%m-%d))"
+          EXISTING=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --label "security,automated" --search "gosec ${GITHUB_REF_NAME}" --json number --jq length)
+          if [ "$EXISTING" -gt 0 ]; then
+            echo "An open gosec issue already exists for this branch — skipping duplicate."
+            exit 0
+          fi
+          gh issue create --repo "$GITHUB_REPOSITORY" --title "$TITLE" --body-file /tmp/issue-body.md --label "security,automated"
+
+      - name: Fail job if new findings detected
+        if: steps.compare.outcome == 'failure'
+        run: |
+          echo "New gosec findings detected — see the GitHub issue created above."
+          echo "Fix or suppress with // #nosec <rule> -- <reason>, then regenerate the baseline:"
+          echo "  bash backend/scripts/update-gosec-baseline.sh"
+          exit 1
+
+      - name: Upload gosec results
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: gosec-results
+          path: backend/gosec-results.json
+
+  docker-build:
+    name: Docker Build Smoke Test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - name: Build backend Docker image
+        run: docker build -t terraform-state-manager-backend:ci backend/
+
+      - name: Trivy filesystem scan (report-only)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: backend/
+          severity: HIGH,CRITICAL
+          exit-code: 0
+          format: table
+
+      - name: Verify image starts (smoke test)
+        run: |
+          # Start with a bogus DB target; we only assert the entrypoint executes.
+          docker run -d \
+            --name tsm-smoke \
+            -e TSM_DATABASE_HOST=nonexistent \
+            -p 18080:8080 \
+            terraform-state-manager-backend:ci || true
+          sleep 5
+          STATUS=$(docker inspect --format='{{.State.Status}}' tsm-smoke 2>/dev/null || echo "missing")
+          echo "Container status: $STATUS"
+          docker rm -f tsm-smoke 2>/dev/null || true
+          if [ "$STATUS" = "missing" ]; then
+            echo "Container never started — Docker build artifact broken"
+            exit 1
+          fi
+
+  # NOTE: deployment-config validation (compose / helm / kustomize) lives in the
+  # frontend repo, where newtsm's deployments/ directory is maintained.

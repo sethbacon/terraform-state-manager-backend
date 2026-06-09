@@ -82,6 +82,8 @@ func (h *AuthHandlers) cookieSecure(c *gin.Context) bool {
 
 func (h *AuthHandlers) setSessionCookies(c *gin.Context, token string) {
 	secure := h.cookieSecure(c)
+	// #nosec G124 -- session cookie is HttpOnly; Secure is config-derived (true in
+	// production, false only for http://localhost dev so the cookie is still sent).
 	http.SetCookie(c.Writer, &http.Cookie{
 		Name:     middleware.AuthCookieName,
 		Value:    token,
@@ -97,6 +99,8 @@ func (h *AuthHandlers) setSessionCookies(c *gin.Context, token string) {
 }
 
 func (h *AuthHandlers) clearSessionCookies(c *gin.Context) {
+	// #nosec G124 -- expiring the HttpOnly session cookie on logout (MaxAge -1);
+	// Secure is config-derived, matching how the cookie was originally set.
 	http.SetCookie(c.Writer, &http.Cookie{
 		Name:     middleware.AuthCookieName,
 		Value:    "",

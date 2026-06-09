@@ -62,6 +62,9 @@ func SetCSRFCookie(w http.ResponseWriter, secure bool) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	// #nosec G124 -- CSRF double-submit cookie must be readable by JS (HttpOnly:false
+	// by design) so the SPA can echo it in X-CSRF-Token; Secure is config-derived so
+	// it is still sent over http://localhost in dev and forced on in production.
 	http.SetCookie(w, &http.Cookie{
 		Name:     CSRFCookieName,
 		Value:    token,
@@ -76,6 +79,8 @@ func SetCSRFCookie(w http.ResponseWriter, secure bool) (string, error) {
 
 // ClearCSRFCookie removes the CSRF cookie (e.g. on logout).
 func ClearCSRFCookie(w http.ResponseWriter) {
+	// #nosec G124 -- expiring the JS-readable CSRF cookie; HttpOnly:false mirrors
+	// how it was set (double-submit pattern), value is emptied with MaxAge -1.
 	http.SetCookie(w, &http.Cookie{
 		Name:     CSRFCookieName,
 		Value:    "",
