@@ -4,11 +4,14 @@
 package api
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/subtle"
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 
@@ -140,68 +143,100 @@ func (h *DriftHandlers) CreateRun() gin.HandlerFunc {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
-		ctx := c.Request.Context()
-		conn, err := h.pipelineRepo.GetByID(ctx, req.PipelineConnectionID)
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load pipeline connection"})
-			return
-		}
-		if conn == nil {
-			c.JSON(http.StatusNotFound, gin.H{"error": "pipeline connection not found"})
-			return
-		}
-		token := ""
-		if len(conn.EncryptedToken) > 0 {
-			pt, derr := crypto.Decrypt(conn.EncryptedToken)
-			if derr != nil {
-				c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to decrypt pipeline token"})
-				return
-			}
-			token = string(pt)
-		}
-
-		run := &repositories.DriftRun{
-			PipelineConnectionID: &conn.ID,
+		saved, err := h.dispatchDrift(c.Request.Context(), DriftTarget{
+			PipelineConnectionID: req.PipelineConnectionID,
+			SourceID:             req.SourceID,
 			StateKey:             req.StateKey,
 			RepoRef:              req.RepoRef,
 			WorkingDir:           req.WorkingDir,
-			Status:               "dispatched",
-			CallbackToken:        randomToken(),
-			Actor:                userIDOf(c),
-		}
-		if req.SourceID != "" {
-			run.SourceID = &req.SourceID
-		}
-		saved, err := h.driftRepo.Create(ctx, run)
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create drift run"})
-			return
-		}
-
-		callbackURL := strings.TrimRight(h.cfg.Server.CallbackBase(), "/") + "/api/v1/drift/runs/" + saved.ID + "/results"
-		inputs := pipelines.DriftInputs{CallbackURL: callbackURL, CallbackToken: run.CallbackToken, WorkingDir: req.WorkingDir}
-
-		var dispatchErr error
-		switch conn.Provider {
-		case "github_actions":
-			dispatchErr = pipelines.DispatchGitHubDrift(ctx, token, pipelines.GitHubConfigFromMap(conn.Config), req.RepoRef, inputs)
-		case "azure_devops":
-			dispatchErr = pipelines.DispatchAzureDevOpsDrift(ctx, token, pipelines.AzureDevOpsConfigFromMap(conn.Config), req.RepoRef, inputs)
-		default:
-			dispatchErr = errUnsupportedProvider(conn.Provider)
-		}
-		if dispatchErr != nil {
-			_ = h.driftRepo.UpdateStatus(ctx, saved.ID, "failed", dispatchErr.Error())
-			saved.Status = "failed"
-			saved.Detail = dispatchErr.Error()
-			saved.CallbackToken = ""
+		}, userIDOf(c))
+		switch {
+		case errors.Is(err, errPipelineNotFound):
+			c.JSON(http.StatusNotFound, gin.H{"error": "pipeline connection not found"})
+		case err != nil && saved != nil:
+			// The run was recorded but the CI dispatch failed; return the run detail.
 			c.JSON(http.StatusBadGateway, saved)
-			return
+		case err != nil:
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to dispatch drift run"})
+		default:
+			c.JSON(http.StatusAccepted, saved)
 		}
-
-		saved.CallbackToken = "" // never expose
-		c.JSON(http.StatusAccepted, saved)
 	}
+}
+
+// DriftTarget is the input for dispatching a drift run. Shared by the HTTP handler
+// and the scheduler (decoded from a schedule's target_config).
+type DriftTarget struct {
+	PipelineConnectionID string `json:"pipeline_connection_id"`
+	SourceID             string `json:"source_id"`
+	StateKey             string `json:"state_key"`
+	RepoRef              string `json:"repo_ref"`
+	WorkingDir           string `json:"working_dir"`
+}
+
+var errPipelineNotFound = errors.New("pipeline connection not found")
+
+// dispatchDrift loads the pipeline, records a drift run, and triggers the CI
+// workflow. On a CI-dispatch failure it returns the saved run (status "failed")
+// alongside the error so the HTTP caller can surface the detail; the callback
+// token is always stripped from the returned run. Shared by CreateRun (HTTP) and
+// the scheduler.
+func (h *DriftHandlers) dispatchDrift(ctx context.Context, tgt DriftTarget, actor string) (*repositories.DriftRun, error) {
+	conn, err := h.pipelineRepo.GetByID(ctx, tgt.PipelineConnectionID)
+	if err != nil {
+		return nil, fmt.Errorf("load pipeline connection: %w", err)
+	}
+	if conn == nil {
+		return nil, errPipelineNotFound
+	}
+	token := ""
+	if len(conn.EncryptedToken) > 0 {
+		pt, derr := crypto.Decrypt(conn.EncryptedToken)
+		if derr != nil {
+			return nil, fmt.Errorf("decrypt pipeline token: %w", derr)
+		}
+		token = string(pt)
+	}
+
+	run := &repositories.DriftRun{
+		PipelineConnectionID: &conn.ID,
+		StateKey:             tgt.StateKey,
+		RepoRef:              tgt.RepoRef,
+		WorkingDir:           tgt.WorkingDir,
+		Status:               "dispatched",
+		CallbackToken:        randomToken(),
+		Actor:                actor,
+	}
+	if tgt.SourceID != "" {
+		run.SourceID = &tgt.SourceID
+	}
+	saved, err := h.driftRepo.Create(ctx, run)
+	if err != nil {
+		return nil, fmt.Errorf("create drift run: %w", err)
+	}
+
+	callbackURL := strings.TrimRight(h.cfg.Server.CallbackBase(), "/") + "/api/v1/drift/runs/" + saved.ID + "/results"
+	inputs := pipelines.DriftInputs{CallbackURL: callbackURL, CallbackToken: run.CallbackToken, WorkingDir: tgt.WorkingDir}
+
+	var dispatchErr error
+	switch conn.Provider {
+	case "github_actions":
+		dispatchErr = pipelines.DispatchGitHubDrift(ctx, token, pipelines.GitHubConfigFromMap(conn.Config), tgt.RepoRef, inputs)
+	case "azure_devops":
+		dispatchErr = pipelines.DispatchAzureDevOpsDrift(ctx, token, pipelines.AzureDevOpsConfigFromMap(conn.Config), tgt.RepoRef, inputs)
+	default:
+		dispatchErr = errUnsupportedProvider(conn.Provider)
+	}
+	if dispatchErr != nil {
+		_ = h.driftRepo.UpdateStatus(ctx, saved.ID, "failed", dispatchErr.Error())
+		saved.Status = "failed"
+		saved.Detail = dispatchErr.Error()
+		saved.CallbackToken = ""
+		return saved, dispatchErr
+	}
+
+	saved.CallbackToken = "" // never expose
+	return saved, nil
 }
 
 // ListRuns returns recent drift runs.

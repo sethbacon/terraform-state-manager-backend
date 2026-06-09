@@ -17,10 +17,11 @@ func init() { gin.SetMode(gin.TestMode) }
 // /version don't touch the database, so nil is safe for those endpoints.
 func newTestRouter(t *testing.T) *gin.Engine {
 	t.Helper()
-	router, err := NewRouter(&config.Config{}, nil, nil)
+	router, stop, err := NewRouter(&config.Config{}, nil, nil)
 	if err != nil {
 		t.Fatalf("NewRouter: %v", err)
 	}
+	t.Cleanup(stop)
 	return router
 }
 

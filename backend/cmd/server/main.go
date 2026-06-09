@@ -189,10 +189,11 @@ func serve(cfg *config.Config) error {
 		}()
 	}
 
-	router, err := api.NewRouter(cfg, database, identityDB)
+	router, stopWorkers, err := api.NewRouter(cfg, database, identityDB)
 	if err != nil {
 		return fmt.Errorf("failed to build router: %w", err)
 	}
+	defer stopWorkers() // halt the background schedule runner on shutdown
 
 	server := &http.Server{
 		Addr:              cfg.Server.GetAddress(),

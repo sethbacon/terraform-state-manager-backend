@@ -17,13 +17,18 @@ import (
 	"github.com/terraform-state-manager/terraform-state-manager/internal/auth"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/auth/mtls"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/config"
+	"github.com/terraform-state-manager/terraform-state-manager/internal/db/repositories"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/middleware"
+	"github.com/terraform-state-manager/terraform-state-manager/internal/services/scheduler"
 )
 
 // NewRouter builds the application's HTTP handler. database is the app/public
 // connection; identityDB resolves to the identity schema (search_path) for the
-// shared identity repositories used by auth.
-func NewRouter(cfg *config.Config, database *sql.DB, identityDB *sql.DB) (*gin.Engine, error) {
+// shared identity repositories used by auth. It also starts the background
+// schedule runner (when database is non-nil) and returns a stop func the caller
+// must invoke on shutdown to halt it.
+func NewRouter(cfg *config.Config, database *sql.DB, identityDB *sql.DB) (*gin.Engine, func(), error) {
+	stop := func() {} // halts background workers; replaced when the scheduler starts
 	r := gin.New()
 	r.Use(gin.Recovery())
 	r.Use(middleware.RequestID())
@@ -36,7 +41,7 @@ func NewRouter(cfg *config.Config, database *sql.DB, identityDB *sql.DB) (*gin.E
 	if cfg.Auth.MTLS.Enabled {
 		mtlsProvider, err := mtls.NewProvider(cfg.Auth.MTLS)
 		if err != nil {
-			return nil, fmt.Errorf("failed to initialise mTLS provider: %w", err)
+			return nil, stop, fmt.Errorf("failed to initialise mTLS provider: %w", err)
 		}
 		r.Use(mtls.AuthMiddleware(mtlsProvider))
 	}
@@ -56,7 +61,7 @@ func NewRouter(cfg *config.Config, database *sql.DB, identityDB *sql.DB) (*gin.E
 
 	authHandlers, err := NewAuthHandlers(cfg, identityDB)
 	if err != nil {
-		return nil, err
+		return nil, stop, err
 	}
 	requireAuth := middleware.AuthMiddleware(authHandlers.UserRepo(), authHandlers.TokenRepo())
 	optionalAuth := middleware.OptionalAuthMiddleware(authHandlers.UserRepo(), authHandlers.TokenRepo())
@@ -161,6 +166,28 @@ func NewRouter(cfg *config.Config, database *sql.DB, identityDB *sql.DB) (*gin.E
 			hg.GET("/runs/:id", middleware.RequireScope(auth.ScopeStateRead), health.GetRun())
 		}
 		v1.POST("/health-lab/runs/:id/results", health.RunResults())
+
+		// Scheduler: cron-driven schedules that dispatch drift runs. The same drift
+		// dispatcher backs the HTTP "run now" endpoint and the background runner.
+		driftDisp := driftDispatcher{drift: drift}
+		scheduleHandlers := NewScheduleHandlers(database, driftDisp)
+		sg := v1.Group("/schedules", requireAuth)
+		{
+			sg.GET("", middleware.RequireScope(auth.ScopeStateRead), scheduleHandlers.ListSchedules())
+			sg.POST("", middleware.RequireScope(auth.ScopeSourcesManage), scheduleHandlers.CreateSchedule())
+			sg.GET("/:id", middleware.RequireScope(auth.ScopeStateRead), scheduleHandlers.GetSchedule())
+			sg.PUT("/:id", middleware.RequireScope(auth.ScopeSourcesManage), scheduleHandlers.UpdateSchedule())
+			sg.DELETE("/:id", middleware.RequireScope(auth.ScopeSourcesManage), scheduleHandlers.DeleteSchedule())
+			sg.POST("/:id/run", middleware.RequireScope(auth.ScopeSourcesManage), scheduleHandlers.RunSchedule())
+		}
+
+		// Start the background runner. Guarded on database so unit tests that build
+		// the router with a nil DB don't spin up a goroutine that would hit it.
+		if database != nil {
+			runner := scheduler.New(repositories.NewScheduleRepository(database), driftDisp)
+			runner.Start()
+			stop = runner.Stop
+		}
 	}
 
 	// SCIM 2.0 provisioning (RFC 7644), mounted at the conventional top-level
@@ -182,5 +209,5 @@ func NewRouter(cfg *config.Config, database *sql.DB, identityDB *sql.DB) (*gin.E
 		}
 	}
 
-	return r, nil
+	return r, stop, nil
 }
