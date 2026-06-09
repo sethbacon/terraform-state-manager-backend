@@ -1,0 +1,6 @@
+{
+  "error": {
+    "code": "ResourceNotFound",
+    "message": "The Resource 'Microsoft.Compute/virtualMachines/vm-gone' under resource group 'rg-platform' was not found."
+  }
+}

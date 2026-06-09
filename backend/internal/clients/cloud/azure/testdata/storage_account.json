@@ -1,0 +1,14 @@
+{
+  "id": "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-platform/providers/Microsoft.Storage/storageAccounts/sttfstateprod",
+  "name": "sttfstateprod",
+  "type": "Microsoft.Storage/storageAccounts",
+  "location": "eastus",
+  "kind": "StorageV2",
+  "sku": {
+    "name": "Standard_LRS",
+    "tier": "Standard"
+  },
+  "properties": {
+    "provisioningState": "Succeeded"
+  }
+}
