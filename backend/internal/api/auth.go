@@ -213,7 +213,17 @@ func (h *AuthHandlers) CallbackHandler() gin.HandlerFunc {
 			return
 		}
 
-		h.ensureDefaultMembership(ctx, user.ID)
+		// Map the user's IdP groups (from the verified ID token) to org/role
+		// memberships. Groups are never user-supplied here — they come from the
+		// signature-verified ID token above.
+		claimName := h.cfg.Auth.OIDC.GroupClaimName
+		if claimName == "" {
+			claimName = "groups"
+		}
+		groups := h.oidcProvider.ExtractGroups(idToken, claimName)
+		if mapErr := h.applyGroupMappings(ctx, user.ID, groups); mapErr != nil {
+			slog.Warn("failed to apply OIDC group mappings", "user_id", user.ID, "error", mapErr)
+		}
 
 		scopes, err := h.orgRepo.GetUserCombinedScopes(ctx, user.ID)
 		if err != nil {
@@ -358,15 +368,74 @@ func (h *AuthHandlers) revokeCurrent(c *gin.Context) {
 	}
 }
 
-// ensureDefaultMembership assigns the configured default role to the user in the
-// default organization on their FIRST login (when no membership exists yet), so a
-// new user receives baseline scopes. It never alters an existing member's role —
-// promotions/demotions are an explicit admin action, not a side effect of login.
-// Group-based mapping from the IdP can replace this later.
-func (h *AuthHandlers) ensureDefaultMembership(ctx context.Context, userID string) {
-	if h.cfg.Auth.OIDC.DefaultRole != "" {
-		h.assignRole(ctx, userID, h.cfg.Auth.OIDC.DefaultRole)
+// applyGroupMappings maps the user's verified IdP groups to organization/role
+// memberships. For each configured mapping whose group the user has, it upserts
+// their membership in that organization with the mapped role; when no mapping
+// matches and a default role is configured, it falls back to the default role in
+// the default organization.
+//
+// SECURITY: the groups originate only from the cryptographically-verified ID
+// token (see CallbackHandler), and mappings are admin-configured (never
+// user-supplied), so this cannot be driven by a forged group claim.
+//
+// NOTE (deprovisioning): this registry-parity version does NOT revoke a mapped
+// role when a user loses the corresponding IdP group — see the reconciliation
+// hardening that follows.
+func (h *AuthHandlers) applyGroupMappings(ctx context.Context, userID string, groups []string) error {
+	mappings := h.cfg.Auth.OIDC.GroupMappings
+	defaultRole := h.cfg.Auth.OIDC.DefaultRole
+	if len(mappings) == 0 && defaultRole == "" {
+		return nil
 	}
+
+	groupSet := make(map[string]struct{}, len(groups))
+	for _, g := range groups {
+		groupSet[g] = struct{}{}
+	}
+
+	matched := false
+	for _, m := range mappings {
+		if _, ok := groupSet[m.Group]; !ok {
+			continue
+		}
+		matched = true
+		org, err := h.orgRepo.GetByName(ctx, m.Organization)
+		if err != nil || org == nil {
+			slog.Warn("group mapping: organization not found", "org", m.Organization, "group", m.Group)
+			continue
+		}
+		isMember, _, err := h.orgRepo.CheckMembership(ctx, org.ID, userID)
+		if err != nil {
+			return fmt.Errorf("check membership org=%s user=%s: %w", org.ID, userID, err)
+		}
+		if isMember {
+			if err := h.orgRepo.UpdateMemberRole(ctx, org.ID, userID, m.Role); err != nil {
+				return fmt.Errorf("update member role org=%s user=%s: %w", org.ID, userID, err)
+			}
+		} else if err := h.orgRepo.AddMemberWithParams(ctx, org.ID, userID, m.Role); err != nil {
+			return fmt.Errorf("add member org=%s user=%s: %w", org.ID, userID, err)
+		}
+		slog.Info("group mapping applied", "user_id", userID, "group", m.Group, "org", m.Organization, "role", m.Role)
+	}
+
+	if !matched && defaultRole != "" {
+		org, err := h.orgRepo.GetDefaultOrganization(ctx)
+		if err != nil || org == nil {
+			return fmt.Errorf("default organization not found for default_role fallback")
+		}
+		isMember, _, err := h.orgRepo.CheckMembership(ctx, org.ID, userID)
+		if err != nil {
+			return fmt.Errorf("check membership default org user=%s: %w", userID, err)
+		}
+		if isMember {
+			if err := h.orgRepo.UpdateMemberRole(ctx, org.ID, userID, defaultRole); err != nil {
+				return fmt.Errorf("update default role user=%s: %w", userID, err)
+			}
+		} else if err := h.orgRepo.AddMemberWithParams(ctx, org.ID, userID, defaultRole); err != nil {
+			return fmt.Errorf("add default member user=%s: %w", userID, err)
+		}
+	}
+	return nil
 }
 
 // assignRole adds the user to the default organization with the given role

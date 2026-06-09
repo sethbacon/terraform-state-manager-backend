@@ -115,10 +115,23 @@ type OIDCConfig struct {
 
 	// GroupClaimName is the ID-token claim carrying the user's IdP groups.
 	GroupClaimName string `mapstructure:"group_claim_name"`
+	// GroupMappings map a verified IdP group claim value to an organization + role
+	// template. Applied on login from the cryptographically-verified ID token;
+	// admin-configured via YAML/file config, never user-supplied.
+	GroupMappings []OIDCGroupMapping `mapstructure:"group_mappings"`
 	// DefaultRole is the role template assigned (in the default organization) to a
 	// user on login when no group mapping applies. Empty means no scopes are
 	// granted automatically.
 	DefaultRole string `mapstructure:"default_role"`
+}
+
+// OIDCGroupMapping maps a single verified IdP group to an organization and role
+// template. The group value is matched against the user's groups claim from the
+// verified ID token.
+type OIDCGroupMapping struct {
+	Group        string `mapstructure:"group"`
+	Organization string `mapstructure:"organization"`
+	Role         string `mapstructure:"role"`
 }
 
 // Load reads configuration from an optional YAML file (path may be empty) layered
