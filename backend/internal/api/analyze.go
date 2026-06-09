@@ -15,6 +15,16 @@ const maxUploadBytes = 64 << 20 // 64 MiB
 
 // AnalyzeUploadHandler analyzes a posted state file without persisting it.
 // POST /api/v1/analyze — body is the raw .tfstate, or a multipart form field "file".
+// @Summary      Analyze an uploaded state file
+// @Description  Analyzes a one-off .tfstate (raw JSON body or multipart "file") without storing a source. Requires state:read.
+// @Tags         Sources
+// @Accept       json
+// @Produce      json
+// @Success      200  {object}  map[string]interface{}
+// @Failure      422  {object}  map[string]interface{}
+// @Security     BearerAuth
+// @Security     CookieAuth
+// @Router       /analyze [post]
 func AnalyzeUploadHandler() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		data, err := readUpload(c)

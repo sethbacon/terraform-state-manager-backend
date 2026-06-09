@@ -113,6 +113,16 @@ func (h *DriftHandlers) DeletePipeline() gin.HandlerFunc {
 // --- Drift runs ---
 
 // CreateRun dispatches a drift run on the chosen pipeline and records it.
+// @Summary      Dispatch drift run
+// @Description  Dispatches a terraform-plan drift run on the chosen CI pipeline and records it. Inputs are validated server-side. Requires state:drift.
+// @Tags         Drift
+// @Accept       json
+// @Produce      json
+// @Success      200  {object}  map[string]interface{}
+// @Failure      400  {object}  map[string]interface{}
+// @Security     BearerAuth
+// @Security     CookieAuth
+// @Router       /drift/runs [post]
 func (h *DriftHandlers) CreateRun() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		var req struct {
@@ -195,6 +205,13 @@ func (h *DriftHandlers) CreateRun() gin.HandlerFunc {
 }
 
 // ListRuns returns recent drift runs.
+// @Summary      List drift runs
+// @Tags         Drift
+// @Produce      json
+// @Success      200  {object}  map[string]interface{}
+// @Security     BearerAuth
+// @Security     CookieAuth
+// @Router       /drift/runs [get]
 func (h *DriftHandlers) ListRuns() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		runs, err := h.driftRepo.List(c.Request.Context(), 50)
@@ -225,6 +242,17 @@ func (h *DriftHandlers) GetRun() gin.HandlerFunc {
 
 // RunResults is the machine callback the CI job posts drift results to. It is
 // authenticated by the per-run callback token (no user session).
+// @Summary      Drift run callback (machine)
+// @Description  CI job posts drift results here, authenticated by the per-run one-shot X-TSM-Callback-Token. Not a user endpoint.
+// @Tags         Drift
+// @Accept       json
+// @Produce      json
+// @Param        id   path  string  true  "Drift run ID"
+// @Success      200  {object}  map[string]interface{}
+// @Failure      401  {object}  map[string]interface{}  "invalid callback token"
+// @Failure      409  {object}  map[string]interface{}  "callback already processed"
+// @Security     CallbackToken
+// @Router       /drift/runs/{id}/results [post]
 func (h *DriftHandlers) RunResults() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		ctx := c.Request.Context()

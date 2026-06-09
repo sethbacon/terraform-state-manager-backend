@@ -6,9 +6,11 @@ package api
 
 import (
 	"database/sql"
+	"net/http"
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/terraform-state-manager/terraform-state-manager/docs"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/auth"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/config"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/middleware"
@@ -27,6 +29,15 @@ func NewRouter(cfg *config.Config, database *sql.DB, identityDB *sql.DB) (*gin.E
 	// System endpoints (unversioned; used by orchestrators and probes).
 	r.GET("/health", health)
 	r.GET("/ready", ready(database))
+
+	// OpenAPI spec (unauthenticated, read-only) — generated from handler swag
+	// annotations (see docs package). Rendered by the frontend's API docs page.
+	r.GET("/swagger.json", func(c *gin.Context) {
+		c.Data(http.StatusOK, "application/json; charset=utf-8", docs.SwaggerJSON)
+	})
+	r.GET("/swagger.yaml", func(c *gin.Context) {
+		c.Data(http.StatusOK, "application/yaml; charset=utf-8", docs.SwaggerYAML)
+	})
 
 	authHandlers, err := NewAuthHandlers(cfg, identityDB)
 	if err != nil {

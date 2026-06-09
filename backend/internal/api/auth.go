@@ -232,6 +232,15 @@ func (h *AuthHandlers) CallbackHandler() gin.HandlerFunc {
 }
 
 // MeHandler returns the authenticated user, memberships, and combined scopes.
+// @Summary      Current user
+// @Description  Returns the authenticated user, organization memberships, and combined allowed scopes.
+// @Tags         Auth
+// @Produce      json
+// @Success      200  {object}  map[string]interface{}
+// @Failure      401  {object}  map[string]interface{}
+// @Security     BearerAuth
+// @Security     CookieAuth
+// @Router       /auth/me [get]
 func (h *AuthHandlers) MeHandler() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		userID, ok := c.Get("user_id")

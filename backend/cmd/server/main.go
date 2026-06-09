@@ -1,3 +1,24 @@
+// @title           Terraform State Manager API
+// @version         1.0.0
+// @description     REST API for the Terraform State Manager: analyze, edit, and move Terraform state across existing backends, with CI-driven drift detection and version testing.
+// @basePath        /api/v1
+// @schemes         https http
+//
+// @securityDefinitions.apikey  BearerAuth
+// @in                          header
+// @name                        Authorization
+// @description                 Session JWT. Format: "Bearer {token}". The same token is also delivered as the HttpOnly tsm_auth_token cookie.
+//
+// @securityDefinitions.apikey  CookieAuth
+// @in                          cookie
+// @name                        tsm_auth_token
+// @description                 HttpOnly session cookie set at login. Mutating requests additionally require the X-CSRF-Token header to match the tsm_csrf cookie (double-submit).
+//
+// @securityDefinitions.apikey  CallbackToken
+// @in                          header
+// @name                        X-TSM-Callback-Token
+// @description                 Per-run one-shot token authenticating a CI job's machine callback (drift/health results).
+
 // Package main is the entry point for the Terraform State Manager server binary.
 // It dispatches three subcommands — serve, migrate, and version — via a simple
 // switch on os.Args so the binary's full CLI surface is readable in one place

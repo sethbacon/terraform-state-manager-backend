@@ -42,18 +42,18 @@ jobs:
         working-directory: backend
         run: go vet ./...
 
-      # Enabled in Phase B (Swagger). swagger.json is generated from handler swag
-      # annotations; regenerate and fail if the committed file is stale.
-      # - name: Verify swagger.json is in sync with annotations
-      #   working-directory: backend
-      #   run: |
-      #     go install github.com/swaggo/swag/cmd/swag@v1.16.4
-      #     export PATH="$PATH:$(go env GOPATH)/bin"
-      #     swag init -g cmd/server/main.go --outputTypes json
-      #     if ! git diff --exit-code docs/swagger.json; then
-      #       echo "docs/swagger.json is out of date — run 'make swag' and commit the result"
-      #       exit 1
-      #     fi
+      - name: Verify swagger.json is in sync with annotations
+        working-directory: backend
+        # swagger.json is generated from handler swag annotations (source of truth).
+        # Regenerate and fail if the committed file is stale.
+        run: |
+          go install github.com/swaggo/swag/cmd/swag@v1.16.4
+          export PATH="$PATH:$(go env GOPATH)/bin"
+          swag init -g cmd/server/main.go --outputTypes json
+          if ! git diff --exit-code docs/swagger.json; then
+            echo "docs/swagger.json is out of date — run 'make swag' and commit the result"
+            exit 1
+          fi
 
       - name: Run Go tests (with coverage)
         working-directory: backend

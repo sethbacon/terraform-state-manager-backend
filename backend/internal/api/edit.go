@@ -21,6 +21,19 @@ import (
 // EditState replaces the state at ?key= with the request body after validating it
 // (valid Terraform state JSON; serial non-regressing and lineage match unless
 // ?force=true) and backing up the current version.
+// @Summary      Replace state (guarded)
+// @Description  Lock -> backup -> validate (serial/lineage) -> write -> audit. Pass force=true to override serial/lineage checks. Requires state:write.
+// @Tags         Edit
+// @Accept       json
+// @Produce      json
+// @Param        id     path   string  true   "Source ID"
+// @Param        key    query  string  true   "State file key"
+// @Param        force  query  bool    false  "Override serial/lineage checks"
+// @Success      200  {object}  map[string]interface{}
+// @Failure      409  {object}  map[string]interface{}  "serial/lineage conflict or locked"
+// @Security     BearerAuth
+// @Security     CookieAuth
+// @Router       /sources/{id}/state/raw [put]
 func (h *SourcesHandlers) EditState() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		key := c.Query("key")
@@ -93,6 +106,17 @@ func (h *SourcesHandlers) EditState() gin.HandlerFunc {
 
 // StateOperation applies a structured edit (rm / mv) to the state at ?key=,
 // running it through the same backup → write → audit pipeline.
+// @Summary      State operation (rm/mv)
+// @Description  Apply an rm or mv operation through the backup -> write -> audit pipeline. Requires state:write.
+// @Tags         Edit
+// @Accept       json
+// @Produce      json
+// @Param        id   path   string  true  "Source ID"
+// @Param        key  query  string  true  "State file key"
+// @Success      200  {object}  map[string]interface{}
+// @Security     BearerAuth
+// @Security     CookieAuth
+// @Router       /sources/{id}/state/operations [post]
 func (h *SourcesHandlers) StateOperation() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		key := c.Query("key")

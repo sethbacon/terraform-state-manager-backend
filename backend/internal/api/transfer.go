@@ -23,12 +23,35 @@ type transferRequest struct {
 }
 
 // BackupToSource copies the state at ?key= into another source (non-destructive).
+// @Summary      Back up state to another source
+// @Description  Non-destructively copies the state at ?key= into a target source. Requires state:transfer.
+// @Tags         Transfer
+// @Accept       json
+// @Produce      json
+// @Param        id   path   string  true  "Source ID"
+// @Param        key  query  string  true  "State file key"
+// @Success      200  {object}  map[string]interface{}
+// @Security     BearerAuth
+// @Security     CookieAuth
+// @Router       /sources/{id}/state/backup [post]
 func (h *SourcesHandlers) BackupToSource() gin.HandlerFunc {
 	return func(c *gin.Context) { h.doTransfer(c, "backup") }
 }
 
 // MigrateToSource copies the state into another source, verifies parity, and
 // optionally decommissions (empties) the original.
+// @Summary      Migrate state to another source
+// @Description  Copies the state to a target, verifies serial/lineage/resource-count parity, and optionally decommissions (empties) the original after a successful backup. Requires state:transfer.
+// @Tags         Transfer
+// @Accept       json
+// @Produce      json
+// @Param        id   path   string  true  "Source ID"
+// @Param        key  query  string  true  "State file key"
+// @Success      200  {object}  map[string]interface{}
+// @Failure      502  {object}  map[string]interface{}  "write to target failed"
+// @Security     BearerAuth
+// @Security     CookieAuth
+// @Router       /sources/{id}/state/migrate [post]
 func (h *SourcesHandlers) MigrateToSource() gin.HandlerFunc {
 	return func(c *gin.Context) { h.doTransfer(c, "migrate") }
 }

@@ -37,6 +37,15 @@ func NewSourcesHandlers(database *sql.DB) *SourcesHandlers {
 }
 
 // ListSources returns all configured state sources.
+// @Summary      List state sources
+// @Description  Returns all configured state-source connections (secrets are never included). Requires state:read.
+// @Tags         Sources
+// @Produce      json
+// @Success      200  {object}  map[string]interface{}
+// @Failure      401  {object}  map[string]interface{}
+// @Security     BearerAuth
+// @Security     CookieAuth
+// @Router       /sources [get]
 func (h *SourcesHandlers) ListSources() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		sources, err := h.repo.List(c.Request.Context())
@@ -49,6 +58,17 @@ func (h *SourcesHandlers) ListSources() gin.HandlerFunc {
 }
 
 // CreateSource adds a state source after validating its connector config.
+// @Summary      Create state source
+// @Description  Adds a state-source connection (credentials encrypted at rest). Requires sources:manage.
+// @Tags         Sources
+// @Accept       json
+// @Produce      json
+// @Success      201  {object}  map[string]interface{}
+// @Failure      400  {object}  map[string]interface{}
+// @Failure      401  {object}  map[string]interface{}
+// @Security     BearerAuth
+// @Security     CookieAuth
+// @Router       /sources [post]
 func (h *SourcesHandlers) CreateSource() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		var req struct {
@@ -102,6 +122,15 @@ func (h *SourcesHandlers) CreateSource() gin.HandlerFunc {
 }
 
 // GetSource returns a single source.
+// @Summary      Get state source
+// @Tags         Sources
+// @Produce      json
+// @Param        id   path      string  true  "Source ID"
+// @Success      200  {object}  map[string]interface{}
+// @Failure      404  {object}  map[string]interface{}
+// @Security     BearerAuth
+// @Security     CookieAuth
+// @Router       /sources/{id} [get]
 func (h *SourcesHandlers) GetSource() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		s, err := h.repo.GetByID(c.Request.Context(), c.Param("id"))
@@ -118,6 +147,14 @@ func (h *SourcesHandlers) GetSource() gin.HandlerFunc {
 }
 
 // DeleteSource removes a source.
+// @Summary      Delete state source
+// @Description  Disconnects the source from the State Manager. The underlying backend and its files are not touched. Requires sources:manage.
+// @Tags         Sources
+// @Param        id   path  string  true  "Source ID"
+// @Success      204  "No Content"
+// @Security     BearerAuth
+// @Security     CookieAuth
+// @Router       /sources/{id} [delete]
 func (h *SourcesHandlers) DeleteSource() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		if err := h.repo.Delete(c.Request.Context(), c.Param("id")); err != nil {
@@ -129,6 +166,14 @@ func (h *SourcesHandlers) DeleteSource() gin.HandlerFunc {
 }
 
 // ListStates enumerates the state files available under a source.
+// @Summary      List state files
+// @Tags         Sources
+// @Produce      json
+// @Param        id   path      string  true  "Source ID"
+// @Success      200  {object}  map[string]interface{}
+// @Security     BearerAuth
+// @Security     CookieAuth
+// @Router       /sources/{id}/states [get]
 func (h *SourcesHandlers) ListStates() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		conn, ok := h.connectorFor(c)
@@ -145,6 +190,17 @@ func (h *SourcesHandlers) ListStates() gin.HandlerFunc {
 }
 
 // AnalyzeState returns the analyzer metrics for a single state file (?key=...).
+// @Summary      Analyze state file
+// @Description  RUM, resource-type/provider/module breakdowns, and version info for a state file.
+// @Tags         Sources
+// @Produce      json
+// @Param        id   path      string  true  "Source ID"
+// @Param        key  query     string  true  "State file key"
+// @Success      200  {object}  map[string]interface{}
+// @Failure      422  {object}  map[string]interface{}
+// @Security     BearerAuth
+// @Security     CookieAuth
+// @Router       /sources/{id}/state/analysis [get]
 func (h *SourcesHandlers) AnalyzeState() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		rs, ok := h.readState(c)
@@ -166,6 +222,15 @@ func (h *SourcesHandlers) AnalyzeState() gin.HandlerFunc {
 }
 
 // RawState streams the raw state JSON (?key=...).
+// @Summary      Get raw state JSON
+// @Tags         Sources
+// @Produce      json
+// @Param        id   path  string  true  "Source ID"
+// @Param        key  query string  true  "State file key"
+// @Success      200  {string}  string  "raw state JSON"
+// @Security     BearerAuth
+// @Security     CookieAuth
+// @Router       /sources/{id}/state/raw [get]
 func (h *SourcesHandlers) RawState() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		rs, ok := h.readState(c)
@@ -177,6 +242,15 @@ func (h *SourcesHandlers) RawState() gin.HandlerFunc {
 }
 
 // ListStateResources returns the per-resource summary for a state file (?key=...).
+// @Summary      List state resources
+// @Tags         Sources
+// @Produce      json
+// @Param        id   path  string  true  "Source ID"
+// @Param        key  query string  true  "State file key"
+// @Success      200  {object}  map[string]interface{}
+// @Security     BearerAuth
+// @Security     CookieAuth
+// @Router       /sources/{id}/state/resources [get]
 func (h *SourcesHandlers) ListStateResources() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		rs, ok := h.readState(c)
@@ -193,6 +267,16 @@ func (h *SourcesHandlers) ListStateResources() gin.HandlerFunc {
 }
 
 // StateReport renders the analysis as a downloadable report (?key=...&format=json|md|csv).
+// @Summary      Download analysis report
+// @Tags         Sources
+// @Produce      json,text/markdown,text/csv
+// @Param        id      path   string  true   "Source ID"
+// @Param        key     query  string  true   "State file key"
+// @Param        format  query  string  false  "Report format: json, md, or csv"  Enums(json, md, csv)
+// @Success      200  {string}  string  "report file"
+// @Security     BearerAuth
+// @Security     CookieAuth
+// @Router       /sources/{id}/state/report [get]
 func (h *SourcesHandlers) StateReport() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		rs, ok := h.readState(c)

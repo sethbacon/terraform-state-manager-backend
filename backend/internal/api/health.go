@@ -35,6 +35,16 @@ func NewHealthHandlers(cfg *config.Config, database *sql.DB) *HealthHandlers {
 }
 
 // CreateRun dispatches a version-health run on the chosen pipeline.
+// @Summary      Dispatch version-health run
+// @Description  Dispatches terraform init/plan against pinned Terraform/provider versions on the chosen CI pipeline. Inputs validated server-side. Requires state:execute.
+// @Tags         VersionLab
+// @Accept       json
+// @Produce      json
+// @Success      200  {object}  map[string]interface{}
+// @Failure      400  {object}  map[string]interface{}
+// @Security     BearerAuth
+// @Security     CookieAuth
+// @Router       /health-lab/runs [post]
 func (h *HealthHandlers) CreateRun() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		var req struct {
@@ -135,6 +145,13 @@ func (h *HealthHandlers) CreateRun() gin.HandlerFunc {
 }
 
 // ListRuns returns recent health runs.
+// @Summary      List version-health runs
+// @Tags         VersionLab
+// @Produce      json
+// @Success      200  {object}  map[string]interface{}
+// @Security     BearerAuth
+// @Security     CookieAuth
+// @Router       /health-lab/runs [get]
 func (h *HealthHandlers) ListRuns() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		runs, err := h.healthRepo.List(c.Request.Context(), 50)

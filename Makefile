@@ -1,7 +1,12 @@
 VERSION ?= dev
 BUILD_DATE ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 
-.PHONY: build test vet tidy run docker
+.PHONY: build test vet tidy run docker swag
+
+# Regenerate the OpenAPI spec (docs/swagger.json) from handler swag annotations.
+# Run after changing any @Summary/@Router annotations, then commit docs/swagger.json.
+swag:
+	cd backend && go run github.com/swaggo/swag/cmd/swag@v1.16.4 init -g cmd/server/main.go --outputTypes json
 
 # Build the server binary (standard crypto).
 build:
