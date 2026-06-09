@@ -58,6 +58,26 @@ drift_ingest:
     issuer: ""
     audience: ""
 
+# Outbound Azure DevOps plan-trigger (the other half of code-drift detection).
+# TSM queues a plan pipeline run in Azure DevOps; the plan reports its results
+# back via the inbound drift_ingest endpoint above. Authentication uses Workload
+# Identity Federation (WIF): TSM presents a projected service-account OIDC token
+# (read from wif.token_file) to the Entra token endpoint and receives an
+# ADO-scoped bearer in return.
+# Env: TSM_ADO_ORGANIZATION_URL, TSM_ADO_PROJECT,
+#      TSM_ADO_WIF_TOKEN_ENDPOINT, TSM_ADO_WIF_CLIENT_ID,
+#      TSM_ADO_WIF_SCOPE, TSM_ADO_WIF_TOKEN_FILE
+# NOTE: placeholders pending AKS + the Entra tenant; the provider is mockable in
+# tests. When wif.token_endpoint is empty the outbound trigger is unconfigured.
+ado:
+  organization_url: ""          # e.g. https://dev.azure.com/your-org
+  project: ""
+  wif:
+    token_endpoint: ""          # e.g. https://login.microsoftonline.com/<tenant>/oauth2/v2.0/token
+    client_id: ""               # Entra application (client) id
+    scope: ""                   # e.g. 499b84ac-1321-427f-aa17-267ca6975798/.default
+    token_file: ""              # path to the projected SA OIDC token (e.g. /var/run/secrets/azure/tokens/ado-token)
+
 security:
   cors:
     allowed_origins:
