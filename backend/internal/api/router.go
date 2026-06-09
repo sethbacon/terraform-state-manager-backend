@@ -43,8 +43,11 @@ import (
 	webhooksAPI "github.com/terraform-state-manager/terraform-state-manager/internal/api/webhooks"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/auth"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/auth/driftingest"
+	"github.com/terraform-state-manager/terraform-state-manager/internal/auth/federation"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/auth/oidc"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/capability"
+	captrigger "github.com/terraform-state-manager/terraform-state-manager/internal/capability/drifttrigger"
+	capenvdrift "github.com/terraform-state-manager/terraform-state-manager/internal/capability/envdrift"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/capability/versiontest"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/config"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/crypto"
@@ -54,6 +57,7 @@ import (
 	"github.com/terraform-state-manager/terraform-state-manager/internal/services/analyzer"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/services/backup"
 	complianceSvc "github.com/terraform-state-manager/terraform-state-manager/internal/services/compliance"
+	"github.com/terraform-state-manager/terraform-state-manager/internal/services/drifttrigger"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/services/migration"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/services/notification"
 	schedulerSvc "github.com/terraform-state-manager/terraform-state-manager/internal/services/scheduler"
@@ -242,12 +246,27 @@ func NewRouter(cfg *config.Config, db, identityDB *sql.DB) (*gin.Engine, *Backgr
 	// handed to the scheduler (for task-type dispatch) and the router (for routes
 	// and discovery). The version-no-op-test capability is the first worked example
 	// (its live ADO plan provider is deferred; it uses the fixture provider).
+	//
+	// The environment-drift and outbound-trigger capabilities wrap the Phase 4
+	// engines. Their credentials (an Azure ARM credential / the ADO WIF token
+	// endpoint) are placeholders until AKS + the Entra tenant are deployed, so the
+	// builders below return nil engines: each capability still registers (its task
+	// type and route exist and are UAT-able) but reports itself unconfigured —
+	// scheduled runs skip and HTTP triggers return 503 rather than panicking. The
+	// same engine instance backs both the scheduled handler (via New) and the
+	// manual HTTP handler (capenvdrift.NewHandler / captrigger.NewHandler below).
+	envDriftEngine := buildEnvDriftEngine(driftRepo)
+	driftTriggerEngine := buildDriftTriggerEngine(cfg)
+
 	capabilityRegistry := capability.NewRegistry()
 	capabilityRegistry.Register(
 		versiontest.New(versiontest.NewFixturePlanProvider(), driftRepo),
 	)
+	capabilityRegistry.Register(capenvdrift.New(envDriftEngine))
+	capabilityRegistry.Register(captrigger.New(driftTriggerEngine))
 	// Merge capability-introduced RBAC scopes (e.g. versiontest:admin) into the
-	// auth scope set so RequireScope can enforce them.
+	// auth scope set so RequireScope can enforce them. The drift capabilities reuse
+	// the existing drift:write scope and introduce none.
 	auth.RegisterCapabilityScopes(capabilityRegistry.Scopes())
 
 	taskScheduler := schedulerSvc.New(scheduledTaskRepo, analysisRunRepo, analysisResultRepo, sourceRepo, snapshotService, backupService, capabilityRegistry)
@@ -303,7 +322,15 @@ func NewRouter(cfg *config.Config, db, identityDB *sql.DB) (*gin.Engine, *Backgr
 	} else {
 		slog.Info("drift-ingest OIDC issuer not configured; POST /drift/ingest disabled")
 	}
-	driftIngestHandlers := driftAPI.NewHandlers(driftIngestValidator, driftRepo, sourceRepo)
+	// The same drift Handlers serves the OIDC-authenticated ingest endpoint and
+	// the JWT/API-key-authenticated manual triggers. The manual triggers wrap the
+	// env-drift and outbound-trigger capability handlers (each unconfigured by
+	// default, returning 503 from its endpoint).
+	driftHandlers := driftAPI.NewHandlers(driftIngestValidator, driftRepo, sourceRepo).
+		WithCapabilities(
+			capenvdrift.NewHandler(envDriftEngine),
+			captrigger.NewHandler(driftTriggerEngine),
+		)
 
 	// Initialize rate limiters
 	authRateLimiter := middleware.NewRateLimiter(middleware.AuthRateLimitConfig())
@@ -353,7 +380,7 @@ func NewRouter(cfg *config.Config, db, identityDB *sql.DB) (*gin.Engine, *Backgr
 		driftIngestGroup := apiV1.Group("/drift")
 		driftIngestGroup.Use(middleware.RateLimitMiddleware(generalRateLimiter))
 		{
-			driftIngestGroup.POST("/ingest", driftIngestHandlers.IngestPlan)
+			driftIngestGroup.POST("/ingest", driftHandlers.IngestPlan)
 		}
 
 		// Development-only endpoints (gated by DEV_MODE; 403 in production).
@@ -566,10 +593,13 @@ func NewRouter(cfg *config.Config, db, identityDB *sql.DB) (*gin.Engine, *Backgr
 			}
 
 			driftGroup := authenticatedGroup.Group("/drift")
-			driftGroup.Use(middleware.RequireScope(auth.ScopeAnalysisRead))
 			{
-				driftGroup.GET("/events", snapshotHandlers.ListDriftEvents)
-				driftGroup.GET("/events/:id", snapshotHandlers.GetDriftEvent)
+				driftGroup.GET("/events", middleware.RequireScope(auth.ScopeAnalysisRead), snapshotHandlers.ListDriftEvents)
+				driftGroup.GET("/events/:id", middleware.RequireScope(auth.ScopeAnalysisRead), snapshotHandlers.GetDriftEvent)
+				// Manual capability triggers. drift:write gates both; each returns
+				// 503 when its capability is unconfigured (no Azure / ADO credential).
+				driftGroup.POST("/env-check", middleware.RequireScope(auth.ScopeDriftWrite), driftHandlers.EnvCheck)
+				driftGroup.POST("/trigger", middleware.RequireScope(auth.ScopeDriftWrite), driftHandlers.Trigger)
 			}
 
 			// ---------------------------------------------------------------
@@ -674,6 +704,49 @@ func NewRouter(cfg *config.Config, db, identityDB *sql.DB) (*gin.Engine, *Backgr
 	}
 
 	return router, bg
+}
+
+// buildEnvDriftEngine wires the environment-drift engine when an Azure ARM
+// credential is available. No credential source is provisioned yet (AKS workload
+// identity / a read-only service principal are the deployment targets), so it
+// returns an untyped nil today: the capability registers but reports itself
+// unconfigured (scheduled runs skip, HTTP triggers 503). When a credential
+// exists, build an azure.ResourceReader from it and return
+// envdrift.NewService(reader, driftRepo); returning the untyped-nil interface
+// here (rather than a typed-nil *envdrift.Service) is deliberate so the
+// capability's Configured() check is correct.
+func buildEnvDriftEngine(driftRepo *repositories.DriftEventRepository) capenvdrift.Engine {
+	// Example wiring once a credential is available:
+	//
+	//   reader, err := azure.NewARMReader(azure.Config{Credential: cred})
+	//   if err != nil { ... }
+	//   return envdrift.NewService(reader, driftRepo)
+	_ = driftRepo
+	return nil
+}
+
+// buildDriftTriggerEngine wires the outbound plan-trigger engine when Azure
+// DevOps + Workload Identity Federation are configured (TSM_ADO_* keys). When the
+// WIF token endpoint is unset the configuration is a placeholder, so it returns an
+// untyped nil: the capability registers but reports itself unconfigured
+// (scheduled runs skip, HTTP triggers 503).
+func buildDriftTriggerEngine(cfg *config.Config) captrigger.Engine {
+	if cfg.ADO.WIF.TokenEndpoint == "" || cfg.ADO.OrganizationURL == "" {
+		return nil
+	}
+	tokenProvider, err := federation.NewProvider(federation.Config{
+		TokenEndpoint: cfg.ADO.WIF.TokenEndpoint,
+		ClientID:      cfg.ADO.WIF.ClientID,
+		Scope:         cfg.ADO.WIF.Scope,
+		TokenFilePath: cfg.ADO.WIF.TokenFile,
+	}, nil)
+	if err != nil {
+		slog.Error("Failed to build ADO federation token provider; outbound drift trigger disabled", "error", err)
+		return nil
+	}
+	queuerFactory := drifttrigger.NewADOQueuerFactory(cfg.ADO.OrganizationURL, cfg.ADO.Project)
+	slog.Info("outbound drift trigger configured", "ado_org", cfg.ADO.OrganizationURL, "ado_project", cfg.ADO.Project)
+	return drifttrigger.NewService(tokenProvider, queuerFactory)
 }
 
 // LoggerMiddleware provides structured logging for every HTTP request.
