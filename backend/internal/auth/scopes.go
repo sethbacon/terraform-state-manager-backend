@@ -14,6 +14,7 @@ const (
 	ScopeStateExecute  Scope = "state:execute"
 	ScopeStateTransfer Scope = "state:transfer"
 	ScopeSourcesManage Scope = "sources:manage"
+	ScopeSCIMProvision Scope = "scim:provision"
 	ScopeAdmin         Scope = "admin"
 )
 

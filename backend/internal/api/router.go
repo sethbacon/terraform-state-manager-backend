@@ -13,6 +13,7 @@ import (
 	"github.com/jmoiron/sqlx"
 
 	"github.com/terraform-state-manager/terraform-state-manager/docs"
+	"github.com/terraform-state-manager/terraform-state-manager/internal/api/scim"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/auth"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/auth/mtls"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/config"
@@ -158,6 +159,25 @@ func NewRouter(cfg *config.Config, database *sql.DB, identityDB *sql.DB) (*gin.E
 			hg.GET("/runs/:id", middleware.RequireScope(auth.ScopeStateRead), health.GetRun())
 		}
 		v1.POST("/health-lab/runs/:id/results", health.RunResults())
+	}
+
+	// SCIM 2.0 provisioning (RFC 7644), mounted at the conventional top-level
+	// /scim/v2 and only when enabled. Bearer-token auth + scim:provision scope
+	// (admin satisfies it); no cookie auth, so it is outside the CSRF-protected
+	// /api/v1 group. IdP clients present Authorization: Bearer <token>.
+	if cfg.Auth.SCIM.Enabled {
+		scimHandlers := scim.NewHandlers(cfg, identityDB)
+		sc := r.Group("/scim/v2", requireAuth, middleware.RequireScope(auth.ScopeSCIMProvision))
+		{
+			sc.GET("/Users", scimHandlers.ListUsers())
+			sc.GET("/Users/:id", scimHandlers.GetUser())
+			sc.POST("/Users", scimHandlers.CreateUser())
+			sc.PUT("/Users/:id", scimHandlers.PutUser())
+			sc.PATCH("/Users/:id", scimHandlers.PatchUser())
+			sc.DELETE("/Users/:id", scimHandlers.DeleteUser())
+			sc.GET("/Groups", scimHandlers.ListGroups())
+			sc.GET("/Groups/:id", scimHandlers.GetGroup())
+		}
 	}
 
 	return r, nil

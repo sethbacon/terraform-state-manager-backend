@@ -109,6 +109,15 @@ type AuthConfig struct {
 	MTLS MTLSConfig `mapstructure:"mtls"`
 	LDAP LDAPConfig `mapstructure:"ldap"`
 	SAML SAMLConfig `mapstructure:"saml"`
+	SCIM SCIMConfig `mapstructure:"scim"`
+}
+
+// SCIMConfig gates the SCIM 2.0 provisioning endpoints (/scim/v2). Disabled by
+// default: when off the routes are not mounted at all, so the surface does not
+// exist unless an operator opts in. When on, the endpoints are still guarded by
+// bearer-token auth + the scim:provision scope (admin satisfies it).
+type SCIMConfig struct {
+	Enabled bool `mapstructure:"enabled"`
 }
 
 // LDAPConfig holds LDAP / Active Directory search-bind authentication settings.

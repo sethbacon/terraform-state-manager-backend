@@ -109,3 +109,11 @@ auth:
     group_mappings: []
     #   - { group: "tf-admins", organization: "default", role: "admin" }
     default_role: ""
+
+  # SCIM 2.0 provisioning (RFC 7644) at /scim/v2 (Users + Groups). Disabled by
+  # default: when off the routes are not mounted at all. When on, every endpoint
+  # requires a bearer token carrying the scim:provision scope (admin satisfies it);
+  # the IdP client sends Authorization: Bearer <token>. Put it behind rate limiting
+  # at the proxy. Deletes/active=false deactivate (remove memberships), not destroy.
+  scim:
+    enabled: false
