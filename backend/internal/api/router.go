@@ -19,6 +19,7 @@ import (
 	"github.com/terraform-state-manager/terraform-state-manager/internal/config"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/db/repositories"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/middleware"
+	"github.com/terraform-state-manager/terraform-state-manager/internal/services/notify"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/services/scheduler"
 )
 
@@ -138,8 +139,15 @@ func NewRouter(cfg *config.Config, database *sql.DB, identityDB *sql.DB) (*gin.E
 			ag.GET("/sso", authHandlers.SSOConfigHandler())
 		}
 
+		// Notifier fans drift/failure alerts out to configured channels. Nil with a
+		// nil DB (unit tests) — the drift handler treats a nil notifier as a no-op.
+		var notifier *notify.Notifier
+		if database != nil {
+			notifier = notify.New(repositories.NewNotificationChannelRepository(database))
+		}
+
 		// Phase 3 drift: CI pipeline connections + drift runs.
-		drift := NewDriftHandlers(cfg, database)
+		drift := NewDriftHandlers(cfg, database, notifier)
 		p := v1.Group("/pipelines", requireAuth)
 		{
 			p.GET("", middleware.RequireScope(auth.ScopeSourcesManage), drift.ListPipelines())
@@ -179,6 +187,18 @@ func NewRouter(cfg *config.Config, database *sql.DB, identityDB *sql.DB) (*gin.E
 			sg.PUT("/:id", middleware.RequireScope(auth.ScopeSourcesManage), scheduleHandlers.UpdateSchedule())
 			sg.DELETE("/:id", middleware.RequireScope(auth.ScopeSourcesManage), scheduleHandlers.DeleteSchedule())
 			sg.POST("/:id/run", middleware.RequireScope(auth.ScopeSourcesManage), scheduleHandlers.RunSchedule())
+		}
+
+		// Notification channels (admin): alert destinations + the drift-event hook.
+		// Target URLs are secrets, so the whole group is admin-scoped.
+		notif := NewNotificationHandlers(database, notifier)
+		ng := v1.Group("/notifications", requireAuth, middleware.RequireScope(auth.ScopeAdmin))
+		{
+			ng.GET("/channels", notif.ListChannels())
+			ng.POST("/channels", notif.CreateChannel())
+			ng.PUT("/channels/:id", notif.UpdateChannel())
+			ng.DELETE("/channels/:id", notif.DeleteChannel())
+			ng.POST("/channels/:id/test", notif.TestChannel())
 		}
 
 		// Start the background runner. Guarded on database so unit tests that build

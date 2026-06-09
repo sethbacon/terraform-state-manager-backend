@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
@@ -21,6 +22,7 @@ import (
 	"github.com/terraform-state-manager/terraform-state-manager/internal/crypto"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/db/repositories"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/pipelines"
+	"github.com/terraform-state-manager/terraform-state-manager/internal/services/notify"
 )
 
 // DriftHandlers serves pipeline-connection and drift-run endpoints.
@@ -28,14 +30,17 @@ type DriftHandlers struct {
 	cfg          *config.Config
 	pipelineRepo *repositories.PipelineRepository
 	driftRepo    *repositories.DriftRepository
+	notifier     *notify.Notifier // may be nil (notifications disabled / no DB)
 }
 
-// NewDriftHandlers constructs the handlers over the app (public) connection.
-func NewDriftHandlers(cfg *config.Config, database *sql.DB) *DriftHandlers {
+// NewDriftHandlers constructs the handlers over the app (public) connection. The
+// notifier (may be nil) fires alerts when a result callback reports drift/failure.
+func NewDriftHandlers(cfg *config.Config, database *sql.DB, notifier *notify.Notifier) *DriftHandlers {
 	return &DriftHandlers{
 		cfg:          cfg,
 		pipelineRepo: repositories.NewPipelineRepository(database),
 		driftRepo:    repositories.NewDriftRepository(database),
+		notifier:     notifier,
 	}
 }
 
@@ -344,8 +349,41 @@ func (h *DriftHandlers) RunResults() gin.HandlerFunc {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to record results"})
 			return
 		}
+
+		h.notifyDriftResult(run.ID, status, body.Added, body.Changed, body.Destroyed, drifted, body.Detail)
 		c.JSON(http.StatusOK, gin.H{"status": "recorded"})
 	}
+}
+
+// notifyDriftResult fires an alert event when a drift result reports drift or a
+// failure. It runs detached (the CI callback must not block on webhook latency)
+// with its own timeout; a nil notifier (notifications disabled) is a no-op.
+func (h *DriftHandlers) notifyDriftResult(runID, status string, added, changed, destroyed int, drifted bool, detail string) {
+	if h.notifier == nil {
+		return
+	}
+	var ev notify.Event
+	switch {
+	case status == "failed":
+		ev = notify.Event{
+			Type:    notify.EventRunFailed,
+			Title:   "Drift run failed",
+			Message: fmt.Sprintf("Drift run %s failed: %s", runID, detail),
+		}
+	case drifted:
+		ev = notify.Event{
+			Type:    notify.EventDriftDetected,
+			Title:   "Drift detected",
+			Message: fmt.Sprintf("Drift run %s detected changes (+%d ~%d -%d).", runID, added, changed, destroyed),
+		}
+	default:
+		return // no drift, no failure — nothing to alert on
+	}
+	go func(ev notify.Event) {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		h.notifier.Notify(ctx, ev)
+	}(ev)
 }
 
 // WorkflowTemplate returns the runner-side CI definition to copy into a repo.
