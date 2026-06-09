@@ -28,6 +28,7 @@ type Config struct {
 	Audit         AuditConfig         `mapstructure:"audit"`
 	Notifications NotificationsConfig `mapstructure:"notifications"`
 	DriftIngest   DriftIngestConfig   `mapstructure:"drift_ingest"`
+	ADO           ADOConfig           `mapstructure:"ado"`
 }
 
 // ServerConfig holds HTTP server configuration
@@ -153,6 +154,35 @@ type DriftIngestConfig struct {
 type DriftIngestOIDCConfig struct {
 	Issuer   string `mapstructure:"issuer"`
 	Audience string `mapstructure:"audience"`
+}
+
+// ADOConfig holds the outbound Azure DevOps settings used by the drift-trigger
+// engine to queue plan pipeline runs. Authentication uses Workload Identity
+// Federation (WIF): TSM presents a projected service-account OIDC token to Entra
+// and receives an ADO-scoped bearer in return.
+//
+// NOTE: these are placeholders until AKS + the Entra tenant are deployed; the
+// federation provider is fully mockable in tests. When WIF.TokenEndpoint is
+// empty the outbound trigger is considered unconfigured.
+type ADOConfig struct {
+	OrganizationURL string       `mapstructure:"organization_url"`
+	Project         string       `mapstructure:"project"`
+	WIF             ADOWIFConfig `mapstructure:"wif"`
+}
+
+// ADOWIFConfig holds the Workload Identity Federation parameters for exchanging a
+// projected service-account OIDC token for an Azure DevOps access token. These
+// map onto TSM_ADO_WIF_* environment variables:
+//
+//	TSM_ADO_WIF_TOKEN_ENDPOINT  the Entra (AAD) tenant token endpoint
+//	TSM_ADO_WIF_CLIENT_ID       the Entra application (client) id
+//	TSM_ADO_WIF_SCOPE           the requested ADO scope (e.g. "<ado-resource>/.default")
+//	TSM_ADO_WIF_TOKEN_FILE      path to the projected SA OIDC token (client assertion)
+type ADOWIFConfig struct {
+	TokenEndpoint string `mapstructure:"token_endpoint"`
+	ClientID      string `mapstructure:"client_id"`
+	Scope         string `mapstructure:"scope"`
+	TokenFile     string `mapstructure:"token_file"`
 }
 
 // IdentitySchemaConfig controls whether identity data (users, organizations,
@@ -393,6 +423,10 @@ func bindEnvVars(v *viper.Viper) error {
 		"notifications.api_key_expiry_check_interval_hours",
 
 		"drift_ingest.oidc.issuer", "drift_ingest.oidc.audience",
+
+		"ado.organization_url", "ado.project",
+		"ado.wif.token_endpoint", "ado.wif.client_id",
+		"ado.wif.scope", "ado.wif.token_file",
 	}
 	for _, key := range keys {
 		if err := v.BindEnv(key); err != nil {
