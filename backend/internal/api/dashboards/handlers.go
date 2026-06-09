@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"sort"
 	"strconv"
 	"time"
 
@@ -16,25 +17,31 @@ import (
 
 	"github.com/terraform-state-manager/terraform-state-manager/internal/db/models"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/db/repositories"
+	"github.com/terraform-state-manager/terraform-state-manager/internal/services/analyzer"
 )
 
 // Handlers provides the HTTP handlers for dashboard API endpoints.
 type Handlers struct {
-	db         *sql.DB
-	runRepo    *repositories.AnalysisRunRepository
-	resultRepo *repositories.AnalysisResultRepository
+	db          *sql.DB
+	runRepo     *repositories.AnalysisRunRepository
+	resultRepo  *repositories.AnalysisResultRepository
+	providerSrc analyzer.ProviderVersionSource
 }
 
-// NewHandlers creates a new Handlers instance.
+// NewHandlers creates a new Handlers instance. providerSrc resolves latest
+// provider versions for pin-drift; pass nil to disable the provider-pin section
+// of the version-drift response (the rest of the response is unaffected).
 func NewHandlers(
 	db *sql.DB,
 	runRepo *repositories.AnalysisRunRepository,
 	resultRepo *repositories.AnalysisResultRepository,
+	providerSrc analyzer.ProviderVersionSource,
 ) *Handlers {
 	return &Handlers{
-		db:         db,
-		runRepo:    runRepo,
-		resultRepo: resultRepo,
+		db:          db,
+		runRepo:     runRepo,
+		resultRepo:  resultRepo,
+		providerSrc: providerSrc,
 	}
 }
 
@@ -99,13 +106,40 @@ type VersionDriftEntry struct {
 
 // VersionDriftResponse summarises Terraform version pin-drift across the latest
 // completed run: per-workspace entries plus rollup counts by status.
+//
+// The ProviderPins section is additive: it carries per-provider pin-drift
+// (locked version vs latest registry version) computed from the lock pins
+// recorded on the run's results. It is empty when no lock pins were supplied or
+// no provider-version source is configured.
 type VersionDriftResponse struct {
-	RunID     string              `json:"run_id"`
-	Total     int                 `json:"total"`
-	Satisfied int                 `json:"satisfied"`
-	Drift     int                 `json:"drift"`
-	Unknown   int                 `json:"unknown"`
-	Entries   []VersionDriftEntry `json:"entries"`
+	RunID        string                  `json:"run_id"`
+	Total        int                     `json:"total"`
+	Satisfied    int                     `json:"satisfied"`
+	Drift        int                     `json:"drift"`
+	Unknown      int                     `json:"unknown"`
+	Entries      []VersionDriftEntry     `json:"entries"`
+	ProviderPins ProviderPinDriftSummary `json:"provider_pins"`
+}
+
+// ProviderPinDriftEntry is a single provider's pin-drift result: the locked
+// version vs the latest version published to the Terraform Registry.
+type ProviderPinDriftEntry struct {
+	Source              string `json:"source"`
+	Pinned              string `json:"pinned"`
+	LatestAvailable     string `json:"latest_available"`
+	Constraint          string `json:"constraint,omitempty"`
+	SatisfiesConstraint bool   `json:"satisfies_constraint"`
+	Status              string `json:"status"`
+}
+
+// ProviderPinDriftSummary rolls up provider pin-drift across the run: one entry
+// per distinct provider source plus status counts.
+type ProviderPinDriftSummary struct {
+	Total    int                     `json:"total"`
+	UpToDate int                     `json:"up_to_date"`
+	Behind   int                     `json:"behind"`
+	Unknown  int                     `json:"unknown"`
+	Entries  []ProviderPinDriftEntry `json:"entries"`
 }
 
 // ---------------------------------------------------------------------------
@@ -367,10 +401,12 @@ func (h *Handlers) GetTerraformVersions(c *gin.Context) {
 
 // GetVersionDrift handles GET /api/v1/dashboard/version-drift.
 // Returns the Terraform version pin-drift summary (required_version constraint
-// vs in-state terraform_version) across the latest completed analysis run.
+// vs in-state terraform_version) across the latest completed analysis run, plus
+// an additive provider-pin section comparing locked provider versions against
+// the latest versions published to the public Terraform Registry.
 //
 // @Summary      Get Terraform version pin-drift
-// @Description  Returns the Terraform version pin-drift summary (required_version constraint vs in-state terraform_version) across the latest completed run. Only workspaces whose analysis run was supplied repo metadata carry a drift report.
+// @Description  Returns the Terraform version pin-drift summary (required_version constraint vs in-state terraform_version) across the latest completed run, plus a provider_pins section comparing each locked provider version against the latest version on the public Terraform Registry. Only workspaces whose analysis run was supplied repo metadata carry a drift report or lock pins.
 // @Tags         Dashboard
 // @Produce      json
 // @Success      200  {object}  map[string]interface{}
@@ -397,7 +433,10 @@ func (h *Handlers) GetVersionDrift(c *gin.Context) {
 	}
 	if run == nil {
 		c.JSON(http.StatusOK, gin.H{
-			"data":    &VersionDriftResponse{Entries: []VersionDriftEntry{}},
+			"data": &VersionDriftResponse{
+				Entries:      []VersionDriftEntry{},
+				ProviderPins: ProviderPinDriftSummary{Entries: []ProviderPinDriftEntry{}},
+			},
 			"message": "no completed analysis runs found",
 		})
 		return
@@ -674,7 +713,11 @@ func (h *Handlers) aggregateVersionDrift(ctx context.Context, runID string) (*Ve
 	}
 	defer func() { _ = rows.Close() }()
 
-	resp := &VersionDriftResponse{RunID: runID, Entries: []VersionDriftEntry{}}
+	resp := &VersionDriftResponse{
+		RunID:        runID,
+		Entries:      []VersionDriftEntry{},
+		ProviderPins: ProviderPinDriftSummary{Entries: []ProviderPinDriftEntry{}},
+	}
 
 	for rows.Next() {
 		var workspaceName string
@@ -717,7 +760,105 @@ func (h *Handlers) aggregateVersionDrift(ctx context.Context, runID string) (*Ve
 		return nil, fmt.Errorf("failed to iterate version drift rows: %w", err)
 	}
 
+	// Additive provider-pin section: compare locked provider versions against
+	// the latest published registry versions. Independent of the TF-version
+	// drift above, so it has no effect on the existing fields.
+	summary, err := h.aggregateProviderPinDrift(ctx, runID)
+	if err != nil {
+		return nil, err
+	}
+	resp.ProviderPins = summary
+
 	return resp, nil
+}
+
+// aggregateProviderPinDrift collects provider lock pins from every successful
+// result of a run, de-duplicates them by source address (first pin seen wins),
+// and computes per-provider pin-drift against the configured provider-version
+// source.
+//
+// When no provider-version source is configured, or no pins were recorded, the
+// summary is empty. Pins whose latest version cannot be resolved are reported
+// with status "unknown" and never fail the request.
+func (h *Handlers) aggregateProviderPinDrift(ctx context.Context, runID string) (ProviderPinDriftSummary, error) {
+	summary := ProviderPinDriftSummary{Entries: []ProviderPinDriftEntry{}}
+
+	rows, err := h.db.QueryContext(ctx,
+		`SELECT provider_lock_pins
+		 FROM analysis_results
+		 WHERE run_id = $1 AND status = $2 AND provider_lock_pins IS NOT NULL
+		 ORDER BY workspace_name`,
+		runID, models.ResultStatusSuccess,
+	)
+	if err != nil {
+		return summary, fmt.Errorf("failed to query provider lock pins: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	// De-duplicate pins across workspaces by provider source. The first pin seen
+	// for a source wins; in practice every workspace in a run shares the same
+	// supplied lock file, so divergence is rare. Results are ordered by
+	// workspace_name, making "first seen" deterministic.
+	deduped := make(map[string]analyzer.ProviderLockPin)
+	for rows.Next() {
+		var rawJSON json.RawMessage
+		if err := rows.Scan(&rawJSON); err != nil {
+			return summary, fmt.Errorf("failed to scan provider lock pins: %w", err)
+		}
+		if len(rawJSON) == 0 {
+			continue
+		}
+		var pins []analyzer.ProviderLockPin
+		if err := json.Unmarshal(rawJSON, &pins); err != nil {
+			continue // skip malformed pin list
+		}
+		for _, pin := range pins {
+			if _, seen := deduped[pin.Source]; !seen {
+				deduped[pin.Source] = pin
+			}
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return summary, fmt.Errorf("failed to iterate provider lock pin rows: %w", err)
+	}
+
+	if len(deduped) == 0 {
+		return summary, nil
+	}
+
+	// Deterministic ordering by source address for stable output.
+	sources := make([]string, 0, len(deduped))
+	for source := range deduped {
+		sources = append(sources, source)
+	}
+	sort.Strings(sources)
+	pins := make([]analyzer.ProviderLockPin, 0, len(sources))
+	for _, source := range sources {
+		pins = append(pins, deduped[source])
+	}
+
+	reports := analyzer.ComputeProviderPinDrift(ctx, pins, h.providerSrc)
+	for _, r := range reports {
+		summary.Entries = append(summary.Entries, ProviderPinDriftEntry{
+			Source:              r.Source,
+			Pinned:              r.Pinned,
+			LatestAvailable:     r.LatestAvailable,
+			Constraint:          r.Constraint,
+			SatisfiesConstraint: r.SatisfiesConstraint,
+			Status:              r.Status,
+		})
+		summary.Total++
+		switch r.Status {
+		case analyzer.ProviderPinUpToDate:
+			summary.UpToDate++
+		case analyzer.ProviderPinBehind:
+			summary.Behind++
+		default:
+			summary.Unknown++
+		}
+	}
+
+	return summary, nil
 }
 
 // ---------------------------------------------------------------------------

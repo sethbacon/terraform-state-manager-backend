@@ -51,6 +51,7 @@ import (
 	"github.com/terraform-state-manager/terraform-state-manager/internal/db/repositories"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/middleware"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/services"
+	"github.com/terraform-state-manager/terraform-state-manager/internal/services/analyzer"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/services/backup"
 	complianceSvc "github.com/terraform-state-manager/terraform-state-manager/internal/services/compliance"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/services/migration"
@@ -226,7 +227,10 @@ func NewRouter(cfg *config.Config, db, identityDB *sql.DB) (*gin.Engine, *Backgr
 
 	// Phase 2 handlers
 	reportHandlers := reports.NewHandlers(cfg, reportRepo, analysisRunRepo, analysisResultRepo, storageBackend)
-	dashboardHandlers := dashboards.NewHandlers(db, analysisRunRepo, analysisResultRepo)
+	// Provider pin-drift uses the public Terraform Registry (no credentials) to
+	// resolve latest provider versions for the version-drift dashboard.
+	providerVersionSource := analyzer.NewRegistryProviderVersionSource("")
+	dashboardHandlers := dashboards.NewHandlers(db, analysisRunRepo, analysisResultRepo, providerVersionSource)
 
 	// Phase 3 services and handlers
 	snapshotService := snapshotSvc.NewService(snapshotRepo, driftRepo)
