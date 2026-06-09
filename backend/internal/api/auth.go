@@ -148,12 +148,20 @@ func deriveFrontendURL(cfg *config.Config) string {
 	return strings.TrimRight(cfg.Server.BaseURL, "/")
 }
 
-// ProvidersHandler lists configured auth providers for the login page.
+// ProvidersHandler lists configured auth providers for the login page picker.
+// SAML IdPs carry an "id" so the SPA can request that specific IdP
+// (provider=saml:<id>); LDAP is rendered as a username/password form.
 func (h *AuthHandlers) ProvidersHandler() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		providers := make([]gin.H, 0, 1)
+		providers := make([]gin.H, 0, 2)
 		if h.oidcProvider != nil {
 			providers = append(providers, gin.H{"type": "oidc", "name": "OpenID Connect"})
+		}
+		for name := range h.samlProviders {
+			providers = append(providers, gin.H{"type": "saml", "name": name, "id": name})
+		}
+		if h.ldapProvider != nil {
+			providers = append(providers, gin.H{"type": "ldap", "name": "LDAP"})
 		}
 		c.JSON(http.StatusOK, gin.H{"providers": providers, "dev_mode": auth.IsDevMode()})
 	}

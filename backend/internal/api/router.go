@@ -129,6 +129,8 @@ func NewRouter(cfg *config.Config, database *sql.DB, identityDB *sql.DB) (*gin.E
 			ag.GET("/organizations", admin.ListOrganizations())
 			ag.GET("/roles", admin.ListRoles())
 			ag.GET("/audit-logs", admin.ListAuditLogs())
+			// Read-only view of configured SSO/identity providers + mappings.
+			ag.GET("/sso", authHandlers.SSOConfigHandler())
 		}
 
 		// Phase 3 drift: CI pipeline connections + drift runs.
