@@ -9,6 +9,7 @@ import (
 	"net/http"
 
 	"github.com/gin-gonic/gin"
+	"github.com/jmoiron/sqlx"
 
 	"github.com/terraform-state-manager/terraform-state-manager/docs"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/auth"
@@ -100,6 +101,17 @@ func NewRouter(cfg *config.Config, database *sql.DB, identityDB *sql.DB) (*gin.E
 
 		// Home dashboard: cross-source aggregated overview.
 		v1.GET("/dashboard/overview", requireAuth, middleware.RequireScope(auth.ScopeStateRead), sources.DashboardOverview())
+
+		// Identity management (admin scope): users, organizations, roles, audit log.
+		admin := NewAdminHandlers(sqlx.NewDb(identityDB, "postgres"))
+		ag := v1.Group("/admin", requireAuth, middleware.RequireScope(auth.ScopeAdmin))
+		{
+			ag.GET("/stats", admin.Stats())
+			ag.GET("/users", admin.ListUsers())
+			ag.GET("/organizations", admin.ListOrganizations())
+			ag.GET("/roles", admin.ListRoles())
+			ag.GET("/audit-logs", admin.ListAuditLogs())
+		}
 
 		// Phase 3 drift: CI pipeline connections + drift runs.
 		drift := NewDriftHandlers(cfg, database)
