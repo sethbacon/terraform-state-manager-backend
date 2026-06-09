@@ -19,6 +19,7 @@ import (
 	idstore "github.com/sethbacon/terraform-suite-identity/identity/store"
 
 	"github.com/terraform-state-manager/terraform-state-manager/internal/auth"
+	"github.com/terraform-state-manager/terraform-state-manager/internal/auth/ldap"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/config"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/middleware"
 )
@@ -32,6 +33,7 @@ type AuthHandlers struct {
 	orgRepo      *idstore.OrganizationRepository
 	tokenRepo    *idstore.TokenRepository
 	oidcProvider *auth.OIDCProvider
+	ldapProvider *ldap.Provider
 	stateStore   auth.StateStore
 }
 
@@ -52,6 +54,13 @@ func NewAuthHandlers(cfg *config.Config, identityDB *sql.DB) (*AuthHandlers, err
 			return nil, err
 		}
 		h.oidcProvider = p
+	}
+	if cfg.Auth.LDAP.Enabled {
+		p, err := ldap.NewProvider(cfg.Auth.LDAP)
+		if err != nil {
+			return nil, err
+		}
+		h.ldapProvider = p
 	}
 	return h, nil
 }
@@ -413,9 +422,17 @@ func (h *AuthHandlers) applyGroupMappings(ctx context.Context, userID string, gr
 	if len(mappings) == 0 && defaultRole == "" {
 		return nil
 	}
-
 	desired, managed := resolveGroupMappings(groups, mappings)
+	return h.reconcileManagedMemberships(ctx, userID, desired, managed, defaultRole)
+}
 
+// reconcileManagedMemberships applies a desired (orgName->role) set against the
+// set of IdP-managed organizations: upsert where desired, REVOKE membership in a
+// managed org with no desired entry (deprovisioning), and add a first-login-only
+// default-role membership in a non-managed default org when nothing was desired.
+// Shared by OIDC and LDAP group mapping so both get the same deprovisioning
+// semantics. Organizations outside the managed set are never touched.
+func (h *AuthHandlers) reconcileManagedMemberships(ctx context.Context, userID string, desired map[string]string, managed map[string]struct{}, defaultRole string) error {
 	// Reconcile each IdP-managed organization.
 	for orgName := range managed {
 		org, err := h.orgRepo.GetByName(ctx, orgName)

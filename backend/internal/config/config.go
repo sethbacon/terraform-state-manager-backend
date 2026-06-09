@@ -107,6 +107,37 @@ type MetricsConfig struct {
 type AuthConfig struct {
 	OIDC OIDCConfig `mapstructure:"oidc"`
 	MTLS MTLSConfig `mapstructure:"mtls"`
+	LDAP LDAPConfig `mapstructure:"ldap"`
+}
+
+// LDAPConfig holds LDAP / Active Directory search-bind authentication settings.
+type LDAPConfig struct {
+	Enabled            bool   `mapstructure:"enabled"`
+	Host               string `mapstructure:"host"`
+	Port               int    `mapstructure:"port"`
+	UseTLS             bool   `mapstructure:"use_tls"`              // LDAPS (TLS from connect)
+	StartTLS           bool   `mapstructure:"start_tls"`            // upgrade plain LDAP to TLS
+	InsecureSkipVerify bool   `mapstructure:"insecure_skip_verify"` // dev only — never in production
+	BaseDN             string `mapstructure:"base_dn"`
+	BindDN             string `mapstructure:"bind_dn"`       // service account for search
+	BindPassword       string `mapstructure:"bind_password"`
+	UserFilter         string `mapstructure:"user_filter"`  // must contain %s for the escaped username
+	UserAttrEmail      string `mapstructure:"user_attr_email"`
+	UserAttrName       string `mapstructure:"user_attr_name"`
+	GroupBaseDN        string `mapstructure:"group_base_dn"`
+	GroupFilter        string `mapstructure:"group_filter"` // optional; %s = escaped user DN
+	GroupMemberAttr    string `mapstructure:"group_member_attr"`
+	// GroupMappings map an LDAP group DN to an organization + role template.
+	GroupMappings []LDAPGroupMapping `mapstructure:"group_mappings"`
+	// DefaultRole granted in the default org on first login when no group matches.
+	DefaultRole string `mapstructure:"default_role"`
+}
+
+// LDAPGroupMapping maps an LDAP group DN to an organization and role template.
+type LDAPGroupMapping struct {
+	GroupDN      string `mapstructure:"group_dn"`
+	Organization string `mapstructure:"organization"`
+	Role         string `mapstructure:"role"`
 }
 
 // MTLSConfig holds mutual-TLS client-certificate authentication settings. The
@@ -218,4 +249,21 @@ func setDefaults(v *viper.Viper) {
 
 	v.SetDefault("auth.mtls.enabled", false)
 	v.SetDefault("auth.mtls.client_ca_file", "")
+
+	v.SetDefault("auth.ldap.enabled", false)
+	v.SetDefault("auth.ldap.host", "")
+	v.SetDefault("auth.ldap.port", 0)
+	v.SetDefault("auth.ldap.use_tls", false)
+	v.SetDefault("auth.ldap.start_tls", false)
+	v.SetDefault("auth.ldap.insecure_skip_verify", false)
+	v.SetDefault("auth.ldap.base_dn", "")
+	v.SetDefault("auth.ldap.bind_dn", "")
+	v.SetDefault("auth.ldap.bind_password", "")
+	v.SetDefault("auth.ldap.user_filter", "")
+	v.SetDefault("auth.ldap.user_attr_email", "mail")
+	v.SetDefault("auth.ldap.user_attr_name", "displayName")
+	v.SetDefault("auth.ldap.group_base_dn", "")
+	v.SetDefault("auth.ldap.group_filter", "")
+	v.SetDefault("auth.ldap.group_member_attr", "member")
+	v.SetDefault("auth.ldap.default_role", "")
 }

@@ -71,6 +71,7 @@ func NewRouter(cfg *config.Config, database *sql.DB, identityDB *sql.DB) (*gin.E
 			a.GET("/providers", authHandlers.ProvidersHandler())
 			a.GET("/login", authHandlers.LoginHandler())
 			a.GET("/callback", authHandlers.CallbackHandler())
+			a.POST("/ldap/login", authHandlers.LDAPLoginHandler())
 			// Authenticated session endpoints.
 			a.GET("/me", requireAuth, authHandlers.MeHandler())
 			a.POST("/refresh", requireAuth, authHandlers.RefreshHandler())

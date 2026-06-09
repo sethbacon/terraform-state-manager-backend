@@ -69,3 +69,23 @@ auth:
     mappings: []
     #   - { subject: "CN=svc-drift",            scopes: ["state:drift"] }
     #   - { subject: "dns:machine.example.com", scopes: ["state:read"] }
+
+  # LDAP / Active Directory search-bind auth (POST /api/v1/auth/ldap/login).
+  # Usernames are escaped before filter substitution; empty passwords are rejected
+  # (no unauthenticated bind). Use use_tls (LDAPS) or start_tls in production and
+  # keep insecure_skip_verify false. Put this endpoint behind rate limiting.
+  ldap:
+    enabled: false
+    host: ""
+    port: 0                # 0 => 636 (LDAPS) or 389
+    use_tls: false
+    start_tls: false
+    insecure_skip_verify: false   # dev only
+    base_dn: "dc=example,dc=com"
+    bind_dn: "cn=svc,dc=example,dc=com"
+    bind_password: ""
+    user_filter: "(uid=%s)"       # %s = escaped username
+    group_member_attr: "member"
+    group_mappings: []
+    #   - { group_dn: "cn=tf-admins,ou=groups,dc=example,dc=com", organization: "default", role: "admin" }
+    default_role: ""
