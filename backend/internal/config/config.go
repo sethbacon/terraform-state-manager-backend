@@ -108,6 +108,7 @@ type AuthConfig struct {
 	OIDC OIDCConfig `mapstructure:"oidc"`
 	MTLS MTLSConfig `mapstructure:"mtls"`
 	LDAP LDAPConfig `mapstructure:"ldap"`
+	SAML SAMLConfig `mapstructure:"saml"`
 }
 
 // LDAPConfig holds LDAP / Active Directory search-bind authentication settings.
@@ -181,6 +182,52 @@ type OIDCConfig struct {
 // template. The group value is matched against the user's groups claim from the
 // verified ID token.
 type OIDCGroupMapping struct {
+	Group        string `mapstructure:"group"`
+	Organization string `mapstructure:"organization"`
+	Role         string `mapstructure:"role"`
+}
+
+// SAMLConfig holds SAML 2.0 Service Provider settings. The SP validates
+// XML-signed assertions from one or more configured IdPs (auth.saml.idps) and
+// maps SAML group-attribute values to org/role memberships (same model as
+// OIDC/LDAP). The ACS endpoint is POST /api/v1/auth/saml/acs.
+type SAMLConfig struct {
+	Enabled  bool   `mapstructure:"enabled"`
+	EntityID string `mapstructure:"entity_id"` // SP entity ID; defaults to acs_url minus /saml/acs
+	ACSURL   string `mapstructure:"acs_url"`   // public URL of POST /api/v1/auth/saml/acs
+	CertFile string `mapstructure:"cert_file"` // optional SP signing cert (PEM)
+	KeyFile  string `mapstructure:"key_file"`  // optional SP signing key (PEM)
+
+	// AllowIDPInitiated permits unsolicited (IdP-initiated) SSO. Default false:
+	// only SP-initiated flows are accepted and the AuthnRequest ID is bound to the
+	// response (InResponseTo), defeating stolen-assertion replay and login CSRF.
+	AllowIDPInitiated bool `mapstructure:"allow_idp_initiated"`
+
+	// IdPs lists one or more SAML Identity Providers (by metadata URL or XML).
+	IdPs []SAMLIdPConfig `mapstructure:"idps"`
+
+	// GroupAttributeName is the assertion attribute carrying the user's groups.
+	GroupAttributeName string `mapstructure:"group_attribute_name"`
+	// GroupMappings map a SAML group-attribute value to an organization + role
+	// template. Orgs referenced are IdP-authoritative: a user's membership is
+	// reconciled on every login (and revoked when the group is lost).
+	GroupMappings []SAMLGroupMapping `mapstructure:"group_mappings"`
+	// DefaultRole granted in the default org on a user's FIRST login only when no
+	// group mapping applies.
+	DefaultRole string `mapstructure:"default_role"`
+}
+
+// SAMLIdPConfig describes a single SAML Identity Provider. Provide either a
+// metadata_url (HTTPS) or inline metadata_xml.
+type SAMLIdPConfig struct {
+	Name        string `mapstructure:"name"`
+	MetadataURL string `mapstructure:"metadata_url"`
+	MetadataXML string `mapstructure:"metadata_xml"`
+}
+
+// SAMLGroupMapping maps a SAML group-attribute value to an organization and role
+// template. The group value is matched exactly against the assertion attribute.
+type SAMLGroupMapping struct {
 	Group        string `mapstructure:"group"`
 	Organization string `mapstructure:"organization"`
 	Role         string `mapstructure:"role"`

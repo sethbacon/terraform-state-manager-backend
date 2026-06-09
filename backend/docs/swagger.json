@@ -287,6 +287,86 @@
                 }
             }
         },
+        "/auth/saml/acs": {
+            "post": {
+                "description": "Receives a signed SAML response from the IdP (SP- or IdP-initiated), validates the assertion, provisions the user, and sets the session cookie before redirecting to the frontend callback.",
+                "consumes": [
+                    "application/x-www-form-urlencoded"
+                ],
+                "produces": [
+                    "text/html"
+                ],
+                "tags": [
+                    "Auth"
+                ],
+                "summary": "SAML Assertion Consumer Service",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Base64-encoded SAML response",
+                        "name": "SAMLResponse",
+                        "in": "formData",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "Relay state (the SP-initiated session key)",
+                        "name": "RelayState",
+                        "in": "formData"
+                    }
+                ],
+                "responses": {
+                    "302": {
+                        "description": "Redirects to the frontend /auth/callback",
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    }
+                }
+            }
+        },
+        "/auth/saml/metadata": {
+            "get": {
+                "description": "Returns the SAML Service Provider metadata XML for the named (or first configured) IdP. Used by SAML identity providers during federation setup.",
+                "produces": [
+                    "text/xml"
+                ],
+                "tags": [
+                    "Auth"
+                ],
+                "summary": "SAML SP metadata",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "SAML IdP name (defaults to first configured)",
+                        "name": "idp",
+                        "in": "query"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "SAML SP metadata XML",
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    }
+                }
+            }
+        },
         "/dashboard/overview": {
             "get": {
                 "security": [

@@ -20,6 +20,7 @@ import (
 
 	"github.com/terraform-state-manager/terraform-state-manager/internal/auth"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/auth/ldap"
+	"github.com/terraform-state-manager/terraform-state-manager/internal/auth/saml"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/config"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/middleware"
 )
@@ -28,13 +29,14 @@ const sessionTTL = 24 * time.Hour
 
 // AuthHandlers serves the authentication endpoints.
 type AuthHandlers struct {
-	cfg          *config.Config
-	userRepo     *idstore.UserRepository
-	orgRepo      *idstore.OrganizationRepository
-	tokenRepo    *idstore.TokenRepository
-	oidcProvider *auth.OIDCProvider
-	ldapProvider *ldap.Provider
-	stateStore   auth.StateStore
+	cfg           *config.Config
+	userRepo      *idstore.UserRepository
+	orgRepo       *idstore.OrganizationRepository
+	tokenRepo     *idstore.TokenRepository
+	oidcProvider  *auth.OIDCProvider
+	ldapProvider  *ldap.Provider
+	samlProviders map[string]*saml.Provider // keyed by IdP name; nil when SAML disabled
+	stateStore    auth.StateStore
 }
 
 // NewAuthHandlers constructs the auth handlers. identityDB must resolve to the
@@ -61,6 +63,17 @@ func NewAuthHandlers(cfg *config.Config, identityDB *sql.DB) (*AuthHandlers, err
 			return nil, err
 		}
 		h.ldapProvider = p
+	}
+	if cfg.Auth.SAML.Enabled {
+		h.samlProviders = make(map[string]*saml.Provider, len(cfg.Auth.SAML.IdPs))
+		for _, idp := range cfg.Auth.SAML.IdPs {
+			p, err := saml.NewProvider(cfg.Auth.SAML, idp)
+			if err != nil {
+				return nil, fmt.Errorf("saml idp %q: %w", idp.Name, err)
+			}
+			h.samlProviders[idp.Name] = p
+			slog.Info("SAML IdP configured", "name", idp.Name)
+		}
 	}
 	return h, nil
 }
@@ -146,9 +159,14 @@ func (h *AuthHandlers) ProvidersHandler() gin.HandlerFunc {
 	}
 }
 
-// LoginHandler begins the OIDC authorization-code flow.
+// LoginHandler begins the OIDC authorization-code flow. With ?provider=saml (or
+// saml:<idp-name>) it begins the SP-initiated SAML flow instead.
 func (h *AuthHandlers) LoginHandler() gin.HandlerFunc {
 	return func(c *gin.Context) {
+		if provider := c.Query("provider"); provider == "saml" || strings.HasPrefix(provider, "saml:") {
+			h.samlLogin(c, provider)
+			return
+		}
 		if h.oidcProvider == nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "OIDC provider not configured"})
 			return

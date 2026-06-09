@@ -12,6 +12,11 @@ type SessionState struct {
 	State        string
 	CreatedAt    time.Time
 	ProviderType string
+	// RequestID is the SAML AuthnRequest ID for an SP-initiated SAML login. It is
+	// passed back to ParseResponse so the IdP response's InResponseTo is validated
+	// against the request we issued (defeats unsolicited-response replay). Empty
+	// for non-SAML flows.
+	RequestID string
 }
 
 // StateStore persists OAuth state tokens between the login redirect and callback.

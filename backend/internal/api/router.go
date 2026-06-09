@@ -72,6 +72,9 @@ func NewRouter(cfg *config.Config, database *sql.DB, identityDB *sql.DB) (*gin.E
 			a.GET("/login", authHandlers.LoginHandler())
 			a.GET("/callback", authHandlers.CallbackHandler())
 			a.POST("/ldap/login", authHandlers.LDAPLoginHandler())
+			// SAML 2.0 SP endpoints: SP metadata and the Assertion Consumer Service.
+			a.GET("/saml/metadata", authHandlers.SAMLMetadataHandler())
+			a.POST("/saml/acs", authHandlers.SAMLACSHandler())
 			// Authenticated session endpoints.
 			a.GET("/me", requireAuth, authHandlers.MeHandler())
 			a.POST("/refresh", requireAuth, authHandlers.RefreshHandler())

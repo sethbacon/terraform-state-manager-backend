@@ -89,3 +89,23 @@ auth:
     group_mappings: []
     #   - { group_dn: "cn=tf-admins,ou=groups,dc=example,dc=com", organization: "default", role: "admin" }
     default_role: ""
+
+  # SAML 2.0 Service Provider auth. SP-initiated login: GET /api/v1/auth/login?provider=saml
+  # (or saml:<idp-name>); the IdP POSTs the signed response to the ACS endpoint
+  # POST /api/v1/auth/saml/acs. SP metadata is served at /api/v1/auth/saml/metadata.
+  # Signatures, the XSW round-trip check, replay window and audience/recipient/
+  # destination are validated; IdP-initiated SSO is OFF unless explicitly enabled.
+  saml:
+    enabled: false
+    entity_id: ""                 # SP entity ID; defaults to acs_url without /saml/acs
+    acs_url: ""                   # public URL of POST /api/v1/auth/saml/acs
+    cert_file: ""                 # optional SP signing cert (PEM)
+    key_file: ""                  # optional SP signing key (PEM)
+    allow_idp_initiated: false    # keep false: SP-initiated only (InResponseTo bound)
+    idps: []
+    #   - { name: "okta", metadata_url: "https://example.okta.com/app/xxx/sso/saml/metadata" }
+    #   - { name: "adfs", metadata_xml: "<EntityDescriptor ...>...</EntityDescriptor>" }
+    group_attribute_name: ""      # assertion attribute carrying the user's groups
+    group_mappings: []
+    #   - { group: "tf-admins", organization: "default", role: "admin" }
+    default_role: ""
