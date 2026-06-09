@@ -17,6 +17,15 @@ const (
 	// is mirrored here (the capability package imports models, not vice versa) so
 	// ValidTaskTypes accepts API-created versiontest tasks.
 	TaskTypeVersionTest = "versiontest"
+	// TaskTypeEnvDrift is owned by the environment-drift capability
+	// (internal/capability/envdrift). Like versiontest it is dispatched via the
+	// scheduler's capability-registry fallback; the literal is mirrored here so
+	// ValidTaskTypes accepts API-created envdrift tasks.
+	TaskTypeEnvDrift = "envdrift"
+	// TaskTypeDriftTrigger is owned by the outbound drift-trigger capability
+	// (internal/capability/drifttrigger). It queues an Azure DevOps plan pipeline
+	// run on a schedule; dispatched via the capability-registry fallback.
+	TaskTypeDriftTrigger = "drifttrigger"
 )
 
 // TaskRunStatus constants for the outcome of a scheduled task execution.
@@ -64,10 +73,12 @@ type ScheduledTaskUpdateRequest struct {
 // ValidTaskTypes returns the set of valid task type strings.
 func ValidTaskTypes() map[string]bool {
 	return map[string]bool{
-		TaskTypeAnalysis:    true,
-		TaskTypeReport:      true,
-		TaskTypeBackup:      true,
-		TaskTypeSnapshot:    true,
-		TaskTypeVersionTest: true,
+		TaskTypeAnalysis:     true,
+		TaskTypeReport:       true,
+		TaskTypeBackup:       true,
+		TaskTypeSnapshot:     true,
+		TaskTypeVersionTest:  true,
+		TaskTypeEnvDrift:     true,
+		TaskTypeDriftTrigger: true,
 	}
 }

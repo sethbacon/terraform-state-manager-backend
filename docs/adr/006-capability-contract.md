@@ -44,6 +44,8 @@ The live provider that triggers a plan in an external CI system (Azure DevOps) i
 3. In `router.go`, `Register` it on the startup `capability.Registry`. The scheduler, scope set, and discovery endpoint pick it up automatically.
 4. If it adds a scheduled task type, add the literal to `models.ValidTaskTypes()` so API-created tasks of that type validate.
 
+A step-by-step authoring guide with a full worked example (the environment-drift capability — scheduled task type **and** manual HTTP triggers, with graceful 503-when-unconfigured behaviour) lives at [`backend/docs/capabilities.md`](../../backend/docs/capabilities.md). The `envdrift` and `drifttrigger` capabilities (Phase 4 engines exposed on schedule and via `POST /drift/env-check` and `POST /drift/trigger`) are the second and third capabilities built on this contract.
+
 ### Alternatives considered
 
 - **Full plugin system (Go `plugin`, or out-of-process):** rejected — far more than the one worked example needs, with build/version-coupling and operational cost the project does not want now.
