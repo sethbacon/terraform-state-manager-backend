@@ -7,6 +7,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.0](https://github.com/sethbacon/terraform-state-manager-backend/compare/v0.8.0...v0.9.0) (2026-06-09)
+
+
+### Features
+
+* **analysis:** flag provider pin drift against the public registry ([#70](https://github.com/sethbacon/terraform-state-manager-backend/issues/70)) ([cd6abbd](https://github.com/sethbacon/terraform-state-manager-backend/commit/cd6abbde76b4b3daa5a45cd6fcc9e8e5566e3969))
+* **drift:** Azure read-only state-vs-environment drift engine ([#74](https://github.com/sethbacon/terraform-state-manager-backend/issues/74)) ([e3f90cb](https://github.com/sethbacon/terraform-state-manager-backend/commit/e3f90cb79208a1312c2f5d425dabf3c9d668499c))
+* **drift:** outbound ADO plan-trigger with WIF federated-token provider ([#75](https://github.com/sethbacon/terraform-state-manager-backend/issues/75)) ([ccf9e51](https://github.com/sethbacon/terraform-state-manager-backend/commit/ccf9e515bd60f04a69b1e3614f549fd9f5bb3652))
+* **drift:** schedule + expose env-drift and outbound-trigger capabilities ([#77](https://github.com/sethbacon/terraform-state-manager-backend/issues/77)) ([37e2c2b](https://github.com/sethbacon/terraform-state-manager-backend/commit/37e2c2b4ff1ee8c7fca177648e95fede97f37a1f))
+* **migration:** ADO repo-migration execute path (REST, idempotent, resumable) ([#71](https://github.com/sethbacon/terraform-state-manager-backend/issues/71)) ([cc7b930](https://github.com/sethbacon/terraform-state-manager-backend/commit/cc7b9305bfcfa7e1153e94fc7c01202d890ac069))
+* **migration:** git-history push for ADO repo migration (go-git) ([#76](https://github.com/sethbacon/terraform-state-manager-backend/issues/76)) ([5f7b2fa](https://github.com/sethbacon/terraform-state-manager-backend/commit/5f7b2fa73b5c45a9aecd8622dcfc2c837d87be90))
+* **sources:** link state sources to ADO repos/pipelines ([#78](https://github.com/sethbacon/terraform-state-manager-backend/issues/78)) ([386397f](https://github.com/sethbacon/terraform-state-manager-backend/commit/386397f70ff9b51a2224724aebb01dde7a8f5feb))
+
 ## [0.8.0](https://github.com/sethbacon/terraform-state-manager-backend/compare/v0.7.0...v0.8.0) (2026-06-08)
 
 
