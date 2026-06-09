@@ -2,6 +2,7 @@ package ado
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 )
 
@@ -44,4 +45,52 @@ func (c *Client) ListBranchPolicies(ctx context.Context) ([]BranchPolicy, error)
 		})
 	}
 	return policies, nil
+}
+
+// AdoptBranchPolicyRequest describes a branch policy to recreate ("adopt") in
+// the target project. TypeID is the policy type's GUID (as captured by
+// ListBranchPolicies); Settings is the opaque policy settings object copied from
+// the source (reviewer counts, scope, build definition id, etc.). The scope
+// inside Settings must already reference target-project repository ids.
+type AdoptBranchPolicyRequest struct {
+	TypeID     string
+	IsEnabled  bool
+	IsBlocking bool
+	Settings   json.RawMessage
+}
+
+// adoptBranchPolicyBody is the wire body for POST _apis/policy/configurations.
+type adoptBranchPolicyBody struct {
+	IsEnabled  bool            `json:"isEnabled"`
+	IsBlocking bool            `json:"isBlocking"`
+	Type       policyTypeRef   `json:"type"`
+	Settings   json.RawMessage `json:"settings"`
+}
+
+type policyTypeRef struct {
+	ID string `json:"id"`
+}
+
+// AdoptBranchPolicy recreates a branch policy in the configured (target)
+// project. It calls POST {org}/{project}/_apis/policy/configurations and returns
+// the created policy. A 409 Conflict (an equivalent policy already exists) is
+// surfaced as an *APIError detectable via IsConflict so callers stay idempotent.
+func (c *Client) AdoptBranchPolicy(ctx context.Context, req AdoptBranchPolicyRequest) (*BranchPolicy, error) {
+	body := adoptBranchPolicyBody{
+		IsEnabled:  req.IsEnabled,
+		IsBlocking: req.IsBlocking,
+		Type:       policyTypeRef{ID: req.TypeID},
+		Settings:   req.Settings,
+	}
+	var created policyConfiguration
+	path := c.projectPath("_apis/policy/configurations")
+	if err := c.postJSON(ctx, path, defaultParams(), body, &created); err != nil {
+		return nil, fmt.Errorf("adopting branch policy (type %s): %w", req.TypeID, err)
+	}
+	return &BranchPolicy{
+		ID:          created.ID,
+		Type:        created.Type.ID,
+		DisplayName: created.Type.DisplayName,
+		IsEnabled:   created.IsEnabled,
+	}, nil
 }

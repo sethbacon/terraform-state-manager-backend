@@ -1,0 +1,7 @@
+{
+  "id": 42,
+  "name": "platform-infra-CI",
+  "folder": "\\Infrastructure",
+  "revision": 1,
+  "url": "https://dev.azure.com/contoso/ContosoTarget/_apis/pipelines/42?revision=1"
+}

@@ -1,0 +1,15 @@
+{
+  "id": "9a8b7c6d-5e4f-4a3b-2c1d-0e9f8a7b6c5d",
+  "name": "platform-infra",
+  "url": "https://dev.azure.com/contoso/_apis/git/repositories/9a8b7c6d-5e4f-4a3b-2c1d-0e9f8a7b6c5d",
+  "project": {
+    "id": "11112222-3333-4444-5555-666677778888",
+    "name": "ContosoTarget"
+  },
+  "defaultBranch": "refs/heads/main",
+  "size": 0,
+  "remoteUrl": "https://contoso@dev.azure.com/contoso/ContosoTarget/_git/platform-infra",
+  "sshUrl": "git@ssh.dev.azure.com:v3/contoso/ContosoTarget/platform-infra",
+  "webUrl": "https://dev.azure.com/contoso/ContosoTarget/_git/platform-infra",
+  "isDisabled": false
+}
