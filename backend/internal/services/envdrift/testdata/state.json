@@ -1,0 +1,76 @@
+{
+  "version": 4,
+  "terraform_version": "1.7.5",
+  "serial": 12,
+  "lineage": "f7b2c1a0-0000-0000-0000-000000000000",
+  "resources": [
+    {
+      "mode": "managed",
+      "type": "azurerm_virtual_network",
+      "name": "main",
+      "provider": "provider[\"registry.terraform.io/hashicorp/azurerm\"]",
+      "instances": [
+        {
+          "attributes": {
+            "id": "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-platform/providers/Microsoft.Network/virtualNetworks/vnet-main",
+            "location": "eastus"
+          }
+        }
+      ]
+    },
+    {
+      "mode": "managed",
+      "type": "azurerm_storage_account",
+      "name": "state",
+      "provider": "provider[\"registry.terraform.io/hashicorp/azurerm\"]",
+      "instances": [
+        {
+          "attributes": {
+            "id": "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-platform/providers/Microsoft.Storage/storageAccounts/sttfstateprod",
+            "location": "eastus"
+          }
+        }
+      ]
+    },
+    {
+      "mode": "managed",
+      "type": "azurerm_linux_virtual_machine",
+      "name": "app",
+      "provider": "provider[\"registry.terraform.io/hashicorp/azurerm\"]",
+      "instances": [
+        {
+          "attributes": {
+            "id": "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-platform/providers/Microsoft.Compute/virtualMachines/vm-gone",
+            "location": "eastus"
+          }
+        }
+      ]
+    },
+    {
+      "mode": "data",
+      "type": "azurerm_client_config",
+      "name": "current",
+      "provider": "provider[\"registry.terraform.io/hashicorp/azurerm\"]",
+      "instances": [
+        {
+          "attributes": {
+            "id": "2021-01-01"
+          }
+        }
+      ]
+    },
+    {
+      "mode": "managed",
+      "type": "random_id",
+      "name": "suffix",
+      "provider": "provider[\"registry.terraform.io/hashicorp/random\"]",
+      "instances": [
+        {
+          "attributes": {
+            "id": "abc123"
+          }
+        }
+      ]
+    }
+  ]
+}

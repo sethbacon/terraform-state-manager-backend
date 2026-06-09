@@ -19,6 +19,9 @@ const (
 	// DriftSourceCode marks events ingested from a Terraform plan JSON via the
 	// external drift-ingest endpoint.
 	DriftSourceCode = "code"
+	// DriftSourceEnvironment marks events detected by comparing a Terraform
+	// state's resources against their live cloud (e.g. Azure ARM) counterparts.
+	DriftSourceEnvironment = "environment"
 )
 
 // DriftEvent records a detected change for a workspace. It covers both
