@@ -5,8 +5,13 @@
 package ado
 
 import (
+	"context"
 	"encoding/base64"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
+	"net/http"
 	"net/url"
 	"time"
 
@@ -62,7 +67,12 @@ func NewClient(cfg Config) (*Client, error) {
 		cfg.RateLimitDelay = defaultRateLimitDelay
 	}
 
-	headers := map[string]string{}
+	// Azure DevOps expects application/json bodies; override the shared client's
+	// HCP-oriented default Content-Type. The shared client applies config.Headers
+	// last, so this wins over the built-in default for every request.
+	headers := map[string]string{
+		"Content-Type": "application/json",
+	}
 	if cfg.Token != "" {
 		// PAT scheme: basic auth with empty username, token as password.
 		encoded := base64.StdEncoding.EncodeToString([]byte(":" + cfg.Token))
@@ -108,4 +118,59 @@ func defaultParams() url.Values {
 type listEnvelope[T any] struct {
 	Count int `json:"count"`
 	Value []T `json:"value"`
+}
+
+// APIError describes a non-2xx response from the Azure DevOps REST API. It
+// carries the HTTP status code and response body so callers can distinguish
+// recoverable conditions (such as a 409 Conflict signalling a resource that
+// already exists) from genuine failures.
+type APIError struct {
+	StatusCode int
+	Body       string
+}
+
+func (e *APIError) Error() string {
+	return fmt.Sprintf("ado: unexpected status %d: %s", e.StatusCode, e.Body)
+}
+
+// IsConflict reports whether err is an APIError carrying HTTP 409 Conflict,
+// which Azure DevOps returns when a create call targets a resource that already
+// exists. The execute orchestrator treats this as an idempotent success.
+func IsConflict(err error) bool {
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		return false
+	}
+	return apiErr.StatusCode == http.StatusConflict
+}
+
+// postJSON performs a POST to the given project-relative path with a JSON body
+// and decodes a successful (2xx) response into target. Non-2xx responses are
+// returned as an *APIError so callers can inspect the status code (e.g. via
+// IsConflict). A nil target skips response decoding.
+func (c *Client) postJSON(ctx context.Context, path string, params url.Values, body, target any) error {
+	fullPath := path
+	if len(params) > 0 {
+		fullPath = path + "?" + params.Encode()
+	}
+
+	resp, err := c.httpClient.Post(ctx, fullPath, body)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		return &APIError{StatusCode: resp.StatusCode, Body: string(bodyBytes)}
+	}
+
+	if target == nil {
+		_, _ = io.Copy(io.Discard, resp.Body)
+		return nil
+	}
+	if err := json.NewDecoder(resp.Body).Decode(target); err != nil {
+		return fmt.Errorf("decoding response from %s: %w", path, err)
+	}
+	return nil
 }

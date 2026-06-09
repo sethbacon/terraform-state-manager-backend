@@ -1,0 +1,15 @@
+{
+  "data": {
+    "subscriptionId": "11111111-2222-3333-4444-555555555555",
+    "subscriptionName": "Contoso Production",
+    "environment": "AzureCloud",
+    "scopeLevel": "Subscription"
+  },
+  "id": "ee11ff22-3344-4556-6778-899900112233",
+  "name": "azure-prod-connection",
+  "type": "azurerm",
+  "url": "https://management.azure.com/",
+  "isShared": false,
+  "isReady": false,
+  "owner": "Library"
+}

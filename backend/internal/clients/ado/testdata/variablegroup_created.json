@@ -1,0 +1,22 @@
+{
+  "id": 77,
+  "type": "Vsts",
+  "name": "platform-shared",
+  "description": "",
+  "variables": {
+    "TF_BACKEND_RESOURCE_GROUP": {
+      "value": ""
+    },
+    "TF_BACKEND_STORAGE_ACCOUNT": {
+      "value": ""
+    },
+    "ARM_CLIENT_SECRET": {
+      "value": ""
+    }
+  },
+  "createdBy": {
+    "displayName": "Ada Lovelace",
+    "id": "aa11bb22-cc33-dd44-ee55-ff6677889900"
+  },
+  "createdOn": "2025-06-01T08:30:00Z"
+}

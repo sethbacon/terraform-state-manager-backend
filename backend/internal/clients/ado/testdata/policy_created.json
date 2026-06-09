@@ -1,0 +1,28 @@
+{
+  "createdBy": {
+    "displayName": "Project Collection Build Service",
+    "id": "3b3c1c63-8b1d-4b1d-9c2a-1a2b3c4d5e6f"
+  },
+  "createdDate": "2025-06-01T10:00:00Z",
+  "isEnabled": true,
+  "isBlocking": true,
+  "isDeleted": false,
+  "settings": {
+    "minimumApproverCount": 2,
+    "creatorVoteCounts": false,
+    "scope": [
+      {
+        "refName": "refs/heads/main",
+        "matchKind": "exact",
+        "repositoryId": "9a8b7c6d-5e4f-4a3b-2c1d-0e9f8a7b6c5d"
+      }
+    ]
+  },
+  "id": 101,
+  "url": "https://dev.azure.com/contoso/ContosoTarget/_apis/policy/configurations/101",
+  "type": {
+    "id": "fa4e907d-c16b-4a4c-9dfa-4906e5d171dd",
+    "url": "https://dev.azure.com/contoso/ContosoTarget/_apis/policy/types/fa4e907d-c16b-4a4c-9dfa-4906e5d171dd",
+    "displayName": "Minimum number of reviewers"
+  }
+}
