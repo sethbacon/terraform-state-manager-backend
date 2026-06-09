@@ -98,6 +98,9 @@ func NewRouter(cfg *config.Config, database *sql.DB, identityDB *sql.DB) (*gin.E
 
 		v1.GET("/transfers/:id", requireAuth, middleware.RequireScope(auth.ScopeStateRead), sources.GetTransfer())
 
+		// Home dashboard: cross-source aggregated overview.
+		v1.GET("/dashboard/overview", requireAuth, middleware.RequireScope(auth.ScopeStateRead), sources.DashboardOverview())
+
 		// Phase 3 drift: CI pipeline connections + drift runs.
 		drift := NewDriftHandlers(cfg, database)
 		p := v1.Group("/pipelines", requireAuth)
