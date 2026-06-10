@@ -179,6 +179,19 @@ func NewRouter(cfg *config.Config, database *sql.DB, identityDB *sql.DB) (*gin.E
 			p.POST("", middleware.RequireScope(auth.ScopeSourcesManage), drift.CreatePipeline())
 			p.DELETE("/:id", middleware.RequireScope(auth.ScopeSourcesManage), drift.DeletePipeline())
 		}
+
+		// CI sources: org-level CI credentials + pipeline/repo/workflow discovery,
+		// so pipeline connections can be created by selection.
+		ciSources := NewCISourceHandlers(database)
+		cs := v1.Group("/ci-sources", requireAuth, middleware.RequireScope(auth.ScopeSourcesManage))
+		{
+			cs.GET("", ciSources.ListCISources())
+			cs.POST("", ciSources.CreateCISource())
+			cs.DELETE("/:id", ciSources.DeleteCISource())
+			cs.GET("/:id/pipelines", ciSources.ListSourcePipelines())
+			cs.GET("/:id/repos", ciSources.ListSourceRepos())
+			cs.GET("/:id/repos/:repo/workflows", ciSources.ListSourceWorkflows())
+		}
 		d := v1.Group("/drift", requireAuth)
 		{
 			d.GET("/workflow", middleware.RequireScope(auth.ScopeStateRead), drift.WorkflowTemplate())

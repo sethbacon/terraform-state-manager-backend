@@ -29,6 +29,7 @@ import (
 type DriftHandlers struct {
 	cfg          *config.Config
 	pipelineRepo *repositories.PipelineRepository
+	ciSourceRepo *repositories.CISourceRepository
 	driftRepo    *repositories.DriftRepository
 	notifier     *notify.Notifier // may be nil (notifications disabled / no DB)
 }
@@ -39,6 +40,7 @@ func NewDriftHandlers(cfg *config.Config, database *sql.DB, notifier *notify.Not
 	return &DriftHandlers{
 		cfg:          cfg,
 		pipelineRepo: repositories.NewPipelineRepository(database),
+		ciSourceRepo: repositories.NewCISourceRepository(database),
 		driftRepo:    repositories.NewDriftRepository(database),
 		notifier:     notifier,
 	}
@@ -194,13 +196,10 @@ func (h *DriftHandlers) dispatchDrift(ctx context.Context, tgt DriftTarget, acto
 	if conn == nil {
 		return nil, errPipelineNotFound
 	}
-	token := ""
-	if len(conn.EncryptedToken) > 0 {
-		pt, derr := crypto.Decrypt(conn.EncryptedToken)
-		if derr != nil {
-			return nil, fmt.Errorf("decrypt pipeline token: %w", derr)
-		}
-		token = string(pt)
+	// Connection-level token, or the shared token of its CI source.
+	token, err := resolvePipelineToken(ctx, h.ciSourceRepo, conn)
+	if err != nil {
+		return nil, err
 	}
 
 	run := &repositories.DriftRun{

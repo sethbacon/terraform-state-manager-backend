@@ -13,7 +13,6 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/terraform-state-manager/terraform-state-manager/internal/config"
-	"github.com/terraform-state-manager/terraform-state-manager/internal/crypto"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/db/repositories"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/pipelines"
 )
@@ -22,6 +21,7 @@ import (
 type HealthHandlers struct {
 	cfg          *config.Config
 	pipelineRepo *repositories.PipelineRepository
+	ciSourceRepo *repositories.CISourceRepository
 	healthRepo   *repositories.HealthRepository
 }
 
@@ -30,6 +30,7 @@ func NewHealthHandlers(cfg *config.Config, database *sql.DB) *HealthHandlers {
 	return &HealthHandlers{
 		cfg:          cfg,
 		pipelineRepo: repositories.NewPipelineRepository(database),
+		ciSourceRepo: repositories.NewCISourceRepository(database),
 		healthRepo:   repositories.NewHealthRepository(database),
 	}
 }
@@ -74,14 +75,11 @@ func (h *HealthHandlers) CreateRun() gin.HandlerFunc {
 			c.JSON(http.StatusNotFound, gin.H{"error": "pipeline connection not found"})
 			return
 		}
-		token := ""
-		if len(conn.EncryptedToken) > 0 {
-			pt, derr := crypto.Decrypt(conn.EncryptedToken)
-			if derr != nil {
-				c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to decrypt pipeline token"})
-				return
-			}
-			token = string(pt)
+		// Connection-level token, or the shared token of its CI source.
+		token, err := resolvePipelineToken(ctx, h.ciSourceRepo, conn)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to resolve pipeline token"})
+			return
 		}
 
 		run := &repositories.HealthRun{
