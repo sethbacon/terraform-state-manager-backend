@@ -41,23 +41,28 @@ type WorkflowRef struct {
 	File string `json:"file"`
 }
 
-func discoveryGET(ctx context.Context, u string, authorize func(*http.Request)) ([]byte, int, error) {
+// maxDiscoveryPages bounds pagination loops so a huge (or misbehaving) provider
+// can't hold a request open indefinitely: 20 pages = 10k ADO pipelines / 2k
+// GitHub repos or workflows.
+const maxDiscoveryPages = 20
+
+func discoveryGET(ctx context.Context, u string, authorize func(*http.Request)) ([]byte, int, http.Header, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, nil, err
 	}
 	authorize(req)
 	req.Header.Set("Accept", "application/json")
 	resp, err := httpClient.Do(req)
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, nil, err
 	}
 	defer func() { _ = resp.Body.Close() }()
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
 	if err != nil {
-		return nil, resp.StatusCode, err
+		return nil, resp.StatusCode, resp.Header, err
 	}
-	return body, resp.StatusCode, nil
+	return body, resp.StatusCode, resp.Header, nil
 }
 
 func adoAuth(pat string) func(*http.Request) {
@@ -73,110 +78,145 @@ func githubAuth(token string) func(*http.Request) {
 	}
 }
 
-// ListAzurePipelines returns the pipeline definitions in an ADO project.
+// ListAzurePipelines returns the pipeline definitions in an ADO project,
+// following the continuation-token pagination so large projects list fully.
 func ListAzurePipelines(ctx context.Context, pat, organization, project string) ([]PipelineRef, error) {
 	if pat == "" || organization == "" || project == "" {
 		return nil, fmt.Errorf("azure devops discovery requires organization, project, and a PAT")
 	}
-	u := fmt.Sprintf("%s/%s/%s/_apis/pipelines?api-version=7.1&$top=500",
+	base := fmt.Sprintf("%s/%s/%s/_apis/pipelines?api-version=7.1&$top=500",
 		azureDevOpsBaseURL, url.PathEscape(organization), url.PathEscape(project))
-	body, status, err := discoveryGET(ctx, u, adoAuth(pat))
-	if err != nil {
-		return nil, fmt.Errorf("azure devops pipeline list failed: %w", err)
+	var refs []PipelineRef
+	continuation := ""
+	for page := 0; page < maxDiscoveryPages; page++ {
+		u := base
+		if continuation != "" {
+			u += "&continuationToken=" + url.QueryEscape(continuation)
+		}
+		body, status, header, err := discoveryGET(ctx, u, adoAuth(pat))
+		if err != nil {
+			return nil, fmt.Errorf("azure devops pipeline list failed: %w", err)
+		}
+		if status != http.StatusOK {
+			return nil, fmt.Errorf("azure devops pipeline list returned %d", status)
+		}
+		var out struct {
+			Value []PipelineRef `json:"value"`
+		}
+		if err := json.Unmarshal(body, &out); err != nil {
+			return nil, fmt.Errorf("azure devops pipeline list parse failed: %w", err)
+		}
+		refs = append(refs, out.Value...)
+		continuation = header.Get("X-MS-ContinuationToken")
+		if continuation == "" {
+			break
+		}
 	}
-	if status != http.StatusOK {
-		return nil, fmt.Errorf("azure devops pipeline list returned %d", status)
-	}
-	var out struct {
-		Value []PipelineRef `json:"value"`
-	}
-	if err := json.Unmarshal(body, &out); err != nil {
-		return nil, fmt.Errorf("azure devops pipeline list parse failed: %w", err)
-	}
-	sort.Slice(out.Value, func(i, j int) bool { return out.Value[i].Name < out.Value[j].Name })
-	return out.Value, nil
+	sort.Slice(refs, func(i, j int) bool { return refs[i].Name < refs[j].Name })
+	return refs, nil
 }
 
-// ListGitHubRepos returns the repositories under a GitHub owner. The org
-// endpoint is tried first; a 404 falls back to the user endpoint so personal
-// accounts work with the same configuration shape.
-func ListGitHubRepos(ctx context.Context, token, owner string) ([]RepoRef, error) {
-	if token == "" || owner == "" {
-		return nil, fmt.Errorf("github discovery requires an owner and a token")
-	}
-	parse := func(body []byte) ([]RepoRef, error) {
+// listGitHubReposFrom pages through a repos endpoint (org or user form) until a
+// short page or the page cap. A 404 on the FIRST page is reported as notFound so
+// the caller can fall back to the other endpoint form.
+func listGitHubReposFrom(ctx context.Context, token, base string) (refs []RepoRef, notFound bool, err error) {
+	const perPage = 100
+	for page := 1; page <= maxDiscoveryPages; page++ {
+		u := fmt.Sprintf("%s&per_page=%d&page=%d", base, perPage, page)
+		body, status, _, gerr := discoveryGET(ctx, u, githubAuth(token))
+		if gerr != nil {
+			return nil, false, fmt.Errorf("github repo list failed: %w", gerr)
+		}
+		if status == http.StatusNotFound && page == 1 {
+			return nil, true, nil
+		}
+		if status != http.StatusOK {
+			return nil, false, fmt.Errorf("github repo list returned %d", status)
+		}
 		var repos []struct {
 			Name          string `json:"name"`
 			DefaultBranch string `json:"default_branch"`
 		}
-		if err := json.Unmarshal(body, &repos); err != nil {
-			return nil, fmt.Errorf("github repo list parse failed: %w", err)
+		if uerr := json.Unmarshal(body, &repos); uerr != nil {
+			return nil, false, fmt.Errorf("github repo list parse failed: %w", uerr)
 		}
-		out := make([]RepoRef, 0, len(repos))
 		for _, r := range repos {
-			out = append(out, RepoRef{Name: r.Name, DefaultBranch: r.DefaultBranch})
+			refs = append(refs, RepoRef{Name: r.Name, DefaultBranch: r.DefaultBranch})
 		}
-		sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
-		return out, nil
-	}
-
-	body, status, err := discoveryGET(ctx,
-		fmt.Sprintf("%s/orgs/%s/repos?per_page=100&sort=full_name", githubAPIBaseURL, url.PathEscape(owner)),
-		githubAuth(token))
-	if err != nil {
-		return nil, fmt.Errorf("github repo list failed: %w", err)
-	}
-	if status == http.StatusNotFound {
-		body, status, err = discoveryGET(ctx,
-			fmt.Sprintf("%s/users/%s/repos?per_page=100&sort=full_name", githubAPIBaseURL, url.PathEscape(owner)),
-			githubAuth(token))
-		if err != nil {
-			return nil, fmt.Errorf("github repo list failed: %w", err)
+		if len(repos) < perPage {
+			break
 		}
 	}
-	if status != http.StatusOK {
-		return nil, fmt.Errorf("github repo list returned %d", status)
-	}
-	return parse(body)
+	return refs, false, nil
 }
 
-// ListGitHubWorkflows returns the active Actions workflows in a repository.
+// ListGitHubRepos returns the repositories under a GitHub owner (all pages).
+// The org endpoint is tried first; a 404 falls back to the user endpoint so
+// personal accounts work with the same configuration shape.
+func ListGitHubRepos(ctx context.Context, token, owner string) ([]RepoRef, error) {
+	if token == "" || owner == "" {
+		return nil, fmt.Errorf("github discovery requires an owner and a token")
+	}
+	refs, notFound, err := listGitHubReposFrom(ctx, token,
+		fmt.Sprintf("%s/orgs/%s/repos?sort=full_name", githubAPIBaseURL, url.PathEscape(owner)))
+	if err != nil {
+		return nil, err
+	}
+	if notFound {
+		refs, _, err = listGitHubReposFrom(ctx, token,
+			fmt.Sprintf("%s/users/%s/repos?sort=full_name", githubAPIBaseURL, url.PathEscape(owner)))
+		if err != nil {
+			return nil, err
+		}
+	}
+	sort.Slice(refs, func(i, j int) bool { return refs[i].Name < refs[j].Name })
+	return refs, nil
+}
+
+// ListGitHubWorkflows returns the active Actions workflows in a repository
+// (all pages).
 func ListGitHubWorkflows(ctx context.Context, token, owner, repo string) ([]WorkflowRef, error) {
 	if token == "" || owner == "" || repo == "" {
 		return nil, fmt.Errorf("github workflow discovery requires owner, repo, and a token")
 	}
-	u := fmt.Sprintf("%s/repos/%s/%s/actions/workflows?per_page=100",
-		githubAPIBaseURL, url.PathEscape(owner), url.PathEscape(repo))
-	body, status, err := discoveryGET(ctx, u, githubAuth(token))
-	if err != nil {
-		return nil, fmt.Errorf("github workflow list failed: %w", err)
-	}
-	if status != http.StatusOK {
-		return nil, fmt.Errorf("github workflow list returned %d", status)
-	}
-	var out struct {
-		Workflows []struct {
-			ID    int64  `json:"id"`
-			Name  string `json:"name"`
-			Path  string `json:"path"`
-			State string `json:"state"`
-		} `json:"workflows"`
-	}
-	if err := json.Unmarshal(body, &out); err != nil {
-		return nil, fmt.Errorf("github workflow list parse failed: %w", err)
-	}
-	refs := make([]WorkflowRef, 0, len(out.Workflows))
-	for _, w := range out.Workflows {
-		if w.State != "active" {
-			continue
+	const perPage = 100
+	var refs []WorkflowRef
+	for page := 1; page <= maxDiscoveryPages; page++ {
+		u := fmt.Sprintf("%s/repos/%s/%s/actions/workflows?per_page=%d&page=%d",
+			githubAPIBaseURL, url.PathEscape(owner), url.PathEscape(repo), perPage, page)
+		body, status, _, err := discoveryGET(ctx, u, githubAuth(token))
+		if err != nil {
+			return nil, fmt.Errorf("github workflow list failed: %w", err)
 		}
-		// The dispatch API accepts the workflow file name; strip the
-		// ".github/workflows/" prefix from path.
-		file := w.Path
-		if idx := lastSlash(file); idx >= 0 {
-			file = file[idx+1:]
+		if status != http.StatusOK {
+			return nil, fmt.Errorf("github workflow list returned %d", status)
 		}
-		refs = append(refs, WorkflowRef{ID: w.ID, Name: w.Name, File: file})
+		var out struct {
+			Workflows []struct {
+				ID    int64  `json:"id"`
+				Name  string `json:"name"`
+				Path  string `json:"path"`
+				State string `json:"state"`
+			} `json:"workflows"`
+		}
+		if err := json.Unmarshal(body, &out); err != nil {
+			return nil, fmt.Errorf("github workflow list parse failed: %w", err)
+		}
+		for _, w := range out.Workflows {
+			if w.State != "active" {
+				continue
+			}
+			// The dispatch API accepts the workflow file name; strip the
+			// ".github/workflows/" prefix from path.
+			file := w.Path
+			if idx := lastSlash(file); idx >= 0 {
+				file = file[idx+1:]
+			}
+			refs = append(refs, WorkflowRef{ID: w.ID, Name: w.Name, File: file})
+		}
+		if len(out.Workflows) < perPage {
+			break
+		}
 	}
 	sort.Slice(refs, func(i, j int) bool { return refs[i].Name < refs[j].Name })
 	return refs, nil
