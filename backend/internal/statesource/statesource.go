@@ -1,6 +1,7 @@
 // Package statesource abstracts the backends where Terraform state already lives
-// (local files, HCP/TFC, Azure Blob, S3, GCS, Git) behind a single read interface.
-// Phase 1 ships read + list; write-back and locking are added in the edit phase.
+// (local files, HCP/TFC, Azure Blob, S3, GCS, Git, Consul, PostgreSQL, Kubernetes,
+// and the generic http backend) behind a single read/write interface with
+// optional advisory locking.
 package statesource
 
 import (
@@ -61,6 +62,14 @@ func New(sourceType string, config map[string]any, credentials map[string]any) (
 		return newGCS(config, credentials)
 	case "git":
 		return newGit(config, credentials)
+	case "consul":
+		return newConsul(config, credentials)
+	case "pg":
+		return newPG(config, credentials)
+	case "kubernetes":
+		return newK8s(config, credentials)
+	case "http":
+		return newHTTPBackend(config, credentials)
 	default:
 		return nil, fmt.Errorf("unknown state source type %q", sourceType)
 	}
