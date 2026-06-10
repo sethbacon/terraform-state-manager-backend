@@ -97,7 +97,7 @@ func NewRouter(cfg *config.Config, database *sql.DB, identityDB *sql.DB) (*gin.E
 		v1.POST("/analyze", requireAuth, middleware.RequireScope(auth.ScopeStateRead), AnalyzeUploadHandler())
 
 		// Phase 1 read plane: state sources + analysis.
-		sources := NewSourcesHandlers(database)
+		sources := NewSourcesHandlers(database, identityDB)
 		s := v1.Group("/sources", requireAuth)
 		{
 			s.GET("", middleware.RequireScope(auth.ScopeStateRead), sources.ListSources())
@@ -172,7 +172,7 @@ func NewRouter(cfg *config.Config, database *sql.DB, identityDB *sql.DB) (*gin.E
 		}
 
 		// Phase 3 drift: CI pipeline connections + drift runs.
-		drift := NewDriftHandlers(cfg, database, notifier)
+		drift := NewDriftHandlers(cfg, database, identityDB, notifier)
 		p := v1.Group("/pipelines", requireAuth)
 		{
 			p.GET("", middleware.RequireScope(auth.ScopeSourcesManage), drift.ListPipelines())
@@ -182,7 +182,7 @@ func NewRouter(cfg *config.Config, database *sql.DB, identityDB *sql.DB) (*gin.E
 
 		// CI sources: org-level CI credentials + pipeline/repo/workflow discovery,
 		// so pipeline connections can be created by selection.
-		ciSources := NewCISourceHandlers(database)
+		ciSources := NewCISourceHandlers(database, identityDB)
 		cs := v1.Group("/ci-sources", requireAuth, middleware.RequireScope(auth.ScopeSourcesManage))
 		{
 			cs.GET("", ciSources.ListCISources())
@@ -203,7 +203,7 @@ func NewRouter(cfg *config.Config, database *sql.DB, identityDB *sql.DB) (*gin.E
 		v1.POST("/drift/runs/:id/results", drift.RunResults())
 
 		// Phase 4 version lab: dispatch plan against pinned versions + health.
-		health := NewHealthHandlers(cfg, database)
+		health := NewHealthHandlers(cfg, database, identityDB)
 		hg := v1.Group("/health-lab", requireAuth)
 		{
 			hg.GET("/workflow", middleware.RequireScope(auth.ScopeStateRead), health.WorkflowTemplate())
@@ -216,7 +216,7 @@ func NewRouter(cfg *config.Config, database *sql.DB, identityDB *sql.DB) (*gin.E
 		// Scheduler: cron-driven schedules that dispatch drift runs. The same drift
 		// dispatcher backs the HTTP "run now" endpoint and the background runner.
 		driftDisp := driftDispatcher{drift: drift}
-		scheduleHandlers := NewScheduleHandlers(database, driftDisp)
+		scheduleHandlers := NewScheduleHandlers(database, identityDB, driftDisp)
 		sg := v1.Group("/schedules", requireAuth)
 		{
 			sg.GET("", middleware.RequireScope(auth.ScopeStateRead), scheduleHandlers.ListSchedules())
@@ -229,7 +229,7 @@ func NewRouter(cfg *config.Config, database *sql.DB, identityDB *sql.DB) (*gin.E
 
 		// Notification channels (admin): alert destinations + the drift-event hook.
 		// Target URLs are secrets, so the whole group is admin-scoped.
-		notif := NewNotificationHandlers(database, notifier)
+		notif := NewNotificationHandlers(database, identityDB, notifier)
 		ng := v1.Group("/notifications", requireAuth, middleware.RequireScope(auth.ScopeAdmin))
 		{
 			ng.GET("/channels", notif.ListChannels())

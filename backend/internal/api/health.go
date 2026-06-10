@@ -23,15 +23,18 @@ type HealthHandlers struct {
 	pipelineRepo *repositories.PipelineRepository
 	ciSourceRepo *repositories.CISourceRepository
 	healthRepo   *repositories.HealthRepository
+	audit        auditor
 }
 
 // NewHealthHandlers constructs the handlers over the app (public) connection.
-func NewHealthHandlers(cfg *config.Config, database *sql.DB) *HealthHandlers {
+// identityDB (may be nil) carries the shared audit log.
+func NewHealthHandlers(cfg *config.Config, database, identityDB *sql.DB) *HealthHandlers {
 	return &HealthHandlers{
 		cfg:          cfg,
 		pipelineRepo: repositories.NewPipelineRepository(database),
 		ciSourceRepo: repositories.NewCISourceRepository(database),
 		healthRepo:   repositories.NewHealthRepository(database),
+		audit:        newAuditor(identityDB),
 	}
 }
 
@@ -138,6 +141,11 @@ func (h *HealthHandlers) CreateRun() gin.HandlerFunc {
 		}
 
 		saved.CallbackToken = ""
+		h.audit.write(c, "health_run.dispatch", "health_run", saved.ID, map[string]interface{}{
+			"pipeline_connection_id": req.PipelineConnectionID,
+			"terraform_version":      req.TerraformVersion,
+			"status":                 saved.Status,
+		})
 		c.JSON(http.StatusAccepted, saved)
 	}
 }

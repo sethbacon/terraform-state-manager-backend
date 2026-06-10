@@ -179,6 +179,9 @@ func (h *AuthHandlers) UpdateOIDCGroupMapping() gin.HandlerFunc {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to save group mapping"})
 			return
 		}
+		h.audit.write(c, "sso.group_mapping.update", "sso", "oidc", map[string]interface{}{
+			"mappings": len(settings.OIDCGroupMappings), "default_role": settings.OIDCDefaultRole,
+		})
 		c.JSON(http.StatusOK, h.oidcConfigResponse(c))
 	}
 }

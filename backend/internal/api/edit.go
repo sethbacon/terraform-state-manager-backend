@@ -100,6 +100,8 @@ func (h *SourcesHandlers) EditState() gin.HandlerFunc {
 			return
 		}
 		h.recordEdit(ctx, src.ID, key, "raw_replace", actor, backupID, beforeSerial, &after, "success", "")
+		h.audit.write(c, "state.edit", "state", src.ID,
+			map[string]interface{}{"key": key, "op": "raw_replace"})
 		c.JSON(http.StatusOK, gin.H{"status": "written", "backup_id": backupID, "serial": after})
 	}
 }
@@ -199,6 +201,8 @@ func (h *SourcesHandlers) StateOperation() gin.HandlerFunc {
 			detail = req.Address + " → " + req.To
 		}
 		h.recordEdit(ctx, src.ID, key, req.Op, actor, &backupID, beforeSerial, &after, "success", detail)
+		h.audit.write(c, "state.operation", "state", src.ID,
+			map[string]interface{}{"key": key, "op": req.Op, "address": req.Address, "to": req.To})
 		c.JSON(http.StatusOK, gin.H{"status": "applied", "op": req.Op, "backup_id": backupID, "serial": after})
 	}
 }
@@ -268,6 +272,8 @@ func (h *SourcesHandlers) RestoreBackup() gin.HandlerFunc {
 			return
 		}
 		h.recordEdit(ctx, src.ID, backup.StateKey, "restore", actor, preBackupID, beforeSerial, backup.Serial, "success", "restored backup "+backup.ID)
+		h.audit.write(c, "state.restore", "state", src.ID,
+			map[string]interface{}{"key": backup.StateKey, "backup_id": backup.ID})
 		c.JSON(http.StatusOK, gin.H{"status": "restored", "key": backup.StateKey})
 	}
 }

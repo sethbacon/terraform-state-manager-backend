@@ -42,21 +42,21 @@ func DispatchAzureDevOps(ctx context.Context, pat string, cfg AzureDevOpsConfig,
 	if ref == "" {
 		ref = cfg.Ref
 	}
-	if ref == "" {
-		ref = "refs/heads/main"
-	}
-	if !strings.HasPrefix(ref, "refs/") {
-		ref = "refs/heads/" + ref
-	}
-
-	body, _ := json.Marshal(map[string]any{
-		"resources": map[string]any{
+	// No ref configured anywhere: omit the override entirely so the run uses the
+	// branch configured on the pipeline definition. Guessing one (e.g. main)
+	// fails validation on repos whose default branch is named differently.
+	payload := map[string]any{"templateParameters": params}
+	if ref != "" {
+		if !strings.HasPrefix(ref, "refs/") {
+			ref = "refs/heads/" + ref
+		}
+		payload["resources"] = map[string]any{
 			"repositories": map[string]any{
 				"self": map[string]any{"refName": ref},
 			},
-		},
-		"templateParameters": params,
-	})
+		}
+	}
+	body, _ := json.Marshal(payload)
 	u := fmt.Sprintf("https://dev.azure.com/%s/%s/_apis/pipelines/%s/runs?api-version=7.1",
 		cfg.Organization, cfg.Project, cfg.PipelineID)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u, bytes.NewReader(body))

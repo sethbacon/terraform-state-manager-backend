@@ -31,17 +31,20 @@ type DriftHandlers struct {
 	pipelineRepo *repositories.PipelineRepository
 	ciSourceRepo *repositories.CISourceRepository
 	driftRepo    *repositories.DriftRepository
+	audit        auditor
 	notifier     *notify.Notifier // may be nil (notifications disabled / no DB)
 }
 
-// NewDriftHandlers constructs the handlers over the app (public) connection. The
-// notifier (may be nil) fires alerts when a result callback reports drift/failure.
-func NewDriftHandlers(cfg *config.Config, database *sql.DB, notifier *notify.Notifier) *DriftHandlers {
+// NewDriftHandlers constructs the handlers over the app (public) connection.
+// identityDB (may be nil) carries the shared audit log; the notifier (may be
+// nil) fires alerts when a result callback reports drift/failure.
+func NewDriftHandlers(cfg *config.Config, database, identityDB *sql.DB, notifier *notify.Notifier) *DriftHandlers {
 	return &DriftHandlers{
 		cfg:          cfg,
 		pipelineRepo: repositories.NewPipelineRepository(database),
 		ciSourceRepo: repositories.NewCISourceRepository(database),
 		driftRepo:    repositories.NewDriftRepository(database),
+		audit:        newAuditor(identityDB),
 		notifier:     notifier,
 	}
 }
@@ -105,6 +108,8 @@ func (h *DriftHandlers) CreatePipeline() gin.HandlerFunc {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create pipeline connection"})
 			return
 		}
+		h.audit.write(c, "pipeline.create", "pipeline_connection", saved.ID,
+			map[string]interface{}{"name": saved.Name, "provider": saved.Provider})
 		c.JSON(http.StatusCreated, saved)
 	}
 }
@@ -112,10 +117,12 @@ func (h *DriftHandlers) CreatePipeline() gin.HandlerFunc {
 // DeletePipeline removes a CI connection.
 func (h *DriftHandlers) DeletePipeline() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		if err := h.pipelineRepo.Delete(c.Request.Context(), c.Param("id")); err != nil {
+		id := c.Param("id")
+		if err := h.pipelineRepo.Delete(c.Request.Context(), id); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to delete pipeline connection"})
 			return
 		}
+		h.audit.write(c, "pipeline.delete", "pipeline_connection", id, nil)
 		c.Status(http.StatusNoContent)
 	}
 }
@@ -157,6 +164,13 @@ func (h *DriftHandlers) CreateRun() gin.HandlerFunc {
 			RepoRef:              req.RepoRef,
 			WorkingDir:           req.WorkingDir,
 		}, userIDOf(c))
+		if saved != nil {
+			h.audit.write(c, "drift_run.dispatch", "drift_run", saved.ID, map[string]interface{}{
+				"pipeline_connection_id": req.PipelineConnectionID,
+				"state_key":              req.StateKey,
+				"status":                 saved.Status,
+			})
+		}
 		switch {
 		case errors.Is(err, errPipelineNotFound):
 			c.JSON(http.StatusNotFound, gin.H{"error": "pipeline connection not found"})

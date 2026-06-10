@@ -23,11 +23,17 @@ var validEvents = map[string]bool{notify.EventDriftDetected: true, notify.EventR
 type NotificationHandlers struct {
 	repo     *repositories.NotificationChannelRepository
 	notifier *notify.Notifier
+	audit    auditor
 }
 
 // NewNotificationHandlers builds the handlers over the app connection.
-func NewNotificationHandlers(database *sql.DB, notifier *notify.Notifier) *NotificationHandlers {
-	return &NotificationHandlers{repo: repositories.NewNotificationChannelRepository(database), notifier: notifier}
+// identityDB (may be nil) carries the shared audit log.
+func NewNotificationHandlers(database, identityDB *sql.DB, notifier *notify.Notifier) *NotificationHandlers {
+	return &NotificationHandlers{
+		repo:     repositories.NewNotificationChannelRepository(database),
+		notifier: notifier,
+		audit:    newAuditor(identityDB),
+	}
 }
 
 type channelRequest struct {
@@ -126,6 +132,8 @@ func (h *NotificationHandlers) CreateChannel() gin.HandlerFunc {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create channel"})
 			return
 		}
+		h.audit.write(c, "notification_channel.create", "notification_channel", saved.ID,
+			map[string]interface{}{"name": saved.Name, "type": saved.Type})
 		c.JSON(http.StatusCreated, saved)
 	}
 }
@@ -174,6 +182,8 @@ func (h *NotificationHandlers) UpdateChannel() gin.HandlerFunc {
 			c.JSON(http.StatusNotFound, gin.H{"error": "channel not found"})
 			return
 		}
+		h.audit.write(c, "notification_channel.update", "notification_channel", updated.ID,
+			map[string]interface{}{"name": updated.Name})
 		c.JSON(http.StatusOK, updated)
 	}
 }
@@ -181,10 +191,12 @@ func (h *NotificationHandlers) UpdateChannel() gin.HandlerFunc {
 // DeleteChannel removes a channel.
 func (h *NotificationHandlers) DeleteChannel() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		if err := h.repo.Delete(c.Request.Context(), c.Param("id")); err != nil {
+		id := c.Param("id")
+		if err := h.repo.Delete(c.Request.Context(), id); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to delete channel"})
 			return
 		}
+		h.audit.write(c, "notification_channel.delete", "notification_channel", id, nil)
 		c.Status(http.StatusNoContent)
 	}
 }
@@ -205,6 +217,7 @@ func (h *NotificationHandlers) TestChannel() gin.HandlerFunc {
 			c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
 			return
 		}
+		h.audit.write(c, "notification_channel.test", "notification_channel", c.Param("id"), nil)
 		c.JSON(http.StatusOK, gin.H{"status": "sent"})
 	}
 }

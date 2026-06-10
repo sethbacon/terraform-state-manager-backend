@@ -41,6 +41,7 @@ type AuthHandlers struct {
 	// ssoSettings reads the admin-editable OIDC group-mapping overlay. The table
 	// lives in the app schema; the identity connection's search_path resolves it.
 	ssoSettings *repositories.SSOSettingsRepository
+	audit       auditor
 }
 
 // NewAuthHandlers constructs the auth handlers. identityDB must resolve to the
@@ -54,6 +55,7 @@ func NewAuthHandlers(cfg *config.Config, identityDB *sql.DB) (*AuthHandlers, err
 		tokenRepo:   idstore.NewTokenRepository(identityDB),
 		stateStore:  auth.NewMemoryStateStore(),
 		ssoSettings: repositories.NewSSOSettingsRepository(identityDB),
+		audit:       newAuditor(identityDB),
 	}
 	if cfg.Auth.OIDC.Enabled {
 		p, err := auth.NewOIDCProvider(&cfg.Auth.OIDC)

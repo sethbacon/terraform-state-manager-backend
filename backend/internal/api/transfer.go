@@ -147,6 +147,10 @@ func (h *SourcesHandlers) doTransfer(c *gin.Context, mode string) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "transfer completed but failed to record it"})
 		return
 	}
+	h.audit.write(c, "state."+mode, "state", srcA.ID, map[string]interface{}{
+		"key": key, "target_source_id": srcB.ID, "target_key": req.TargetKey,
+		"status": rec.Status, "decommissioned": rec.Decommissioned,
+	})
 	c.JSON(http.StatusOK, saved)
 }
 

@@ -47,12 +47,18 @@ func (d driftDispatcher) Dispatch(ctx context.Context, targetType string, target
 type ScheduleHandlers struct {
 	repo       *repositories.ScheduleRepository
 	dispatcher scheduler.Dispatcher
+	audit      auditor
 }
 
 // NewScheduleHandlers builds the handlers over the app connection. dispatcher is
-// used by the "run now" endpoint and is the same adapter the background runner uses.
-func NewScheduleHandlers(database *sql.DB, dispatcher scheduler.Dispatcher) *ScheduleHandlers {
-	return &ScheduleHandlers{repo: repositories.NewScheduleRepository(database), dispatcher: dispatcher}
+// used by the "run now" endpoint and is the same adapter the background runner
+// uses; identityDB (may be nil) carries the shared audit log.
+func NewScheduleHandlers(database, identityDB *sql.DB, dispatcher scheduler.Dispatcher) *ScheduleHandlers {
+	return &ScheduleHandlers{
+		repo:       repositories.NewScheduleRepository(database),
+		dispatcher: dispatcher,
+		audit:      newAuditor(identityDB),
+	}
 }
 
 type scheduleRequest struct {
@@ -140,6 +146,8 @@ func (h *ScheduleHandlers) CreateSchedule() gin.HandlerFunc {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create schedule"})
 			return
 		}
+		h.audit.write(c, "schedule.create", "schedule", saved.ID,
+			map[string]interface{}{"name": saved.Name, "cron_expr": saved.CronExpr})
 		c.JSON(http.StatusCreated, saved)
 	}
 }
@@ -196,6 +204,8 @@ func (h *ScheduleHandlers) UpdateSchedule() gin.HandlerFunc {
 			c.JSON(http.StatusNotFound, gin.H{"error": "schedule not found"})
 			return
 		}
+		h.audit.write(c, "schedule.update", "schedule", updated.ID,
+			map[string]interface{}{"name": updated.Name, "cron_expr": updated.CronExpr})
 		c.JSON(http.StatusOK, updated)
 	}
 }
@@ -203,10 +213,12 @@ func (h *ScheduleHandlers) UpdateSchedule() gin.HandlerFunc {
 // DeleteSchedule removes a schedule.
 func (h *ScheduleHandlers) DeleteSchedule() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		if err := h.repo.Delete(c.Request.Context(), c.Param("id")); err != nil {
+		id := c.Param("id")
+		if err := h.repo.Delete(c.Request.Context(), id); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to delete schedule"})
 			return
 		}
+		h.audit.write(c, "schedule.delete", "schedule", id, nil)
 		c.Status(http.StatusNoContent)
 	}
 }
@@ -234,6 +246,8 @@ func (h *ScheduleHandlers) RunSchedule() gin.HandlerFunc {
 			return
 		}
 		runID, status, dErr := h.dispatcher.Dispatch(ctx, s.TargetType, s.TargetConfig, userIDOf(c))
+		h.audit.write(c, "schedule.run", "schedule", s.ID,
+			map[string]interface{}{"name": s.Name, "status": status})
 		var runPtr *string
 		if runID != "" {
 			runPtr = &runID

@@ -22,17 +22,19 @@ type SourcesHandlers struct {
 	editRepo     *repositories.StateEditRepository
 	transferRepo *repositories.TransferRepository
 	lockRepo     *repositories.StateLockRepository
+	audit        auditor
 }
 
 // NewSourcesHandlers constructs the handlers over the app (public) connection,
 // where the state_sources, state_backups, state_edits, and state_transfers
-// tables live.
-func NewSourcesHandlers(database *sql.DB) *SourcesHandlers {
+// tables live. identityDB (may be nil) carries the shared audit log.
+func NewSourcesHandlers(database, identityDB *sql.DB) *SourcesHandlers {
 	return &SourcesHandlers{
 		repo:         repositories.NewSourceRepository(database),
 		editRepo:     repositories.NewStateEditRepository(database),
 		transferRepo: repositories.NewTransferRepository(database),
 		lockRepo:     repositories.NewStateLockRepository(database),
+		audit:        newAuditor(identityDB),
 	}
 }
 
@@ -117,6 +119,8 @@ func (h *SourcesHandlers) CreateSource() gin.HandlerFunc {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create source"})
 			return
 		}
+		h.audit.write(c, "source.create", "source", created.ID,
+			map[string]interface{}{"name": created.Name, "type": created.Type})
 		c.JSON(http.StatusCreated, created)
 	}
 }
@@ -157,10 +161,12 @@ func (h *SourcesHandlers) GetSource() gin.HandlerFunc {
 // @Router       /sources/{id} [delete]
 func (h *SourcesHandlers) DeleteSource() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		if err := h.repo.Delete(c.Request.Context(), c.Param("id")); err != nil {
+		id := c.Param("id")
+		if err := h.repo.Delete(c.Request.Context(), id); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to delete source"})
 			return
 		}
+		h.audit.write(c, "source.delete", "source", id, nil)
 		c.Status(http.StatusNoContent)
 	}
 }
@@ -294,6 +300,8 @@ func (h *SourcesHandlers) StateReport() gin.HandlerFunc {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
+		h.audit.write(c, "report.generate", "state", c.Param("id"),
+			map[string]interface{}{"key": rs.Key, "format": string(format)})
 		c.Header("Content-Disposition", `attachment; filename="`+filename+`"`)
 		c.Data(http.StatusOK, contentType, body)
 	}

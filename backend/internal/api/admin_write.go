@@ -14,11 +14,13 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	idmodels "github.com/sethbacon/terraform-suite-identity/identity/models"
+	idstore "github.com/sethbacon/terraform-suite-identity/identity/store"
 )
 
-// writeAudit records an admin mutation in the audit log (best-effort — an audit
-// write failure is logged, never blocks the mutation response).
-func (h *AdminHandlers) writeAudit(c *gin.Context, action, resourceType, resourceID string, metadata map[string]interface{}) {
+// writeAuditEntry records a mutation in the audit log with the acting user and
+// client IP (best-effort — an audit write failure is logged, never blocks the
+// mutation response). Shared by the admin, CI source, and pipeline handlers.
+func writeAuditEntry(c *gin.Context, repo *idstore.AuditRepository, action, resourceType, resourceID string, metadata map[string]interface{}) {
 	entry := &idmodels.AuditLog{
 		Action:       action,
 		ResourceType: &resourceType,
@@ -35,9 +37,13 @@ func (h *AdminHandlers) writeAudit(c *gin.Context, action, resourceType, resourc
 	if ip := c.ClientIP(); ip != "" {
 		entry.IPAddress = &ip
 	}
-	if err := h.auditRepo.CreateAuditLog(c.Request.Context(), entry); err != nil {
+	if err := repo.CreateAuditLog(c.Request.Context(), entry); err != nil {
 		slog.Warn("failed to write audit entry", "action", action, "error", err)
 	}
+}
+
+func (h *AdminHandlers) writeAudit(c *gin.Context, action, resourceType, resourceID string, metadata map[string]interface{}) {
+	writeAuditEntry(c, h.auditRepo, action, resourceType, resourceID, metadata)
 }
 
 // --- Users ---

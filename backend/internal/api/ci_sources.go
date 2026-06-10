@@ -14,6 +14,7 @@ import (
 	"strings"
 
 	"github.com/gin-gonic/gin"
+	idstore "github.com/sethbacon/terraform-suite-identity/identity/store"
 
 	"github.com/terraform-state-manager/terraform-state-manager/internal/crypto"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/db/repositories"
@@ -22,11 +23,17 @@ import (
 
 // CISourceHandlers serves the CI source CRUD + discovery endpoints.
 type CISourceHandlers struct {
-	repo *repositories.CISourceRepository
+	repo  *repositories.CISourceRepository
+	audit *idstore.AuditRepository
 }
 
-func NewCISourceHandlers(database *sql.DB) *CISourceHandlers {
-	return &CISourceHandlers{repo: repositories.NewCISourceRepository(database)}
+// NewCISourceHandlers builds the handlers. identityDB (search_path
+// identity,public) carries the shared audit log.
+func NewCISourceHandlers(database, identityDB *sql.DB) *CISourceHandlers {
+	return &CISourceHandlers{
+		repo:  repositories.NewCISourceRepository(database),
+		audit: idstore.NewAuditRepository(identityDB),
+	}
 }
 
 // ciSourceJSON renders a source without its credential ("has_token" only).
@@ -129,6 +136,8 @@ func (h *CISourceHandlers) CreateCISource() gin.HandlerFunc {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create CI source"})
 			return
 		}
+		writeAuditEntry(c, h.audit, "ci_source.create", "ci_source", saved.ID,
+			map[string]interface{}{"name": saved.Name, "provider": saved.Provider})
 		c.JSON(http.StatusCreated, ciSourceJSON(saved))
 	}
 }
@@ -144,10 +153,12 @@ func (h *CISourceHandlers) CreateCISource() gin.HandlerFunc {
 // @Router       /ci-sources/{id} [delete]
 func (h *CISourceHandlers) DeleteCISource() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		if err := h.repo.Delete(c.Request.Context(), c.Param("id")); err != nil {
+		id := c.Param("id")
+		if err := h.repo.Delete(c.Request.Context(), id); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to delete CI source"})
 			return
 		}
+		writeAuditEntry(c, h.audit, "ci_source.delete", "ci_source", id, nil)
 		c.Status(http.StatusNoContent)
 	}
 }
