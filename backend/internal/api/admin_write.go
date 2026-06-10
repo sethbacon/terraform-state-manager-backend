@@ -184,7 +184,7 @@ func (h *AdminHandlers) ExportUserData() gin.HandlerFunc {
 			"exported_at": time.Now().UTC().Format(time.RFC3339),
 			"user":        user,
 			"memberships": memberships,
-			"audit_logs":  logs,
+			"audit_logs":  auditLogsJSON(logs),
 		}
 		data, err := json.MarshalIndent(export, "", "  ")
 		if err != nil {

@@ -7,6 +7,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/jmoiron/sqlx"
+	idmodels "github.com/sethbacon/terraform-suite-identity/identity/models"
 	idstore "github.com/sethbacon/terraform-suite-identity/identity/store"
 )
 
@@ -147,6 +148,34 @@ func auditFiltersFromQuery(c *gin.Context) idstore.AuditFilters {
 	return f
 }
 
+// auditLogJSON maps an identity AuditLog onto a snake_case JSON shape. The
+// identity model carries json tags only on its transient join fields, so
+// marshalling it directly would emit Go field names (ID, CreatedAt, …) that no
+// client expects.
+func auditLogJSON(l *idmodels.AuditLog) gin.H {
+	return gin.H{
+		"id":              l.ID,
+		"user_id":         l.UserID,
+		"organization_id": l.OrganizationID,
+		"action":          l.Action,
+		"resource_type":   l.ResourceType,
+		"resource_id":     l.ResourceID,
+		"metadata":        l.Metadata,
+		"ip_address":      l.IPAddress,
+		"created_at":      l.CreatedAt,
+		"user_email":      l.UserEmail,
+		"user_name":       l.UserName,
+	}
+}
+
+func auditLogsJSON(logs []*idmodels.AuditLog) []gin.H {
+	out := make([]gin.H, 0, len(logs))
+	for _, l := range logs {
+		out = append(out, auditLogJSON(l))
+	}
+	return out
+}
+
 // ListAuditLogs returns audit-log entries (paginated, filterable).
 // @Summary      List audit log
 // @Tags         Admin
@@ -170,7 +199,7 @@ func (h *AdminHandlers) ListAuditLogs() gin.HandlerFunc {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to list audit logs"})
 			return
 		}
-		c.JSON(http.StatusOK, gin.H{"logs": logs, "total": total})
+		c.JSON(http.StatusOK, gin.H{"logs": auditLogsJSON(logs), "total": total})
 	}
 }
 
