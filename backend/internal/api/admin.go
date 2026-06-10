@@ -3,6 +3,7 @@ package api
 import (
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/jmoiron/sqlx"
@@ -41,13 +42,15 @@ func pageParams(c *gin.Context) (limit, offset int) {
 	return limit, (page - 1) * limit
 }
 
-// ListUsers returns users with their organization memberships (paginated).
+// ListUsers returns users with their organization memberships (paginated),
+// optionally filtered by a free-text search on name/email (?q=).
 // @Summary      List users
 // @Description  Paginated list of users with organization role memberships. Requires admin.
 // @Tags         Admin
 // @Produce      json
-// @Param        page      query  int  false  "Page (default 1)"
-// @Param        per_page  query  int  false  "Items per page (max 200, default 50)"
+// @Param        page      query  int     false  "Page (default 1)"
+// @Param        per_page  query  int     false  "Items per page (max 200, default 50)"
+// @Param        q         query  string  false  "Search by name or email"
 // @Success      200  {object}  map[string]interface{}
 // @Security     BearerAuth
 // @Security     CookieAuth
@@ -55,6 +58,16 @@ func pageParams(c *gin.Context) (limit, offset int) {
 func (h *AdminHandlers) ListUsers() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		limit, offset := pageParams(c)
+		if q := c.Query("q"); q != "" {
+			users, err := h.userRepo.SearchWithMemberships(c.Request.Context(), q, limit, offset)
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to search users"})
+				return
+			}
+			// Search has no exact count; clients page until a short page comes back.
+			c.JSON(http.StatusOK, gin.H{"users": users, "total": offset + len(users)})
+			return
+		}
 		users, total, err := h.userRepo.ListUsersWithMemberships(c.Request.Context(), limit, offset)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to list users"})
@@ -103,12 +116,48 @@ func (h *AdminHandlers) ListRoles() gin.HandlerFunc {
 	}
 }
 
-// ListAuditLogs returns recent audit-log entries (paginated).
+// auditFiltersForUser builds the filter set selecting a single user's entries
+// (used by the GDPR export).
+func auditFiltersForUser(userID string) idstore.AuditFilters {
+	return idstore.AuditFilters{UserID: &userID}
+}
+
+// auditFiltersFromQuery maps the audit-log query params onto repository filters.
+func auditFiltersFromQuery(c *gin.Context) idstore.AuditFilters {
+	var f idstore.AuditFilters
+	if v := c.Query("action"); v != "" {
+		f.Action = &v
+	}
+	if v := c.Query("resource_type"); v != "" {
+		f.ResourceType = &v
+	}
+	if v := c.Query("user_email"); v != "" {
+		f.UserEmail = &v
+	}
+	if v := c.Query("start_date"); v != "" {
+		if t, err := time.Parse(time.RFC3339, v); err == nil {
+			f.StartDate = &t
+		}
+	}
+	if v := c.Query("end_date"); v != "" {
+		if t, err := time.Parse(time.RFC3339, v); err == nil {
+			f.EndDate = &t
+		}
+	}
+	return f
+}
+
+// ListAuditLogs returns audit-log entries (paginated, filterable).
 // @Summary      List audit log
 // @Tags         Admin
 // @Produce      json
-// @Param        page      query  int  false  "Page (default 1)"
-// @Param        per_page  query  int  false  "Items per page (max 200, default 50)"
+// @Param        page           query  int     false  "Page (default 1)"
+// @Param        per_page       query  int     false  "Items per page (max 200, default 50)"
+// @Param        action         query  string  false  "Filter by action (partial)"
+// @Param        resource_type  query  string  false  "Filter by resource type"
+// @Param        user_email     query  string  false  "Filter by user email (partial)"
+// @Param        start_date     query  string  false  "RFC3339 lower bound"
+// @Param        end_date       query  string  false  "RFC3339 upper bound"
 // @Success      200  {object}  map[string]interface{}
 // @Security     BearerAuth
 // @Security     CookieAuth
@@ -116,7 +165,7 @@ func (h *AdminHandlers) ListRoles() gin.HandlerFunc {
 func (h *AdminHandlers) ListAuditLogs() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		limit, offset := pageParams(c)
-		logs, total, err := h.auditRepo.ListAuditLogs(c.Request.Context(), idstore.AuditFilters{}, limit, offset)
+		logs, total, err := h.auditRepo.ListAuditLogs(c.Request.Context(), auditFiltersFromQuery(c), limit, offset)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to list audit logs"})
 			return

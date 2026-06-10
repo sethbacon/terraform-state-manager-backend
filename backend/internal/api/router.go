@@ -131,12 +131,37 @@ func NewRouter(cfg *config.Config, database *sql.DB, identityDB *sql.DB) (*gin.E
 		ag := v1.Group("/admin", requireAuth, middleware.RequireScope(auth.ScopeAdmin))
 		{
 			ag.GET("/stats", admin.Stats())
+
+			// Users: list/search + CRUD + memberships + GDPR data-subject actions.
 			ag.GET("/users", admin.ListUsers())
+			ag.POST("/users", admin.CreateUser())
+			ag.PUT("/users/:id", admin.UpdateUser())
+			ag.DELETE("/users/:id", admin.DeleteUser())
+			ag.GET("/users/:id/memberships", admin.GetUserMemberships())
+			ag.GET("/users/:id/export", admin.ExportUserData())
+			ag.POST("/users/:id/erase", admin.EraseUser())
+
+			// Organizations: CRUD + member management.
 			ag.GET("/organizations", admin.ListOrganizations())
+			ag.POST("/organizations", admin.CreateOrganization())
+			ag.PUT("/organizations/:id", admin.UpdateOrganization())
+			ag.DELETE("/organizations/:id", admin.DeleteOrganization())
+			ag.GET("/organizations/:id/members", admin.ListOrganizationMembers())
+			ag.POST("/organizations/:id/members", admin.AddOrganizationMember())
+			ag.PUT("/organizations/:id/members/:user_id", admin.UpdateOrganizationMember())
+			ag.DELETE("/organizations/:id/members/:user_id", admin.RemoveOrganizationMember())
+
 			ag.GET("/roles", admin.ListRoles())
 			ag.GET("/audit-logs", admin.ListAuditLogs())
+
 			// Read-only view of configured SSO/identity providers + mappings.
 			ag.GET("/sso", authHandlers.SSOConfigHandler())
+			// OIDC group-mapping settings (runtime-editable overlay) + read-only
+			// SAML/LDAP mappings and mTLS configuration.
+			ag.GET("/oidc/config", authHandlers.OIDCConfigHandler())
+			ag.PUT("/oidc/group-mapping", authHandlers.UpdateOIDCGroupMapping())
+			ag.GET("/identity-group-mappings", authHandlers.IdentityGroupMappingsHandler())
+			ag.GET("/mtls", authHandlers.MTLSConfigHandler())
 		}
 
 		// Notifier fans drift/failure alerts out to configured channels. Nil with a

@@ -22,6 +22,7 @@ import (
 	"github.com/terraform-state-manager/terraform-state-manager/internal/auth/ldap"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/auth/saml"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/config"
+	"github.com/terraform-state-manager/terraform-state-manager/internal/db/repositories"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/middleware"
 )
 
@@ -37,6 +38,9 @@ type AuthHandlers struct {
 	ldapProvider  *ldap.Provider
 	samlProviders map[string]*saml.Provider // keyed by IdP name; nil when SAML disabled
 	stateStore    auth.StateStore
+	// ssoSettings reads the admin-editable OIDC group-mapping overlay. The table
+	// lives in the app schema; the identity connection's search_path resolves it.
+	ssoSettings *repositories.SSOSettingsRepository
 }
 
 // NewAuthHandlers constructs the auth handlers. identityDB must resolve to the
@@ -44,11 +48,12 @@ type AuthHandlers struct {
 // only when OIDC is enabled in config.
 func NewAuthHandlers(cfg *config.Config, identityDB *sql.DB) (*AuthHandlers, error) {
 	h := &AuthHandlers{
-		cfg:        cfg,
-		userRepo:   idstore.NewUserRepository(identityDB),
-		orgRepo:    idstore.NewOrganizationRepository(identityDB),
-		tokenRepo:  idstore.NewTokenRepository(identityDB),
-		stateStore: auth.NewMemoryStateStore(),
+		cfg:         cfg,
+		userRepo:    idstore.NewUserRepository(identityDB),
+		orgRepo:     idstore.NewOrganizationRepository(identityDB),
+		tokenRepo:   idstore.NewTokenRepository(identityDB),
+		stateStore:  auth.NewMemoryStateStore(),
+		ssoSettings: repositories.NewSSOSettingsRepository(identityDB),
 	}
 	if cfg.Auth.OIDC.Enabled {
 		p, err := auth.NewOIDCProvider(&cfg.Auth.OIDC)
@@ -250,11 +255,9 @@ func (h *AuthHandlers) CallbackHandler() gin.HandlerFunc {
 
 		// Map the user's IdP groups (from the verified ID token) to org/role
 		// memberships. Groups are never user-supplied here — they come from the
-		// signature-verified ID token above.
-		claimName := h.cfg.Auth.OIDC.GroupClaimName
-		if claimName == "" {
-			claimName = "groups"
-		}
+		// signature-verified ID token above. The claim name honours the
+		// admin-saved overlay (see effectiveOIDCGroupConfig).
+		claimName, _, _ := h.effectiveOIDCGroupConfig(ctx)
 		groups := h.oidcProvider.ExtractGroups(idToken, claimName)
 		if mapErr := h.applyGroupMappings(ctx, user.ID, groups); mapErr != nil {
 			slog.Warn("failed to apply OIDC group mappings", "user_id", user.ID, "error", mapErr)
@@ -403,6 +406,36 @@ func (h *AuthHandlers) revokeCurrent(c *gin.Context) {
 	}
 }
 
+// effectiveOIDCGroupConfig returns the OIDC group-mapping settings in force:
+// the admin-saved DB overlay when one exists (authoritative, including an empty
+// mapping list), else the file config. The claim name falls back file → "groups"
+// because an empty claim name cannot address a token claim. Read failures fall
+// back to file config so a DB blip can't change login semantics arbitrarily.
+func (h *AuthHandlers) effectiveOIDCGroupConfig(ctx context.Context) (claimName string, mappings []config.OIDCGroupMapping, defaultRole string) {
+	claimName = h.cfg.Auth.OIDC.GroupClaimName
+	mappings = h.cfg.Auth.OIDC.GroupMappings
+	defaultRole = h.cfg.Auth.OIDC.DefaultRole
+
+	if h.ssoSettings != nil {
+		if s, err := h.ssoSettings.Get(ctx); err != nil {
+			slog.Warn("failed to load SSO settings overlay; using file config", "error", err)
+		} else if s != nil {
+			mappings = make([]config.OIDCGroupMapping, 0, len(s.OIDCGroupMappings))
+			for _, m := range s.OIDCGroupMappings {
+				mappings = append(mappings, config.OIDCGroupMapping{Group: m.Group, Organization: m.Organization, Role: m.Role})
+			}
+			defaultRole = s.OIDCDefaultRole
+			if s.OIDCGroupClaimName != "" {
+				claimName = s.OIDCGroupClaimName
+			}
+		}
+	}
+	if claimName == "" {
+		claimName = "groups"
+	}
+	return claimName, mappings, defaultRole
+}
+
 // resolveGroupMappings computes, from a user's verified IdP groups and the
 // admin-configured mappings, the desired role per organization (orgName -> role,
 // last matching mapping wins) and the set of "IdP-managed" organizations (every
@@ -443,8 +476,7 @@ func resolveGroupMappings(groups []string, mappings []config.OIDCGroupMapping) (
 //     can never silently overwrite/re-escalate an existing role (preserves the
 //     earlier H4 fix).
 func (h *AuthHandlers) applyGroupMappings(ctx context.Context, userID string, groups []string) error {
-	mappings := h.cfg.Auth.OIDC.GroupMappings
-	defaultRole := h.cfg.Auth.OIDC.DefaultRole
+	_, mappings, defaultRole := h.effectiveOIDCGroupConfig(ctx)
 	if len(mappings) == 0 && defaultRole == "" {
 		return nil
 	}
