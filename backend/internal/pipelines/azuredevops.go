@@ -74,7 +74,14 @@ func DispatchAzureDevOps(ctx context.Context, pat string, cfg AzureDevOpsConfig,
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
 		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		return fmt.Errorf("azure devops pipeline run returned %d: %s", resp.StatusCode, string(msg))
+		// ADO rejects templateParameters the pipeline's YAML does not declare —
+		// the classic symptom of pointing a connection at a regular CI pipeline
+		// instead of one created from the TSM workflow template.
+		hint := ""
+		if strings.Contains(string(msg), "Unexpected parameter") {
+			hint = " — the target pipeline does not declare the TSM parameters; create a pipeline from the in-app workflow template (Drift → Workflow template → Azure DevOps) and point the connection at that"
+		}
+		return fmt.Errorf("azure devops pipeline run returned %d: %s%s", resp.StatusCode, string(msg), hint)
 	}
 	return nil
 }
