@@ -13,6 +13,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -434,5 +435,111 @@ func (h *DriftHandlers) CallbackPreflight() gin.HandlerFunc {
 			"callback_base":      base,
 			"likely_unreachable": callbackLooksUnreachable(base),
 		})
+	}
+}
+
+type workflowSetupRequest struct {
+	Content string `json:"content"`
+}
+
+// SetupSourceWorkflow commits the TSM workflow file to a new branch of the repo
+// and opens a pull request through the provider API (phase 2 of the repo-setup
+// wizard). Returns {"status":"exists"} without writing when the file is already
+// on the default branch. The file path and branch name are fixed server-side;
+// the request supplies only the (size-capped) file content. Requires a PAT with
+// repo write scopes (ADO Code R&W / GitHub contents+PRs).
+// @Summary      Commit workflow + open PR (repo-setup wizard)
+// @Tags         Pipelines
+// @Accept       json
+// @Produce      json
+// @Success      200  {object}  map[string]interface{}
+// @Failure      400  {object}  map[string]interface{}
+// @Security     BearerAuth
+// @Security     CookieAuth
+// @Router       /ci-sources/{id}/repos/{repo}/workflow-setup [post]
+func (h *CISourceHandlers) SetupSourceWorkflow() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		src, token, ok := h.loadWithToken(c)
+		if !ok {
+			return
+		}
+		var req workflowSetupRequest
+		if err := c.ShouldBindJSON(&req); err != nil || strings.TrimSpace(req.Content) == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "content is required"})
+			return
+		}
+		if len(req.Content) > 64*1024 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "content exceeds 64KiB"})
+			return
+		}
+		repo := c.Param("repo")
+		var (
+			result *pipelines.SetupResult
+			err    error
+		)
+		switch src.Provider {
+		case "azure_devops":
+			if src.Project == nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "azure_devops source has no project"})
+				return
+			}
+			result, err = pipelines.SetupAzureWorkflow(c.Request.Context(), token, src.Organization, *src.Project, repo, req.Content)
+		case "github_actions":
+			result, err = pipelines.SetupGitHubWorkflow(c.Request.Context(), token, src.Organization, repo, req.Content)
+		default:
+			c.JSON(http.StatusBadRequest, gin.H{"error": "workflow setup is not available for this provider"})
+			return
+		}
+		if err != nil {
+			c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+			return
+		}
+		writeAuditEntry(c, h.audit, "ci_source.workflow.setup", "ci_source", src.ID,
+			map[string]interface{}{"repo": repo, "status": result.Status, "pr_url": result.PRURL})
+		c.JSON(http.StatusOK, result)
+	}
+}
+
+// GetSourcePRState reports the normalized state (open | merged | closed) of a
+// pull request opened by SetupSourceWorkflow, for the wizard's poller.
+// @Summary      Pull request state (repo-setup wizard)
+// @Tags         Pipelines
+// @Produce      json
+// @Success      200  {object}  map[string]interface{}
+// @Failure      400  {object}  map[string]interface{}
+// @Security     BearerAuth
+// @Security     CookieAuth
+// @Router       /ci-sources/{id}/repos/{repo}/prs/{pr} [get]
+func (h *CISourceHandlers) GetSourcePRState() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		src, token, ok := h.loadWithToken(c)
+		if !ok {
+			return
+		}
+		prID, err := strconv.Atoi(c.Param("pr"))
+		if err != nil || prID <= 0 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid pull request id"})
+			return
+		}
+		repo := c.Param("repo")
+		var state string
+		switch src.Provider {
+		case "azure_devops":
+			if src.Project == nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "azure_devops source has no project"})
+				return
+			}
+			state, err = pipelines.AzurePRState(c.Request.Context(), token, src.Organization, *src.Project, repo, prID)
+		case "github_actions":
+			state, err = pipelines.GitHubPRState(c.Request.Context(), token, src.Organization, repo, prID)
+		default:
+			c.JSON(http.StatusBadRequest, gin.H{"error": "pull request state is not available for this provider"})
+			return
+		}
+		if err != nil {
+			c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"state": state})
 	}
 }

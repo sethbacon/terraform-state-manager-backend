@@ -196,6 +196,9 @@ func NewRouter(cfg *config.Config, database *sql.DB, identityDB *sql.DB) (*gin.E
 			// Repo-setup wizard: ADO service connections + pipeline creation.
 			cs.GET("/:id/service-connections", ciSources.ListSourceServiceConnections())
 			cs.POST("/:id/repos/:repo/pipelines", ciSources.CreateSourcePipeline())
+			// Phase 2: commit the workflow via branch + PR, and poll the PR state.
+			cs.POST("/:id/repos/:repo/workflow-setup", ciSources.SetupSourceWorkflow())
+			cs.GET("/:id/repos/:repo/prs/:pr", ciSources.GetSourcePRState())
 		}
 		d := v1.Group("/drift", requireAuth)
 		{
