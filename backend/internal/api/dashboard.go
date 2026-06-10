@@ -1,8 +1,12 @@
 package api
 
 import (
+	"context"
 	"net/http"
 	"sort"
+	"sync"
+	"sync/atomic"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
@@ -10,10 +14,23 @@ import (
 	"github.com/terraform-state-manager/terraform-state-manager/internal/statesource"
 )
 
+// Dashboard aggregation guardrails: remote backends (e.g. HCP Terraform) cost
+// two HTTP round-trips per state read, so an org with many workspaces read
+// serially can exceed proxy timeouts. Reads run dashboardReadConcurrency-wide
+// per source (kept modest — HCP rate-limits ~30 req/30s per token) under a hard
+// dashboardBudget; whatever doesn't finish is dropped and the source is counted
+// in source_errors so the page shows partial data instead of timing out.
+const (
+	dashboardBudget          = 12 * time.Second
+	dashboardReadConcurrency = 6
+)
+
 // DashboardOverview aggregates analyzer metrics across every configured source for
 // the home page: totals (RUM, managed, data), and provider / resource-type /
 // Terraform-version distributions. Per-source and per-state failures are tolerated
-// (counted in source_errors) so one unreachable backend doesn't break the page.
+// and reads run bounded-concurrent under a hard time budget, so one unreachable
+// or slow backend yields partial data (flagged via source_errors) rather than a
+// page timeout.
 // @Summary      Dashboard overview
 // @Description  Aggregates RUM and resource/provider/Terraform-version breakdowns across all sources. Requires state:read.
 // @Tags         Dashboard
@@ -24,13 +41,16 @@ import (
 // @Router       /dashboard/overview [get]
 func (h *SourcesHandlers) DashboardOverview() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		ctx := c.Request.Context()
+		ctx, cancel := context.WithTimeout(c.Request.Context(), dashboardBudget)
+		defer cancel()
+
 		sources, err := h.repo.List(ctx)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to list sources"})
 			return
 		}
 
+		var mu sync.Mutex
 		var stateCount, rum, managed, data, total, sourceErrors int
 		providers := map[string]int{}
 		resTypes := map[string]int{}
@@ -53,31 +73,56 @@ func (h *SourcesHandlers) DashboardOverview() gin.HandlerFunc {
 				sourceErrors++
 				continue
 			}
+
+			// Read + analyze states concurrently (bounded) under the budget.
+			var readErrs atomic.Int32
+			sem := make(chan struct{}, dashboardReadConcurrency)
+			var wg sync.WaitGroup
 			for _, ref := range refs {
-				rs, err := conn.Read(ctx, ref.Key)
-				if err != nil || rs == nil {
+				if ctx.Err() != nil {
+					readErrs.Add(1)
 					continue
 				}
-				a, err := analyzer.Analyze(rs.Data)
-				if err != nil {
-					continue
-				}
-				stateCount++
-				rum += a.RUM
-				managed += a.ManagedResources
-				data += a.DataSources
-				total += a.TotalResources
-				for _, p := range a.Providers {
-					providers[p.Key] += p.Count
-				}
-				for _, rt := range a.ResourceTypes {
-					resTypes[rt.Key] += rt.Count
-				}
-				v := a.TerraformVersion
-				if v == "" {
-					v = "unknown"
-				}
-				versions[v]++
+				wg.Add(1)
+				sem <- struct{}{}
+				go func(key string) {
+					defer wg.Done()
+					defer func() { <-sem }()
+					rs, err := conn.Read(ctx, key)
+					if err != nil || rs == nil {
+						readErrs.Add(1)
+						return
+					}
+					a, err := analyzer.Analyze(rs.Data)
+					if err != nil {
+						readErrs.Add(1)
+						return
+					}
+					mu.Lock()
+					defer mu.Unlock()
+					stateCount++
+					rum += a.RUM
+					managed += a.ManagedResources
+					data += a.DataSources
+					total += a.TotalResources
+					for _, p := range a.Providers {
+						providers[p.Key] += p.Count
+					}
+					for _, rt := range a.ResourceTypes {
+						resTypes[rt.Key] += rt.Count
+					}
+					v := a.TerraformVersion
+					if v == "" {
+						v = "unknown"
+					}
+					versions[v]++
+				}(ref.Key)
+			}
+			wg.Wait()
+			// Any unread/unanalyzed state (including budget exhaustion) flags the
+			// source so the page banner reports partial data.
+			if readErrs.Load() > 0 {
+				sourceErrors++
 			}
 		}
 
