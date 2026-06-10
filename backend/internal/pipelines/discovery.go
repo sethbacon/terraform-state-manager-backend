@@ -4,6 +4,7 @@
 package pipelines
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -229,4 +230,132 @@ func lastSlash(s string) int {
 		}
 	}
 	return -1
+}
+
+// AzureRepoRef is one Git repository in an ADO project. ID is required by the
+// pipeline-creation API.
+type AzureRepoRef struct {
+	ID            string `json:"id"`
+	Name          string `json:"name"`
+	DefaultBranch string `json:"default_branch,omitempty"`
+}
+
+// ServiceConnectionRef is one ADO service connection (cloud credential) the
+// generated pipeline can reference for terraform auth.
+type ServiceConnectionRef struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+	Type string `json:"type,omitempty"`
+}
+
+// ListAzureRepos returns the Git repositories in an ADO project.
+func ListAzureRepos(ctx context.Context, pat, organization, project string) ([]AzureRepoRef, error) {
+	if pat == "" || organization == "" || project == "" {
+		return nil, fmt.Errorf("azure devops discovery requires organization, project, and a PAT")
+	}
+	u := fmt.Sprintf("%s/%s/%s/_apis/git/repositories?api-version=7.1",
+		azureDevOpsBaseURL, url.PathEscape(organization), url.PathEscape(project))
+	body, status, _, err := discoveryGET(ctx, u, adoAuth(pat))
+	if err != nil {
+		return nil, fmt.Errorf("azure devops repo list failed: %w", err)
+	}
+	if status != http.StatusOK {
+		return nil, fmt.Errorf("azure devops repo list returned %d", status)
+	}
+	var out struct {
+		Value []struct {
+			ID            string `json:"id"`
+			Name          string `json:"name"`
+			DefaultBranch string `json:"defaultBranch"`
+		} `json:"value"`
+	}
+	if err := json.Unmarshal(body, &out); err != nil {
+		return nil, fmt.Errorf("azure devops repo list parse failed: %w", err)
+	}
+	refs := make([]AzureRepoRef, 0, len(out.Value))
+	for _, r := range out.Value {
+		refs = append(refs, AzureRepoRef{ID: r.ID, Name: r.Name, DefaultBranch: r.DefaultBranch})
+	}
+	sort.Slice(refs, func(i, j int) bool { return refs[i].Name < refs[j].Name })
+	return refs, nil
+}
+
+// ListAzureServiceConnections returns the project's service connections so the
+// wizard can name one in the generated pipeline's credential guidance. Requires
+// the PAT to carry Service Connections (read); callers degrade gracefully on 403.
+func ListAzureServiceConnections(ctx context.Context, pat, organization, project string) ([]ServiceConnectionRef, error) {
+	if pat == "" || organization == "" || project == "" {
+		return nil, fmt.Errorf("azure devops discovery requires organization, project, and a PAT")
+	}
+	u := fmt.Sprintf("%s/%s/%s/_apis/serviceendpoint/endpoints?api-version=7.1-preview.4",
+		azureDevOpsBaseURL, url.PathEscape(organization), url.PathEscape(project))
+	body, status, _, err := discoveryGET(ctx, u, adoAuth(pat))
+	if err != nil {
+		return nil, fmt.Errorf("azure devops service connection list failed: %w", err)
+	}
+	if status != http.StatusOK {
+		return nil, fmt.Errorf("azure devops service connection list returned %d", status)
+	}
+	var out struct {
+		Value []struct {
+			ID   string `json:"id"`
+			Name string `json:"name"`
+			Type string `json:"type"`
+		} `json:"value"`
+	}
+	if err := json.Unmarshal(body, &out); err != nil {
+		return nil, fmt.Errorf("azure devops service connection list parse failed: %w", err)
+	}
+	refs := make([]ServiceConnectionRef, 0, len(out.Value))
+	for _, sc := range out.Value {
+		refs = append(refs, ServiceConnectionRef{ID: sc.ID, Name: sc.Name, Type: sc.Type})
+	}
+	sort.Slice(refs, func(i, j int) bool { return refs[i].Name < refs[j].Name })
+	return refs, nil
+}
+
+// CreateAzurePipeline creates a YAML pipeline definition pointing at yamlPath in
+// the given repository (the wizard's "create the pipeline for me" step). The PAT
+// must carry Build (read & execute) with pipeline-creation rights.
+func CreateAzurePipeline(ctx context.Context, pat, organization, project, name, yamlPath, repoID string) (*PipelineRef, error) {
+	if pat == "" || organization == "" || project == "" {
+		return nil, fmt.Errorf("azure devops pipeline creation requires organization, project, and a PAT")
+	}
+	if name == "" || yamlPath == "" || repoID == "" {
+		return nil, fmt.Errorf("azure devops pipeline creation requires name, yaml_path, and repository id")
+	}
+	payload, _ := json.Marshal(map[string]any{
+		"name": name,
+		"configuration": map[string]any{
+			"type": "yaml",
+			"path": yamlPath,
+			"repository": map[string]any{
+				"id":   repoID,
+				"type": "azureReposGit",
+			},
+		},
+	})
+	u := fmt.Sprintf("%s/%s/%s/_apis/pipelines?api-version=7.1",
+		azureDevOpsBaseURL, url.PathEscape(organization), url.PathEscape(project))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u, bytes.NewReader(payload))
+	if err != nil {
+		return nil, err
+	}
+	adoAuth(pat)(req)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("azure devops pipeline creation failed: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+		return nil, fmt.Errorf("azure devops pipeline creation returned %d: %s", resp.StatusCode, string(body))
+	}
+	var ref PipelineRef
+	if err := json.Unmarshal(body, &ref); err != nil {
+		return nil, fmt.Errorf("azure devops pipeline creation parse failed: %w", err)
+	}
+	return &ref, nil
 }

@@ -2,6 +2,7 @@ package pipelines
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -119,5 +120,78 @@ func TestListGitHubWorkflowsFiltersAndFileNames(t *testing.T) {
 	}
 	if len(wfs) != 1 || wfs[0].File != "tsm-drift.yml" || wfs[0].Name != "Drift" {
 		t.Fatalf("unexpected workflows: %+v", wfs)
+	}
+}
+
+func TestListAzureReposAndServiceConnections(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/o/p/_apis/git/repositories":
+			_, _ = w.Write([]byte(`{"value":[{"id":"r2","name":"zeta","defaultBranch":"refs/heads/main"},{"id":"r1","name":"app","defaultBranch":"refs/heads/develop"}]}`))
+		case "/o/p/_apis/serviceendpoint/endpoints":
+			_, _ = w.Write([]byte(`{"value":[{"id":"sc1","name":"azure-prod","type":"azurerm"}]}`))
+		default:
+			t.Errorf("unexpected path %s", r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+	old := azureDevOpsBaseURL
+	azureDevOpsBaseURL = srv.URL
+	defer func() { azureDevOpsBaseURL = old }()
+
+	repos, err := ListAzureRepos(context.Background(), "pat", "o", "p")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(repos) != 2 || repos[0].Name != "app" || repos[1].ID != "r2" {
+		t.Fatalf("unexpected repos: %+v", repos)
+	}
+	scs, err := ListAzureServiceConnections(context.Background(), "pat", "o", "p")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(scs) != 1 || scs[0].Name != "azure-prod" || scs[0].Type != "azurerm" {
+		t.Fatalf("unexpected service connections: %+v", scs)
+	}
+}
+
+func TestCreateAzurePipeline(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/o/p/_apis/pipelines" {
+			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+		var body struct {
+			Name          string `json:"name"`
+			Configuration struct {
+				Type       string `json:"type"`
+				Path       string `json:"path"`
+				Repository struct {
+					ID   string `json:"id"`
+					Type string `json:"type"`
+				} `json:"repository"`
+			} `json:"configuration"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		if body.Name != "TSM Drift" || body.Configuration.Path != "/azure-pipelines-tsm-drift.yml" ||
+			body.Configuration.Repository.ID != "r1" || body.Configuration.Type != "yaml" {
+			t.Errorf("unexpected payload: %+v", body)
+		}
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{"id":99,"name":"TSM Drift","folder":"\\"}`))
+	}))
+	defer srv.Close()
+	old := azureDevOpsBaseURL
+	azureDevOpsBaseURL = srv.URL
+	defer func() { azureDevOpsBaseURL = old }()
+
+	ref, err := CreateAzurePipeline(context.Background(), "pat", "o", "p", "TSM Drift", "/azure-pipelines-tsm-drift.yml", "r1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ref.ID != 99 || ref.Name != "TSM Drift" {
+		t.Fatalf("unexpected ref: %+v", ref)
+	}
+	if _, err := CreateAzurePipeline(context.Background(), "pat", "o", "p", "", "/x.yml", "r1"); err == nil {
+		t.Fatal("empty name accepted")
 	}
 }

@@ -178,6 +178,8 @@ func NewRouter(cfg *config.Config, database *sql.DB, identityDB *sql.DB) (*gin.E
 			p.GET("", middleware.RequireScope(auth.ScopeSourcesManage), drift.ListPipelines())
 			p.POST("", middleware.RequireScope(auth.ScopeSourcesManage), drift.CreatePipeline())
 			p.DELETE("/:id", middleware.RequireScope(auth.ScopeSourcesManage), drift.DeletePipeline())
+			// Repo-setup wizard preflight: is the callback URL reachable from CI?
+			p.GET("/callback-preflight", middleware.RequireScope(auth.ScopeSourcesManage), drift.CallbackPreflight())
 		}
 
 		// CI sources: org-level CI credentials + pipeline/repo/workflow discovery,
@@ -191,6 +193,9 @@ func NewRouter(cfg *config.Config, database *sql.DB, identityDB *sql.DB) (*gin.E
 			cs.GET("/:id/pipelines", ciSources.ListSourcePipelines())
 			cs.GET("/:id/repos", ciSources.ListSourceRepos())
 			cs.GET("/:id/repos/:repo/workflows", ciSources.ListSourceWorkflows())
+			// Repo-setup wizard: ADO service connections + pipeline creation.
+			cs.GET("/:id/service-connections", ciSources.ListSourceServiceConnections())
+			cs.POST("/:id/repos/:repo/pipelines", ciSources.CreateSourcePipeline())
 		}
 		d := v1.Group("/drift", requireAuth)
 		{

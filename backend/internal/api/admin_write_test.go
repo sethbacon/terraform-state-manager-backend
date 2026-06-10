@@ -52,3 +52,22 @@ func TestAuditFiltersFromQuery(t *testing.T) {
 		t.Fatalf("bogus end_date should be ignored, got %+v", f.EndDate)
 	}
 }
+
+func TestCallbackLooksUnreachable(t *testing.T) {
+	unreachable := []string{
+		"", "http://localhost:8081", "http://127.0.0.1:3000", "http://backend:8080",
+		"http://10.1.2.3", "http://192.168.1.5:8081", "http://host.docker.internal:8081",
+		"http://thegn.local", "https://api.corp.internal",
+	}
+	for _, u := range unreachable {
+		if !callbackLooksUnreachable(u) {
+			t.Errorf("expected unreachable: %q", u)
+		}
+	}
+	reachable := []string{"https://tsm.example.com", "https://abc123.ngrok.app", "http://203.0.113.7:8081"}
+	for _, u := range reachable {
+		if callbackLooksUnreachable(u) {
+			t.Errorf("expected reachable: %q", u)
+		}
+	}
+}

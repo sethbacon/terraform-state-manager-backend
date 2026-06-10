@@ -10,7 +10,9 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"net"
 	"net/http"
+	"net/url"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -225,16 +227,28 @@ func (h *CISourceHandlers) ListSourceRepos() gin.HandlerFunc {
 		if !ok {
 			return
 		}
-		if src.Provider != "github_actions" {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "repo discovery is only available for github_actions sources"})
-			return
+		switch src.Provider {
+		case "github_actions":
+			repos, err := pipelines.ListGitHubRepos(c.Request.Context(), token, src.Organization)
+			if err != nil {
+				c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+				return
+			}
+			c.JSON(http.StatusOK, gin.H{"repos": repos})
+		case "azure_devops":
+			if src.Project == nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "azure_devops source has no project"})
+				return
+			}
+			repos, err := pipelines.ListAzureRepos(c.Request.Context(), token, src.Organization, *src.Project)
+			if err != nil {
+				c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+				return
+			}
+			c.JSON(http.StatusOK, gin.H{"repos": repos})
+		default:
+			c.JSON(http.StatusBadRequest, gin.H{"error": "repo discovery is not available for this provider"})
 		}
-		repos, err := pipelines.ListGitHubRepos(c.Request.Context(), token, src.Organization)
-		if err != nil {
-			c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
-			return
-		}
-		c.JSON(http.StatusOK, gin.H{"repos": repos})
 	}
 }
 
@@ -266,6 +280,87 @@ func (h *CISourceHandlers) ListSourceWorkflows() gin.HandlerFunc {
 	}
 }
 
+// ListSourceServiceConnections lists an ADO project's service connections so
+// the repo-setup wizard can name one in the generated pipeline's credential
+// guidance. Requires the PAT to carry Service Connections (read).
+// @Summary      List CI source service connections (Azure DevOps)
+// @Tags         Pipelines
+// @Produce      json
+// @Success      200  {object}  map[string]interface{}
+// @Failure      400  {object}  map[string]interface{}
+// @Security     BearerAuth
+// @Security     CookieAuth
+// @Router       /ci-sources/{id}/service-connections [get]
+func (h *CISourceHandlers) ListSourceServiceConnections() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		src, token, ok := h.loadWithToken(c)
+		if !ok {
+			return
+		}
+		if src.Provider != "azure_devops" || src.Project == nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "service connections are only available for azure_devops sources"})
+			return
+		}
+		scs, err := pipelines.ListAzureServiceConnections(c.Request.Context(), token, src.Organization, *src.Project)
+		if err != nil {
+			c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"service_connections": scs})
+	}
+}
+
+type createSourcePipelineRequest struct {
+	Name     string `json:"name"`
+	YAMLPath string `json:"yaml_path"`
+}
+
+// CreateSourcePipeline creates an ADO YAML pipeline definition pointing at the
+// committed TSM workflow file (the wizard's "create the pipeline for me" step).
+// :repo is the ADO repository id from the repos listing.
+// @Summary      Create CI pipeline definition (Azure DevOps)
+// @Tags         Pipelines
+// @Accept       json
+// @Produce      json
+// @Success      201  {object}  map[string]interface{}
+// @Failure      400  {object}  map[string]interface{}
+// @Security     BearerAuth
+// @Security     CookieAuth
+// @Router       /ci-sources/{id}/repos/{repo}/pipelines [post]
+func (h *CISourceHandlers) CreateSourcePipeline() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		src, token, ok := h.loadWithToken(c)
+		if !ok {
+			return
+		}
+		if src.Provider != "azure_devops" || src.Project == nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "pipeline creation is only available for azure_devops sources"})
+			return
+		}
+		var req createSourcePipelineRequest
+		if err := c.ShouldBindJSON(&req); err != nil || strings.TrimSpace(req.Name) == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "name is required"})
+			return
+		}
+		yamlPath := strings.TrimSpace(req.YAMLPath)
+		if yamlPath == "" {
+			yamlPath = "/azure-pipelines-tsm-drift.yml"
+		}
+		if !strings.HasPrefix(yamlPath, "/") {
+			yamlPath = "/" + yamlPath
+		}
+		ref, err := pipelines.CreateAzurePipeline(c.Request.Context(), token,
+			src.Organization, *src.Project, strings.TrimSpace(req.Name), yamlPath, c.Param("repo"))
+		if err != nil {
+			c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+			return
+		}
+		writeAuditEntry(c, h.audit, "ci_source.pipeline.create", "ci_source", src.ID,
+			map[string]interface{}{"pipeline": ref.Name, "pipeline_id": ref.ID, "repo": c.Param("repo")})
+		c.JSON(http.StatusCreated, gin.H{"pipeline": ref})
+	}
+}
+
 // resolvePipelineToken returns the dispatch credential for a connection: its own
 // token when it has one, else the token of the CI source referenced by
 // config.ci_source_id. Returns "" when neither exists (the dispatcher rejects
@@ -294,4 +389,50 @@ func resolvePipelineToken(ctx context.Context, ciRepo *repositories.CISourceRepo
 		return "", fmt.Errorf("decrypt CI source token: %w", err)
 	}
 	return string(pt), nil
+}
+
+// callbackLooksUnreachable reports whether a callback base URL is unlikely to be
+// reachable from hosted CI agents (localhost/private/link-local/container-only
+// addresses, or no URL at all). Heuristic — a private address can be fine with
+// self-hosted agents, so callers should warn, not block.
+func callbackLooksUnreachable(base string) bool {
+	if strings.TrimSpace(base) == "" {
+		return true
+	}
+	u, err := url.Parse(base)
+	if err != nil || u.Hostname() == "" {
+		return true
+	}
+	host := strings.ToLower(u.Hostname())
+	switch host {
+	case "localhost", "host.docker.internal", "backend", "frontend":
+		return true
+	}
+	if strings.HasSuffix(host, ".local") || strings.HasSuffix(host, ".internal") {
+		return true
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsUnspecified()
+	}
+	return false
+}
+
+// CallbackPreflight reports the callback base URL CI jobs will POST results to,
+// flagging addresses hosted agents cannot reach (the repo-setup wizard surfaces
+// this before any pipeline is created).
+// @Summary      Callback reachability preflight
+// @Tags         Pipelines
+// @Produce      json
+// @Success      200  {object}  map[string]interface{}
+// @Security     BearerAuth
+// @Security     CookieAuth
+// @Router       /pipelines/callback-preflight [get]
+func (h *DriftHandlers) CallbackPreflight() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		base := h.cfg.Server.CallbackBase()
+		c.JSON(http.StatusOK, gin.H{
+			"callback_base":      base,
+			"likely_unreachable": callbackLooksUnreachable(base),
+		})
+	}
 }
