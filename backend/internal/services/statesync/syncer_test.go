@@ -1,0 +1,344 @@
+package statesync
+
+import (
+	"context"
+	"database/sql"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"sync"
+	"testing"
+	"time"
+
+	sqlmock "github.com/DATA-DOG/go-sqlmock"
+
+	"github.com/terraform-state-manager/terraform-state-manager/internal/db/repositories"
+	"github.com/terraform-state-manager/terraform-state-manager/internal/statesource"
+)
+
+var ctx = context.Background()
+
+func newMock(t *testing.T) (*sql.DB, sqlmock.Sqlmock) {
+	t.Helper()
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	// Sync reads run concurrently; expectation order is nondeterministic.
+	mock.MatchExpectationsInOrder(false)
+	t.Cleanup(func() { db.Close() })
+	return db, mock
+}
+
+func minState(serial int64, resources ...string) string {
+	type res struct {
+		Mode      string           `json:"mode"`
+		Type      string           `json:"type"`
+		Name      string           `json:"name"`
+		Provider  string           `json:"provider"`
+		Instances []map[string]any `json:"instances"`
+	}
+	out := struct {
+		Version          int    `json:"version"`
+		TerraformVersion string `json:"terraform_version"`
+		Serial           int64  `json:"serial"`
+		Lineage          string `json:"lineage"`
+		Resources        []res  `json:"resources"`
+	}{Version: 4, TerraformVersion: "1.9.5", Serial: serial, Lineage: "lin-1"}
+	for _, r := range resources {
+		out.Resources = append(out.Resources, res{
+			Mode: "managed", Type: r, Name: "x",
+			Provider:  `provider["registry.terraform.io/hashicorp/aws"]`,
+			Instances: []map[string]any{{"attributes": map[string]any{}}},
+		})
+	}
+	b, _ := json.Marshal(out)
+	return string(b)
+}
+
+func seed(t *testing.T, dir, name, content string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o600); err != nil {
+		t.Fatalf("seed %s: %v", name, err)
+	}
+}
+
+// fileMarker computes the marker the syncer derives from the local connector's
+// listing metadata, so tests can pre-load "unchanged" markers.
+func fileMarker(t *testing.T, dir, name string) string {
+	t.Helper()
+	info, err := os.Stat(filepath.Join(dir, name))
+	if err != nil {
+		t.Fatalf("stat %s: %v", name, err)
+	}
+	return fmt.Sprintf("%d|%s", info.Size(), info.ModTime().UTC().Format(time.RFC3339Nano))
+}
+
+func localSource(dir string) *repositories.Source {
+	return &repositories.Source{
+		ID: "s1", Name: "demo", Type: "local",
+		Config: map[string]any{"base_path": dir},
+	}
+}
+
+func connectLocal(s *repositories.Source) (statesource.Connector, error) {
+	return statesource.New(s.Type, s.Config, nil)
+}
+
+func newSyncer(db *sql.DB, connect Connect) *Syncer {
+	s := New(
+		repositories.NewSourceRepository(db),
+		repositories.NewStateAnalysisRepository(db),
+		connect,
+	)
+	s.retryDelay = time.Millisecond // no need to be polite to fakes
+	return s
+}
+
+// fakeConn scripts List/Read failures for the error paths.
+type fakeConn struct {
+	refs      []statesource.StateRef
+	listErr   error
+	readErr   error
+	data      map[string]string
+	failFirst map[string]int // key -> remaining scripted failures (e.g. 429 bursts)
+	mu        sync.Mutex
+}
+
+func (f *fakeConn) List(context.Context) ([]statesource.StateRef, error) {
+	return f.refs, f.listErr
+}
+func (f *fakeConn) Read(_ context.Context, key string) (*statesource.RawState, error) {
+	f.mu.Lock()
+	if n := f.failFirst[key]; n > 0 {
+		f.failFirst[key] = n - 1
+		f.mu.Unlock()
+		return nil, errors.New("state download returned 429")
+	}
+	f.mu.Unlock()
+	if f.readErr != nil {
+		return nil, f.readErr
+	}
+	return &statesource.RawState{Key: key, Data: []byte(f.data[key])}, nil
+}
+func (f *fakeConn) Write(context.Context, string, []byte) error { return nil }
+
+func sourceRows(dir string) *sqlmock.Rows {
+	cfg, _ := json.Marshal(map[string]any{"base_path": dir})
+	return sqlmock.NewRows([]string{"id", "name", "type", "endpoint", "config", "scope", "encrypted_credentials", "created_at", "updated_at"}).
+		AddRow("s1", "demo", "local", "", cfg, []byte(`{}`), nil, "2026-06-10", "2026-06-10")
+}
+
+func TestSyncAll_FirstBackfillReadsEverything(t *testing.T) {
+	db, mock := newMock(t)
+	dir := t.TempDir()
+	seed(t, dir, "app.tfstate", minState(7, "aws_instance", "aws_vpc"))
+	seed(t, dir, "net.tfstate", minState(3, "aws_subnet"))
+
+	mock.ExpectQuery("SELECT .+ FROM state_sources ORDER BY").WillReturnRows(sourceRows(dir))
+	mock.ExpectQuery("SELECT state_key, version_marker FROM state_analyses").WithArgs("s1").
+		WillReturnRows(sqlmock.NewRows([]string{"state_key", "version_marker"}))
+	mock.ExpectExec("INSERT INTO state_analyses").WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("INSERT INTO state_analyses").WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("DELETE FROM state_analyses WHERE source_id").WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec("INSERT INTO source_sync_status").WithArgs("s1", 2, 0, "").
+		WillReturnResult(sqlmock.NewResult(0, 1))
+
+	if err := newSyncer(db, connectLocal).SyncAll(ctx); err != nil {
+		t.Fatalf("SyncAll: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Error(err)
+	}
+}
+
+func TestSyncAll_UnchangedStatesAreNotReRead(t *testing.T) {
+	db, mock := newMock(t)
+	dir := t.TempDir()
+	seed(t, dir, "app.tfstate", minState(7, "aws_instance"))
+	seed(t, dir, "stale.tfstate", minState(1, "aws_vpc"))
+
+	// app matches its stored marker; stale's marker moved -> exactly one
+	// re-read/upsert. A third stored key vanished from disk -> pruned.
+	mock.ExpectQuery("SELECT .+ FROM state_sources ORDER BY").WillReturnRows(sourceRows(dir))
+	mock.ExpectQuery("SELECT state_key, version_marker FROM state_analyses").WithArgs("s1").
+		WillReturnRows(sqlmock.NewRows([]string{"state_key", "version_marker"}).
+			AddRow("app.tfstate", fileMarker(t, dir, "app.tfstate")).
+			AddRow("stale.tfstate", "old-marker").
+			AddRow("deleted.tfstate", "whatever"))
+	mock.ExpectExec("INSERT INTO state_analyses").WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("DELETE FROM state_analyses WHERE source_id").WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("INSERT INTO source_sync_status").WithArgs("s1", 2, 0, "").
+		WillReturnResult(sqlmock.NewResult(0, 1))
+
+	if err := newSyncer(db, connectLocal).SyncAll(ctx); err != nil {
+		t.Fatalf("SyncAll: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Error(err)
+	}
+}
+
+func TestSyncAll_SourceFailuresAreRecordedNotFatal(t *testing.T) {
+	// Connect failure.
+	db, mock := newMock(t)
+	mock.ExpectQuery("SELECT .+ FROM state_sources ORDER BY").WillReturnRows(sourceRows("/x"))
+	mock.ExpectExec("INSERT INTO source_sync_status").WithArgs("s1", 0, 0, "connect: nope").
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	s := newSyncer(db, func(*repositories.Source) (statesource.Connector, error) {
+		return nil, errors.New("nope")
+	})
+	if err := s.SyncAll(ctx); err != nil {
+		t.Fatalf("SyncAll: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Error(err)
+	}
+
+	// List failure.
+	db2, mock2 := newMock(t)
+	mock2.ExpectQuery("SELECT .+ FROM state_sources ORDER BY").WillReturnRows(sourceRows("/x"))
+	mock2.ExpectExec("INSERT INTO source_sync_status").WithArgs("s1", 0, 0, "list: hcp 429").
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	s2 := newSyncer(db2, func(*repositories.Source) (statesource.Connector, error) {
+		return &fakeConn{listErr: errors.New("hcp 429")}, nil
+	})
+	if err := s2.SyncAll(ctx); err != nil {
+		t.Fatalf("SyncAll: %v", err)
+	}
+	if err := mock2.ExpectationsWereMet(); err != nil {
+		t.Error(err)
+	}
+}
+
+func TestSyncAll_ReadAndAnalyzeErrorsCount(t *testing.T) {
+	db, mock := newMock(t)
+	now := time.Now()
+	conn := &fakeConn{
+		refs: []statesource.StateRef{
+			{Key: "bad-json", LastModified: &now},
+			{Key: "unreadable", LastModified: &now},
+		},
+		data: map[string]string{"bad-json": "not terraform state"},
+	}
+	// One ref fails analysis, the other fails read (scripted via readErr on a
+	// second connector run is not possible per-key, so bad-json covers analyze
+	// and an empty data map entry covers "no state" handling).
+	conn.data["unreadable"] = `{"version":0}` // analyzer rejects: not a state file
+
+	mock.ExpectQuery("SELECT .+ FROM state_sources ORDER BY").WillReturnRows(sourceRows("/x"))
+	mock.ExpectQuery("SELECT state_key, version_marker FROM state_analyses").WithArgs("s1").
+		WillReturnRows(sqlmock.NewRows([]string{"state_key", "version_marker"}))
+	mock.ExpectExec("DELETE FROM state_analyses WHERE source_id").WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec("INSERT INTO source_sync_status").WithArgs("s1", 2, 2, sqlmock.AnyArg()).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+
+	s := newSyncer(db, func(*repositories.Source) (statesource.Connector, error) { return conn, nil })
+	if err := s.SyncAll(ctx); err != nil {
+		t.Fatalf("SyncAll: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Error(err)
+	}
+}
+
+func TestSyncAll_TransientThrottleClearsOnRetry(t *testing.T) {
+	db, mock := newMock(t)
+	now := time.Now()
+	conn := &fakeConn{
+		refs:      []statesource.StateRef{{Key: "throttled", LastModified: &now}},
+		data:      map[string]string{"throttled": minState(1, "aws_instance")},
+		failFirst: map[string]int{"throttled": 1}, // first read 429s, retry succeeds
+	}
+
+	mock.ExpectQuery("SELECT .+ FROM state_sources ORDER BY").WillReturnRows(sourceRows("/x"))
+	mock.ExpectQuery("SELECT state_key, version_marker FROM state_analyses").WithArgs("s1").
+		WillReturnRows(sqlmock.NewRows([]string{"state_key", "version_marker"}))
+	mock.ExpectExec("INSERT INTO state_analyses").WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("DELETE FROM state_analyses WHERE source_id").WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec("INSERT INTO source_sync_status").WithArgs("s1", 1, 0, "").
+		WillReturnResult(sqlmock.NewResult(0, 1))
+
+	s := newSyncer(db, func(*repositories.Source) (statesource.Connector, error) { return conn, nil })
+	if err := s.SyncAll(ctx); err != nil {
+		t.Fatalf("SyncAll: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Error(err)
+	}
+}
+
+func TestSyncAll_Serialization(t *testing.T) {
+	db, mock := newMock(t)
+	_ = mock
+	s := newSyncer(db, connectLocal)
+	s.runMu.Lock()
+	defer s.runMu.Unlock()
+	if err := s.SyncAll(ctx); err != ErrSyncInProgress {
+		t.Errorf("SyncAll while locked = %v, want ErrSyncInProgress", err)
+	}
+}
+
+func TestSyncAll_SourcesListError(t *testing.T) {
+	db, mock := newMock(t)
+	mock.ExpectQuery("SELECT .+ FROM state_sources ORDER BY").WillReturnError(errors.New("db down"))
+	if err := newSyncer(db, connectLocal).SyncAll(ctx); err == nil {
+		t.Error("SyncAll: expected error when sources cannot be listed")
+	}
+}
+
+func TestSyncKeyAndDropKey(t *testing.T) {
+	db, mock := newMock(t)
+	dir := t.TempDir()
+	seed(t, dir, "app.tfstate", minState(7, "aws_instance"))
+
+	mock.ExpectExec("INSERT INTO state_analyses").WillReturnResult(sqlmock.NewResult(0, 1))
+	s := newSyncer(db, connectLocal)
+	s.SyncKey(localSource(dir), "app.tfstate")
+
+	mock.ExpectExec("DELETE FROM state_analyses WHERE source_id = .+ AND state_key").
+		WithArgs("s1", "app.tfstate").WillReturnResult(sqlmock.NewResult(0, 1))
+	s.DropKey(localSource(dir), "app.tfstate")
+
+	// Errors are swallowed (logged): a failing refresh must not panic.
+	s2 := newSyncer(db, func(*repositories.Source) (statesource.Connector, error) {
+		return nil, errors.New("nope")
+	})
+	s2.SyncKey(localSource(dir), "app.tfstate")
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Error(err)
+	}
+}
+
+func TestStartStopLoop(t *testing.T) {
+	db, mock := newMock(t)
+	// The immediate boot cycle lists sources; give it an empty result.
+	mock.ExpectQuery("SELECT .+ FROM state_sources ORDER BY").
+		WillReturnRows(sqlmock.NewRows([]string{"id", "name", "type", "endpoint", "config", "scope", "encrypted_credentials", "created_at", "updated_at"}))
+	s := newSyncer(db, connectLocal)
+	s.interval = time.Hour
+	s.Start()
+	time.Sleep(50 * time.Millisecond) // let the boot cycle run
+	s.Stop()
+}
+
+func TestMarker(t *testing.T) {
+	now := time.Date(2026, 6, 11, 9, 0, 0, 0, time.UTC)
+	cases := []struct {
+		ref  statesource.StateRef
+		want string
+	}{
+		{statesource.StateRef{Size: 2048, LastModified: &now}, "2048|2026-06-11T09:00:00Z"},
+		{statesource.StateRef{Size: 0, LastModified: &now}, "0|2026-06-11T09:00:00Z"}, // HCP: updated-at only
+		{statesource.StateRef{Size: 1024}, "1024|"},
+		{statesource.StateRef{}, ""}, // no metadata -> always re-read
+	}
+	for i, c := range cases {
+		if got := marker(c.ref); got != c.want {
+			t.Errorf("case %d: marker = %q, want %q", i, got, c.want)
+		}
+	}
+}

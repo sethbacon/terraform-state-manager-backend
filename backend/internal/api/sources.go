@@ -3,6 +3,7 @@
 package api
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"net/http"
@@ -13,6 +14,7 @@ import (
 	"github.com/terraform-state-manager/terraform-state-manager/internal/crypto"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/db/repositories"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/reporting"
+	"github.com/terraform-state-manager/terraform-state-manager/internal/services/statesync"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/statesource"
 )
 
@@ -22,8 +24,11 @@ type SourcesHandlers struct {
 	editRepo     *repositories.StateEditRepository
 	transferRepo *repositories.TransferRepository
 	lockRepo     *repositories.StateLockRepository
+	analysisRepo *repositories.StateAnalysisRepository
 	audit        auditor
-	overview     overviewCache
+	// syncer reconciles the persistent analysis store; nil in rigs that don't
+	// exercise the dashboard (handlers must nil-check).
+	syncer *statesync.Syncer
 }
 
 // NewSourcesHandlers constructs the handlers over the app (public) connection,
@@ -35,8 +40,23 @@ func NewSourcesHandlers(database, identityDB *sql.DB) *SourcesHandlers {
 		editRepo:     repositories.NewStateEditRepository(database),
 		transferRepo: repositories.NewTransferRepository(database),
 		lockRepo:     repositories.NewStateLockRepository(database),
+		analysisRepo: repositories.NewStateAnalysisRepository(database),
 		audit:        newAuditor(identityDB),
 	}
+}
+
+// AttachSyncer wires the statesync service in after construction (the router
+// builds both and connects them).
+func (h *SourcesHandlers) AttachSyncer(s *statesync.Syncer) { h.syncer = s }
+
+// ConnectSource builds a live connector for a source, decrypting its
+// credentials. Exported shape for the statesync service's Connect dependency.
+func ConnectSource(s *repositories.Source) (statesource.Connector, error) {
+	creds, err := decryptCredentials(s)
+	if err != nil {
+		return nil, err
+	}
+	return statesource.New(s.Type, s.Config, creds)
 }
 
 // ListSources returns all configured state sources.
@@ -122,6 +142,11 @@ func (h *SourcesHandlers) CreateSource() gin.HandlerFunc {
 		}
 		h.audit.write(c, "source.create", "source", created.ID,
 			map[string]interface{}{"name": created.Name, "type": created.Type})
+		// Backfill the new source's analyses right away rather than waiting for
+		// the next cycle (no-op if a cycle is already running).
+		if h.syncer != nil {
+			go func() { _ = h.syncer.SyncAll(context.Background()) }()
+		}
 		c.JSON(http.StatusCreated, created)
 	}
 }

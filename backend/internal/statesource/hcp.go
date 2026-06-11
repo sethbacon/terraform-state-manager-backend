@@ -55,6 +55,9 @@ func (h *hcp) List(ctx context.Context) ([]StateRef, error) {
 					Name      string `json:"name"`
 					UpdatedAt string `json:"updated-at"`
 				} `json:"attributes"`
+				Relationships struct {
+					CurrentStateVersion json.RawMessage `json:"current-state-version"`
+				} `json:"relationships"`
 			} `json:"data"`
 			Links struct {
 				Next string `json:"next"`
@@ -64,6 +67,19 @@ func (h *hcp) List(ctx context.Context) ([]StateRef, error) {
 			return nil, err
 		}
 		for _, ws := range resp.Data {
+			// Skip workspaces that have never stored state (the relationship is
+			// present with a null data pointer): nothing to read or analyze.
+			// Absent relationship (older TFE payloads) -> include, Read decides.
+			if len(ws.Relationships.CurrentStateVersion) > 0 {
+				var rel struct {
+					Data *struct {
+						ID string `json:"id"`
+					} `json:"data"`
+				}
+				if err := json.Unmarshal(ws.Relationships.CurrentStateVersion, &rel); err == nil && rel.Data == nil {
+					continue
+				}
+			}
 			ref := StateRef{Key: ws.ID, Name: ws.Attributes.Name}
 			if t, err := time.Parse(time.RFC3339, ws.Attributes.UpdatedAt); err == nil {
 				ref.LastModified = &t

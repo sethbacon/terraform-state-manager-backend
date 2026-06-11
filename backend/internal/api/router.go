@@ -21,6 +21,7 @@ import (
 	"github.com/terraform-state-manager/terraform-state-manager/internal/middleware"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/services/notify"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/services/scheduler"
+	"github.com/terraform-state-manager/terraform-state-manager/internal/services/statesync"
 )
 
 // NewRouter builds the application's HTTP handler. database is the app/public
@@ -252,12 +253,19 @@ func NewRouter(cfg *config.Config, database *sql.DB, identityDB *sql.DB) (*gin.E
 		if database != nil {
 			runner := scheduler.New(repositories.NewScheduleRepository(database), driftDisp)
 			runner.Start()
-			// Keep the dashboard cache warm alongside the schedule runner.
-			stopOverview := sources.StartOverviewRefresher()
+			// Keep the persistent analysis store reconciled (backfills on boot,
+			// then re-reads only changed states each cycle).
+			syncer := statesync.New(
+				repositories.NewSourceRepository(database),
+				repositories.NewStateAnalysisRepository(database),
+				ConnectSource,
+			)
+			sources.AttachSyncer(syncer)
+			syncer.Start()
 			runnerStop := runner.Stop
 			stop = func() {
 				runnerStop()
-				stopOverview()
+				syncer.Stop()
 			}
 		}
 	}

@@ -11,6 +11,9 @@ import (
 
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
 	"github.com/gin-gonic/gin"
+
+	"github.com/terraform-state-manager/terraform-state-manager/internal/db/repositories"
+	"github.com/terraform-state-manager/terraform-state-manager/internal/services/statesync"
 )
 
 // fakeDispatcher records the dispatch and returns a scripted outcome.
@@ -156,19 +159,31 @@ func TestSchedules_RunNow(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Dashboard overview over a real local source
+// Dashboard overview over the persistent analysis store
 // ---------------------------------------------------------------------------
 
-func TestDashboardOverview_Compute(t *testing.T) {
+// TestDashboardOverview_StoreAggregation drives the full new flow end to end:
+// ?refresh=true runs a statesync cycle over a real local source (sqlmock store),
+// then the handler aggregates the store and reports per-source sync status.
+func TestDashboardOverview_StoreAggregation(t *testing.T) {
 	t.Setenv("TSM_ENCRYPTION_KEY", "0123456789abcdef0123456789abcdef")
 	db, mock, err := sqlmock.New()
 	if err != nil {
 		t.Fatalf("sqlmock.New: %v", err)
 	}
 	defer db.Close()
+	// The sync cycle reads states concurrently; expectation order is not
+	// deterministic across the sync + aggregate queries.
+	mock.MatchExpectationsInOrder(false)
 	dir := t.TempDir()
 
 	h := NewSourcesHandlers(db, nil)
+	syncer := statesync.New(
+		repositories.NewSourceRepository(db),
+		repositories.NewStateAnalysisRepository(db),
+		ConnectSource,
+	)
+	h.AttachSyncer(syncer)
 	r := gin.New()
 	r.GET("/api/v1/dashboard/overview", h.DashboardOverview())
 
@@ -181,30 +196,85 @@ func TestDashboardOverview_Compute(t *testing.T) {
 			AddRow("s1", "demo", "local", "", cfg, []byte(`{}`), nil, "2026-06-10", "2026-06-10")
 	}
 
-	// Cold: computes across the (real) local source.
+	// Sync cycle: list sources, diff markers (none yet), upsert the analysis,
+	// prune nothing, record status.
 	mock.ExpectQuery("SELECT .+ FROM state_sources ORDER BY").WillReturnRows(sourceListRows())
+	mock.ExpectQuery("SELECT state_key, version_marker FROM state_analyses").WithArgs("s1").
+		WillReturnRows(sqlmock.NewRows([]string{"state_key", "version_marker"}))
+	mock.ExpectExec("INSERT INTO state_analyses").WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("DELETE FROM state_analyses WHERE source_id").WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec("INSERT INTO source_sync_status").WillReturnResult(sqlmock.NewResult(0, 1))
+
+	// Handler aggregation over the store.
+	mock.ExpectQuery("SELECT .+ FROM state_sources ORDER BY").WillReturnRows(sourceListRows())
+	mock.ExpectQuery(`SELECT COUNT\(\*\),`).WillReturnRows(
+		sqlmock.NewRows([]string{"count", "rum", "managed", "data", "total"}).AddRow(1, 2, 2, 0, 2))
+	mock.ExpectQuery(`jsonb_each_text\(providers\)`).WillReturnRows(
+		sqlmock.NewRows([]string{"key", "sum"}).AddRow("aws", 2))
+	mock.ExpectQuery(`jsonb_each_text\(resource_types\)`).WillReturnRows(
+		sqlmock.NewRows([]string{"key", "sum"}).AddRow("aws_instance", 1).AddRow("aws_vpc", 1))
+	mock.ExpectQuery("SELECT CASE WHEN terraform_version").WillReturnRows(
+		sqlmock.NewRows([]string{"v", "count"}).AddRow("1.9.5", 1))
+	mock.ExpectQuery("FROM source_sync_status").WillReturnRows(
+		sqlmock.NewRows([]string{"source_id", "last_sync_at", "states_listed", "read_errors", "last_error", "stored"}).
+			AddRow("s1", "2026-06-11T09:00:00Z", 1, 0, "", 1))
+
+	w := env.do(http.MethodGet, "/api/v1/dashboard/overview?refresh=true", "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("overview: status = %d (%s)", w.Code, w.Body.String())
+	}
+	body := w.Body.String()
+	for _, want := range []string{`"rum":2`, `"states":1`, `"states_listed":1`, `"refreshed_at":"2026-06-11T09:00:00Z"`, `"source_errors":0`, `"last_sync_at":"2026-06-11T09:00:00Z"`} {
+		if !strings.Contains(body, want) {
+			t.Errorf("overview missing %s: %s", want, body)
+		}
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("unmet expectations: %v", err)
+	}
+
+	// The nil-syncer write hook is a no-op (rigs without a syncer).
+	h2 := NewSourcesHandlers(db, nil)
+	h2.refreshAnalysisAsync(&repositories.Source{ID: "s1"}, "app.tfstate")
+}
+
+// TestDashboardOverview_SyncStatusDegraded: a source whose last cycle had read
+// errors counts toward source_errors and never-synced sources report synced=false.
+func TestDashboardOverview_SyncStatusDegraded(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+	h := NewSourcesHandlers(db, nil)
+	r := gin.New()
+	r.GET("/api/v1/dashboard/overview", h.DashboardOverview())
+	env := &sourcesEnv{r: r, mock: mock}
+
+	cfg, _ := json.Marshal(map[string]any{"base_path": "/tmp"})
+	mock.ExpectQuery("SELECT .+ FROM state_sources ORDER BY").WillReturnRows(
+		sqlmock.NewRows([]string{"id", "name", "type", "endpoint", "config", "scope", "encrypted_credentials", "created_at", "updated_at"}).
+			AddRow("s1", "demo", "local", "", cfg, []byte(`{}`), nil, "2026-06-10", "2026-06-10").
+			AddRow("s2", "fresh", "local", "", cfg, []byte(`{}`), nil, "2026-06-10", "2026-06-10"))
+	mock.ExpectQuery(`SELECT COUNT\(\*\),`).WillReturnRows(
+		sqlmock.NewRows([]string{"count", "rum", "managed", "data", "total"}).AddRow(80, 5009, 5012, 992, 6004))
+	mock.ExpectQuery(`jsonb_each_text\(providers\)`).WillReturnRows(sqlmock.NewRows([]string{"key", "sum"}))
+	mock.ExpectQuery(`jsonb_each_text\(resource_types\)`).WillReturnRows(sqlmock.NewRows([]string{"key", "sum"}))
+	mock.ExpectQuery("SELECT CASE WHEN terraform_version").WillReturnRows(sqlmock.NewRows([]string{"v", "count"}))
+	mock.ExpectQuery("FROM source_sync_status").WillReturnRows(
+		sqlmock.NewRows([]string{"source_id", "last_sync_at", "states_listed", "read_errors", "last_error", "stored"}).
+			AddRow("s1", "2026-06-11T09:00:00Z", 165, 3, "read ws-1: 429", 162))
+
 	w := env.do(http.MethodGet, "/api/v1/dashboard/overview", "")
 	if w.Code != http.StatusOK {
-		t.Fatalf("cold overview: status = %d (%s)", w.Code, w.Body.String())
+		t.Fatalf("overview: status = %d (%s)", w.Code, w.Body.String())
 	}
-	if !strings.Contains(w.Body.String(), `"rum":2`) || !strings.Contains(w.Body.String(), "refreshed_at") {
-		t.Errorf("overview aggregation wrong: %s", w.Body.String())
+	body := w.Body.String()
+	for _, want := range []string{`"source_errors":1`, `"read_errors":3`, `"synced":false`, `"states_listed":165`} {
+		if !strings.Contains(body, want) {
+			t.Errorf("overview missing %s: %s", want, body)
+		}
 	}
-
-	// Warm: served from cache — no DB expectation queued, must still 200.
-	if w := env.do(http.MethodGet, "/api/v1/dashboard/overview", ""); w.Code != http.StatusOK {
-		t.Errorf("warm overview: status = %d (cache miss?)", w.Code)
-	}
-
-	// refresh=true bypasses the cache and recomputes.
-	mock.ExpectQuery("SELECT .+ FROM state_sources ORDER BY").WillReturnRows(sourceListRows())
-	if w := env.do(http.MethodGet, "/api/v1/dashboard/overview?refresh=true", ""); w.Code != http.StatusOK {
-		t.Errorf("forced refresh: status = %d", w.Code)
-	}
-
-	// Refresher start/stop is clean.
-	stop := h.StartOverviewRefresher()
-	stop()
 }
 
 func TestDashboardOverview_SourceListError(t *testing.T) {

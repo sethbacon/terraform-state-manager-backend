@@ -54,7 +54,12 @@ func TestHCP_ListPaginatesAndSorts(t *testing.T) {
 		}
 		switch {
 		case strings.Contains(r.URL.RawQuery, "page%5Bnumber%5D=2") || strings.Contains(r.URL.RawQuery, "page[number]=2"):
-			fmt.Fprint(w, `{"data":[{"id":"ws-aaa","attributes":{"name":"alpha","updated-at":"2026-06-01T00:00:00Z"}}],"links":{"next":""}}`)
+			// ws-aaa has state; ws-never was created but never applied (null
+			// current-state-version) and must be filtered from the listing.
+			fmt.Fprint(w, `{"data":[`+
+				`{"id":"ws-aaa","attributes":{"name":"alpha","updated-at":"2026-06-01T00:00:00Z"},"relationships":{"current-state-version":{"data":{"id":"sv-1","type":"state-versions"}}}},`+
+				`{"id":"ws-never","attributes":{"name":"never-applied","updated-at":"2026-06-03T00:00:00Z"},"relationships":{"current-state-version":{"data":null}}}`+
+				`],"links":{"next":""}}`)
 		default:
 			fmt.Fprintf(w, `{"data":[{"id":"ws-zzz","attributes":{"name":"zulu","updated-at":"2026-06-02T00:00:00Z"}}],"links":{"next":"%s/api/v2/organizations/acme/workspaces?page[number]=2"}}`, srv.URL)
 		}
@@ -65,8 +70,10 @@ func TestHCP_ListPaginatesAndSorts(t *testing.T) {
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
+	// ws-never (no current state version) is excluded; ws-zzz carries no
+	// relationships at all (older TFE payload) and is kept.
 	if len(refs) != 2 {
-		t.Fatalf("expected both pages, got %d refs", len(refs))
+		t.Fatalf("expected both pages minus the never-applied workspace, got %d refs: %+v", len(refs), refs)
 	}
 	// Sorted by workspace NAME (friendly), not ID.
 	if refs[0].Name != "alpha" || refs[1].Name != "zulu" {

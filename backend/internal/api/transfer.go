@@ -118,6 +118,7 @@ func (h *SourcesHandlers) doTransfer(c *gin.Context, mode string) {
 		return
 	}
 	rec.Status = "success"
+	h.refreshAnalysisAsync(srcB, req.TargetKey)
 
 	if mode == "migrate" {
 		verified, detail := verifyTransfer(ctx, connB, req.TargetKey, srcAnalysis, srcErr)
@@ -136,6 +137,7 @@ func (h *SourcesHandlers) doTransfer(c *gin.Context, mode string) {
 				rec.Decommissioned = true
 				after := serial + 1
 				h.recordEdit(ctx, srcA.ID, key, "decommission", actor, nil, &serial, &after, "success", "emptied after migrate")
+				h.refreshAnalysisAsync(srcA, key)
 			} else {
 				rec.Detail = detail + "; decommission failed (source preserved): " + err.Error()
 			}

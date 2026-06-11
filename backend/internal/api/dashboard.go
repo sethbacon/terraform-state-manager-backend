@@ -1,87 +1,29 @@
 package api
 
 import (
-	"context"
 	"net/http"
 	"sort"
-	"sync"
-	"sync/atomic"
-	"time"
 
 	"github.com/gin-gonic/gin"
 
 	"github.com/terraform-state-manager/terraform-state-manager/internal/analyzer"
-	"github.com/terraform-state-manager/terraform-state-manager/internal/statesource"
+	"github.com/terraform-state-manager/terraform-state-manager/internal/db/repositories"
+	"github.com/terraform-state-manager/terraform-state-manager/internal/services/statesync"
 )
 
-// Dashboard aggregation guardrails: remote backends (e.g. HCP Terraform) cost
-// two HTTP round-trips per state read, so an org with many workspaces read
-// serially can exceed proxy timeouts. Reads run dashboardReadConcurrency-wide
-// per source (kept modest — HCP rate-limits ~30 req/30s per token) under a hard
-// dashboardBudget; whatever doesn't finish is dropped and the source is counted
-// in source_errors so the page shows partial data instead of timing out.
-//
-// On top of that the result is CACHED: a background refresher recomputes every
-// dashboardRefreshInterval, the handler serves the cache while it is younger
-// than dashboardCacheTTL, and ?refresh=true forces a recompute.
-const (
-	dashboardBudget          = 12 * time.Second
-	dashboardReadConcurrency = 6
-	dashboardRefreshInterval = 5 * time.Minute
-	dashboardCacheTTL        = 10 * time.Minute
-)
+// The dashboard aggregates the persistent state-analysis store (kept
+// reconciled by the statesync service) instead of re-reading every state file
+// from its backend per request. That keeps the endpoint O(store rows) no
+// matter how many state files the backends hold, and the numbers stable
+// between loads. ?refresh=true runs a reconcile cycle first (steady state:
+// one listing call per source plus reads for changed states only); if a cycle
+// is already running the current store is served as-is.
 
-// overviewCache holds the most recent aggregation result.
-type overviewCache struct {
-	mu   sync.Mutex
-	data gin.H
-	at   time.Time
-}
-
-func (c *overviewCache) get() (gin.H, time.Time, bool) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.data, c.at, c.data != nil
-}
-
-func (c *overviewCache) set(d gin.H) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.data = d
-	c.at = time.Now()
-}
-
-// StartOverviewRefresher computes the dashboard overview in the background on a
-// fixed interval so page loads serve a warm cache. Returns a stop func.
-func (h *SourcesHandlers) StartOverviewRefresher() func() {
-	stop := make(chan struct{})
-	go func() {
-		ticker := time.NewTicker(dashboardRefreshInterval)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-stop:
-				return
-			case <-ticker.C:
-				ctx, cancel := context.WithTimeout(context.Background(), dashboardBudget)
-				if data, err := h.computeOverview(ctx); err == nil {
-					h.overview.set(data)
-				}
-				cancel()
-			}
-		}
-	}()
-	return func() { close(stop) }
-}
-
-// DashboardOverview aggregates analyzer metrics across every configured source for
-// the home page: totals (RUM, managed, data), and provider / resource-type /
-// Terraform-version distributions. Per-source and per-state failures are tolerated
-// and reads run bounded-concurrent under a hard time budget, so one unreachable
-// or slow backend yields partial data (flagged via source_errors) rather than a
-// page timeout.
+// DashboardOverview aggregates analyzer metrics across every configured source
+// for the home page: totals (RUM, managed, data), provider / resource-type /
+// Terraform-version distributions, and per-source sync freshness.
 // @Summary      Dashboard overview
-// @Description  Aggregates RUM and resource/provider/Terraform-version breakdowns across all sources. Requires state:read.
+// @Description  Aggregates RUM and resource/provider/Terraform-version breakdowns from the persistent analysis store, with per-source sync status. ?refresh=true reconciles first. Requires state:read.
 // @Tags         Dashboard
 // @Produce      json
 // @Success      200  {object}  map[string]interface{}
@@ -90,123 +32,106 @@ func (h *SourcesHandlers) StartOverviewRefresher() func() {
 // @Router       /dashboard/overview [get]
 func (h *SourcesHandlers) DashboardOverview() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		force := c.Query("refresh") == "true"
-		if !force {
-			if data, at, ok := h.overview.get(); ok && time.Since(at) < dashboardCacheTTL {
-				c.JSON(http.StatusOK, data)
-				return
+		ctx := c.Request.Context()
+		if c.Query("refresh") == "true" && h.syncer != nil {
+			if err := h.syncer.SyncAll(ctx); err != nil && err != statesync.ErrSyncInProgress {
+				// Refresh is best-effort: serve the store either way.
+				_ = err
 			}
 		}
-		ctx, cancel := context.WithTimeout(c.Request.Context(), dashboardBudget)
-		defer cancel()
-		data, err := h.computeOverview(ctx)
+
+		sources, err := h.repo.List(ctx)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to list sources"})
 			return
 		}
-		h.overview.set(data)
-		c.JSON(http.StatusOK, data)
-	}
-}
-
-// computeOverview runs the budgeted, bounded-concurrent aggregation.
-func (h *SourcesHandlers) computeOverview(ctx context.Context) (gin.H, error) {
-	{
-		sources, err := h.repo.List(ctx)
+		totals, err := h.analysisRepo.Totals(ctx)
 		if err != nil {
-			return nil, err
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to aggregate analyses"})
+			return
+		}
+		providers, err := h.analysisRepo.ProviderCounts(ctx)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to aggregate providers"})
+			return
+		}
+		resTypes, err := h.analysisRepo.ResourceTypeCounts(ctx)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to aggregate resource types"})
+			return
+		}
+		versions, err := h.analysisRepo.VersionCounts(ctx)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to aggregate versions"})
+			return
+		}
+		statuses, err := h.analysisRepo.SyncStatuses(ctx)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load sync status"})
+			return
 		}
 
-		var mu sync.Mutex
-		var stateCount, rum, managed, data, total, sourceErrors int
-		providers := map[string]int{}
-		resTypes := map[string]int{}
-		versions := map[string]int{}
-
+		// Per-source freshness, in the sources' own (newest-first) order.
+		// Sources without a status row have not completed a first sync yet.
+		sync := make([]gin.H, 0, len(sources))
+		sourceErrors := 0
+		statesListed := 0
+		refreshedAt := ""
 		for i := range sources {
-			s := &sources[i]
-			creds, err := decryptCredentials(s)
-			if err != nil {
-				sourceErrors++
-				continue
+			src := &sources[i]
+			entry := gin.H{
+				"source_id": src.ID,
+				"name":      src.Name,
+				"type":      src.Type,
+				"synced":    false,
 			}
-			conn, err := statesource.New(s.Type, s.Config, creds)
-			if err != nil {
-				sourceErrors++
-				continue
-			}
-			refs, err := conn.List(ctx)
-			if err != nil {
-				sourceErrors++
-				continue
-			}
-
-			// Read + analyze states concurrently (bounded) under the budget.
-			var readErrs atomic.Int32
-			sem := make(chan struct{}, dashboardReadConcurrency)
-			var wg sync.WaitGroup
-			for _, ref := range refs {
-				if ctx.Err() != nil {
-					readErrs.Add(1)
-					continue
+			if st, ok := statuses[src.ID]; ok {
+				entry["synced"] = true
+				entry["last_sync_at"] = st.LastSyncAt
+				entry["states_listed"] = st.StatesListed
+				entry["states_stored"] = st.StatesStored
+				entry["read_errors"] = st.ReadErrors
+				entry["last_error"] = st.LastError
+				statesListed += st.StatesListed
+				if st.ReadErrors > 0 || st.LastError != "" {
+					sourceErrors++
 				}
-				wg.Add(1)
-				sem <- struct{}{}
-				go func(key string) {
-					defer wg.Done()
-					defer func() { <-sem }()
-					rs, err := conn.Read(ctx, key)
-					if err != nil || rs == nil {
-						readErrs.Add(1)
-						return
-					}
-					a, err := analyzer.Analyze(rs.Data)
-					if err != nil {
-						readErrs.Add(1)
-						return
-					}
-					mu.Lock()
-					defer mu.Unlock()
-					stateCount++
-					rum += a.RUM
-					managed += a.ManagedResources
-					data += a.DataSources
-					total += a.TotalResources
-					for _, p := range a.Providers {
-						providers[p.Key] += p.Count
-					}
-					for _, rt := range a.ResourceTypes {
-						resTypes[rt.Key] += rt.Count
-					}
-					v := a.TerraformVersion
-					if v == "" {
-						v = "unknown"
-					}
-					versions[v]++
-				}(ref.Key)
+				if st.LastSyncAt > refreshedAt {
+					refreshedAt = st.LastSyncAt
+				}
 			}
-			wg.Wait()
-			// Any unread/unanalyzed state (including budget exhaustion) flags the
-			// source so the page banner reports partial data.
-			if readErrs.Load() > 0 {
-				sourceErrors++
-			}
+			sync = append(sync, entry)
 		}
 
-		return gin.H{
+		resp := gin.H{
 			"sources":            len(sources),
-			"states":             stateCount,
-			"rum":                rum,
-			"managed_resources":  managed,
-			"data_sources":       data,
-			"total_resources":    total,
+			"states":             totals.States,
+			"states_listed":      statesListed,
+			"rum":                totals.RUM,
+			"managed_resources":  totals.ManagedResources,
+			"data_sources":       totals.DataSources,
+			"total_resources":    totals.TotalResources,
 			"providers":          topCounts(providers, 0),
 			"resource_types":     topCounts(resTypes, 10),
 			"terraform_versions": topCounts(versions, 0),
 			"source_errors":      sourceErrors,
-			"refreshed_at":       time.Now().UTC().Format(time.RFC3339),
-		}, nil
+			"sync":               sync,
+		}
+		if refreshedAt != "" {
+			resp["refreshed_at"] = refreshedAt
+		}
+		c.JSON(http.StatusOK, resp)
 	}
+}
+
+// refreshAnalysisAsync re-analyzes one state in the background after a
+// TSM-initiated write so the dashboard reflects it immediately.
+func (h *SourcesHandlers) refreshAnalysisAsync(src *repositories.Source, key string) {
+	if h.syncer == nil {
+		return
+	}
+	srcCopy := *src
+	go h.syncer.SyncKey(&srcCopy, key)
 }
 
 // topCounts turns a map into a descending []Count (ties broken by key for
