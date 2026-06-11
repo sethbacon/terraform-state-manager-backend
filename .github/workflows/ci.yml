@@ -63,9 +63,10 @@ jobs:
 
       - name: Check coverage threshold
         working-directory: backend
-        # Bootstrap floor — guards against regression; ratchet upward as coverage grows.
+        # Ratchet floor: every change that touches a package should add tests and
+        # raise this. The registry backend enforces 80 — that's the target.
         run: |
-          THRESHOLD=4
+          THRESHOLD=25
           COVERAGE=$(go tool cover -func=coverage.out | grep "^total:" | awk '{print $3}' | tr -d '%')
           echo "Coverage: ${COVERAGE}%  (floor: ${THRESHOLD}%)"
           awk -v cov="$COVERAGE" -v thr="$THRESHOLD" 'BEGIN {
