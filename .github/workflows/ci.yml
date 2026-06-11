@@ -66,7 +66,7 @@ jobs:
         # Ratchet floor: every change that touches a package should add tests and
         # raise this. The registry backend enforces 80 — that's the target.
         run: |
-          THRESHOLD=25
+          THRESHOLD=30
           COVERAGE=$(go tool cover -func=coverage.out | grep "^total:" | awk '{print $3}' | tr -d '%')
           echo "Coverage: ${COVERAGE}%  (floor: ${THRESHOLD}%)"
           awk -v cov="$COVERAGE" -v thr="$THRESHOLD" 'BEGIN {
