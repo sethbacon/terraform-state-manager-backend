@@ -217,6 +217,18 @@ func (h *SourcesHandlers) ListStates() gin.HandlerFunc {
 			c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
 			return
 		}
+		// Some backends list no byte size (HCP workspaces); overlay the sizes
+		// the analysis store recorded when it last read each state. Best
+		// effort — a store miss leaves the connector's value.
+		if sizes, err := h.analysisRepo.Sizes(c.Request.Context(), c.Param("id")); err == nil {
+			for i := range refs {
+				if refs[i].Size == 0 {
+					if sz, ok := sizes[refs[i].Key]; ok {
+						refs[i].Size = sz
+					}
+				}
+			}
+		}
 		c.JSON(http.StatusOK, gin.H{"states": refs})
 	}
 }

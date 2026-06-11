@@ -111,6 +111,28 @@ func (r *StateAnalysisRepository) Markers(ctx context.Context, sourceID string) 
 	return markers, rows.Err()
 }
 
+// Sizes returns state_key -> stored byte size for a source, used to enrich
+// connector listings whose backend exposes no size (e.g. HCP workspaces).
+func (r *StateAnalysisRepository) Sizes(ctx context.Context, sourceID string) (map[string]int64, error) {
+	rows, err := r.db.QueryContext(ctx,
+		`SELECT state_key, size FROM state_analyses WHERE source_id = $1`, sourceID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	sizes := map[string]int64{}
+	for rows.Next() {
+		var key string
+		var size int64
+		if err := rows.Scan(&key, &size); err != nil {
+			return nil, err
+		}
+		sizes[key] = size
+	}
+	return sizes, rows.Err()
+}
+
 // DeleteMissing removes rows for states no longer present in the source's
 // listing. keep is the full set of currently-listed keys.
 func (r *StateAnalysisRepository) DeleteMissing(ctx context.Context, sourceID string, keep []string) error {

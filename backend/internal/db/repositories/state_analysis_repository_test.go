@@ -69,6 +69,27 @@ func TestStateAnalysisMarkers(t *testing.T) {
 	}
 }
 
+func TestStateAnalysisSizes(t *testing.T) {
+	db, mock := newMock(t)
+	r := NewStateAnalysisRepository(db)
+
+	mock.ExpectQuery("SELECT state_key, size FROM state_analyses").WithArgs("s1").
+		WillReturnRows(sqlmock.NewRows([]string{"state_key", "size"}).
+			AddRow("ws-abc", 28412).AddRow("ws-def", 911))
+	sizes, err := r.Sizes(ctx, "s1")
+	if err != nil {
+		t.Fatalf("Sizes: %v", err)
+	}
+	if len(sizes) != 2 || sizes["ws-abc"] != 28412 {
+		t.Errorf("sizes = %v", sizes)
+	}
+
+	mock.ExpectQuery("SELECT state_key, size FROM state_analyses").WillReturnError(errDB)
+	if _, err := r.Sizes(ctx, "s1"); err == nil {
+		t.Error("Sizes: expected error")
+	}
+}
+
 func TestStateAnalysisDeletes(t *testing.T) {
 	db, mock := newMock(t)
 	r := NewStateAnalysisRepository(db)

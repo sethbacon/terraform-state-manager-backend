@@ -3,6 +3,7 @@ package api
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -183,14 +184,35 @@ func TestListStates_RealLocalSource(t *testing.T) {
 	e := newSourcesEnv(t)
 	e.seed(t, "app.tfstate", minState(7, "lin-1", "aws_instance.web"))
 	e.seed(t, "net.tfstate", minState(3, "lin-2", "aws_vpc.main"))
+	// Zero-byte file mimics backends whose listing has no size (HCP): the
+	// handler overlays the size the analysis store recorded.
+	e.seed(t, "sizeless.tfstate", "")
 
 	e.expectSource("s1", e.dir)
+	e.mock.ExpectQuery("SELECT state_key, size FROM state_analyses").WithArgs("s1").
+		WillReturnRows(sqlmock.NewRows([]string{"state_key", "size"}).
+			AddRow("sizeless.tfstate", 4242).
+			AddRow("app.tfstate", 9)) // ignored: connector already has a size
 	w := e.do(http.MethodGet, "/api/v1/sources/s1/states", "")
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d (%s)", w.Code, w.Body.String())
 	}
 	if !strings.Contains(w.Body.String(), "app.tfstate") || !strings.Contains(w.Body.String(), "net.tfstate") {
 		t.Errorf("states missing from listing: %s", w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), `"size":4242`) {
+		t.Errorf("store size not overlaid on sizeless state: %s", w.Body.String())
+	}
+	if strings.Contains(w.Body.String(), `"size":9`) {
+		t.Errorf("overlay must not replace a real connector size: %s", w.Body.String())
+	}
+
+	// A store error is best-effort: the listing still serves.
+	e.expectSource("s1", e.dir)
+	e.mock.ExpectQuery("SELECT state_key, size FROM state_analyses").
+		WillReturnError(errors.New("store down"))
+	if w := e.do(http.MethodGet, "/api/v1/sources/s1/states", ""); w.Code != http.StatusOK {
+		t.Errorf("listing must survive a store failure: status = %d", w.Code)
 	}
 }
 
