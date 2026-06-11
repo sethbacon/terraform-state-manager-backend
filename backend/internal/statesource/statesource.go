@@ -6,9 +6,25 @@ package statesource
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io/fs"
 	"time"
 )
+
+// ErrNotFound marks Read failures where the state genuinely does not exist on
+// the backend, as opposed to a transient backend failure. Guarded write paths
+// rely on this distinction: a missing state is safe to treat as a first write,
+// but a transient read error must abort (otherwise the pre-write backup and
+// serial/lineage checks would be silently skipped).
+var ErrNotFound = errors.New("not found")
+
+// IsNotFound reports whether err means "the state does not exist" rather than
+// "the backend failed". Filesystem-backed connectors (local, git) surface
+// fs.ErrNotExist; the rest wrap ErrNotFound explicitly.
+func IsNotFound(err error) bool {
+	return errors.Is(err, ErrNotFound) || errors.Is(err, fs.ErrNotExist)
+}
 
 // StateRef identifies one state file within a source (e.g. a relative path for
 // local, a workspace/key for remote backends).

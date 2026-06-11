@@ -53,10 +53,19 @@ func TestConsulListReadWrite(t *testing.T) {
 			})
 		case r.Method == http.MethodGet && r.URL.Query().Get("raw") == "true":
 			if r.URL.Path != "/v1/kv/terraform/prod" {
-				t.Errorf("unexpected read path %q", r.URL.Path)
+				w.WriteHeader(http.StatusNotFound)
+				return
 			}
 			_, _ = w.Write([]byte(stateBody))
+		case r.Method == http.MethodGet: // cas-index fetch before a write
+			_ = json.NewEncoder(w).Encode([]consulKVEntry{
+				{Key: "terraform/prod", Value: base64.StdEncoding.EncodeToString([]byte(stateBody)), ModifyIndex: 41},
+			})
 		case r.Method == http.MethodPut:
+			// Writes must be check-and-set against the index just fetched.
+			if r.URL.Query().Get("cas") != "41" {
+				t.Errorf("write must use cas=41, got %q", r.URL.Query().Get("cas"))
+			}
 			_, _ = w.Write([]byte("true"))
 		default:
 			w.WriteHeader(http.StatusNotFound)
@@ -89,6 +98,56 @@ func TestConsulListReadWrite(t *testing.T) {
 	}
 	if err := c.Write(context.Background(), "terraform/prod", []byte(stateBody)); err != nil {
 		t.Errorf("Write: %v", err)
+	}
+	// A missing key reads as ErrNotFound (guarded writes key off this).
+	if _, err := c.Read(context.Background(), "terraform/missing"); !IsNotFound(err) {
+		t.Errorf("missing key must be IsNotFound, got %v", err)
+	}
+}
+
+func TestConsulWriteCASConflict(t *testing.T) {
+	// Consul answers the cas-index fetch with index 7 but rejects the PUT
+	// ("false" body): a concurrent writer bumped the key. Write must surface a
+	// conflict instead of reporting success.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			_ = json.NewEncoder(w).Encode([]consulKVEntry{{Key: "terraform/prod", ModifyIndex: 7}})
+		case http.MethodPut:
+			if r.URL.Query().Get("cas") != "7" {
+				t.Errorf("cas = %q, want 7", r.URL.Query().Get("cas"))
+			}
+			_, _ = w.Write([]byte("false"))
+		}
+	}))
+	defer srv.Close()
+	u, _ := url.Parse(srv.URL)
+	c, err := newConsul(map[string]any{"address": u.Host}, nil)
+	if err != nil {
+		t.Fatalf("newConsul: %v", err)
+	}
+	err = c.Write(context.Background(), "terraform/prod", []byte(`{"version":4}`))
+	if err == nil || !strings.Contains(err.Error(), "concurrent writer") {
+		t.Errorf("CAS rejection must surface a conflict, got %v", err)
+	}
+
+	// Fresh keys write with cas=0 (create-only).
+	srv2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			w.WriteHeader(http.StatusNotFound)
+		case http.MethodPut:
+			if r.URL.Query().Get("cas") != "0" {
+				t.Errorf("fresh key cas = %q, want 0", r.URL.Query().Get("cas"))
+			}
+			_, _ = w.Write([]byte("true"))
+		}
+	}))
+	defer srv2.Close()
+	u2, _ := url.Parse(srv2.URL)
+	c2, _ := newConsul(map[string]any{"address": u2.Host}, nil)
+	if err := c2.Write(context.Background(), "terraform/new", []byte(`{"version":4}`)); err != nil {
+		t.Errorf("fresh-key write: %v", err)
 	}
 }
 

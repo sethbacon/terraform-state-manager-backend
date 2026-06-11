@@ -572,20 +572,25 @@ func TestHCP_WriteCreatesWorkspaceByName(t *testing.T) {
 }
 
 func TestHCP_WriteGuards(t *testing.T) {
-	// Serial must advance: existing ws-exist is at serial 5.
+	// Serial must advance: existing ws-exist is at serial 5. The check runs
+	// UNDER the workspace lock (checking before locking would race a run
+	// advancing the state), and a guard rejection must still unlock.
 	conn, f := newHCPWriteFake(t)
 	err := conn.Write(context.Background(), "existing", []byte(`{"version":4,"serial":5,"lineage":"lin-A"}`))
 	if err == nil || !strings.Contains(err.Error(), "serial") {
 		t.Errorf("stale serial: %v", err)
 	}
-	if len(f.calls) != 0 {
-		t.Errorf("guard must reject before locking, calls = %v", f.calls)
+	if strings.Join(f.calls, ",") != "lock,unlock" {
+		t.Errorf("guard must check under the lock and release it, calls = %v", f.calls)
 	}
 
 	// Lineage must match.
 	err = conn.Write(context.Background(), "existing", []byte(`{"version":4,"serial":6,"lineage":"lin-OTHER"}`))
 	if err == nil || !strings.Contains(err.Error(), "lineage") {
 		t.Errorf("lineage mismatch: %v", err)
+	}
+	if strings.Join(f.calls, ",") != "lock,unlock,lock,unlock" {
+		t.Errorf("lineage rejection must also unlock, calls = %v", f.calls)
 	}
 
 	// Serial 6 + matching lineage passes.

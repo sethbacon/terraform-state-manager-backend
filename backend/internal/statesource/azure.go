@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob"
+	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/bloberror"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/container"
 )
 
@@ -74,6 +75,9 @@ func (a *azureConn) List(ctx context.Context) ([]StateRef, error) {
 func (a *azureConn) Read(ctx context.Context, key string) (*RawState, error) {
 	resp, err := a.client.DownloadStream(ctx, a.container, key, nil)
 	if err != nil {
+		if bloberror.HasCode(err, bloberror.BlobNotFound) {
+			return nil, fmt.Errorf("blob %q %w", key, ErrNotFound)
+		}
 		return nil, fmt.Errorf("failed to read blob %q: %w", key, err)
 	}
 	body := resp.Body

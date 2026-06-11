@@ -102,7 +102,7 @@ func (p *pgSource) Read(ctx context.Context, key string) (*RawState, error) {
 	err = db.QueryRowContext(ctx,
 		fmt.Sprintf("SELECT data FROM %s WHERE name = $1", p.table()), key).Scan(&data) // #nosec G201 -- schema validated as identifier in newPG
 	if err == sql.ErrNoRows {
-		return nil, fmt.Errorf("state %q not found", key)
+		return nil, fmt.Errorf("state %q %w", key, ErrNotFound)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("pg read failed: %w", err)

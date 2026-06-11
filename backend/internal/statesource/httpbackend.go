@@ -145,7 +145,7 @@ func (h *httpBackend) Read(ctx context.Context, key string) (*RawState, error) {
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusNoContent {
-		return nil, fmt.Errorf("state %q not found", key)
+		return nil, fmt.Errorf("state %q %w", key, ErrNotFound)
 	}
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("http backend read returned status %d", resp.StatusCode)

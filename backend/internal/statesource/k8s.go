@@ -186,7 +186,7 @@ func (k *k8s) Read(ctx context.Context, key string) (*RawState, error) {
 		return nil, fmt.Errorf("kubernetes read body failed: %w", err)
 	}
 	if resp.StatusCode == http.StatusNotFound {
-		return nil, fmt.Errorf("state %q not found", key)
+		return nil, fmt.Errorf("state %q %w", key, ErrNotFound)
 	}
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("kubernetes read returned status %d", resp.StatusCode)

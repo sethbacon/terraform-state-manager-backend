@@ -3,6 +3,7 @@ package statesource
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -11,6 +12,7 @@ import (
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/aws/smithy-go"
 )
 
 // s3conn reads state from an S3 bucket (or S3-compatible store such as MinIO /
@@ -85,6 +87,10 @@ func (s *s3conn) Read(ctx context.Context, key string) (*RawState, error) {
 		Key:    aws.String(key),
 	})
 	if err != nil {
+		var apiErr smithy.APIError
+		if errors.As(err, &apiErr) && (apiErr.ErrorCode() == "NoSuchKey" || apiErr.ErrorCode() == "NotFound") {
+			return nil, fmt.Errorf("state s3://%s/%s %w", s.bucket, key, ErrNotFound)
+		}
 		return nil, fmt.Errorf("failed to read s3://%s/%s: %w", s.bucket, key, err)
 	}
 	defer func() { _ = out.Body.Close() }()

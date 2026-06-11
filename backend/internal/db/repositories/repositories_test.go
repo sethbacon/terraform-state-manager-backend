@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"strings"
 	"testing"
 
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
@@ -137,6 +138,10 @@ func TestStateLockRepository_AcquireRelease(t *testing.T) {
 	db, mock := newMock(t)
 	r := NewStateLockRepository(db)
 
+	// Acquire reaps any TTL-expired lock first (a crashed holder must not wedge
+	// the key forever), then inserts.
+	mock.ExpectExec("DELETE FROM state_locks").WithArgs("s1", "k", staleLockTTL).
+		WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectQuery("INSERT INTO state_locks").WithArgs("s1", "k", "alice").
 		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("lock-1"))
 	id, err := r.Acquire(ctx, "s1", "k", "alice")
@@ -144,13 +149,24 @@ func TestStateLockRepository_AcquireRelease(t *testing.T) {
 		t.Fatalf("Acquire: %v %q", err, id)
 	}
 
-	// A unique-constraint violation must map to ErrLocked, not a raw pq error.
+	// A unique-constraint violation must map to ErrLocked, not a raw pq error,
+	// and the conflict names the current holder.
+	mock.ExpectExec("DELETE FROM state_locks").
+		WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectQuery("INSERT INTO state_locks").
 		WillReturnError(&pq.Error{Code: "23505"})
-	if _, err := r.Acquire(ctx, "s1", "k", "bob"); !errors.Is(err, ErrLocked) {
+	mock.ExpectQuery("SELECT COALESCE").WithArgs("s1", "k").
+		WillReturnRows(sqlmock.NewRows([]string{"actor", "acquired_at"}).AddRow("alice", "2026-06-11 10:00:00"))
+	_, err = r.Acquire(ctx, "s1", "k", "bob")
+	if !errors.Is(err, ErrLocked) {
 		t.Errorf("expected ErrLocked on unique violation, got %v", err)
 	}
+	if err == nil || !strings.Contains(err.Error(), "alice") {
+		t.Errorf("conflict should name the holder, got %v", err)
+	}
 
+	mock.ExpectExec("DELETE FROM state_locks").
+		WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectQuery("INSERT INTO state_locks").WillReturnError(errDB)
 	if _, err := r.Acquire(ctx, "s1", "k", "bob"); errors.Is(err, ErrLocked) || err == nil {
 		t.Errorf("non-unique errors must pass through, got %v", err)
@@ -160,6 +176,21 @@ func TestStateLockRepository_AcquireRelease(t *testing.T) {
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	if err := r.Release(ctx, "s1", "k", "lock-1"); err != nil {
 		t.Errorf("Release: %v", err)
+	}
+
+	// ForceRelease deletes whatever holds the key and reports whether a lock
+	// existed (the admin force-unlock endpoint relays this).
+	mock.ExpectExec("DELETE FROM state_locks").WithArgs("s1", "k").
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	released, err := r.ForceRelease(ctx, "s1", "k")
+	if err != nil || !released {
+		t.Errorf("ForceRelease: %v released=%v", err, released)
+	}
+	mock.ExpectExec("DELETE FROM state_locks").WithArgs("s1", "nope").
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	released, err = r.ForceRelease(ctx, "s1", "nope")
+	if err != nil || released {
+		t.Errorf("ForceRelease on unlocked key: %v released=%v", err, released)
 	}
 }
 

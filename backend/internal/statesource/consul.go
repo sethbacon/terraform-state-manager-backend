@@ -128,7 +128,7 @@ func (c *consul) Read(ctx context.Context, key string) (*RawState, error) {
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode == http.StatusNotFound {
-		return nil, fmt.Errorf("state %q not found", key)
+		return nil, fmt.Errorf("state %q %w", key, ErrNotFound)
 	}
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("consul read returned status %d", resp.StatusCode)
@@ -140,8 +140,17 @@ func (c *consul) Read(ctx context.Context, key string) (*RawState, error) {
 	return &RawState{Key: key, Data: data, Size: int64(len(data))}, nil
 }
 
+// Write replaces the state via Consul's check-and-set: the key's current
+// ModifyIndex is fetched and presented as ?cas=, so a write racing another
+// writer (a terraform apply against the consul backend, another edit) is
+// rejected by Consul instead of silently overwriting it. cas=0 means
+// create-only, covering fresh keys.
 func (c *consul) Write(ctx context.Context, key string, data []byte) error {
-	resp, err := c.do(ctx, http.MethodPut, c.kvURL(key, url.Values{}), bytes.NewReader(data))
+	idx, err := c.modifyIndex(ctx, key)
+	if err != nil {
+		return err
+	}
+	resp, err := c.do(ctx, http.MethodPut, c.kvURL(key, url.Values{"cas": {strconv.FormatInt(idx, 10)}}), bytes.NewReader(data))
 	if err != nil {
 		return fmt.Errorf("consul write failed: %w", err)
 	}
@@ -151,7 +160,31 @@ func (c *consul) Write(ctx context.Context, key string, data []byte) error {
 		return fmt.Errorf("consul write returned status %d", resp.StatusCode)
 	}
 	if strings.TrimSpace(string(body)) != "true" {
-		return fmt.Errorf("consul rejected the write")
+		return fmt.Errorf("consul rejected the write: key %q changed since it was read (concurrent writer) — re-read and retry", key)
 	}
 	return nil
+}
+
+// modifyIndex returns the key's current ModifyIndex for check-and-set writes,
+// or 0 (create-only) when the key does not exist.
+func (c *consul) modifyIndex(ctx context.Context, key string) (int64, error) {
+	resp, err := c.do(ctx, http.MethodGet, c.kvURL(key, url.Values{}), nil)
+	if err != nil {
+		return 0, fmt.Errorf("consul cas-index read failed: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode == http.StatusNotFound {
+		return 0, nil
+	}
+	if resp.StatusCode != http.StatusOK {
+		return 0, fmt.Errorf("consul cas-index read returned status %d", resp.StatusCode)
+	}
+	var entries []consulKVEntry
+	if err := json.NewDecoder(resp.Body).Decode(&entries); err != nil {
+		return 0, fmt.Errorf("consul cas-index parse failed: %w", err)
+	}
+	if len(entries) == 0 {
+		return 0, nil
+	}
+	return entries[0].ModifyIndex, nil
 }

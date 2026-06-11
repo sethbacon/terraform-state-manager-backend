@@ -102,6 +102,9 @@ func (g *gcsConn) List(ctx context.Context) ([]StateRef, error) {
 func (g *gcsConn) Read(ctx context.Context, key string) (*RawState, error) {
 	r, err := g.client.NewReader(ctx, g.bucket, key)
 	if err != nil {
+		if errors.Is(err, storage.ErrObjectNotExist) {
+			return nil, fmt.Errorf("state gs://%s/%s %w", g.bucket, key, ErrNotFound)
+		}
 		return nil, fmt.Errorf("failed to read gs://%s/%s: %w", g.bucket, key, err)
 	}
 	defer func() { _ = r.Close() }()

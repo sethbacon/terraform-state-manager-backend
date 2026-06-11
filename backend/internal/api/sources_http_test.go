@@ -70,6 +70,7 @@ func newSourcesEnv(t *testing.T) *sourcesEnv {
 	v1.POST("/sources/:id/state/operations", h.StateOperation())
 	v1.GET("/sources/:id/state/backups", h.ListBackups())
 	v1.POST("/sources/:id/state/backups/:backupId/restore", h.RestoreBackup())
+	v1.DELETE("/sources/:id/state/lock", h.ForceUnlock())
 	v1.POST("/sources/:id/state/backup", h.BackupToSource())
 	v1.POST("/sources/:id/state/migrate", h.MigrateToSource())
 
@@ -437,6 +438,91 @@ func TestEditState_RejectsInvalidState(t *testing.T) {
 		t.Errorf("invalid state: status = %d, want 422", w.Code)
 	}
 	if w := e.do(http.MethodPut, "/api/v1/sources/s1/state/raw", "{}"); w.Code != http.StatusBadRequest {
+		t.Errorf("missing key: status = %d, want 400", w.Code)
+	}
+}
+
+func TestEditState_AbortsWhenReadFails(t *testing.T) {
+	e := newSourcesEnv(t)
+
+	// An http source whose backend 500s on read: the pre-write read cannot
+	// distinguish "no state yet" from "backend down", so the edit must abort
+	// (502) BEFORE writing — a transient failure must not silently skip the
+	// backup and serial/lineage checks.
+	var wrote bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			wrote = true
+		}
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	cfg, _ := json.Marshal(map[string]any{"address": srv.URL})
+	e.mock.ExpectQuery("SELECT .+ FROM state_sources WHERE id").WithArgs("s1").
+		WillReturnRows(sqlmock.NewRows(
+			[]string{"id", "name", "type", "endpoint", "config", "scope", "encrypted_credentials", "created_at", "updated_at"}).
+			AddRow("s1", "flaky-http", "http", "", cfg, []byte(`{}`), nil, "2026-06-11", "2026-06-11"))
+	// No lock_address => app-level DB lock: TTL reap, acquire, then release.
+	e.mock.ExpectExec("DELETE FROM state_locks").WillReturnResult(sqlmock.NewResult(0, 0))
+	e.mock.ExpectQuery("INSERT INTO state_locks").
+		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("lk1"))
+	e.mock.ExpectExec("DELETE FROM state_locks").WillReturnResult(sqlmock.NewResult(0, 1))
+
+	w := e.do(http.MethodPut, "/api/v1/sources/s1/state/raw?key=default", minState(2, "lin-1"))
+	if w.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502 (%s)", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "cannot verify current state") {
+		t.Errorf("error should explain the aborted guard: %s", w.Body.String())
+	}
+	if wrote {
+		t.Error("write must not reach the backend when the pre-write read fails")
+	}
+}
+
+func TestRestoreBackup_AbortsWhenPreBackupFails(t *testing.T) {
+	e := newSourcesEnv(t)
+	e.seed(t, "app.tfstate", minState(9, "lin-1", "aws_instance.web"))
+
+	backupData := minState(7, "lin-1", "aws_instance.web")
+	e.mock.ExpectQuery("FROM state_backups WHERE id").WithArgs("b1").
+		WillReturnRows(sqlmock.NewRows(
+			[]string{"id", "source_id", "state_key", "data", "serial", "created_by", "created_at"}).
+			AddRow("b1", "s1", "app.tfstate", []byte(backupData), 7, "alice", "2026-06-10"))
+	e.expectSource("s1", e.dir)
+	// The pre-restore safety backup fails: the restore must abort rather than
+	// proceed with the current state unrecoverable.
+	e.mock.ExpectQuery("INSERT INTO state_backups").WillReturnError(errors.New("db down"))
+
+	w := e.do(http.MethodPost, "/api/v1/sources/s1/state/backups/b1/restore", "")
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500 (%s)", w.Code, w.Body.String())
+	}
+	if !strings.Contains(e.read(t, "app.tfstate"), `"serial":9`) {
+		t.Error("failed pre-restore backup must abort before writing")
+	}
+}
+
+func TestForceUnlock(t *testing.T) {
+	e := newSourcesEnv(t)
+
+	e.mock.ExpectExec("DELETE FROM state_locks").WithArgs("s1", "app.tfstate").
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	w := e.do(http.MethodDelete, "/api/v1/sources/s1/state/lock?key=app.tfstate", "")
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"released":true`) {
+		t.Fatalf("force unlock: %d (%s)", w.Code, w.Body.String())
+	}
+
+	// Nothing held is reported, not errored.
+	e.mock.ExpectExec("DELETE FROM state_locks").WithArgs("s1", "other").
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	w = e.do(http.MethodDelete, "/api/v1/sources/s1/state/lock?key=other", "")
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"released":false`) {
+		t.Fatalf("no-op force unlock: %d (%s)", w.Code, w.Body.String())
+	}
+
+	if w := e.do(http.MethodDelete, "/api/v1/sources/s1/state/lock", ""); w.Code != http.StatusBadRequest {
 		t.Errorf("missing key: status = %d, want 400", w.Code)
 	}
 }

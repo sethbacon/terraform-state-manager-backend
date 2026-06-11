@@ -2549,6 +2549,51 @@
                 }
             }
         },
+        "/sources/{id}/state/lock": {
+            "delete": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    },
+                    {
+                        "CookieAuth": []
+                    }
+                ],
+                "description": "Removes the app-level advisory lock for the key, whoever holds it. Native backend locks are unaffected. Requires admin.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Edit"
+                ],
+                "summary": "Force-unlock a state key (admin)",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Source ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "State file key",
+                        "name": "key",
+                        "in": "query",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    }
+                }
+            }
+        },
         "/sources/{id}/state/migrate": {
             "post": {
                 "security": [

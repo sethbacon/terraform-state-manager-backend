@@ -109,7 +109,7 @@ func (h *hcp) resolveWorkspaceID(ctx context.Context, key string) (string, error
 		return "", err
 	}
 	if ws == nil {
-		return "", fmt.Errorf("workspace %q not found in organization %s", key, h.org)
+		return "", fmt.Errorf("workspace %q %w in organization %s", key, ErrNotFound, h.org)
 	}
 	return ws.ID, nil
 }
@@ -155,10 +155,15 @@ func (h *hcp) Read(ctx context.Context, key string) (*RawState, error) {
 	}
 	u := fmt.Sprintf("%s/api/v2/workspaces/%s/current-state-version", h.baseURL, url.PathEscape(key))
 	if err := h.getJSON(ctx, u, &sv); err != nil {
+		// A 404 here means the workspace exists but has no state yet — that is a
+		// genuine not-found, not a backend failure.
+		if strings.Contains(err.Error(), "returned 404") {
+			return nil, fmt.Errorf("workspace %s has no state: %w", key, ErrNotFound)
+		}
 		return nil, fmt.Errorf("failed to read current state version for workspace %s: %w", key, err)
 	}
 	if sv.Data.Attributes.DownloadURL == "" {
-		return nil, fmt.Errorf("workspace %s has no current state version", key)
+		return nil, fmt.Errorf("workspace %s has no current state version: %w", key, ErrNotFound)
 	}
 	data, err := h.download(ctx, sv.Data.Attributes.DownloadURL)
 	if err != nil {
@@ -194,9 +199,19 @@ func (h *hcp) Write(ctx context.Context, key string, data []byte) error {
 		return err
 	}
 
-	// Guard rails before touching anything: the new serial must advance past
-	// the workspace's current state, and the lineage must match. HCP enforces
-	// both server-side; checking here yields actionable errors.
+	if err := h.lockWorkspace(ctx, wsID); err != nil {
+		return err
+	}
+	defer func() {
+		if err := h.unlockWorkspace(context.WithoutCancel(ctx), wsID); err != nil {
+			hcpLog.Error("failed to unlock workspace after write", "workspace", wsID, "error", err)
+		}
+	}()
+
+	// Guard rails: the new serial must advance past the workspace's current
+	// state, and the lineage must match. Checked UNDER the workspace lock — a
+	// check before locking would race a run advancing the state in the gap.
+	// HCP enforces both server-side too; checking here yields actionable errors.
 	if cur, err := h.currentStateMeta(ctx, wsID); err != nil {
 		return err
 	} else if cur != nil {
@@ -207,15 +222,6 @@ func (h *hcp) Write(ctx context.Context, key string, data []byte) error {
 			return fmt.Errorf("lineage mismatch: workspace %s tracks lineage %s but the state being written has %s — refusing to overwrite a different state's history", key, cur.Lineage, meta.Lineage)
 		}
 	}
-
-	if err := h.lockWorkspace(ctx, wsID); err != nil {
-		return err
-	}
-	defer func() {
-		if err := h.unlockWorkspace(context.WithoutCancel(ctx), wsID); err != nil {
-			hcpLog.Error("failed to unlock workspace after write", "workspace", wsID, "error", err)
-		}
-	}()
 
 	sum := md5.Sum(data) // #nosec G401 -- HCP's state-version API requires an MD5 content checksum
 	body, _ := json.Marshal(map[string]any{

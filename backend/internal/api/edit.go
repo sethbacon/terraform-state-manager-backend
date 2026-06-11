@@ -69,7 +69,16 @@ func (h *SourcesHandlers) EditState() gin.HandlerFunc {
 		var beforeSerial *int64
 		var backupID *string
 
-		if cur, readErr := conn.Read(ctx, key); readErr == nil && cur != nil {
+		// Fail closed: only a genuine not-found (first write to this key) may skip
+		// the backup and serial/lineage checks. A transient read failure must abort,
+		// otherwise the write proceeds unguarded and unbackuped exactly when the
+		// backend is flaky.
+		cur, readErr := conn.Read(ctx, key)
+		if readErr != nil && !statesource.IsNotFound(readErr) {
+			c.JSON(http.StatusBadGateway, gin.H{"error": "cannot verify current state before writing: " + readErr.Error()})
+			return
+		}
+		if readErr == nil && cur != nil {
 			if curA, e := analyzer.Analyze(cur.Data); e == nil {
 				bs := curA.Serial
 				beforeSerial = &bs
@@ -258,14 +267,25 @@ func (h *SourcesHandlers) RestoreBackup() gin.HandlerFunc {
 
 		var beforeSerial *int64
 		var preBackupID *string
-		if cur, readErr := conn.Read(ctx, backup.StateKey); readErr == nil && cur != nil {
+		// Same fail-closed rule as EditState: a transient read failure aborts the
+		// restore (the current state could not be backed up); only a genuine
+		// not-found proceeds without a pre-restore backup.
+		cur, readErr := conn.Read(ctx, backup.StateKey)
+		if readErr != nil && !statesource.IsNotFound(readErr) {
+			c.JSON(http.StatusBadGateway, gin.H{"error": "cannot verify current state before restoring: " + readErr.Error()})
+			return
+		}
+		if readErr == nil && cur != nil {
 			if curA, e := analyzer.Analyze(cur.Data); e == nil {
 				bs := curA.Serial
 				beforeSerial = &bs
 			}
-			if id, bErr := h.editRepo.CreateBackup(ctx, src.ID, backup.StateKey, cur.Data, beforeSerial, actor); bErr == nil {
-				preBackupID = &id
+			id, bErr := h.editRepo.CreateBackup(ctx, src.ID, backup.StateKey, cur.Data, beforeSerial, actor)
+			if bErr != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to back up current state"})
+				return
 			}
+			preBackupID = &id
 		}
 
 		if err := conn.Write(ctx, backup.StateKey, backup.Data); err != nil {
@@ -327,6 +347,39 @@ func (h *SourcesHandlers) acquireLock(c *gin.Context, sourceID string, conn stat
 		return nil, false
 	}
 	return func() { _ = h.lockRepo.Release(context.Background(), sourceID, key, lockID) }, true
+}
+
+// ForceUnlock releases the app-level advisory lock on ?key= regardless of
+// holder — the admin escape hatch for a lock orphaned by a crash that has not
+// yet aged past the repository's stale-lock TTL. It does NOT touch native
+// backend locks (local lock files, consul/http backend locks, HCP workspace
+// locks); those are owned by the backend itself.
+// @Summary      Force-unlock a state key (admin)
+// @Description  Removes the app-level advisory lock for the key, whoever holds it. Native backend locks are unaffected. Requires admin.
+// @Tags         Edit
+// @Produce      json
+// @Param        id   path   string  true  "Source ID"
+// @Param        key  query  string  true  "State file key"
+// @Success      200  {object}  map[string]interface{}
+// @Security     BearerAuth
+// @Security     CookieAuth
+// @Router       /sources/{id}/state/lock [delete]
+func (h *SourcesHandlers) ForceUnlock() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		key := c.Query("key")
+		if key == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "key query parameter is required"})
+			return
+		}
+		released, err := h.lockRepo.ForceRelease(c.Request.Context(), c.Param("id"), key)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to release lock"})
+			return
+		}
+		h.audit.write(c, "state.force_unlock", "state", c.Param("id"),
+			map[string]interface{}{"key": key, "released": released})
+		c.JSON(http.StatusOK, gin.H{"released": released})
+	}
 }
 
 func userIDOf(c *gin.Context) string {
