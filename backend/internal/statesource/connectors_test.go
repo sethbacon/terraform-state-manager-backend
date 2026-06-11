@@ -239,6 +239,11 @@ func TestHTTPBackendReadWriteLock(t *testing.T) {
 	if len(refs) != 1 || refs[0].Key != httpStateKey || refs[0].LastModified == nil {
 		t.Fatalf("unexpected refs: %+v", refs)
 	}
+	// HEAD here sends no Content-Length (client sees -1): the ref must clamp
+	// to 0 so the API layer's analysis-store size overlay applies.
+	if refs[0].Size != 0 {
+		t.Fatalf("size = %d, want 0 when Content-Length is absent", refs[0].Size)
+	}
 	rs, err := conn.Read(context.Background(), httpStateKey)
 	if err != nil {
 		t.Fatalf("Read: %v", err)

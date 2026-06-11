@@ -124,7 +124,12 @@ func (h *httpBackend) List(ctx context.Context) ([]StateRef, error) {
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("http backend probe returned status %d", resp.StatusCode)
 	}
-	ref := StateRef{Key: httpStateKey, Name: h.address, Size: resp.ContentLength}
+	ref := StateRef{Key: httpStateKey, Name: h.address}
+	// HEAD without Content-Length reports -1; leave 0 so the API layer can
+	// overlay the size recorded by the analysis store.
+	if resp.ContentLength > 0 {
+		ref.Size = resp.ContentLength
+	}
 	if lm := resp.Header.Get("Last-Modified"); lm != "" {
 		if parsed, pErr := http.ParseTime(lm); pErr == nil {
 			ref.LastModified = &parsed
