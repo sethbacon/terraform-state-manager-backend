@@ -439,7 +439,14 @@ func (h *DriftHandlers) CallbackPreflight() gin.HandlerFunc {
 }
 
 type workflowSetupRequest struct {
+	// Content alone is the legacy single-drift-file form.
 	Content string `json:"content"`
+	// Files lands multiple workflows in one branch + PR. Kind selects the
+	// canonical, server-fixed path: "drift" or "versionlab".
+	Files []struct {
+		Kind    string `json:"kind"`
+		Content string `json:"content"`
+	} `json:"files"`
 }
 
 // SetupSourceWorkflow commits the TSM workflow file to a new branch of the repo
@@ -464,13 +471,40 @@ func (h *CISourceHandlers) SetupSourceWorkflow() gin.HandlerFunc {
 			return
 		}
 		var req workflowSetupRequest
-		if err := c.ShouldBindJSON(&req); err != nil || strings.TrimSpace(req.Content) == "" {
+		if err := c.ShouldBindJSON(&req); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
+			return
+		}
+		// Normalize: legacy single-content form means one drift workflow.
+		type kindContent struct{ kind, content string }
+		var wanted []kindContent
+		if strings.TrimSpace(req.Content) != "" {
+			wanted = append(wanted, kindContent{"drift", req.Content})
+		}
+		for _, f := range req.Files {
+			wanted = append(wanted, kindContent{f.Kind, f.Content})
+		}
+		if len(wanted) == 0 {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "content is required"})
 			return
 		}
-		if len(req.Content) > 64*1024 {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "content exceeds 64KiB"})
-			return
+		isADO := src.Provider == "azure_devops"
+		files := make([]pipelines.FileSpec, 0, len(wanted))
+		for _, w := range wanted {
+			paths, ok := pipelines.WorkflowPaths[w.kind]
+			if !ok {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "kind must be drift or versionlab"})
+				return
+			}
+			if strings.TrimSpace(w.content) == "" || len(w.content) > 64*1024 {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "each file needs content under 64KiB"})
+				return
+			}
+			path := paths.GitHub
+			if isADO {
+				path = paths.Azure
+			}
+			files = append(files, pipelines.FileSpec{Path: path, Content: w.content})
 		}
 		repo := c.Param("repo")
 		var (
@@ -483,9 +517,9 @@ func (h *CISourceHandlers) SetupSourceWorkflow() gin.HandlerFunc {
 				c.JSON(http.StatusBadRequest, gin.H{"error": "azure_devops source has no project"})
 				return
 			}
-			result, err = pipelines.SetupAzureWorkflow(c.Request.Context(), token, src.Organization, *src.Project, repo, req.Content)
+			result, err = pipelines.SetupAzureWorkflow(c.Request.Context(), token, src.Organization, *src.Project, repo, files)
 		case "github_actions":
-			result, err = pipelines.SetupGitHubWorkflow(c.Request.Context(), token, src.Organization, repo, req.Content)
+			result, err = pipelines.SetupGitHubWorkflow(c.Request.Context(), token, src.Organization, repo, files)
 		default:
 			c.JSON(http.StatusBadRequest, gin.H{"error": "workflow setup is not available for this provider"})
 			return

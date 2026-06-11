@@ -65,7 +65,8 @@ func TestSetupAzureWorkflowCreatesBranchAndPR(t *testing.T) {
 	azureDevOpsBaseURL = srv.URL
 	defer func() { azureDevOpsBaseURL = old }()
 
-	res, err := SetupAzureWorkflow(context.Background(), "pat", "o", "p", "r1", "yaml-content")
+	res, err := SetupAzureWorkflow(context.Background(), "pat", "o", "p", "r1",
+		[]FileSpec{{Path: AzureWorkflowPath, Content: "yaml-content"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -93,7 +94,8 @@ func TestSetupAzureWorkflowIdempotentWhenFileExists(t *testing.T) {
 	azureDevOpsBaseURL = srv.URL
 	defer func() { azureDevOpsBaseURL = old }()
 
-	res, err := SetupAzureWorkflow(context.Background(), "pat", "o", "p", "r1", "c")
+	res, err := SetupAzureWorkflow(context.Background(), "pat", "o", "p", "r1",
+		[]FileSpec{{Path: AzureWorkflowPath, Content: "c"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -138,7 +140,8 @@ func TestSetupGitHubWorkflowCreatesBranchAndPR(t *testing.T) {
 	githubAPIBaseURL = srv.URL
 	defer func() { githubAPIBaseURL = old }()
 
-	res, err := SetupGitHubWorkflow(context.Background(), "tok", "octocat", "infra", "wf-yaml")
+	res, err := SetupGitHubWorkflow(context.Background(), "tok", "octocat", "infra",
+		[]FileSpec{{Path: GitHubWorkflowPath, Content: "wf-yaml"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -177,5 +180,60 @@ func TestPRStateNormalization(t *testing.T) {
 	}
 	if s, _ := GitHubPRState(ctx, "t", "o", "r", 4); s != "closed" {
 		t.Errorf("gh closed-unmerged → %s", s)
+	}
+}
+
+
+func TestSetupAzureWorkflowMultiFileSkipsExisting(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/repositories/r1") && r.Method == http.MethodGet:
+			_, _ = w.Write([]byte(`{"defaultBranch":"refs/heads/main"}`))
+		case strings.HasSuffix(r.URL.Path, "/items"):
+			// drift file exists, versionlab does not
+			if strings.Contains(r.URL.RawQuery, "drift") {
+				_, _ = w.Write([]byte(`{"objectId":"x"}`))
+			} else {
+				w.WriteHeader(http.StatusNotFound)
+			}
+		case strings.HasSuffix(r.URL.Path, "/refs"):
+			_, _ = w.Write([]byte(`{"value":[{"name":"refs/heads/main","objectId":"tip1"}]}`))
+		case strings.HasSuffix(r.URL.Path, "/pushes"):
+			var push struct {
+				Commits []struct {
+					Changes []struct {
+						Item struct {
+							Path string `json:"path"`
+						} `json:"item"`
+					} `json:"changes"`
+				} `json:"commits"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&push)
+			if len(push.Commits[0].Changes) != 1 || push.Commits[0].Changes[0].Item.Path != WorkflowPaths["versionlab"].Azure {
+				t.Errorf("expected only the missing versionlab file, got %+v", push.Commits[0].Changes)
+			}
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{}`))
+		case strings.HasSuffix(r.URL.Path, "/pullrequests"):
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{"pullRequestId":5,"repository":{"webUrl":"https://x/_git/r1"}}`))
+		default:
+			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+	old := azureDevOpsBaseURL
+	azureDevOpsBaseURL = srv.URL
+	defer func() { azureDevOpsBaseURL = old }()
+
+	res, err := SetupAzureWorkflow(context.Background(), "pat", "o", "p", "r1", []FileSpec{
+		{Path: WorkflowPaths["drift"].Azure, Content: "a"},
+		{Path: WorkflowPaths["versionlab"].Azure, Content: "b"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Status != "pr_created" || res.PRID != 5 {
+		t.Fatalf("unexpected: %+v", res)
 	}
 }
