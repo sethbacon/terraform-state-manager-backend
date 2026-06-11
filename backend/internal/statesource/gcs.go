@@ -12,11 +12,49 @@ import (
 	"google.golang.org/api/option"
 )
 
+// gcsAPI abstracts the GCS SDK operations the connector uses so tests can
+// inject a mock (registry storage-backend pattern); realGCSClient adapts the
+// actual *storage.Client behind it.
+type gcsAPI interface {
+	Objects(ctx context.Context, bucket string, q *storage.Query) gcsObjectIterator
+	NewReader(ctx context.Context, bucket, object string) (io.ReadCloser, error)
+	// NewWriter returns a writer for the object with the given content type
+	// already applied; the upload commits on Close.
+	NewWriter(ctx context.Context, bucket, object, contentType string) io.WriteCloser
+}
+
+// gcsObjectIterator is the iteration subset of *storage.ObjectIterator.
+type gcsObjectIterator interface {
+	Next() (*storage.ObjectAttrs, error)
+}
+
+// realGCSClient delegates gcsAPI to the GCS SDK.
+type realGCSClient struct {
+	client *storage.Client
+}
+
+// coverage:skip:trivial-delegation
+func (r *realGCSClient) Objects(ctx context.Context, bucket string, q *storage.Query) gcsObjectIterator {
+	return r.client.Bucket(bucket).Objects(ctx, q)
+}
+
+// coverage:skip:trivial-delegation
+func (r *realGCSClient) NewReader(ctx context.Context, bucket, object string) (io.ReadCloser, error) {
+	return r.client.Bucket(bucket).Object(object).NewReader(ctx)
+}
+
+// coverage:skip:trivial-delegation
+func (r *realGCSClient) NewWriter(ctx context.Context, bucket, object, contentType string) io.WriteCloser {
+	w := r.client.Bucket(bucket).Object(object).NewWriter(ctx)
+	w.ContentType = contentType
+	return w
+}
+
 // gcsConn reads/writes state in a Google Cloud Storage bucket. A service-account
 // JSON key may be supplied via credentials.credentials_json; otherwise Application
 // Default Credentials are used.
 type gcsConn struct {
-	client *storage.Client
+	client gcsAPI
 	bucket string
 	prefix string
 }
@@ -36,12 +74,11 @@ func newGCS(config, creds map[string]any) (*gcsConn, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to create GCS client: %w", err)
 	}
-	return &gcsConn{client: client, bucket: bucket, prefix: prefix}, nil
+	return &gcsConn{client: &realGCSClient{client: client}, bucket: bucket, prefix: prefix}, nil
 }
 
-// coverage:skip:requires-cloud
 func (g *gcsConn) List(ctx context.Context) ([]StateRef, error) {
-	it := g.client.Bucket(g.bucket).Objects(ctx, &storage.Query{Prefix: g.prefix})
+	it := g.client.Objects(ctx, g.bucket, &storage.Query{Prefix: g.prefix})
 	var refs []StateRef
 	for {
 		attrs, err := it.Next()
@@ -62,9 +99,8 @@ func (g *gcsConn) List(ctx context.Context) ([]StateRef, error) {
 	return refs, nil
 }
 
-// coverage:skip:requires-cloud
 func (g *gcsConn) Read(ctx context.Context, key string) (*RawState, error) {
-	r, err := g.client.Bucket(g.bucket).Object(key).NewReader(ctx)
+	r, err := g.client.NewReader(ctx, g.bucket, key)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read gs://%s/%s: %w", g.bucket, key, err)
 	}
@@ -76,10 +112,8 @@ func (g *gcsConn) Read(ctx context.Context, key string) (*RawState, error) {
 	return &RawState{Key: key, Data: data, Size: int64(len(data))}, nil
 }
 
-// coverage:skip:requires-cloud
 func (g *gcsConn) Write(ctx context.Context, key string, data []byte) error {
-	w := g.client.Bucket(g.bucket).Object(key).NewWriter(ctx)
-	w.ContentType = "application/json"
+	w := g.client.NewWriter(ctx, g.bucket, key, "application/json")
 	if _, err := w.Write(data); err != nil {
 		_ = w.Close()
 		return fmt.Errorf("failed to write gs://%s/%s: %w", g.bucket, key, err)
