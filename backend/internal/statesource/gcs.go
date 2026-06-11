@@ -39,6 +39,7 @@ func newGCS(config, creds map[string]any) (*gcsConn, error) {
 	return &gcsConn{client: client, bucket: bucket, prefix: prefix}, nil
 }
 
+// coverage:skip:requires-cloud
 func (g *gcsConn) List(ctx context.Context) ([]StateRef, error) {
 	it := g.client.Bucket(g.bucket).Objects(ctx, &storage.Query{Prefix: g.prefix})
 	var refs []StateRef
@@ -61,6 +62,7 @@ func (g *gcsConn) List(ctx context.Context) ([]StateRef, error) {
 	return refs, nil
 }
 
+// coverage:skip:requires-cloud
 func (g *gcsConn) Read(ctx context.Context, key string) (*RawState, error) {
 	r, err := g.client.Bucket(g.bucket).Object(key).NewReader(ctx)
 	if err != nil {
@@ -74,6 +76,7 @@ func (g *gcsConn) Read(ctx context.Context, key string) (*RawState, error) {
 	return &RawState{Key: key, Data: data, Size: int64(len(data))}, nil
 }
 
+// coverage:skip:requires-cloud
 func (g *gcsConn) Write(ctx context.Context, key string, data []byte) error {
 	w := g.client.Bucket(g.bucket).Object(key).NewWriter(ctx)
 	w.ContentType = "application/json"

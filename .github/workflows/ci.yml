@@ -72,10 +72,10 @@ jobs:
         working-directory: backend
         # Ratchet floor: every change that touches a package should add tests and
         # raise this. The registry backend enforces 80 — that's the target.
-        # History: 4 (bootstrap) → 25 → 30 → 50 → 62 → 72 (connector/dispatch/
-        # reconciliation passes, 2026-06-10).
+        # History: 4 (bootstrap) → 25 → 30 → 50 → 62 → 72 → 78 (registry parity:
+        # actual hit 80.0 filtered on 2026-06-11, matching the registry's floor).
         run: |
-          THRESHOLD=72
+          THRESHOLD=78
           COVERAGE=$(go tool cover -func=coverage.filtered.out | grep "^total:" | awk '{print $3}' | tr -d '%')
           echo "Coverage (filtered): ${COVERAGE}%  (floor: ${THRESHOLD}%)"
           awk -v cov="$COVERAGE" -v thr="$THRESHOLD" 'BEGIN {

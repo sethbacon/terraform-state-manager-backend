@@ -126,6 +126,7 @@ func (p *Provider) GetMetadata() *saml.EntityDescriptor { return p.sp.Metadata()
 // caller persists the ID in session state and passes it back to ValidateResponse
 // as a possible request ID so crewjam validates InResponseTo (binding the IdP's
 // response to the request we issued).
+// coverage:skip:requires-saml-idp
 func (p *Provider) MakeAuthenticationRequest(relayState string) (*url.URL, string, error) {
 	authReq, err := p.sp.MakeAuthenticationRequest(
 		p.sp.GetSSOBindingLocation(saml.HTTPRedirectBinding),
@@ -146,6 +147,7 @@ func (p *Provider) MakeAuthenticationRequest(relayState string) (*url.URL, strin
 // returns the user info. possibleRequestIDs binds the response to a prior
 // AuthnRequest (InResponseTo) for SP-initiated logins; pass nil for the
 // IdP-initiated flow (only honored when AllowIDPInitiated is set).
+// coverage:skip:requires-saml-idp
 func (p *Provider) ValidateResponse(r *http.Request, possibleRequestIDs []string, groupAttr string) (*UserInfo, error) {
 	assertion, err := p.sp.ParseResponse(r, possibleRequestIDs)
 	if err != nil {
@@ -226,6 +228,7 @@ func resolveIdPMetadata(idp config.SAMLIdPConfig) (*saml.EntityDescriptor, error
 
 // fetchIdPMetadata retrieves and parses IdP metadata from an HTTPS URL. The read
 // is bounded to 1 MiB to prevent resource exhaustion.
+// coverage:skip:requires-saml-idp
 func fetchIdPMetadata(metadataURL string) (*saml.EntityDescriptor, error) {
 	parsedURL, err := url.Parse(metadataURL)
 	if err != nil {

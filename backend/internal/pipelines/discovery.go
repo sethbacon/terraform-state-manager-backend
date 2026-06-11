@@ -21,6 +21,20 @@ var (
 	githubAPIBaseURL   = "https://api.github.com"
 )
 
+// OverrideBaseURLsForTest points both provider APIs at a test server and
+// returns a restore func. For use by handler tests in dependent packages; not
+// safe for concurrent use with real provider traffic.
+func OverrideBaseURLsForTest(ado, github string) (restore func()) {
+	oldADO, oldGH := azureDevOpsBaseURL, githubAPIBaseURL
+	if ado != "" {
+		azureDevOpsBaseURL = ado
+	}
+	if github != "" {
+		githubAPIBaseURL = github
+	}
+	return func() { azureDevOpsBaseURL, githubAPIBaseURL = oldADO, oldGH }
+}
+
 // PipelineRef is one dispatchable Azure DevOps pipeline definition.
 type PipelineRef struct {
 	ID     int    `json:"id"`

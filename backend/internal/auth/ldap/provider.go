@@ -116,6 +116,7 @@ func (p *Provider) Authenticate(username, password string) (*UserInfo, error) {
 	return &UserInfo{DN: userDN, Email: email, Name: name, Groups: groups}, nil
 }
 
+// coverage:skip:requires-ldap-server
 func (p *Provider) dial() (*goldap.Conn, error) {
 	addr := fmt.Sprintf("%s:%d", p.cfg.Host, p.cfg.Port)
 	tlsConfig := &tls.Config{
@@ -143,6 +144,7 @@ func (p *Provider) dial() (*goldap.Conn, error) {
 	return conn, nil
 }
 
+// coverage:skip:requires-ldap-server
 func (p *Provider) searchUser(conn *goldap.Conn, username string) (dn, email, name string, err error) {
 	// Escape the username before substituting it into the admin-configured filter.
 	filter := fmt.Sprintf(p.cfg.UserFilter, goldap.EscapeFilter(username))
@@ -165,6 +167,7 @@ func (p *Provider) searchUser(conn *goldap.Conn, username string) (dn, email, na
 	return e.DN, e.GetAttributeValue(p.cfg.UserAttrEmail), e.GetAttributeValue(p.cfg.UserAttrName), nil
 }
 
+// coverage:skip:requires-ldap-server
 func (p *Provider) lookupGroups(conn *goldap.Conn, userDN string) ([]string, error) {
 	baseDN := p.cfg.GroupBaseDN
 	if baseDN == "" {

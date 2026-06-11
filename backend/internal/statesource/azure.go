@@ -42,6 +42,7 @@ func newAzure(config, creds map[string]any) (*azureConn, error) {
 	return &azureConn{client: client, container: containerName, prefix: prefix}, nil
 }
 
+// coverage:skip:requires-cloud
 func (a *azureConn) List(ctx context.Context) ([]StateRef, error) {
 	opts := &container.ListBlobsFlatOptions{}
 	if a.prefix != "" {
@@ -71,6 +72,7 @@ func (a *azureConn) List(ctx context.Context) ([]StateRef, error) {
 	return refs, nil
 }
 
+// coverage:skip:requires-cloud
 func (a *azureConn) Read(ctx context.Context, key string) (*RawState, error) {
 	resp, err := a.client.DownloadStream(ctx, a.container, key, nil)
 	if err != nil {
@@ -85,6 +87,7 @@ func (a *azureConn) Read(ctx context.Context, key string) (*RawState, error) {
 	return &RawState{Key: key, Data: data, Size: int64(len(data)), LastModified: resp.LastModified}, nil
 }
 
+// coverage:skip:requires-cloud
 func (a *azureConn) Write(ctx context.Context, key string, data []byte) error {
 	if _, err := a.client.UploadBuffer(ctx, a.container, key, data, nil); err != nil {
 		return fmt.Errorf("failed to write blob %q: %w", key, err)

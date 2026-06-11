@@ -1,0 +1,180 @@
+package api
+
+import (
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+
+	"github.com/terraform-state-manager/terraform-state-manager/internal/pipelines"
+)
+
+// fakeADO serves the minimal Azure DevOps surface the discovery/setup handlers
+// proxy to. The pipelines package's own tests cover the protocol details; these
+// tests cover the handler glue end to end.
+func fakeADO(t *testing.T) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/_apis/pipelines") && r.Method == http.MethodGet:
+			fmt.Fprint(w, `{"count":1,"value":[{"id":7,"name":"TSM Drift","folder":"\\"}]}`)
+		case strings.HasSuffix(r.URL.Path, "/_apis/pipelines") && r.Method == http.MethodPost:
+			fmt.Fprint(w, `{"id":42,"name":"TSM Drift","folder":"\\"}`)
+		case strings.HasSuffix(r.URL.Path, "/_apis/git/repositories"):
+			fmt.Fprint(w, `{"value":[{"id":"r1","name":"infra","defaultBranch":"refs/heads/main"}]}`)
+		case strings.Contains(r.URL.Path, "/_apis/serviceendpoint/endpoints"):
+			fmt.Fprint(w, `{"value":[{"id":"sc1","name":"azure-prod","type":"azurerm"}]}`)
+		case strings.Contains(r.URL.Path, "/pullrequests/"):
+			fmt.Fprint(w, `{"pullRequestId":12,"status":"completed"}`)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func TestCISourceProxies_AzureDevOps(t *testing.T) {
+	srv := fakeADO(t)
+	restore := pipelines.OverrideBaseURLsForTest(srv.URL, "")
+	defer restore()
+
+	e := newCISourcesEnv(t)
+	proj := "Platform"
+	expectSrc := func() {
+		e.mock.ExpectQuery("SELECT .+ FROM ci_sources WHERE id").WithArgs("c1").
+			WillReturnRows(ciSrcRow(t, "azure_devops", &proj, "pat"))
+	}
+
+	expectSrc()
+	w := e.do(http.MethodGet, "/api/v1/ci-sources/c1/pipelines", "")
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "TSM Drift") {
+		t.Fatalf("pipelines: status = %d (%s)", w.Code, w.Body.String())
+	}
+
+	expectSrc()
+	w = e.do(http.MethodGet, "/api/v1/ci-sources/c1/repos", "")
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"infra"`) {
+		t.Fatalf("repos: status = %d (%s)", w.Code, w.Body.String())
+	}
+
+	expectSrc()
+	w = e.do(http.MethodGet, "/api/v1/ci-sources/c1/service-connections", "")
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "azure-prod") {
+		t.Fatalf("service connections: status = %d (%s)", w.Code, w.Body.String())
+	}
+
+	expectSrc()
+	w = e.do(http.MethodPost, "/api/v1/ci-sources/c1/repos/r1/pipelines", `{"name":"TSM Drift"}`)
+	if w.Code != http.StatusCreated || !strings.Contains(w.Body.String(), "42") {
+		t.Fatalf("create pipeline: status = %d (%s)", w.Code, w.Body.String())
+	}
+
+	expectSrc()
+	w = e.do(http.MethodGet, "/api/v1/ci-sources/c1/repos/r1/prs/12", "")
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "merged") {
+		t.Fatalf("pr state: status = %d (%s)", w.Code, w.Body.String())
+	}
+}
+
+func TestCISourceProxies_GitHub(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasPrefix(r.URL.Path, "/orgs/") && strings.HasSuffix(r.URL.Path, "/repos"):
+			fmt.Fprint(w, `[{"id":1,"name":"infra","full_name":"corp-org/infra","default_branch":"main"}]`)
+		case strings.HasSuffix(r.URL.Path, "/actions/workflows"):
+			fmt.Fprint(w, `{"workflows":[{"id":1,"name":"Drift","path":".github/workflows/tsm-drift.yml","state":"active"}]}`)
+		case strings.Contains(r.URL.Path, "/pulls/"):
+			fmt.Fprint(w, `{"number":5,"state":"open","merged":false}`)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+	restore := pipelines.OverrideBaseURLsForTest("", srv.URL)
+	defer restore()
+
+	e := newCISourcesEnv(t)
+	expectSrc := func() {
+		e.mock.ExpectQuery("SELECT .+ FROM ci_sources WHERE id").WithArgs("c1").
+			WillReturnRows(ciSrcRow(t, "github_actions", nil, "ghp"))
+	}
+
+	expectSrc()
+	w := e.do(http.MethodGet, "/api/v1/ci-sources/c1/repos", "")
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"infra"`) {
+		t.Fatalf("repos: status = %d (%s)", w.Code, w.Body.String())
+	}
+
+	expectSrc()
+	w = e.do(http.MethodGet, "/api/v1/ci-sources/c1/repos/infra/workflows", "")
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "tsm-drift.yml") {
+		t.Fatalf("workflows: status = %d (%s)", w.Code, w.Body.String())
+	}
+
+	expectSrc()
+	w = e.do(http.MethodGet, "/api/v1/ci-sources/c1/repos/infra/prs/5", "")
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "open") {
+		t.Fatalf("pr state: status = %d (%s)", w.Code, w.Body.String())
+	}
+
+	// GitHub sources don't expose ADO-only discovery.
+	expectSrc()
+	if w := e.do(http.MethodGet, "/api/v1/ci-sources/c1/pipelines", ""); w.Code != http.StatusBadRequest {
+		t.Errorf("github pipelines listing: status = %d, want 400", w.Code)
+	}
+}
+
+func TestDriftDispatch_HappyPathOverFakeProvider(t *testing.T) {
+	var dispatched bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "/runs") {
+			dispatched = true
+			w.WriteHeader(http.StatusOK)
+			fmt.Fprint(w, `{}`)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+	restore := pipelines.OverrideBaseURLsForTest(srv.URL, "")
+	defer restore()
+
+	e := newDriftEnv(t)
+	e.mock.ExpectQuery("SELECT .+ FROM pipeline_connections WHERE id").WithArgs("p1").
+		WillReturnRows(pipelineHTTPRow(t, "azure_devops", "pat",
+			map[string]any{"organization": "corp", "project": "Platform", "pipeline_id": "7"}))
+	e.mock.ExpectQuery("INSERT INTO drift_runs").WillReturnRows(driftRow("tok-1"))
+
+	w := e.do(http.MethodPost, "/api/v1/drift/runs", `{"pipeline_connection_id":"p1","state_key":"app.tfstate"}`)
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("dispatch: status = %d, want 202 (%s)", w.Code, w.Body.String())
+	}
+	if !dispatched {
+		t.Error("provider never received the run dispatch")
+	}
+	if strings.Contains(w.Body.String(), "tok-1") {
+		t.Error("accepted run leaked the callback token")
+	}
+}
+
+func TestSetupSourceWorkflow_ProviderFailureIs502(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, `{"message":"repo not found"}`, http.StatusNotFound)
+	}))
+	defer srv.Close()
+	restore := pipelines.OverrideBaseURLsForTest(srv.URL, srv.URL)
+	defer restore()
+
+	e := newCISourcesEnv(t)
+	proj := "Platform"
+	e.mock.ExpectQuery("SELECT .+ FROM ci_sources WHERE id").WithArgs("c1").
+		WillReturnRows(ciSrcRow(t, "azure_devops", &proj, "pat"))
+
+	w := e.do(http.MethodPost, "/api/v1/ci-sources/c1/repos/ghost/workflow-setup",
+		`{"files":[{"kind":"drift","content":"yaml"}]}`)
+	if w.Code != http.StatusBadGateway {
+		t.Fatalf("provider failure: status = %d, want 502 (%s)", w.Code, w.Body.String())
+	}
+}
