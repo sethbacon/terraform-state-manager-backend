@@ -24,7 +24,9 @@ RUN CLEAN_VERSION="${VERSION#v}" && \
 # Stage 2: minimal runtime image.
 FROM alpine:3.21
 
-RUN apk add --no-cache ca-certificates tzdata wget && \
+# git: go-git shells out to git-upload-pack for file-path remotes (http/ssh
+# remotes are pure-Go); needed so local-path git sources work in-container.
+RUN apk add --no-cache ca-certificates tzdata wget git && \
     addgroup -g 1000 tsm && \
     adduser -D -u 1000 -G tsm tsm
 

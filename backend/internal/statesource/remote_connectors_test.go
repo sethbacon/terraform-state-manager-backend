@@ -4,6 +4,10 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"crypto/md5" // #nosec G501 -- mirrors the connector's HCP checksum
+	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -14,6 +18,7 @@ import (
 	"time"
 
 	"github.com/go-git/go-git/v5"
+	gitcfg "github.com/go-git/go-git/v5/config"
 	"github.com/go-git/go-git/v5/plumbing/object"
 )
 
@@ -227,13 +232,113 @@ func TestGit_ListAndRead(t *testing.T) {
 	}
 }
 
-func TestGit_CloneFailureAndWrite(t *testing.T) {
+func TestGit_CloneFailure(t *testing.T) {
 	g := &gitConn{repoURL: filepath.Join(t.TempDir(), "nope")}
 	if _, err := g.List(context.Background()); err == nil || !strings.Contains(err.Error(), "clone failed") {
 		t.Errorf("clone failure: %v", err)
 	}
-	if err := g.Write(context.Background(), "k", nil); err == nil {
-		t.Error("git writes must be rejected")
+	if err := g.Write(context.Background(), "k.tfstate", []byte("{}")); err == nil ||
+		!strings.Contains(err.Error(), "clone failed") {
+		t.Errorf("write against a missing repo: %v", err)
+	}
+}
+
+// seedBareGitRepo seeds history into a bare repository (real remotes are
+// bare; non-bare local remotes refuse pushes to the checked-out branch).
+func seedBareGitRepo(t *testing.T) string {
+	t.Helper()
+	bare := t.TempDir()
+	if _, err := git.PlainInit(bare, true); err != nil {
+		t.Fatalf("bare init: %v", err)
+	}
+	work := seedGitRepo(t)
+	repo, err := git.PlainOpen(work)
+	if err != nil {
+		t.Fatalf("open work repo: %v", err)
+	}
+	if _, err := repo.CreateRemote(&gitcfg.RemoteConfig{Name: "bare", URLs: []string{bare}}); err != nil {
+		t.Fatalf("remote: %v", err)
+	}
+	if err := repo.Push(&git.PushOptions{RemoteName: "bare"}); err != nil {
+		t.Fatalf("seed push: %v", err)
+	}
+	return bare
+}
+
+// branchTipContent reads a file from the tip commit of the repo's HEAD branch.
+func branchTipContent(t *testing.T, dir, file string) (string, string) {
+	t.Helper()
+	repo, err := git.PlainOpen(dir)
+	if err != nil {
+		t.Fatalf("open repo: %v", err)
+	}
+	head, err := repo.Head()
+	if err != nil {
+		t.Fatalf("head: %v", err)
+	}
+	commit, err := repo.CommitObject(head.Hash())
+	if err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	f, err := commit.File(file)
+	if err != nil {
+		t.Fatalf("file %s at tip: %v", file, err)
+	}
+	content, _ := f.Contents()
+	return content, commit.Message
+}
+
+func TestGit_WriteCommitsAndPushes(t *testing.T) {
+	dir := seedBareGitRepo(t)
+	g := &gitConn{repoURL: dir, authorName: "TSM", authorEmail: "tsm@noreply.local"}
+
+	// Overwrite an existing state.
+	if err := g.Write(context.Background(), "prod/app.tfstate", []byte(`{"version":4,"serial":10}`)); err != nil {
+		t.Fatalf("Write existing: %v", err)
+	}
+	content, msg := branchTipContent(t, dir, "prod/app.tfstate")
+	if !strings.Contains(content, `"serial":10`) {
+		t.Errorf("pushed content = %s", content)
+	}
+	if !strings.Contains(msg, "tsm: write state prod/app.tfstate") {
+		t.Errorf("commit message = %q", msg)
+	}
+
+	// New nested key (transfer target): directories materialize in the tree.
+	if err := g.Write(context.Background(), "envs/dr/site.tfstate", []byte(`{"version":4,"serial":1}`)); err != nil {
+		t.Fatalf("Write new nested: %v", err)
+	}
+	if content, _ := branchTipContent(t, dir, "envs/dr/site.tfstate"); !strings.Contains(content, `"serial":1`) {
+		t.Errorf("new file content = %s", content)
+	}
+
+	// Read-back through the connector sees the pushed bytes.
+	rs, err := g.Read(context.Background(), "envs/dr/site.tfstate")
+	if err != nil || !strings.Contains(string(rs.Data), `"serial":1`) {
+		t.Fatalf("read-back: %v (%s)", err, rs.Data)
+	}
+}
+
+func TestGit_WriteGuards(t *testing.T) {
+	dir := seedBareGitRepo(t)
+	g := &gitConn{repoURL: dir}
+
+	// Identical content is a no-op: no new commit lands.
+	_, msgBefore := branchTipContent(t, dir, "prod/app.tfstate")
+	if err := g.Write(context.Background(), "prod/app.tfstate", []byte(`{"version":4,"serial":9}`)); err != nil {
+		t.Fatalf("no-op write: %v", err)
+	}
+	if _, msgAfter := branchTipContent(t, dir, "prod/app.tfstate"); msgAfter != msgBefore {
+		t.Errorf("no-op write created a commit: %q", msgAfter)
+	}
+
+	// Key guards: extension and traversal.
+	if err := g.Write(context.Background(), "notes.txt", []byte("x")); err == nil ||
+		!strings.Contains(err.Error(), ".tfstate") {
+		t.Errorf("extension guard: %v", err)
+	}
+	if err := g.Write(context.Background(), "../escape.tfstate", []byte("{}")); err == nil {
+		t.Error("traversal guard must reject ../ keys")
 	}
 }
 
@@ -340,5 +445,198 @@ func TestCloudConstructorValidation(t *testing.T) {
 	}
 	if _, err := newPG(map[string]any{}, nil); err == nil {
 		t.Error("pg: missing connection config must error")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// HCP write: resolve/create workspace, serial+lineage guards, lock lifecycle
+// ---------------------------------------------------------------------------
+
+// hcpWriteFake models the workspace surface Write touches and records the
+// call order so lock/unlock sequencing is assertable.
+type hcpWriteFake struct {
+	srv        *httptest.Server
+	byName     map[string]string // name -> id
+	serial     map[string]int64  // id -> current serial (absent = no state)
+	lineage    map[string]string
+	locked     map[string]bool
+	lockErr    bool
+	svErr      bool
+	calls      []string
+	lastSV     map[string]any
+	lastCreate string
+}
+
+func newHCPWriteFake(t *testing.T) (*hcp, *hcpWriteFake) {
+	t.Helper()
+	f := &hcpWriteFake{
+		byName:  map[string]string{"existing": "ws-exist"},
+		serial:  map[string]int64{"ws-exist": 5},
+		lineage: map[string]string{"ws-exist": "lin-A"},
+		locked:  map[string]bool{},
+	}
+	f.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/api/v2/organizations/acme/workspaces/"):
+			name := strings.TrimPrefix(r.URL.Path, "/api/v2/organizations/acme/workspaces/")
+			id, ok := f.byName[name]
+			if !ok {
+				w.WriteHeader(http.StatusNotFound)
+				fmt.Fprint(w, `{"errors":[{"status":"404"}]}`)
+				return
+			}
+			fmt.Fprintf(w, `{"data":{"id":%q,"attributes":{"locked":false}}}`, id)
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v2/organizations/acme/workspaces":
+			var req struct {
+				Data struct {
+					Attributes struct {
+						Name string `json:"name"`
+					} `json:"attributes"`
+				} `json:"data"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&req)
+			f.lastCreate = req.Data.Attributes.Name
+			f.byName[req.Data.Attributes.Name] = "ws-new1"
+			f.calls = append(f.calls, "create-ws")
+			w.WriteHeader(http.StatusCreated)
+			fmt.Fprint(w, `{"data":{"id":"ws-new1"}}`)
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/current-state-version"):
+			id := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/api/v2/workspaces/"), "/current-state-version")
+			serial, ok := f.serial[id]
+			if !ok {
+				w.WriteHeader(http.StatusNotFound)
+				fmt.Fprint(w, `{"errors":[{"status":"404","title":"not found"}]}`)
+				return
+			}
+			fmt.Fprintf(w, `{"data":{"attributes":{"serial":%d,"lineage":%q,"hosted-state-download-url":""}}}`, serial, f.lineage[id])
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/actions/lock"):
+			if f.lockErr {
+				w.WriteHeader(http.StatusConflict)
+				fmt.Fprint(w, `{"errors":[{"status":"409","title":"locked by run"}]}`)
+				return
+			}
+			f.calls = append(f.calls, "lock")
+			fmt.Fprint(w, `{}`)
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/actions/unlock"):
+			f.calls = append(f.calls, "unlock")
+			fmt.Fprint(w, `{}`)
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/state-versions"):
+			if f.svErr {
+				w.WriteHeader(http.StatusUnprocessableEntity)
+				fmt.Fprint(w, `{"errors":[{"status":"422","title":"invalid serial"}]}`)
+				return
+			}
+			var req struct {
+				Data struct {
+					Attributes map[string]any `json:"attributes"`
+				} `json:"data"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&req)
+			f.lastSV = req.Data.Attributes
+			f.calls = append(f.calls, "state-version")
+			w.WriteHeader(http.StatusCreated)
+			fmt.Fprint(w, `{"data":{"id":"sv-1"}}`)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(f.srv.Close)
+	return newHCPOver(f.srv), f
+}
+
+func TestHCP_WriteCreatesWorkspaceByName(t *testing.T) {
+	conn, f := newHCPWriteFake(t)
+	state := []byte(`{"version":4,"serial":1,"lineage":"lin-new"}`)
+
+	if err := conn.Write(context.Background(), "fresh-workspace", state); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if f.lastCreate != "fresh-workspace" {
+		t.Errorf("created workspace = %q", f.lastCreate)
+	}
+	want := []string{"create-ws", "lock", "state-version", "unlock"}
+	if strings.Join(f.calls, ",") != strings.Join(want, ",") {
+		t.Errorf("call order = %v, want %v", f.calls, want)
+	}
+	if f.lastSV["serial"] != float64(1) || f.lastSV["lineage"] != "lin-new" {
+		t.Errorf("state-version attributes = %v", f.lastSV)
+	}
+	decoded, _ := base64.StdEncoding.DecodeString(f.lastSV["state"].(string))
+	if string(decoded) != string(state) {
+		t.Errorf("uploaded state mismatch: %s", decoded)
+	}
+	sum := md5.Sum(state)
+	if f.lastSV["md5"] != hex.EncodeToString(sum[:]) {
+		t.Errorf("md5 = %v", f.lastSV["md5"])
+	}
+}
+
+func TestHCP_WriteGuards(t *testing.T) {
+	// Serial must advance: existing ws-exist is at serial 5.
+	conn, f := newHCPWriteFake(t)
+	err := conn.Write(context.Background(), "existing", []byte(`{"version":4,"serial":5,"lineage":"lin-A"}`))
+	if err == nil || !strings.Contains(err.Error(), "serial") {
+		t.Errorf("stale serial: %v", err)
+	}
+	if len(f.calls) != 0 {
+		t.Errorf("guard must reject before locking, calls = %v", f.calls)
+	}
+
+	// Lineage must match.
+	err = conn.Write(context.Background(), "existing", []byte(`{"version":4,"serial":6,"lineage":"lin-OTHER"}`))
+	if err == nil || !strings.Contains(err.Error(), "lineage") {
+		t.Errorf("lineage mismatch: %v", err)
+	}
+
+	// Serial 6 + matching lineage passes.
+	if err := conn.Write(context.Background(), "existing", []byte(`{"version":4,"serial":6,"lineage":"lin-A"}`)); err != nil {
+		t.Fatalf("valid overwrite: %v", err)
+	}
+
+	// Workspace names are validated before any create.
+	err = conn.Write(context.Background(), "bad name!", []byte(`{"version":4,"serial":1}`))
+	if err == nil || !strings.Contains(err.Error(), "invalid workspace name") {
+		t.Errorf("name validation: %v", err)
+	}
+
+	// Junk payloads never reach the API.
+	if err := conn.Write(context.Background(), "existing", []byte("not json")); err == nil {
+		t.Error("non-JSON state must error")
+	}
+}
+
+func TestHCP_WriteLockLifecycle(t *testing.T) {
+	// Lock conflict: surfaced, nothing uploaded, no unlock attempted.
+	conn, f := newHCPWriteFake(t)
+	f.lockErr = true
+	err := conn.Write(context.Background(), "existing", []byte(`{"version":4,"serial":6,"lineage":"lin-A"}`))
+	if err == nil || !strings.Contains(err.Error(), "lock") {
+		t.Errorf("lock conflict: %v", err)
+	}
+	for _, c := range f.calls {
+		if c == "state-version" || c == "unlock" {
+			t.Errorf("nothing should run after a failed lock: %v", f.calls)
+		}
+	}
+
+	// Upload failure: workspace still unlocked afterwards.
+	conn2, f2 := newHCPWriteFake(t)
+	f2.svErr = true
+	err = conn2.Write(context.Background(), "existing", []byte(`{"version":4,"serial":6,"lineage":"lin-A"}`))
+	if err == nil {
+		t.Fatal("sv failure must surface")
+	}
+	if strings.Join(f2.calls, ",") != "lock,unlock" {
+		t.Errorf("unlock must follow a failed upload: %v", f2.calls)
+	}
+}
+
+func TestHCP_ReadResolvesWorkspaceNames(t *testing.T) {
+	// A name key resolves to its ID before the state-version read.
+	conn, f := newHCPWriteFake(t)
+	_ = f
+	if _, err := conn.Read(context.Background(), "missing-name"); err == nil ||
+		!strings.Contains(err.Error(), "not found in organization") {
+		t.Errorf("missing name: %v", err)
 	}
 }

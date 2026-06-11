@@ -25,6 +25,23 @@ func fakeK8s(t *testing.T) (*k8s, map[string]map[string]string) {
 			return
 		}
 		switch {
+		case r.URL.Path == "/api/v1/namespaces/default/secrets" && r.Method == http.MethodPost:
+			var manifest struct {
+				Metadata struct {
+					Name   string            `json:"name"`
+					Labels map[string]string `json:"labels"`
+				} `json:"metadata"`
+				Type string            `json:"type"`
+				Data map[string]string `json:"data"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&manifest)
+			if manifest.Type != "Opaque" || manifest.Metadata.Labels["app.kubernetes.io/managed-by"] != "terraform-state-manager" {
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			secrets[manifest.Metadata.Name] = manifest.Data
+			w.WriteHeader(http.StatusCreated)
+			fmt.Fprint(w, `{}`)
 		case r.URL.Path == "/api/v1/namespaces/default/secrets" && r.Method == http.MethodGet:
 			items := make([]map[string]any, 0, len(secrets))
 			for name, data := range secrets {
@@ -130,8 +147,9 @@ func TestK8s_ReadWrite(t *testing.T) {
 	if !strings.Contains(string(stored), `"serial":6`) {
 		t.Errorf("Write did not patch the secret: %s", stored)
 	}
-	if err := conn.Write(ctx, "default/missing", []byte("{}")); err == nil {
-		t.Error("write to a missing secret must error")
+	// Missing secrets are now created on write (transfer targets).
+	if err := conn.Write(ctx, "default/missing", []byte("{}")); err != nil {
+		t.Errorf("write to a missing secret must create it: %v", err)
 	}
 }
 
@@ -140,5 +158,34 @@ func TestK8s_AuthFailureSurfaces(t *testing.T) {
 	conn.token = "wrong"
 	if _, err := conn.List(context.Background()); err == nil || !strings.Contains(err.Error(), "401") {
 		t.Errorf("auth failure must surface the status: %v", err)
+	}
+}
+
+func TestK8s_WriteCreatesMissingSecret(t *testing.T) {
+	conn, secrets := fakeK8s(t)
+
+	// New key -> PATCH 404 -> POST create with the managed-by label.
+	if err := conn.Write(context.Background(), "default/brand-new", []byte(`{"version":4}`)); err != nil {
+		t.Fatalf("Write new: %v", err)
+	}
+	created, ok := secrets["brand-new"]
+	if !ok {
+		t.Fatal("secret was not created")
+	}
+	if decoded, _ := base64.StdEncoding.DecodeString(created["tfstate"]); string(decoded) != `{"version":4}` {
+		t.Errorf("created tfstate = %q", decoded)
+	}
+
+	// Existing key still PATCHes in place (no duplicate create).
+	if err := conn.Write(context.Background(), "default/brand-new", []byte(`{"version":4,"serial":1}`)); err != nil {
+		t.Fatalf("Write existing: %v", err)
+	}
+	if decoded, _ := base64.StdEncoding.DecodeString(secrets["brand-new"]["tfstate"]); string(decoded) != `{"version":4,"serial":1}` {
+		t.Errorf("patched tfstate = %q", decoded)
+	}
+
+	// Malformed key never reaches the API.
+	if err := conn.Write(context.Background(), "no-namespace", nil); err == nil {
+		t.Error("invalid key must error")
 	}
 }

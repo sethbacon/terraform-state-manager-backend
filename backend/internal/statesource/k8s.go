@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"os"
@@ -167,6 +168,9 @@ func (k *k8s) secretURL(key string) (string, error) {
 		k.server, url.PathEscape(parts[0]), url.PathEscape(parts[1])), nil
 }
 
+// k8sLog tags mutation logs from this connector.
+var k8sLog = slog.With("component", "statesource.k8s")
+
 func (k *k8s) Read(ctx context.Context, key string) (*RawState, error) {
 	su, err := k.secretURL(key)
 	if err != nil {
@@ -220,10 +224,49 @@ func (k *k8s) Write(ctx context.Context, key string, data []byte) error {
 		return fmt.Errorf("kubernetes write failed: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode == http.StatusNotFound {
+		// New state key (e.g. a transfer target): create the Secret instead.
+		return k.createSecret(ctx, key, data)
+	}
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
 		return fmt.Errorf("kubernetes write returned status %d: %s", resp.StatusCode, string(body))
 	}
+	return nil
+}
+
+// createSecret creates a new Opaque Secret holding the state, labelled so its
+// origin is traceable. Only called when a write targets a missing Secret.
+func (k *k8s) createSecret(ctx context.Context, key string, data []byte) error {
+	parts := strings.SplitN(key, "/", 2)
+	if len(parts) != 2 {
+		return fmt.Errorf("invalid state key %q (expected namespace/name)", key)
+	}
+	manifest, err := json.Marshal(map[string]any{
+		"apiVersion": "v1",
+		"kind":       "Secret",
+		"metadata": map[string]any{
+			"name":      parts[1],
+			"namespace": parts[0],
+			"labels":    map[string]string{"app.kubernetes.io/managed-by": "terraform-state-manager"},
+		},
+		"type": "Opaque",
+		"data": map[string]string{"tfstate": base64.StdEncoding.EncodeToString(data)},
+	})
+	if err != nil {
+		return err
+	}
+	createURL := fmt.Sprintf("%s/api/v1/namespaces/%s/secrets", k.server, url.PathEscape(parts[0]))
+	resp, err := k.do(ctx, http.MethodPost, createURL, "application/json", bytes.NewReader(manifest))
+	if err != nil {
+		return fmt.Errorf("kubernetes secret create failed: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return fmt.Errorf("kubernetes secret create returned status %d: %s", resp.StatusCode, string(body))
+	}
+	k8sLog.Info("created state secret", "namespace", parts[0], "name", parts[1], "bytes", len(data))
 	return nil
 }
 

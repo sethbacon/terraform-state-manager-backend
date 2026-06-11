@@ -61,14 +61,14 @@ func TestLocal_LockUnlock(t *testing.T) {
 }
 
 func TestLocal_LockContainsTraversal(t *testing.T) {
-	// resolve() strips "../" lexically, so a traversal key is confined to the
-	// base path — the lock file must land inside it, never one level up.
+	// resolve() rejects traversal keys outright (it used to silently confine
+	// them to the base, which made the effective path surprising).
 	conn, dir := newLocalAt(t)
-	if _, err := conn.Lock(context.Background(), "../outside.tfstate"); err != nil {
-		t.Fatalf("Lock: %v", err)
+	if _, err := conn.Lock(context.Background(), "../outside.tfstate"); err == nil {
+		t.Fatal("traversal key must be rejected")
 	}
-	if _, err := os.Stat(filepath.Join(dir, "outside.tfstate.tsmlock")); err != nil {
-		t.Errorf("confined lock file missing: %v", err)
+	if _, err := os.Stat(filepath.Join(dir, "outside.tfstate.tsmlock")); !os.IsNotExist(err) {
+		t.Error("no lock file may be created for a rejected key")
 	}
 	if _, err := os.Stat(filepath.Join(filepath.Dir(dir), "outside.tfstate.tsmlock")); !os.IsNotExist(err) {
 		t.Error("lock file escaped the base path")

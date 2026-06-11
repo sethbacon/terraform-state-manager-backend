@@ -92,6 +92,12 @@ func (l *local) Write(_ context.Context, key string, data []byte) error {
 	if err != nil {
 		return err
 	}
+	// New keys may live in not-yet-existing subdirectories (transfer targets
+	// like envs/prod/app.tfstate); resolve() already confined the path to the
+	// base directory.
+	if err := os.MkdirAll(filepath.Dir(full), 0o750); err != nil {
+		return fmt.Errorf("failed to create directories for %q: %w", key, err)
+	}
 	tmp := full + ".tmp"
 	if err := os.WriteFile(tmp, data, 0o600); err != nil { // #nosec G304 -- path validated by resolve()
 		return fmt.Errorf("failed to write state %q: %w", key, err)
@@ -158,7 +164,14 @@ func (l *local) lockPath(key string) (string, error) {
 // via both lexical "../" stripping and symlink resolution (a symlink inside the
 // base directory must not redirect reads/writes outside it).
 func (l *local) resolve(key string) (string, error) {
-	clean := filepath.Clean("/" + filepath.FromSlash(key)) // force-root then clean to strip ../
+	// Reject traversal segments outright rather than silently relocating the
+	// key inside the base after the force-root clean.
+	for _, seg := range strings.Split(key, "/") {
+		if seg == ".." {
+			return "", fmt.Errorf("invalid state key %q (path traversal)", key)
+		}
+	}
+	clean := filepath.Clean("/" + filepath.FromSlash(key)) // force-root then clean
 	full := filepath.Join(l.basePath, clean)
 	if full != l.basePath && !strings.HasPrefix(full, l.basePath+string(os.PathSeparator)) {
 		return "", fmt.Errorf("invalid state key %q", key)
