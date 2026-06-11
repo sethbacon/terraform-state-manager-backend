@@ -203,6 +203,7 @@ func (h *AuthHandlers) LoginHandler() gin.HandlerFunc {
 // CallbackHandler completes the OIDC flow: exchanges the code, provisions the
 // user + membership, issues a JWT, sets the session cookie, and redirects to the
 // frontend callback page.
+// coverage:skip:requires-oidc-issuer
 func (h *AuthHandlers) CallbackHandler() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		frontendBase := deriveFrontendURL(h.cfg)

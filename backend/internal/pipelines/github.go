@@ -57,8 +57,8 @@ func DispatchGitHub(ctx context.Context, token string, cfg GitHubConfig, ref str
 	}
 
 	body, _ := json.Marshal(map[string]any{"ref": ref, "inputs": inputs})
-	u := fmt.Sprintf("https://api.github.com/repos/%s/%s/actions/workflows/%s/dispatches",
-		cfg.Owner, cfg.Repo, cfg.WorkflowID)
+	u := fmt.Sprintf("%s/repos/%s/%s/actions/workflows/%s/dispatches",
+		githubAPIBaseURL, cfg.Owner, cfg.Repo, cfg.WorkflowID)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u, bytes.NewReader(body))
 	if err != nil {
 		return err

@@ -77,6 +77,7 @@ func NewProvider(cfg config.LDAPConfig) (*Provider, error) {
 }
 
 // Authenticate performs search-bind authentication and returns the user's info.
+// coverage:skip:requires-ldap-server
 func (p *Provider) Authenticate(username, password string) (*UserInfo, error) {
 	// Harden against LDAP unauthenticated/anonymous bind: a non-empty password is
 	// required, and an empty username can never identify a user.

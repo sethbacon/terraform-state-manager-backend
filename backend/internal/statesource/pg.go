@@ -44,6 +44,7 @@ func newPG(config, credentials map[string]any) (*pgSource, error) {
 }
 
 // open returns a short-lived connection; this connector is a scanner, not a pool.
+// coverage:skip:requires-database
 func (p *pgSource) open() (*sql.DB, error) {
 	db, err := sql.Open("postgres", p.connStr)
 	if err != nil {
@@ -61,6 +62,7 @@ func (p *pgSource) table() string {
 	return fmt.Sprintf("%q.states", p.schema)
 }
 
+// coverage:skip:requires-database
 func (p *pgSource) List(ctx context.Context) ([]StateRef, error) {
 	db, err := p.open()
 	if err != nil {
@@ -87,6 +89,7 @@ func (p *pgSource) List(ctx context.Context) ([]StateRef, error) {
 	return refs, rows.Err()
 }
 
+// coverage:skip:requires-database
 func (p *pgSource) Read(ctx context.Context, key string) (*RawState, error) {
 	db, err := p.open()
 	if err != nil {
@@ -107,6 +110,7 @@ func (p *pgSource) Read(ctx context.Context, key string) (*RawState, error) {
 }
 
 // Write upserts the state row, matching the pg backend's name-keyed layout.
+// coverage:skip:requires-database
 func (p *pgSource) Write(ctx context.Context, key string, data []byte) error {
 	db, err := p.open()
 	if err != nil {

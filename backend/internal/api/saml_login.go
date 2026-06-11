@@ -19,6 +19,7 @@ import (
 // saml:<idp-name>. It mints a single-use state token, records the AuthnRequest ID
 // in session state (so the ACS can validate InResponseTo), and redirects the
 // browser to the IdP. Called from LoginHandler.
+// coverage:skip:requires-saml-idp
 func (h *AuthHandlers) samlLogin(c *gin.Context, provider string) {
 	if len(h.samlProviders) == 0 {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "SAML provider not configured"})
@@ -77,6 +78,7 @@ func (h *AuthHandlers) samlLogin(c *gin.Context, provider string) {
 // @Success      200  {string}  string  "SAML SP metadata XML"
 // @Failure      404  {object}  map[string]interface{}
 // @Router       /auth/saml/metadata [get]
+// coverage:skip:requires-saml-idp
 func (h *AuthHandlers) SAMLMetadataHandler() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		var provider *saml.Provider
@@ -121,6 +123,7 @@ func (h *AuthHandlers) SAMLMetadataHandler() gin.HandlerFunc {
 // @Success      302  {string}  string  "Redirects to the frontend /auth/callback"
 // @Failure      400  {object}  map[string]interface{}
 // @Router       /auth/saml/acs [post]
+// coverage:skip:requires-saml-idp
 func (h *AuthHandlers) SAMLACSHandler() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		frontendBase := deriveFrontendURL(h.cfg)

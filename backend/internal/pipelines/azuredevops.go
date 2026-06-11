@@ -57,8 +57,8 @@ func DispatchAzureDevOps(ctx context.Context, pat string, cfg AzureDevOpsConfig,
 		}
 	}
 	body, _ := json.Marshal(payload)
-	u := fmt.Sprintf("https://dev.azure.com/%s/%s/_apis/pipelines/%s/runs?api-version=7.1",
-		cfg.Organization, cfg.Project, cfg.PipelineID)
+	u := fmt.Sprintf("%s/%s/%s/_apis/pipelines/%s/runs?api-version=7.1",
+		azureDevOpsBaseURL, cfg.Organization, cfg.Project, cfg.PipelineID)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u, bytes.NewReader(body))
 	if err != nil {
 		return err
