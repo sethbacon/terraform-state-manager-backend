@@ -20,10 +20,59 @@ import (
 // per source (kept modest — HCP rate-limits ~30 req/30s per token) under a hard
 // dashboardBudget; whatever doesn't finish is dropped and the source is counted
 // in source_errors so the page shows partial data instead of timing out.
+//
+// On top of that the result is CACHED: a background refresher recomputes every
+// dashboardRefreshInterval, the handler serves the cache while it is younger
+// than dashboardCacheTTL, and ?refresh=true forces a recompute.
 const (
 	dashboardBudget          = 12 * time.Second
 	dashboardReadConcurrency = 6
+	dashboardRefreshInterval = 5 * time.Minute
+	dashboardCacheTTL        = 10 * time.Minute
 )
+
+// overviewCache holds the most recent aggregation result.
+type overviewCache struct {
+	mu   sync.Mutex
+	data gin.H
+	at   time.Time
+}
+
+func (c *overviewCache) get() (gin.H, time.Time, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.data, c.at, c.data != nil
+}
+
+func (c *overviewCache) set(d gin.H) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.data = d
+	c.at = time.Now()
+}
+
+// StartOverviewRefresher computes the dashboard overview in the background on a
+// fixed interval so page loads serve a warm cache. Returns a stop func.
+func (h *SourcesHandlers) StartOverviewRefresher() func() {
+	stop := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(dashboardRefreshInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-stop:
+				return
+			case <-ticker.C:
+				ctx, cancel := context.WithTimeout(context.Background(), dashboardBudget)
+				if data, err := h.computeOverview(ctx); err == nil {
+					h.overview.set(data)
+				}
+				cancel()
+			}
+		}
+	}()
+	return func() { close(stop) }
+}
 
 // DashboardOverview aggregates analyzer metrics across every configured source for
 // the home page: totals (RUM, managed, data), and provider / resource-type /
@@ -41,13 +90,31 @@ const (
 // @Router       /dashboard/overview [get]
 func (h *SourcesHandlers) DashboardOverview() gin.HandlerFunc {
 	return func(c *gin.Context) {
+		force := c.Query("refresh") == "true"
+		if !force {
+			if data, at, ok := h.overview.get(); ok && time.Since(at) < dashboardCacheTTL {
+				c.JSON(http.StatusOK, data)
+				return
+			}
+		}
 		ctx, cancel := context.WithTimeout(c.Request.Context(), dashboardBudget)
 		defer cancel()
-
-		sources, err := h.repo.List(ctx)
+		data, err := h.computeOverview(ctx)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to list sources"})
 			return
+		}
+		h.overview.set(data)
+		c.JSON(http.StatusOK, data)
+	}
+}
+
+// computeOverview runs the budgeted, bounded-concurrent aggregation.
+func (h *SourcesHandlers) computeOverview(ctx context.Context) (gin.H, error) {
+	{
+		sources, err := h.repo.List(ctx)
+		if err != nil {
+			return nil, err
 		}
 
 		var mu sync.Mutex
@@ -126,7 +193,7 @@ func (h *SourcesHandlers) DashboardOverview() gin.HandlerFunc {
 			}
 		}
 
-		c.JSON(http.StatusOK, gin.H{
+		return gin.H{
 			"sources":            len(sources),
 			"states":             stateCount,
 			"rum":                rum,
@@ -137,7 +204,8 @@ func (h *SourcesHandlers) DashboardOverview() gin.HandlerFunc {
 			"resource_types":     topCounts(resTypes, 10),
 			"terraform_versions": topCounts(versions, 0),
 			"source_errors":      sourceErrors,
-		})
+			"refreshed_at":       time.Now().UTC().Format(time.RFC3339),
+		}, nil
 	}
 }
 

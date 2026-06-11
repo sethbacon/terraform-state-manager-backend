@@ -252,7 +252,13 @@ func NewRouter(cfg *config.Config, database *sql.DB, identityDB *sql.DB) (*gin.E
 		if database != nil {
 			runner := scheduler.New(repositories.NewScheduleRepository(database), driftDisp)
 			runner.Start()
-			stop = runner.Stop
+			// Keep the dashboard cache warm alongside the schedule runner.
+			stopOverview := sources.StartOverviewRefresher()
+			runnerStop := runner.Stop
+			stop = func() {
+				runnerStop()
+				stopOverview()
+			}
 		}
 	}
 

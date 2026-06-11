@@ -23,6 +23,7 @@ type SourcesHandlers struct {
 	transferRepo *repositories.TransferRepository
 	lockRepo     *repositories.StateLockRepository
 	audit        auditor
+	overview     overviewCache
 }
 
 // NewSourcesHandlers constructs the handlers over the app (public) connection,
