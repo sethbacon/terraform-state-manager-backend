@@ -48,7 +48,7 @@ func TestConsulListReadWrite(t *testing.T) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Query().Get("recurse") == "true":
 			_ = json.NewEncoder(w).Encode([]consulKVEntry{
-				{Key: "terraform/prod", Value: base64.StdEncoding.EncodeToString([]byte(stateBody))},
+				{Key: "terraform/prod", Value: base64.StdEncoding.EncodeToString([]byte(stateBody)), ModifyIndex: 41},
 				{Key: "terraform/sub/", Value: ""}, // directory placeholder: skipped
 			})
 		case r.Method == http.MethodGet && r.URL.Query().Get("raw") == "true":
@@ -75,6 +75,10 @@ func TestConsulListReadWrite(t *testing.T) {
 	}
 	if len(refs) != 1 || refs[0].Key != "terraform/prod" || refs[0].Size != int64(len(stateBody)) {
 		t.Fatalf("unexpected refs: %+v", refs)
+	}
+	// ModifyIndex feeds the sync change marker (same-size edits still detected).
+	if refs[0].Version != "41" {
+		t.Fatalf("version = %q, want ModifyIndex 41", refs[0].Version)
 	}
 	rs, err := c.Read(context.Background(), "terraform/prod")
 	if err != nil {

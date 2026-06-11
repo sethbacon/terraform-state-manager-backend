@@ -335,6 +335,10 @@ func TestMarker(t *testing.T) {
 		{statesource.StateRef{Size: 0, LastModified: &now}, "0|2026-06-11T09:00:00Z"}, // HCP: updated-at only
 		{statesource.StateRef{Size: 1024}, "1024|"},
 		{statesource.StateRef{}, ""}, // no metadata -> always re-read
+		// Version token disambiguates same-size changes (consul ModifyIndex,
+		// pg content hash) and stands alone when size/timestamp are absent.
+		{statesource.StateRef{Size: 1024, Version: "41"}, "1024||41"},
+		{statesource.StateRef{Version: "d41d8cd9"}, "0||d41d8cd9"},
 	}
 	for i, c := range cases {
 		if got := marker(c.ref); got != c.want {

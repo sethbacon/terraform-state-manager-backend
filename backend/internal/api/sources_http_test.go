@@ -63,6 +63,7 @@ func newSourcesEnv(t *testing.T) *sourcesEnv {
 	v1.GET("/sources/:id/state/raw", h.RawState())
 	v1.PUT("/sources/:id/state/raw", h.EditState())
 	v1.GET("/sources/:id/state/resources", h.ListStateResources())
+	v1.GET("/sources/:id/state/outputs", h.StateOutputs())
 	v1.GET("/sources/:id/state/report", h.StateReport())
 	v1.POST("/sources/:id/state/operations", h.StateOperation())
 	v1.GET("/sources/:id/state/backups", h.ListBackups())
@@ -213,6 +214,45 @@ func TestListStates_RealLocalSource(t *testing.T) {
 		WillReturnError(errors.New("store down"))
 	if w := e.do(http.MethodGet, "/api/v1/sources/s1/states", ""); w.Code != http.StatusOK {
 		t.Errorf("listing must survive a store failure: status = %d", w.Code)
+	}
+}
+
+func TestStateOutputs(t *testing.T) {
+	e := newSourcesEnv(t)
+	e.seed(t, "app.tfstate", `{
+		"version": 4, "lineage": "lin-1", "serial": 7,
+		"outputs": {
+			"vpc_id": {"value": "vpc-123", "type": "string"},
+			"db_password": {"value": "hunter2", "type": "string", "sensitive": true}
+		},
+		"resources": []
+	}`)
+
+	e.expectSource("s1", e.dir)
+	w := e.do(http.MethodGet, "/api/v1/sources/s1/state/outputs?key=app.tfstate", "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d (%s)", w.Code, w.Body.String())
+	}
+	body := w.Body.String()
+	if !strings.Contains(body, `"vpc_id"`) || !strings.Contains(body, `"vpc-123"`) {
+		t.Errorf("plain output missing: %s", body)
+	}
+	if !strings.Contains(body, `"db_password"`) || !strings.Contains(body, `"sensitive":true`) {
+		t.Errorf("sensitive output not listed: %s", body)
+	}
+	// The sensitive VALUE must never cross the API boundary.
+	if strings.Contains(body, "hunter2") {
+		t.Errorf("sensitive value leaked: %s", body)
+	}
+
+	// Missing key short-circuits; junk state is a 422.
+	if w := e.do(http.MethodGet, "/api/v1/sources/s1/state/outputs", ""); w.Code != http.StatusBadRequest {
+		t.Errorf("missing key: status = %d, want 400", w.Code)
+	}
+	e.seed(t, "junk.tfstate", `{"hello":"world"}`)
+	e.expectSource("s1", e.dir)
+	if w := e.do(http.MethodGet, "/api/v1/sources/s1/state/outputs?key=junk.tfstate", ""); w.Code != http.StatusUnprocessableEntity {
+		t.Errorf("junk state: status = %d, want 422", w.Code)
 	}
 }
 

@@ -310,6 +310,32 @@ func (h *SourcesHandlers) ListStateResources() gin.HandlerFunc {
 	}
 }
 
+// StateOutputs returns the root-module outputs for a state file (?key=...).
+// Sensitive output values are redacted server-side.
+// @Summary      List state outputs
+// @Tags         Sources
+// @Produce      json
+// @Param        id   path  string  true  "Source ID"
+// @Param        key  query string  true  "State file key"
+// @Success      200  {object}  map[string]interface{}
+// @Security     BearerAuth
+// @Security     CookieAuth
+// @Router       /sources/{id}/state/outputs [get]
+func (h *SourcesHandlers) StateOutputs() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		rs, ok := h.readState(c)
+		if !ok {
+			return
+		}
+		outputs, err := analyzer.ListOutputs(rs.Data)
+		if err != nil {
+			c.JSON(http.StatusUnprocessableEntity, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"key": rs.Key, "outputs": outputs})
+	}
+}
+
 // StateReport renders the analysis as a downloadable report (?key=...&format=json|md|csv).
 // @Summary      Download analysis report
 // @Tags         Sources

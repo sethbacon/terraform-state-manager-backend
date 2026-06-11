@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -114,7 +115,7 @@ func (c *consul) List(ctx context.Context) ([]StateRef, error) {
 		if decoded, dErr := base64.StdEncoding.DecodeString(e.Value); dErr == nil {
 			size = int64(len(decoded))
 		}
-		refs = append(refs, StateRef{Key: e.Key, Name: e.Key, Size: size})
+		refs = append(refs, StateRef{Key: e.Key, Name: e.Key, Size: size, Version: strconv.FormatInt(e.ModifyIndex, 10)})
 	}
 	sort.Slice(refs, func(i, j int) bool { return refs[i].Key < refs[j].Key })
 	return refs, nil

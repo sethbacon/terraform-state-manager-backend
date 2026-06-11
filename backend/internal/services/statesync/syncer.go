@@ -275,15 +275,20 @@ func (s *Syncer) DropKey(src *repositories.Source, key string) {
 }
 
 // marker derives the change-detection token from listing metadata: size plus
-// last-modified (Azure/local) or just last-modified (HCP workspace updated-at,
-// size unknown at listing time). Empty when the backend exposes neither.
+// last-modified (Azure/local), last-modified alone (HCP workspace updated-at),
+// or a backend version token (consul ModifyIndex, pg content hash) for
+// backends without timestamps. Empty when the backend exposes nothing — those
+// states are re-read every cycle.
 func marker(ref statesource.StateRef) string {
 	lm := ""
 	if ref.LastModified != nil {
 		lm = ref.LastModified.UTC().Format(time.RFC3339Nano)
 	}
-	if ref.Size == 0 && lm == "" {
+	if ref.Size == 0 && lm == "" && ref.Version == "" {
 		return ""
+	}
+	if ref.Version != "" {
+		return fmt.Sprintf("%d|%s|%s", ref.Size, lm, ref.Version)
 	}
 	return fmt.Sprintf("%d|%s", ref.Size, lm)
 }

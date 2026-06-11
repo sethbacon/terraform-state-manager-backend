@@ -1331,7 +1331,7 @@
                         "CookieAuth": []
                     }
                 ],
-                "description": "Aggregates RUM and resource/provider/Terraform-version breakdowns across all sources. Requires state:read.",
+                "description": "Aggregates RUM and resource/provider/Terraform-version breakdowns from the persistent analysis store, with per-source sync status. ?refresh=true reconciles first. Requires state:read.",
                 "produces": [
                     "application/json"
                 ],
@@ -2572,6 +2572,50 @@
                     "Edit"
                 ],
                 "summary": "State operation (rm/mv)",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Source ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "State file key",
+                        "name": "key",
+                        "in": "query",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    }
+                }
+            }
+        },
+        "/sources/{id}/state/outputs": {
+            "get": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    },
+                    {
+                        "CookieAuth": []
+                    }
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Sources"
+                ],
+                "summary": "List state outputs",
                 "parameters": [
                     {
                         "type": "string",

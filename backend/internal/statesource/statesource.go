@@ -17,6 +17,10 @@ type StateRef struct {
 	Name         string     `json:"name"`
 	Size         int64      `json:"size"`
 	LastModified *time.Time `json:"last_modified,omitempty"`
+	// Version is an opaque backend change token (consul ModifyIndex, pg
+	// content hash) for backends whose listings carry no timestamp; it
+	// strengthens sync change-detection where size alone is ambiguous.
+	Version string `json:"version,omitempty"`
 }
 
 // RawState is the bytes of a state file plus its metadata.

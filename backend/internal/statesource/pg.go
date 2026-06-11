@@ -71,7 +71,7 @@ func (p *pgSource) List(ctx context.Context) ([]StateRef, error) {
 	defer func() { _ = db.Close() }()
 
 	rows, err := db.QueryContext(ctx,
-		fmt.Sprintf("SELECT name, octet_length(data) FROM %s ORDER BY name", p.table())) // #nosec G201 -- schema validated as identifier in newPG
+		fmt.Sprintf("SELECT name, octet_length(data), md5(data::text) FROM %s ORDER BY name", p.table())) // #nosec G201 -- schema validated as identifier in newPG
 	if err != nil {
 		return nil, fmt.Errorf("pg list failed: %w", err)
 	}
@@ -81,10 +81,11 @@ func (p *pgSource) List(ctx context.Context) ([]StateRef, error) {
 	for rows.Next() {
 		var name string
 		var size sql.NullInt64
-		if err := rows.Scan(&name, &size); err != nil {
+		var hash sql.NullString
+		if err := rows.Scan(&name, &size, &hash); err != nil {
 			return nil, fmt.Errorf("pg list scan failed: %w", err)
 		}
-		refs = append(refs, StateRef{Key: name, Name: name, Size: size.Int64})
+		refs = append(refs, StateRef{Key: name, Name: name, Size: size.Int64, Version: hash.String})
 	}
 	return refs, rows.Err()
 }
