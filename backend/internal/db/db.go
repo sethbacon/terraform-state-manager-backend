@@ -20,6 +20,7 @@ import (
 var migrationsFS embed.FS
 
 // Connect establishes a pooled connection to PostgreSQL and verifies it.
+// coverage:skip:requires-database
 func Connect(dsn string, maxConnections, minIdleConnections int) (*sql.DB, error) {
 	database, err := sql.Open("postgres", dsn)
 	if err != nil {
@@ -38,6 +39,7 @@ func Connect(dsn string, maxConnections, minIdleConnections int) (*sql.DB, error
 }
 
 // RunMigrations applies embedded migrations in the given direction ("up"/"down").
+// coverage:skip:requires-database
 func RunMigrations(database *sql.DB, direction string) error {
 	m, err := newMigrator(database)
 	if err != nil {
@@ -60,6 +62,7 @@ func RunMigrations(database *sql.DB, direction string) error {
 }
 
 // GetMigrationVersion returns the current schema version.
+// coverage:skip:requires-database
 func GetMigrationVersion(database *sql.DB) (version uint, dirty bool, err error) {
 	m, err := newMigrator(database)
 	if err != nil {
@@ -72,6 +75,7 @@ func GetMigrationVersion(database *sql.DB) (version uint, dirty bool, err error)
 	return version, dirty, nil
 }
 
+// coverage:skip:requires-database
 func newMigrator(database *sql.DB) (*migrate.Migrate, error) {
 	driver, err := postgres.WithInstance(database, &postgres.Config{})
 	if err != nil {

@@ -61,14 +61,23 @@ jobs:
           go clean -testcache
           go test ./internal/... -race -coverprofile=coverage.out -covermode=atomic
 
+      - name: Filter integration-only functions from coverage
+        working-directory: backend
+        # Functions whose doc comment carries a `coverage:skip:` marker (live
+        # DB, OIDC issuer, …) are excluded from the unit-test denominator —
+        # registry pattern; see scripts/coverfilter.
+        run: go run ./scripts/coverfilter -in coverage.out -out coverage.filtered.out -root .
+
       - name: Check coverage threshold
         working-directory: backend
         # Ratchet floor: every change that touches a package should add tests and
         # raise this. The registry backend enforces 80 — that's the target.
+        # History: 4 (bootstrap) → 25 → 30 → 50 (registry test port + repo/scim/
+        # notify/api handler build-out, 2026-06-10).
         run: |
-          THRESHOLD=30
-          COVERAGE=$(go tool cover -func=coverage.out | grep "^total:" | awk '{print $3}' | tr -d '%')
-          echo "Coverage: ${COVERAGE}%  (floor: ${THRESHOLD}%)"
+          THRESHOLD=50
+          COVERAGE=$(go tool cover -func=coverage.filtered.out | grep "^total:" | awk '{print $3}' | tr -d '%')
+          echo "Coverage (filtered): ${COVERAGE}%  (floor: ${THRESHOLD}%)"
           awk -v cov="$COVERAGE" -v thr="$THRESHOLD" 'BEGIN {
             if (cov + 0 < thr + 0) {
               print "FAIL: " cov "% is below the " thr "% floor."
