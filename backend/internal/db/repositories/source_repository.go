@@ -118,6 +118,50 @@ func (r *SourceRepository) Create(ctx context.Context, s *Source) (*Source, erro
 	return created, nil
 }
 
+// Update replaces a source's name, endpoint, config, and scope. Credentials
+// are replaced only when EncryptedCredentials is non-empty (blank keeps the
+// stored secret). Type is immutable. Returns (nil, nil) if the id is unknown.
+func (r *SourceRepository) Update(ctx context.Context, s *Source) (*Source, error) {
+	configJSON, err := json.Marshal(orEmptyMap(s.Config))
+	if err != nil {
+		return nil, err
+	}
+	scopeJSON, err := json.Marshal(orEmptyMap(s.Scope))
+	if err != nil {
+		return nil, err
+	}
+	var endpoint any
+	if s.Endpoint != "" {
+		endpoint = s.Endpoint
+	}
+	row := r.db.QueryRowContext(ctx, `
+		UPDATE state_sources SET
+			name = $2,
+			endpoint = $3,
+			config = $4::jsonb,
+			scope = $5::jsonb,
+			encrypted_credentials = CASE WHEN $6::bytea IS NULL THEN encrypted_credentials ELSE $6 END,
+			updated_at = now()
+		WHERE id = $1
+		RETURNING `+sourceColumns,
+		s.ID, s.Name, endpoint, string(configJSON), string(scopeJSON), nullableBytes(s.EncryptedCredentials))
+	updated, err := scanSource(row)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("failed to update source: %w", err)
+	}
+	return updated, nil
+}
+
+func nullableBytes(b []byte) any {
+	if len(b) == 0 {
+		return nil
+	}
+	return b
+}
+
 // Delete removes a source by id.
 func (r *SourceRepository) Delete(ctx context.Context, id string) error {
 	_, err := r.db.ExecContext(ctx, `DELETE FROM state_sources WHERE id = $1`, id)

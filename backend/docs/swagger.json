@@ -2366,6 +2366,59 @@
                     }
                 }
             },
+            "put": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    },
+                    {
+                        "CookieAuth": []
+                    }
+                ],
+                "description": "Edits a state-source connection. Credentials are replaced only when provided; the type cannot change. Requires sources:manage.",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Sources"
+                ],
+                "summary": "Update state source",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Source ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    }
+                }
+            },
             "delete": {
                 "security": [
                     {
@@ -2874,6 +2927,51 @@
                 "responses": {
                     "200": {
                         "description": "OK",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    }
+                }
+            }
+        },
+        "/sources/{id}/test": {
+            "post": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    },
+                    {
+                        "CookieAuth": []
+                    }
+                ],
+                "description": "Connects to the backend and lists states. Requires state:read.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Sources"
+                ],
+                "summary": "Test state source connection",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Source ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "502": {
+                        "description": "Bad Gateway",
                         "schema": {
                             "type": "object",
                             "additionalProperties": true

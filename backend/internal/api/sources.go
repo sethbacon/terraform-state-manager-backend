@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"net/http"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
@@ -173,6 +174,131 @@ func (h *SourcesHandlers) GetSource() gin.HandlerFunc {
 			return
 		}
 		c.JSON(http.StatusOK, s)
+	}
+}
+
+// UpdateSource edits a source's name, config, scope, and (optionally)
+// credentials. Type is immutable; blank credentials keep the stored secret.
+// @Summary      Update state source
+// @Description  Edits a state-source connection. Credentials are replaced only when provided; the type cannot change. Requires sources:manage.
+// @Tags         Sources
+// @Accept       json
+// @Produce      json
+// @Param        id   path      string  true  "Source ID"
+// @Success      200  {object}  map[string]interface{}
+// @Failure      400  {object}  map[string]interface{}
+// @Failure      404  {object}  map[string]interface{}
+// @Security     BearerAuth
+// @Security     CookieAuth
+// @Router       /sources/{id} [put]
+func (h *SourcesHandlers) UpdateSource() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		existing, err := h.repo.GetByID(c.Request.Context(), c.Param("id"))
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load source"})
+			return
+		}
+		if existing == nil {
+			c.JSON(http.StatusNotFound, gin.H{"error": "source not found"})
+			return
+		}
+
+		var req struct {
+			Name        string         `json:"name" binding:"required"`
+			Endpoint    string         `json:"endpoint"`
+			Config      map[string]any `json:"config"`
+			Scope       map[string]any `json:"scope"`
+			Credentials map[string]any `json:"credentials"`
+		}
+		if err := c.ShouldBindJSON(&req); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "name is required"})
+			return
+		}
+
+		// Validate the connector against the new config, using the new
+		// credentials when given, otherwise the stored ones.
+		validateCreds := req.Credentials
+		if len(validateCreds) == 0 {
+			stored, dErr := decryptCredentials(existing)
+			if dErr != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to decrypt source credentials"})
+				return
+			}
+			validateCreds = stored
+		}
+		if _, err := statesource.New(existing.Type, req.Config, validateCreds); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+
+		src := &repositories.Source{
+			ID:       existing.ID,
+			Name:     req.Name,
+			Endpoint: req.Endpoint,
+			Config:   req.Config,
+			Scope:    req.Scope,
+		}
+		if len(req.Credentials) > 0 {
+			if !crypto.Available() {
+				c.JSON(http.StatusBadRequest, gin.H{
+					"error": "cannot store credentials: encryption key not configured (set TSM_ENCRYPTION_KEY)",
+				})
+				return
+			}
+			plain, _ := json.Marshal(req.Credentials)
+			enc, err := crypto.Encrypt(plain)
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to encrypt credentials"})
+				return
+			}
+			src.EncryptedCredentials = enc
+		}
+
+		updated, err := h.repo.Update(c.Request.Context(), src)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update source"})
+			return
+		}
+		if updated == nil {
+			c.JSON(http.StatusNotFound, gin.H{"error": "source not found"})
+			return
+		}
+		h.audit.write(c, "source.update", "source", updated.ID,
+			map[string]interface{}{"name": updated.Name, "type": updated.Type})
+		// The new config may point at different states; reconcile soon.
+		if h.syncer != nil {
+			go func() { _ = h.syncer.SyncAll(context.Background()) }()
+		}
+		c.JSON(http.StatusOK, updated)
+	}
+}
+
+// TestSource connects to the source's backend and lists its states, returning
+// the count or the connection error. Read-only; nothing is persisted.
+// @Summary      Test state source connection
+// @Description  Connects to the backend and lists states. Requires state:read.
+// @Tags         Sources
+// @Produce      json
+// @Param        id   path      string  true  "Source ID"
+// @Success      200  {object}  map[string]interface{}
+// @Failure      502  {object}  map[string]interface{}
+// @Security     BearerAuth
+// @Security     CookieAuth
+// @Router       /sources/{id}/test [post]
+func (h *SourcesHandlers) TestSource() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		conn, ok := h.connectorFor(c)
+		if !ok {
+			return
+		}
+		ctx, cancel := context.WithTimeout(c.Request.Context(), 15*time.Second)
+		defer cancel()
+		refs, err := conn.List(ctx)
+		if err != nil {
+			c.JSON(http.StatusBadGateway, gin.H{"status": "failed", "error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"status": "ok", "states": len(refs)})
 	}
 }
 

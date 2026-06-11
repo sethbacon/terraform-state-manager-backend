@@ -57,7 +57,9 @@ func newSourcesEnv(t *testing.T) *sourcesEnv {
 	v1.GET("/sources", h.ListSources())
 	v1.POST("/sources", h.CreateSource())
 	v1.GET("/sources/:id", h.GetSource())
+	v1.PUT("/sources/:id", h.UpdateSource())
 	v1.DELETE("/sources/:id", h.DeleteSource())
+	v1.POST("/sources/:id/test", h.TestSource())
 	v1.GET("/sources/:id/states", h.ListStates())
 	v1.GET("/sources/:id/state/analysis", h.AnalyzeState())
 	v1.GET("/sources/:id/state/raw", h.RawState())
@@ -214,6 +216,67 @@ func TestListStates_RealLocalSource(t *testing.T) {
 		WillReturnError(errors.New("store down"))
 	if w := e.do(http.MethodGet, "/api/v1/sources/s1/states", ""); w.Code != http.StatusOK {
 		t.Errorf("listing must survive a store failure: status = %d", w.Code)
+	}
+}
+
+func TestUpdateSource(t *testing.T) {
+	e := newSourcesEnv(t)
+
+	// Happy path: load existing, validate new config, update; blank
+	// credentials pass NULL so the stored secret is kept.
+	e.expectSource("s1", e.dir)
+	cfg, _ := json.Marshal(map[string]any{"base_path": e.dir})
+	e.mock.ExpectQuery("UPDATE state_sources SET").
+		WithArgs("s1", "renamed", nil, sqlmock.AnyArg(), sqlmock.AnyArg(), nil).
+		WillReturnRows(sqlmock.NewRows(
+			[]string{"id", "name", "type", "endpoint", "config", "scope", "encrypted_credentials", "created_at", "updated_at"}).
+			AddRow("s1", "renamed", "local", "", cfg, []byte(`{}`), nil, "2026-06-10", "2026-06-11"))
+	body := fmt.Sprintf(`{"name":"renamed","config":{"base_path":%q}}`, e.dir)
+	w := e.do(http.MethodPut, "/api/v1/sources/s1", body)
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"renamed"`) {
+		t.Fatalf("update: status = %d (%s)", w.Code, w.Body.String())
+	}
+
+	// Connector validation rejects a bad config before any write.
+	e.expectSource("s1", e.dir)
+	if w := e.do(http.MethodPut, "/api/v1/sources/s1", `{"name":"x","config":{"base_path":"/does/not/exist"}}`); w.Code != http.StatusBadRequest {
+		t.Errorf("invalid config: status = %d, want 400", w.Code)
+	}
+
+	// Missing name -> 400; unknown id -> 404.
+	e.expectSource("s1", e.dir)
+	if w := e.do(http.MethodPut, "/api/v1/sources/s1", `{}`); w.Code != http.StatusBadRequest {
+		t.Errorf("missing name: status = %d, want 400", w.Code)
+	}
+	e.mock.ExpectQuery("SELECT .+ FROM state_sources WHERE id").WithArgs("ghost").
+		WillReturnRows(sqlmock.NewRows([]string{"id", "name", "type", "endpoint", "config", "scope", "encrypted_credentials", "created_at", "updated_at"}))
+	if w := e.do(http.MethodPut, "/api/v1/sources/ghost", `{"name":"x"}`); w.Code != http.StatusNotFound {
+		t.Errorf("ghost: status = %d, want 404", w.Code)
+	}
+	if err := e.mock.ExpectationsWereMet(); err != nil {
+		t.Error(err)
+	}
+}
+
+func TestTestSource(t *testing.T) {
+	e := newSourcesEnv(t)
+	e.seed(t, "app.tfstate", minState(7, "lin-1", "aws_instance.web"))
+
+	e.expectSource("s1", e.dir)
+	w := e.do(http.MethodPost, "/api/v1/sources/s1/test", "")
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"status":"ok"`) ||
+		!strings.Contains(w.Body.String(), `"states":1`) {
+		t.Fatalf("test ok: status = %d (%s)", w.Code, w.Body.String())
+	}
+
+	// A broken backend surfaces as 502 with the connector error.
+	cfg, _ := json.Marshal(map[string]any{"base_path": filepath.Join(e.dir, "gone")})
+	e.mock.ExpectQuery("SELECT .+ FROM state_sources WHERE id").WithArgs("s2").
+		WillReturnRows(sqlmock.NewRows(
+			[]string{"id", "name", "type", "endpoint", "config", "scope", "encrypted_credentials", "created_at", "updated_at"}).
+			AddRow("s2", "broken", "local", "", cfg, []byte(`{}`), nil, "2026-06-10", "2026-06-10"))
+	if w := e.do(http.MethodPost, "/api/v1/sources/s2/test", ""); w.Code != http.StatusBadRequest && w.Code != http.StatusBadGateway {
+		t.Errorf("broken: status = %d, want 400/502", w.Code)
 	}
 }
 

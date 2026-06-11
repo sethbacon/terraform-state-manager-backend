@@ -96,6 +96,39 @@ func TestSourceRepository_CreateAndDelete(t *testing.T) {
 	}
 }
 
+func TestSourceRepository_Update(t *testing.T) {
+	db, mock := newMock(t)
+	r := NewSourceRepository(db)
+
+	// Blank credentials pass NULL so the CASE keeps the stored secret.
+	mock.ExpectQuery("UPDATE state_sources SET").
+		WithArgs("s1", "renamed", nil, `{"base_path":"/new"}`, "{}", nil).
+		WillReturnRows(sourceRow())
+	updated, err := r.Update(ctx, &Source{ID: "s1", Name: "renamed", Config: map[string]any{"base_path": "/new"}})
+	if err != nil || updated == nil || updated.ID != "s1" {
+		t.Fatalf("Update: %v %+v", err, updated)
+	}
+
+	// New credentials replace the blob.
+	mock.ExpectQuery("UPDATE state_sources SET").
+		WithArgs("s1", "renamed", nil, "{}", "{}", []byte("sealed")).
+		WillReturnRows(sourceRow())
+	if _, err := r.Update(ctx, &Source{ID: "s1", Name: "renamed", EncryptedCredentials: []byte("sealed")}); err != nil {
+		t.Fatalf("Update with creds: %v", err)
+	}
+
+	// Unknown id -> (nil, nil); db error surfaces.
+	mock.ExpectQuery("UPDATE state_sources SET").
+		WillReturnRows(sqlmock.NewRows([]string{"id", "name", "type", "endpoint", "config", "scope", "encrypted_credentials", "created_at", "updated_at"}))
+	if got, err := r.Update(ctx, &Source{ID: "ghost", Name: "x"}); err != nil || got != nil {
+		t.Errorf("ghost update = %v, %v; want nil, nil", got, err)
+	}
+	mock.ExpectQuery("UPDATE state_sources SET").WillReturnError(errDB)
+	if _, err := r.Update(ctx, &Source{ID: "s1", Name: "x"}); err == nil {
+		t.Error("Update swallowed the error")
+	}
+}
+
 // ---------------------------------------------------------------------------
 // StateLockRepository
 // ---------------------------------------------------------------------------
