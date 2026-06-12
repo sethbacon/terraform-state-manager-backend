@@ -1,0 +1,292 @@
+package repositories
+
+import (
+	"context"
+	"database/sql"
+	"encoding/json"
+	"errors"
+	"fmt"
+
+	"github.com/lib/pq"
+)
+
+// DriftRecord is a durable, acknowledgeable drift condition on one state file.
+// Re-detections collapse onto the live (non-resolved) record for the state; a
+// clean result resolves it. drift_runs stay the per-run mechanism underneath.
+type DriftRecord struct {
+	ID                   string          `json:"id"`
+	SourceID             *string         `json:"source_id"`
+	StateKey             string          `json:"state_key"`
+	PipelineConnectionID *string         `json:"pipeline_connection_id"`
+	LastRunID            *string         `json:"last_run_id"`
+	Origin               string          `json:"origin"`   // run | ingest
+	Severity             string          `json:"severity"` // critical | warning
+	Added                int             `json:"added"`
+	Changed              int             `json:"changed"`
+	Destroyed            int             `json:"destroyed"`
+	Summary              json.RawMessage `json:"summary,omitempty"`
+	Status               string          `json:"status"` // open | acknowledged | resolved
+	AcknowledgedBy       string          `json:"acknowledged_by"`
+	AcknowledgedAt       *string         `json:"acknowledged_at"`
+	AckNote              string          `json:"ack_note"`
+	ResolvedAt           *string         `json:"resolved_at"`
+	ExternalRef          *string         `json:"external_ref,omitempty"`
+	Detections           int             `json:"detections"`
+	FirstDetectedAt      string          `json:"first_detected_at"`
+	LastDetectedAt       string          `json:"last_detected_at"`
+}
+
+// DriftSeverity classifies drift the way ogtsm did: destroyed resources are
+// critical, anything else that drifted is a warning.
+func DriftSeverity(destroyed int) string {
+	if destroyed > 0 {
+		return "critical"
+	}
+	return "warning"
+}
+
+// DriftRecordRepository is the DAO for drift_records.
+type DriftRecordRepository struct {
+	db *sql.DB
+}
+
+func NewDriftRecordRepository(db *sql.DB) *DriftRecordRepository {
+	return &DriftRecordRepository{db: db}
+}
+
+const driftRecordColumns = `id, source_id, state_key, pipeline_connection_id, last_run_id, origin, severity,
+	added, changed, destroyed, summary, status, acknowledged_by, acknowledged_at::text, ack_note,
+	resolved_at::text, external_ref, detections, first_detected_at::text, last_detected_at::text`
+
+func scanDriftRecord(scanner interface{ Scan(dest ...any) error }) (*DriftRecord, error) {
+	var r DriftRecord
+	var srcID, connID, runID, ackAt, resolvedAt, extRef sql.NullString
+	var summary []byte
+	if err := scanner.Scan(&r.ID, &srcID, &r.StateKey, &connID, &runID, &r.Origin, &r.Severity,
+		&r.Added, &r.Changed, &r.Destroyed, &summary, &r.Status, &r.AcknowledgedBy, &ackAt, &r.AckNote,
+		&resolvedAt, &extRef, &r.Detections, &r.FirstDetectedAt, &r.LastDetectedAt); err != nil {
+		return nil, err
+	}
+	if srcID.Valid {
+		r.SourceID = &srcID.String
+	}
+	if connID.Valid {
+		r.PipelineConnectionID = &connID.String
+	}
+	if runID.Valid {
+		r.LastRunID = &runID.String
+	}
+	if ackAt.Valid {
+		r.AcknowledgedAt = &ackAt.String
+	}
+	if resolvedAt.Valid {
+		r.ResolvedAt = &resolvedAt.String
+	}
+	if extRef.Valid {
+		r.ExternalRef = &extRef.String
+	}
+	if len(summary) > 0 {
+		r.Summary = summary
+	}
+	return &r, nil
+}
+
+// Detection carries one drift observation into UpsertDetection.
+type Detection struct {
+	SourceID             string
+	StateKey             string
+	PipelineConnectionID *string
+	RunID                *string
+	Origin               string // run | ingest
+	Added                int
+	Changed              int
+	Destroyed            int
+	Summary              []byte
+	ExternalRef          *string
+}
+
+// UpsertDetection records a drift observation: it updates the live
+// (non-resolved) record for the state — counts, summary, last_detected_at,
+// detections — or inserts a fresh open one. Acknowledged records stay
+// acknowledged on re-detection. A replayed ingest (same source + external_ref,
+// already resolved) is returned as-is instead of erroring.
+func (r *DriftRecordRepository) UpsertDetection(ctx context.Context, d *Detection) (*DriftRecord, error) {
+	var summaryArg any
+	if len(d.Summary) > 0 {
+		summaryArg = string(d.Summary)
+	}
+	row := r.db.QueryRowContext(ctx, `
+		INSERT INTO drift_records
+			(source_id, state_key, pipeline_connection_id, last_run_id, origin, severity,
+			 added, changed, destroyed, summary, external_ref)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, COALESCE($10::jsonb,'[]'::jsonb), $11)
+		ON CONFLICT (source_id, state_key) WHERE status <> 'resolved'
+		DO UPDATE SET
+			pipeline_connection_id = COALESCE(EXCLUDED.pipeline_connection_id, drift_records.pipeline_connection_id),
+			last_run_id      = COALESCE(EXCLUDED.last_run_id, drift_records.last_run_id),
+			origin           = EXCLUDED.origin,
+			severity         = EXCLUDED.severity,
+			added            = EXCLUDED.added,
+			changed          = EXCLUDED.changed,
+			destroyed        = EXCLUDED.destroyed,
+			summary          = EXCLUDED.summary,
+			external_ref     = COALESCE(EXCLUDED.external_ref, drift_records.external_ref),
+			detections       = drift_records.detections + 1,
+			last_detected_at = now()
+		RETURNING `+driftRecordColumns,
+		d.SourceID, d.StateKey, d.PipelineConnectionID, d.RunID, d.Origin, DriftSeverity(d.Destroyed),
+		d.Added, d.Changed, d.Destroyed, summaryArg, d.ExternalRef)
+	rec, err := scanDriftRecord(row)
+	if err != nil {
+		// A resolved record can still hold this external_ref (pipeline retry
+		// after auto-resolve): treat the replay as idempotent, not an error.
+		var pqErr *pq.Error
+		if errors.As(err, &pqErr) && pqErr.Code == "23505" && d.ExternalRef != nil {
+			if existing, gErr := r.GetByExternalRef(ctx, d.SourceID, *d.ExternalRef); gErr == nil && existing != nil {
+				return existing, nil
+			}
+		}
+		return nil, fmt.Errorf("failed to upsert drift record: %w", err)
+	}
+	return rec, nil
+}
+
+// GetByExternalRef returns the record carrying an ingest idempotency key, or
+// (nil, nil) when none exists.
+func (r *DriftRecordRepository) GetByExternalRef(ctx context.Context, sourceID, externalRef string) (*DriftRecord, error) {
+	row := r.db.QueryRowContext(ctx,
+		`SELECT `+driftRecordColumns+` FROM drift_records WHERE source_id = $1 AND external_ref = $2`,
+		sourceID, externalRef)
+	rec, err := scanDriftRecord(row)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return rec, nil
+}
+
+// ResolveClean closes the live record for a state after a clean result,
+// returning whether one was open.
+func (r *DriftRecordRepository) ResolveClean(ctx context.Context, sourceID, stateKey string) (bool, error) {
+	res, err := r.db.ExecContext(ctx, `
+		UPDATE drift_records SET status='resolved', resolved_at=now()
+		WHERE source_id = $1 AND state_key = $2 AND status <> 'resolved'`,
+		sourceID, stateKey)
+	if err != nil {
+		return false, err
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
+}
+
+// List returns records newest-detection-first. Empty filter values mean "any";
+// statuses filters to the given set.
+func (r *DriftRecordRepository) List(ctx context.Context, statuses []string, sourceID, severity string, limit int) ([]DriftRecord, error) {
+	if limit <= 0 || limit > 500 {
+		limit = 100
+	}
+	// The query text only ever gains fixed SQL with positional placeholders;
+	// all caller-supplied values bind through args.
+	q := `SELECT ` + driftRecordColumns + ` FROM drift_records WHERE 1=1`
+	args := []any{}
+	if len(statuses) > 0 {
+		args = append(args, pq.Array(statuses))
+		q += fmt.Sprintf(" AND status = ANY($%d)", len(args)) // #nosec G202 -- placeholder only; value bound via args
+	}
+	if sourceID != "" {
+		args = append(args, sourceID)
+		q += fmt.Sprintf(" AND source_id = $%d", len(args)) // #nosec G202 -- placeholder only; value bound via args
+	}
+	if severity != "" {
+		args = append(args, severity)
+		q += fmt.Sprintf(" AND severity = $%d", len(args)) // #nosec G202 -- placeholder only; value bound via args
+	}
+	args = append(args, limit)
+	q += fmt.Sprintf(" ORDER BY last_detected_at DESC LIMIT $%d", len(args)) // #nosec G202 -- placeholder only
+
+	rows, err := r.db.QueryContext(ctx, q, args...) // #nosec G202 -- q is built from fixed SQL + placeholders above
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []DriftRecord{}
+	for rows.Next() {
+		rec, err := scanDriftRecord(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, *rec)
+	}
+	return out, rows.Err()
+}
+
+// GetByID returns one record, or (nil, nil) when absent.
+func (r *DriftRecordRepository) GetByID(ctx context.Context, id string) (*DriftRecord, error) {
+	row := r.db.QueryRowContext(ctx, `SELECT `+driftRecordColumns+` FROM drift_records WHERE id = $1`, id)
+	rec, err := scanDriftRecord(row)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return rec, nil
+}
+
+// Acknowledge transitions an OPEN record to acknowledged, recording who/when
+// and an optional note. Returns (nil, nil) when the record is missing or not
+// open (callers distinguish via GetByID).
+func (r *DriftRecordRepository) Acknowledge(ctx context.Context, id, actor, note string) (*DriftRecord, error) {
+	row := r.db.QueryRowContext(ctx, `
+		UPDATE drift_records
+		SET status='acknowledged', acknowledged_by=$2, acknowledged_at=now(), ack_note=$3
+		WHERE id = $1 AND status = 'open'
+		RETURNING `+driftRecordColumns,
+		id, actor, note)
+	rec, err := scanDriftRecord(row)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return rec, nil
+}
+
+// Resolve manually closes a record (e.g. drift remediated out-of-band).
+// Returns (nil, nil) when the record is missing or already resolved.
+func (r *DriftRecordRepository) Resolve(ctx context.Context, id string) (*DriftRecord, error) {
+	row := r.db.QueryRowContext(ctx, `
+		UPDATE drift_records SET status='resolved', resolved_at=now()
+		WHERE id = $1 AND status <> 'resolved'
+		RETURNING `+driftRecordColumns, id)
+	rec, err := scanDriftRecord(row)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return rec, nil
+}
+
+// CountsByStatus returns record counts keyed by status (dashboard badge).
+func (r *DriftRecordRepository) CountsByStatus(ctx context.Context) (map[string]int, error) {
+	rows, err := r.db.QueryContext(ctx, `SELECT status, COUNT(*) FROM drift_records GROUP BY status`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]int{}
+	for rows.Next() {
+		var status string
+		var n int
+		if err := rows.Scan(&status, &n); err != nil {
+			return nil, err
+		}
+		out[status] = n
+	}
+	return out, rows.Err()
+}

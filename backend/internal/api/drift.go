@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -25,12 +26,14 @@ import (
 	"github.com/terraform-state-manager/terraform-state-manager/internal/services/notify"
 )
 
-// DriftHandlers serves pipeline-connection and drift-run endpoints.
+// DriftHandlers serves pipeline-connection, drift-run, and drift-record endpoints.
 type DriftHandlers struct {
 	cfg          *config.Config
 	pipelineRepo *repositories.PipelineRepository
 	ciSourceRepo *repositories.CISourceRepository
 	driftRepo    *repositories.DriftRepository
+	recordRepo   *repositories.DriftRecordRepository
+	sourceRepo   *repositories.SourceRepository
 	audit        auditor
 	notifier     *notify.Notifier // may be nil (notifications disabled / no DB)
 }
@@ -44,9 +47,29 @@ func NewDriftHandlers(cfg *config.Config, database, identityDB *sql.DB, notifier
 		pipelineRepo: repositories.NewPipelineRepository(database),
 		ciSourceRepo: repositories.NewCISourceRepository(database),
 		driftRepo:    repositories.NewDriftRepository(database),
+		recordRepo:   repositories.NewDriftRecordRepository(database),
+		sourceRepo:   repositories.NewSourceRepository(database),
 		audit:        newAuditor(identityDB),
 		notifier:     notifier,
 	}
+}
+
+// driftLog tags drift-record maintenance logs.
+var driftLog = slog.With("component", "drift")
+
+// notifyTimeout bounds detached notification sends.
+const notifyTimeout = 15 * time.Second
+
+// splitCSV splits a comma-separated query value, trimming blanks.
+func splitCSV(s string) []string {
+	parts := strings.Split(s, ",")
+	out := parts[:0]
+	for _, p := range parts {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 func randomToken() string {
@@ -363,6 +386,7 @@ func (h *DriftHandlers) RunResults() gin.HandlerFunc {
 			return
 		}
 
+		h.recordDriftOutcome(ctx, run, status, body.Added, body.Changed, body.Destroyed, drifted, body.Summary)
 		h.notifyDriftResult(run.ID, status, body.Added, body.Changed, body.Destroyed, drifted, body.Detail)
 		c.JSON(http.StatusOK, gin.H{"status": "recorded"})
 	}
@@ -393,7 +417,7 @@ func (h *DriftHandlers) notifyDriftResult(runID, status string, added, changed, 
 		return // no drift, no failure — nothing to alert on
 	}
 	go func(ev notify.Event) {
-		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), notifyTimeout)
 		defer cancel()
 		h.notifier.Notify(ctx, ev)
 	}(ev)

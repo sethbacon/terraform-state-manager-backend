@@ -1,0 +1,309 @@
+// drift_records.go implements the durable drift-record plane layered over drift
+// runs: persistent, acknowledgeable records of "this state is drifted", with a
+// push-style ingest endpoint so pipelines TSM did not dispatch can still report
+// plan results. Re-detections collapse onto the live record per state; clean
+// results auto-resolve it.
+package api
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+
+	"github.com/gin-gonic/gin"
+
+	"github.com/terraform-state-manager/terraform-state-manager/internal/db/repositories"
+	"github.com/terraform-state-manager/terraform-state-manager/internal/services/driftingest"
+	"github.com/terraform-state-manager/terraform-state-manager/internal/services/notify"
+)
+
+// maxIngestPlanBytes caps the terraform show -json payload accepted by ingest.
+const maxIngestPlanBytes = 5 << 20 // 5 MiB
+
+// recordDriftOutcome maintains drift_records from a run result: a drifted
+// completion upserts the live record for the state, a clean completion resolves
+// it. Runs without a source_id + state_key cannot be mapped to a record (the
+// pair is the record identity) and are skipped; failures don't touch records.
+func (h *DriftHandlers) recordDriftOutcome(ctx context.Context, run *repositories.DriftRun, status string, added, changed, destroyed int, drifted bool, summary []byte) {
+	if h.recordRepo == nil || status != "completed" || run.SourceID == nil || run.StateKey == "" {
+		return
+	}
+	if drifted {
+		_, err := h.recordRepo.UpsertDetection(ctx, &repositories.Detection{
+			SourceID:             *run.SourceID,
+			StateKey:             run.StateKey,
+			PipelineConnectionID: run.PipelineConnectionID,
+			RunID:                &run.ID,
+			Origin:               "run",
+			Added:                added,
+			Changed:              changed,
+			Destroyed:            destroyed,
+			Summary:              summary,
+		})
+		if err != nil {
+			driftLog.Error("failed to upsert drift record from run", "run", run.ID, "error", err)
+		}
+		return
+	}
+	if _, err := h.recordRepo.ResolveClean(ctx, *run.SourceID, run.StateKey); err != nil {
+		driftLog.Error("failed to resolve drift record after clean run", "run", run.ID, "error", err)
+	}
+}
+
+// IngestDrift accepts a drift result pushed by a pipeline TSM did not dispatch.
+// The caller either supplies the parsed counts/summary or a raw
+// `terraform show -json` plan (parsed server-side with the same semantics the
+// dispatched workflows compute with jq). external_ref (e.g. the CI run id)
+// makes retries idempotent.
+// @Summary      Ingest drift result (push)
+// @Description  Pipelines TSM did not dispatch POST plan results here. Supply counts/summary or a raw `terraform show -json` plan. external_ref deduplicates retries. Requires state:drift.
+// @Tags         Drift
+// @Accept       json
+// @Produce      json
+// @Success      200  {object}  map[string]interface{}
+// @Failure      400  {object}  map[string]interface{}
+// @Security     BearerAuth
+// @Security     CookieAuth
+// @Router       /drift/ingest [post]
+func (h *DriftHandlers) IngestDrift() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		ctx := c.Request.Context()
+		raw, err := io.ReadAll(io.LimitReader(c.Request.Body, maxIngestPlanBytes+1))
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "failed to read request body"})
+			return
+		}
+		if len(raw) > maxIngestPlanBytes {
+			c.JSON(http.StatusRequestEntityTooLarge, gin.H{"error": "payload exceeds 5 MiB; send counts/summary instead of the full plan"})
+			return
+		}
+		var req struct {
+			SourceID    string          `json:"source_id"`
+			StateKey    string          `json:"state_key"`
+			ExternalRef string          `json:"external_ref"`
+			Plan        json.RawMessage `json:"plan"`
+			Added       int             `json:"added"`
+			Changed     int             `json:"changed"`
+			Destroyed   int             `json:"destroyed"`
+			Drifted     *bool           `json:"drifted"`
+			Summary     json.RawMessage `json:"summary"`
+			Detail      string          `json:"detail"`
+		}
+		if err := json.Unmarshal(raw, &req); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid JSON body"})
+			return
+		}
+		if req.SourceID == "" || req.StateKey == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "source_id and state_key are required"})
+			return
+		}
+		src, err := h.sourceRepo.GetByID(ctx, req.SourceID)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load source"})
+			return
+		}
+		if src == nil {
+			c.JSON(http.StatusNotFound, gin.H{"error": "source not found"})
+			return
+		}
+
+		// Idempotency: a replayed external_ref returns the existing record.
+		if req.ExternalRef != "" {
+			if existing, err := h.recordRepo.GetByExternalRef(ctx, req.SourceID, req.ExternalRef); err == nil && existing != nil {
+				c.JSON(http.StatusOK, gin.H{"record": existing, "replay": true})
+				return
+			}
+		}
+
+		added, changed, destroyed := req.Added, req.Changed, req.Destroyed
+		summary := req.Summary
+		drifted := added+changed+destroyed > 0 || len(summary) > 2 // "[]" is clean
+		if len(req.Plan) > 0 {
+			var plan driftingest.Plan
+			if err := json.Unmarshal(req.Plan, &plan); err != nil {
+				c.JSON(http.StatusUnprocessableEntity, gin.H{"error": "plan is not valid terraform show -json output"})
+				return
+			}
+			res := driftingest.Summarize(&plan)
+			added, changed, destroyed = res.Added, res.Changed, res.Destroyed
+			summary, _ = json.Marshal(res.Summary)
+			drifted = res.Drifted()
+		}
+		if req.Drifted != nil {
+			drifted = *req.Drifted
+		}
+
+		var extRef *string
+		if req.ExternalRef != "" {
+			extRef = &req.ExternalRef
+		}
+
+		if !drifted {
+			resolved, err := h.recordRepo.ResolveClean(ctx, req.SourceID, req.StateKey)
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to record clean result"})
+				return
+			}
+			h.audit.write(c, "drift.ingest", "drift_record", req.SourceID,
+				map[string]interface{}{"state_key": req.StateKey, "drifted": false, "resolved": resolved, "external_ref": req.ExternalRef})
+			c.JSON(http.StatusOK, gin.H{"status": "clean", "resolved": resolved})
+			return
+		}
+
+		rec, err := h.recordRepo.UpsertDetection(ctx, &repositories.Detection{
+			SourceID:    req.SourceID,
+			StateKey:    req.StateKey,
+			Origin:      "ingest",
+			Added:       added,
+			Changed:     changed,
+			Destroyed:   destroyed,
+			Summary:     summary,
+			ExternalRef: extRef,
+		})
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to record drift"})
+			return
+		}
+		h.audit.write(c, "drift.ingest", "drift_record", rec.ID,
+			map[string]interface{}{"state_key": req.StateKey, "drifted": true, "severity": rec.Severity, "external_ref": req.ExternalRef})
+		h.notifyIngestedDrift(src.Name, req.StateKey, added, changed, destroyed)
+		c.JSON(http.StatusOK, gin.H{"record": rec})
+	}
+}
+
+// notifyIngestedDrift mirrors notifyDriftResult for the push path (detached,
+// nil-safe). The dispatched path already notifies from the run callback.
+func (h *DriftHandlers) notifyIngestedDrift(sourceName, stateKey string, added, changed, destroyed int) {
+	if h.notifier == nil {
+		return
+	}
+	ev := notify.Event{
+		Type:    notify.EventDriftDetected,
+		Title:   "Drift detected",
+		Message: fmt.Sprintf("Ingested drift on %s/%s (+%d ~%d -%d).", sourceName, stateKey, added, changed, destroyed),
+	}
+	go func(ev notify.Event) {
+		ctx, cancel := context.WithTimeout(context.Background(), notifyTimeout)
+		defer cancel()
+		h.notifier.Notify(ctx, ev)
+	}(ev)
+}
+
+// ListDriftRecords returns drift records, filterable by status/source/severity.
+// ?status= is comma-separated; default returns every status.
+// @Summary      List drift records
+// @Tags         Drift
+// @Produce      json
+// @Success      200  {object}  map[string]interface{}
+// @Security     BearerAuth
+// @Security     CookieAuth
+// @Router       /drift/records [get]
+func (h *DriftHandlers) ListDriftRecords() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		var statuses []string
+		if s := c.Query("status"); s != "" {
+			for _, part := range splitCSV(s) {
+				if part != "open" && part != "acknowledged" && part != "resolved" {
+					c.JSON(http.StatusBadRequest, gin.H{"error": "status must be open, acknowledged, or resolved"})
+					return
+				}
+				statuses = append(statuses, part)
+			}
+		}
+		records, err := h.recordRepo.List(c.Request.Context(), statuses, c.Query("source_id"), c.Query("severity"), 0)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to list drift records"})
+			return
+		}
+		counts, err := h.recordRepo.CountsByStatus(c.Request.Context())
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to list drift records"})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"records": records, "counts": counts})
+	}
+}
+
+// GetDriftRecord returns one drift record.
+func (h *DriftHandlers) GetDriftRecord() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		rec, err := h.recordRepo.GetByID(c.Request.Context(), c.Param("id"))
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load drift record"})
+			return
+		}
+		if rec == nil {
+			c.JSON(http.StatusNotFound, gin.H{"error": "drift record not found"})
+			return
+		}
+		c.JSON(http.StatusOK, rec)
+	}
+}
+
+// AcknowledgeDriftRecord marks an open record acknowledged with an optional note.
+// @Summary      Acknowledge drift record
+// @Description  Marks an open drift record acknowledged (who/when + optional note). Re-detections keep the acknowledgement. Requires state:drift.
+// @Tags         Drift
+// @Accept       json
+// @Produce      json
+// @Param        id  path  string  true  "Drift record ID"
+// @Success      200  {object}  map[string]interface{}
+// @Failure      409  {object}  map[string]interface{}  "record is not open"
+// @Security     BearerAuth
+// @Security     CookieAuth
+// @Router       /drift/records/{id}/acknowledge [post]
+func (h *DriftHandlers) AcknowledgeDriftRecord() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		var req struct {
+			Note string `json:"note"`
+		}
+		_ = c.ShouldBindJSON(&req) // body optional
+		if len(req.Note) > 1000 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "note must be 1000 characters or fewer"})
+			return
+		}
+		rec, err := h.recordRepo.Acknowledge(c.Request.Context(), c.Param("id"), userIDOf(c), req.Note)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to acknowledge drift record"})
+			return
+		}
+		if rec == nil {
+			// Missing vs not-open: look it up to answer precisely.
+			existing, gErr := h.recordRepo.GetByID(c.Request.Context(), c.Param("id"))
+			if gErr == nil && existing != nil {
+				c.JSON(http.StatusConflict, gin.H{"error": "drift record is not open (status: " + existing.Status + ")"})
+				return
+			}
+			c.JSON(http.StatusNotFound, gin.H{"error": "drift record not found"})
+			return
+		}
+		h.audit.write(c, "drift_record.acknowledge", "drift_record", rec.ID,
+			map[string]interface{}{"state_key": rec.StateKey, "note": req.Note})
+		c.JSON(http.StatusOK, rec)
+	}
+}
+
+// ResolveDriftRecord manually closes a record (drift remediated out-of-band).
+func (h *DriftHandlers) ResolveDriftRecord() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		rec, err := h.recordRepo.Resolve(c.Request.Context(), c.Param("id"))
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to resolve drift record"})
+			return
+		}
+		if rec == nil {
+			existing, gErr := h.recordRepo.GetByID(c.Request.Context(), c.Param("id"))
+			if gErr == nil && existing != nil {
+				c.JSON(http.StatusConflict, gin.H{"error": "drift record is already resolved"})
+				return
+			}
+			c.JSON(http.StatusNotFound, gin.H{"error": "drift record not found"})
+			return
+		}
+		h.audit.write(c, "drift_record.resolve", "drift_record", rec.ID,
+			map[string]interface{}{"state_key": rec.StateKey})
+		c.JSON(http.StatusOK, rec)
+	}
+}
