@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.0.1](https://github.com/sethbacon/terraform-state-manager-backend/compare/v1.0.0...v1.0.1) (2026-06-12)
+
+
+### Documentation
+
+* add Apache-2.0 LICENSE, NOTICE attributions, and license/disclaimer sections ([#86](https://github.com/sethbacon/terraform-state-manager-backend/issues/86)) ([03e14a9](https://github.com/sethbacon/terraform-state-manager-backend/commit/03e14a94ec6734c4fa465841e965febb8042b412))
+
 ## [1.0.0](https://github.com/sethbacon/terraform-state-manager-backend/compare/v0.10.1...v1.0.0) (2026-06-12)
 
 
