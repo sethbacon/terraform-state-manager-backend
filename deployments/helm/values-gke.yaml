@@ -1,0 +1,121 @@
+# ============================================================
+# values-gke.yaml — GCP GKE deployment values
+# ============================================================
+# Fill in ALL <PLACEHOLDER> values. See docs/deployment/gke-deployment.md.
+# Secrets come from GCP Secret Manager via the Secrets Store CSI provider;
+# pod identity is GKE Workload Identity on the ServiceAccount. Cloud SQL is
+# reached via its public/private IP with SSL (or add the auth-proxy sidecar
+# via backend.extraVolumes/extraEnv — see the deployment doc).
+# ============================================================
+
+backend:
+  image:
+    repository: <REGION>-docker.pkg.dev/<PROJECT_ID>/tsm/terraform-state-manager-backend
+    tag: "v1.0.0"
+  replicaCount: 3
+
+workers:
+  dedicated: true
+
+frontend:
+  enabled: true
+  image:
+    repository: <REGION>-docker.pkg.dev/<PROJECT_ID>/tsm/terraform-state-manager-frontend
+    tag: "v1.0.0"
+  replicaCount: 2
+
+server:
+  publicUrl: "https://<HOSTNAME>"
+  baseUrl: "https://<HOSTNAME>"
+  callbackUrl: "https://<HOSTNAME>"
+
+# ── Database: Cloud SQL for PostgreSQL ────────────────────────────────────────
+externalDatabase:
+  host: "<CLOUD_SQL_IP_OR_DNS>"
+  port: 5432
+  name: "terraform_state_manager"
+  user: "tsm"
+  sslMode: "require"
+  password: ""
+  existingSecret: ""
+
+security:
+  jwtSecret: ""
+  encryptionKey: ""
+  existingSecret: ""
+
+logging:
+  level: "warn"
+  format: "json"
+
+# ── GKE Workload Identity ──────────────────────────────────────────────────────
+serviceAccount:
+  create: true
+  annotations:
+    iam.gke.io/gcp-service-account: "<GSA_NAME>@<PROJECT_ID>.iam.gserviceaccount.com"
+
+workloadIdentity:
+  enabled: false
+
+keyVault:
+  enabled: false
+
+# ── GCP Secret Manager via Secrets Store CSI ──────────────────────────────────
+secretsStore:
+  enabled: true
+  provider: gcp
+  parameters:
+    secrets: |
+      - resourceName: "projects/<PROJECT_ID>/secrets/tsm-jwt-secret/versions/latest"
+        path: "TSM_JWT_SECRET"
+      - resourceName: "projects/<PROJECT_ID>/secrets/tsm-encryption-key/versions/latest"
+        path: "TSM_ENCRYPTION_KEY"
+      - resourceName: "projects/<PROJECT_ID>/secrets/tsm-database-password/versions/latest"
+        path: "TSM_DATABASE_PASSWORD"
+  secretObjects:
+    - secretName: tsm-terraform-state-manager
+      type: Opaque
+      data:
+        - objectName: TSM_JWT_SECRET
+          key: TSM_JWT_SECRET
+        - objectName: TSM_ENCRYPTION_KEY
+          key: TSM_ENCRYPTION_KEY
+        - objectName: TSM_DATABASE_PASSWORD
+          key: TSM_DATABASE_PASSWORD
+
+# ── Gateway API: built-in GKE Gateway controller ──────────────────────────────
+gatewayAPI:
+  enabled: true
+  # GKE pre-provisions its GatewayClasses — do not create one.
+  createGatewayClass: false
+  gatewayClassName: gke-l7-global-external-managed
+  controllerName: ""
+  albId: ""
+  hostname: "<HOSTNAME>"
+  certManagerIssuer: "letsencrypt-staging"
+  tlsSecretName: "terraform-state-manager-tls"
+  email: "<OPS_EMAIL>"
+
+ingress:
+  enabled: false
+
+networkPolicy:
+  enabled: true
+  prometheusNamespace: "monitoring"
+
+autoscaling:
+  enabled: true
+  minReplicas: 3
+  maxReplicas: 10
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+
+serviceMonitor:
+  enabled: true
+
+backup:
+  enabled: true
+  destination: "gcs"
+  bucket: "<BACKUP_BUCKET>"

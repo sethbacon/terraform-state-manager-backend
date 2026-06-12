@@ -1,0 +1,105 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "tsm.fullname" . }}-config
+  labels:
+    {{- include "tsm.labels" . | nindent 4 }}
+data:
+  # Server
+  TSM_SERVER_HOST: {{ .Values.server.host | quote }}
+  TSM_SERVER_PORT: {{ .Values.server.port | quote }}
+  TSM_SERVER_BASE_URL: {{ .Values.server.baseUrl | quote }}
+  TSM_SERVER_PUBLIC_URL: {{ .Values.server.publicUrl | quote }}
+  {{- if .Values.server.callbackUrl }}
+  TSM_SERVER_CALLBACK_URL: {{ .Values.server.callbackUrl | quote }}
+  {{- end }}
+  TSM_SERVER_READ_TIMEOUT: {{ .Values.server.readTimeout | quote }}
+  TSM_SERVER_WRITE_TIMEOUT: {{ .Values.server.writeTimeout | quote }}
+  {{- if .Values.tls.enabled }}
+  TSM_SERVER_TLS_CERT_FILE: "/etc/tsm/tls/tls.crt"
+  TSM_SERVER_TLS_KEY_FILE: "/etc/tsm/tls/tls.key"
+  {{- end }}
+
+  # Database (password lives in the Secret)
+  TSM_DATABASE_HOST: {{ .Values.externalDatabase.host | quote }}
+  TSM_DATABASE_PORT: {{ .Values.externalDatabase.port | quote }}
+  TSM_DATABASE_NAME: {{ .Values.externalDatabase.name | quote }}
+  TSM_DATABASE_USER: {{ .Values.externalDatabase.user | quote }}
+  TSM_DATABASE_SSL_MODE: {{ .Values.externalDatabase.sslMode | quote }}
+  TSM_DATABASE_MAX_CONNECTIONS: {{ .Values.externalDatabase.maxConnections | quote }}
+  TSM_DATABASE_MIN_IDLE_CONNECTIONS: {{ .Values.externalDatabase.minIdleConnections | quote }}
+
+  # Auth — OIDC
+  TSM_AUTH_OIDC_ENABLED: {{ .Values.auth.oidc.enabled | quote }}
+  {{- if .Values.auth.oidc.enabled }}
+  TSM_AUTH_OIDC_ISSUER_URL: {{ .Values.auth.oidc.issuerUrl | quote }}
+  TSM_AUTH_OIDC_CLIENT_ID: {{ .Values.auth.oidc.clientId | quote }}
+  TSM_AUTH_OIDC_REDIRECT_URL: {{ .Values.auth.oidc.redirectUrl | quote }}
+  TSM_AUTH_OIDC_SCOPES: {{ join "," .Values.auth.oidc.scopes | quote }}
+  TSM_AUTH_OIDC_GROUP_CLAIM_NAME: {{ .Values.auth.oidc.groupClaimName | quote }}
+  {{- if .Values.auth.oidc.defaultRole }}
+  TSM_AUTH_OIDC_DEFAULT_ROLE: {{ .Values.auth.oidc.defaultRole | quote }}
+  {{- end }}
+  {{- end }}
+
+  # Auth — LDAP (bind password lives in the Secret)
+  TSM_AUTH_LDAP_ENABLED: {{ .Values.auth.ldap.enabled | quote }}
+  {{- if .Values.auth.ldap.enabled }}
+  TSM_AUTH_LDAP_HOST: {{ .Values.auth.ldap.host | quote }}
+  TSM_AUTH_LDAP_PORT: {{ .Values.auth.ldap.port | quote }}
+  TSM_AUTH_LDAP_USE_TLS: {{ .Values.auth.ldap.useTls | quote }}
+  TSM_AUTH_LDAP_START_TLS: {{ .Values.auth.ldap.startTls | quote }}
+  TSM_AUTH_LDAP_BASE_DN: {{ .Values.auth.ldap.baseDn | quote }}
+  TSM_AUTH_LDAP_BIND_DN: {{ .Values.auth.ldap.bindDn | quote }}
+  TSM_AUTH_LDAP_USER_FILTER: {{ .Values.auth.ldap.userFilter | quote }}
+  TSM_AUTH_LDAP_USER_ATTR_EMAIL: {{ .Values.auth.ldap.userAttrEmail | quote }}
+  TSM_AUTH_LDAP_USER_ATTR_NAME: {{ .Values.auth.ldap.userAttrName | quote }}
+  {{- if .Values.auth.ldap.groupBaseDn }}
+  TSM_AUTH_LDAP_GROUP_BASE_DN: {{ .Values.auth.ldap.groupBaseDn | quote }}
+  TSM_AUTH_LDAP_GROUP_FILTER: {{ .Values.auth.ldap.groupFilter | quote }}
+  TSM_AUTH_LDAP_GROUP_MEMBER_ATTR: {{ .Values.auth.ldap.groupMemberAttr | quote }}
+  {{- end }}
+  {{- if .Values.auth.ldap.defaultRole }}
+  TSM_AUTH_LDAP_DEFAULT_ROLE: {{ .Values.auth.ldap.defaultRole | quote }}
+  {{- end }}
+  {{- end }}
+
+  # Auth — SAML (SP cert/key are file mounts; see backend.extraVolumes)
+  TSM_AUTH_SAML_ENABLED: {{ .Values.auth.saml.enabled | quote }}
+  {{- if .Values.auth.saml.enabled }}
+  {{- if .Values.auth.saml.entityId }}
+  TSM_AUTH_SAML_ENTITY_ID: {{ .Values.auth.saml.entityId | quote }}
+  {{- end }}
+  TSM_AUTH_SAML_ACS_URL: {{ .Values.auth.saml.acsUrl | quote }}
+  {{- if .Values.auth.saml.certFile }}
+  TSM_AUTH_SAML_CERT_FILE: {{ .Values.auth.saml.certFile | quote }}
+  TSM_AUTH_SAML_KEY_FILE: {{ .Values.auth.saml.keyFile | quote }}
+  {{- end }}
+  TSM_AUTH_SAML_ALLOW_IDP_INITIATED: {{ .Values.auth.saml.allowIdpInitiated | quote }}
+  {{- if .Values.auth.saml.groupAttributeName }}
+  TSM_AUTH_SAML_GROUP_ATTRIBUTE_NAME: {{ .Values.auth.saml.groupAttributeName | quote }}
+  {{- end }}
+  {{- if .Values.auth.saml.defaultRole }}
+  TSM_AUTH_SAML_DEFAULT_ROLE: {{ .Values.auth.saml.defaultRole | quote }}
+  {{- end }}
+  {{- end }}
+
+  # Auth — mTLS (requires tls.enabled; client CA mounted via extraVolumes)
+  TSM_AUTH_MTLS_ENABLED: {{ .Values.auth.mtls.enabled | quote }}
+  {{- if .Values.auth.mtls.enabled }}
+  TSM_AUTH_MTLS_CLIENT_CA_FILE: {{ .Values.auth.mtls.clientCaFile | quote }}
+  {{- end }}
+
+  # Auth — SCIM provisioning
+  TSM_AUTH_SCIM_ENABLED: {{ .Values.auth.scim.enabled | quote }}
+
+  # Logging
+  TSM_LOGGING_LEVEL: {{ .Values.logging.level | quote }}
+  TSM_LOGGING_FORMAT: {{ .Values.logging.format | quote }}
+
+  # Telemetry
+  TSM_TELEMETRY_METRICS_ENABLED: {{ .Values.telemetry.metrics.enabled | quote }}
+  TSM_TELEMETRY_METRICS_PROMETHEUS_PORT: {{ .Values.telemetry.metrics.prometheusPort | quote }}
+
+  # Dev mode is always off in chart deployments
+  DEV_MODE: "false"

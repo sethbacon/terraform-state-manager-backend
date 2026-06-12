@@ -1,0 +1,50 @@
+{{- if .Values.prometheusRule.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ include "tsm.fullname" . }}
+  labels:
+    {{- include "tsm.labels" . | nindent 4 }}
+    {{- with .Values.prometheusRule.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  groups:
+    - name: terraform-state-manager
+      rules:
+        - alert: TSMBackendDown
+          expr: up{job=~".*{{ include "tsm.fullname" . }}.*"} == 0
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "TSM backend target down"
+            description: "No metrics scraped from {{ "{{ $labels.instance }}" }} for 5 minutes."
+        - alert: TSMHigh5xxRate
+          expr: |
+            sum(rate(http_requests_total{status=~"5.."}[5m]))
+              / clamp_min(sum(rate(http_requests_total[5m])), 0.001) > 0.05
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "TSM 5xx error rate above 5%"
+            description: "More than 5% of HTTP requests returned 5xx over the last 10 minutes."
+        - alert: TSMHighLatencyP99
+          expr: |
+            histogram_quantile(0.99, sum(rate(http_request_duration_seconds_bucket[5m])) by (le)) > 5
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "TSM p99 latency above 5s"
+            description: "99th percentile request latency exceeded 5s for 10 minutes."
+        - alert: TSMDBConnectionsSaturated
+          expr: db_connections_in_use / clamp_min(db_connections_open, 1) > 0.9
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "TSM database pool near saturation"
+            description: "More than 90% of open database connections are in use."
+{{- end }}

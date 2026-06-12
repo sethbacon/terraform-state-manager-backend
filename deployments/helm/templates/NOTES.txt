@@ -1,0 +1,50 @@
+Terraform State Manager has been deployed!
+
+{{- if .Values.gatewayAPI.enabled }}
+
+Access the app at:
+  https://{{ .Values.gatewayAPI.hostname }}
+{{- else if .Values.ingress.enabled }}
+
+Access the app at:
+{{- range .Values.ingress.hosts }}
+  https://{{ .host }}
+{{- end }}
+{{- end }}
+
+Workloads:
+  Backend API:  {{ include "tsm.fullname" . }}-backend ({{ .Values.backend.replicaCount }} replicas{{ if .Values.autoscaling.enabled }}, HPA enabled{{ end }})
+{{- if .Values.workers.dedicated }}
+  Worker:       {{ include "tsm.fullname" . }}-worker (1 replica — schedule runner + state sync)
+{{- else }}
+  Worker:       in-process on the backend pods (workers.dedicated=false — keep replicaCount=1!)
+{{- end }}
+{{- if .Values.frontend.enabled }}
+  Frontend:     {{ include "tsm.fullname" . }}-frontend ({{ .Values.frontend.replicaCount }} replicas)
+{{- end }}
+
+Verify:
+  kubectl get pods -n {{ .Release.Namespace }} -l app.kubernetes.io/instance={{ .Release.Name }}
+  kubectl port-forward -n {{ .Release.Namespace }} svc/{{ include "tsm.fullname" . }}-backend {{ .Values.service.backend.port }}:{{ .Values.service.backend.port }}
+  curl http://localhost:{{ .Values.service.backend.port }}/health
+  curl http://localhost:{{ .Values.service.backend.port }}/ready
+
+{{- if not .Values.externalDatabase.host }}
+
+WARNING: externalDatabase.host is not set — the backend will not become ready.
+{{- end }}
+{{- if and (not .Values.security.existingSecret) (not .Values.security.jwtSecret) }}
+
+WARNING: no JWT secret configured (security.jwtSecret or security.existingSecret).
+{{- end }}
+{{- if and (not .Values.server.callbackUrl) (not .Values.server.baseUrl) }}
+
+WARNING: server.baseUrl/callbackUrl unset — CI drift callbacks have nowhere to post.
+{{- end }}
+
+NOTE: Drift and Version Lab runs require server.callbackUrl (or baseUrl) to be
+reachable FROM YOUR CI RUNNERS. GitHub-hosted runners need a public endpoint.
+
+ENCRYPTION KEY CUSTODY: TSM_ENCRYPTION_KEY protects every stored source/CI
+credential. Losing it orphans them (re-entry required) — escrow the key. See
+docs/disaster-recovery.md.

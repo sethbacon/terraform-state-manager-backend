@@ -1,0 +1,49 @@
+{{- if .Values.ingress.enabled -}}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "tsm.fullname" . }}
+  labels:
+    {{- include "tsm.labels" . | nindent 4 }}
+  {{- with .Values.ingress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- if .Values.ingress.className }}
+  ingressClassName: {{ .Values.ingress.className }}
+  {{- end }}
+  {{- if .Values.ingress.tls }}
+  tls:
+    {{- range .Values.ingress.tls }}
+    - hosts:
+        {{- range .hosts }}
+        - {{ . | quote }}
+        {{- end }}
+      secretName: {{ .secretName }}
+    {{- end }}
+  {{- end }}
+  rules:
+    {{- range .Values.ingress.hosts }}
+    - host: {{ .host | quote }}
+      http:
+        paths:
+          {{- range .paths }}
+          - path: {{ .path }}
+            pathType: {{ .pathType }}
+            backend:
+              service:
+                {{- if $.Values.frontend.enabled }}
+                # The frontend nginx proxies /api, /scim, /health, /ready, and
+                # /swagger to the backend, so a single catch-all rule suffices.
+                name: {{ include "tsm.fullname" $ }}-frontend
+                port:
+                  number: {{ $.Values.service.frontend.port }}
+                {{- else }}
+                name: {{ include "tsm.fullname" $ }}-backend
+                port:
+                  number: {{ $.Values.service.backend.port }}
+                {{- end }}
+          {{- end }}
+    {{- end }}
+{{- end }}

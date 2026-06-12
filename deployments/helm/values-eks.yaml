@@ -1,0 +1,125 @@
+# ============================================================
+# values-eks.yaml — AWS EKS deployment values
+# ============================================================
+# Fill in ALL <PLACEHOLDER> values. See docs/deployment/eks-deployment.md.
+# Secrets come from AWS Secrets Manager via ASCP (Secrets Store CSI Driver +
+# AWS provider); the pod identity is an IRSA role on the ServiceAccount.
+# ============================================================
+
+backend:
+  image:
+    repository: <AWS_ACCOUNT_ID>.dkr.ecr.<REGION>.amazonaws.com/terraform-state-manager-backend
+    tag: "v1.0.0"
+  replicaCount: 3
+
+workers:
+  dedicated: true
+
+frontend:
+  enabled: true
+  image:
+    repository: <AWS_ACCOUNT_ID>.dkr.ecr.<REGION>.amazonaws.com/terraform-state-manager-frontend
+    tag: "v1.0.0"
+  replicaCount: 2
+
+server:
+  publicUrl: "https://<HOSTNAME>"
+  baseUrl: "https://<HOSTNAME>"
+  callbackUrl: "https://<HOSTNAME>"
+
+# ── Database: RDS for PostgreSQL ───────────────────────────────────────────────
+externalDatabase:
+  host: "<RDS_ENDPOINT>.rds.amazonaws.com"
+  port: 5432
+  name: "terraform_state_manager"
+  user: "tsm"
+  sslMode: "require"
+  password: ""
+  existingSecret: ""
+
+security:
+  jwtSecret: ""
+  encryptionKey: ""
+  existingSecret: ""
+
+logging:
+  level: "warn"
+  format: "json"
+
+# ── IRSA: role with secretsmanager:GetSecretValue on the TSM secrets ──────────
+serviceAccount:
+  create: true
+  annotations:
+    eks.amazonaws.com/role-arn: "arn:aws:iam::<AWS_ACCOUNT_ID>:role/<TSM_IRSA_ROLE>"
+
+workloadIdentity:
+  enabled: false
+
+keyVault:
+  enabled: false
+
+# ── AWS Secrets Manager via ASCP ───────────────────────────────────────────────
+# Create one secret per value (names below) or adapt jmesPath for a JSON secret.
+secretsStore:
+  enabled: true
+  provider: aws
+  parameters:
+    objects: |
+      - objectName: "tsm/jwt-secret"
+        objectType: "secretsmanager"
+        objectAlias: "TSM_JWT_SECRET"
+      - objectName: "tsm/encryption-key"
+        objectType: "secretsmanager"
+        objectAlias: "TSM_ENCRYPTION_KEY"
+      - objectName: "tsm/database-password"
+        objectType: "secretsmanager"
+        objectAlias: "TSM_DATABASE_PASSWORD"
+  secretObjects:
+    - secretName: tsm-terraform-state-manager
+      type: Opaque
+      data:
+        - objectName: TSM_JWT_SECRET
+          key: TSM_JWT_SECRET
+        - objectName: TSM_ENCRYPTION_KEY
+          key: TSM_ENCRYPTION_KEY
+        - objectName: TSM_DATABASE_PASSWORD
+          key: TSM_DATABASE_PASSWORD
+
+# ── Gateway API: AWS Load Balancer Controller ─────────────────────────────────
+gatewayAPI:
+  enabled: true
+  createGatewayClass: true
+  gatewayClassName: aws-alb-external
+  controllerName: "gateway.k8s.aws/alb"
+  albId: ""
+  gatewayAnnotations:
+    service.beta.kubernetes.io/aws-load-balancer-scheme: internet-facing
+  hostname: "<HOSTNAME>"
+  certManagerIssuer: "letsencrypt-staging"
+  tlsSecretName: "terraform-state-manager-tls"
+  email: "<OPS_EMAIL>"
+
+ingress:
+  enabled: false
+
+networkPolicy:
+  enabled: true
+  prometheusNamespace: "monitoring"
+
+autoscaling:
+  enabled: true
+  minReplicas: 3
+  maxReplicas: 10
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+
+serviceMonitor:
+  enabled: true
+
+backup:
+  enabled: true
+  destination: "s3"
+  bucket: "<BACKUP_BUCKET>"
+  region: "<REGION>"

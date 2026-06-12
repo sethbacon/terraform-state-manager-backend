@@ -1,0 +1,76 @@
+{{- if .Values.networkPolicy.enabled -}}
+# ── Default: deny all ingress in this namespace ───────────────────────────────
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "tsm.fullname" . }}-default-deny-ingress
+  labels:
+    {{- include "tsm.labels" . | nindent 4 }}
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+---
+# ── Frontend: allow HTTP from anywhere (external Gateway / LB traffic) ────────
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "tsm.fullname" . }}-allow-frontend-ingress
+  labels:
+    {{- include "tsm.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/component: frontend
+  policyTypes:
+    - Ingress
+  ingress:
+    - ports:
+        - port: 8080
+          protocol: TCP
+---
+# ── Backend: allow HTTP (frontend pods + Gateway/LB direct /api routes) ───────
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "tsm.fullname" . }}-allow-backend-ingress
+  labels:
+    {{- include "tsm.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/component: backend
+  policyTypes:
+    - Ingress
+  ingress:
+    - ports:
+        - port: {{ .Values.service.backend.port }}
+          protocol: TCP
+---
+# ── Backend + worker metrics: allow Prometheus scrape ─────────────────────────
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "tsm.fullname" . }}-allow-metrics
+  labels:
+    {{- include "tsm.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchExpressions:
+      - key: app.kubernetes.io/component
+        operator: In
+        values: ["backend", "worker"]
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.networkPolicy.prometheusNamespace }}
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - port: {{ .Values.telemetry.metrics.prometheusPort }}
+          protocol: TCP
+{{- end }}

@@ -1,0 +1,390 @@
+---
+# Default values for the terraform-state-manager Helm chart.
+#
+# Topology: this chart deploys up to three workloads —
+#   backend  (N replicas)  the API; periodic workers DISABLED when workers.dedicated=true
+#   worker   (1 replica)   schedule runner + statesync reconcile loop (workers.dedicated=true)
+#   frontend (N replicas)  nginx serving the SPA, proxying /api to the backend
+#
+# The worker split exists because the schedule runner has no cross-replica
+# claim: two replicas firing schedules would double-dispatch drift runs. With
+# workers.dedicated=false the backend pods run the workers in-process — only
+# safe with backend.replicaCount=1 and autoscaling disabled.
+
+# -- Global settings
+global:
+  # -- Image pull secrets
+  imagePullSecrets: []
+
+# -- Backend (API) configuration
+backend:
+  # -- Number of API replicas (safe to scale when workers.dedicated=true)
+  replicaCount: 2
+  image:
+    # -- Backend image repository
+    repository: terraform-state-manager-backend
+    # -- Image tag (defaults to Chart.appVersion)
+    tag: ""
+    pullPolicy: IfNotPresent
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+  # -- Pod security context (image runs as user tsm/1000)
+  podSecurityContext:
+    runAsUser: 1000
+    runAsGroup: 1000
+    fsGroup: 1000
+    runAsNonRoot: true
+  # -- Container security context
+  securityContext:
+    readOnlyRootFilesystem: true
+    allowPrivilegeEscalation: false
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  # -- Topology spread constraints for scheduling across zones/nodes
+  topologySpreadConstraints: []
+  # Example:
+  #   - maxSkew: 1
+  #     topologyKey: topology.kubernetes.io/zone
+  #     whenUnsatisfiable: DoNotSchedule
+  #     labelSelector:
+  #       matchLabels:
+  #         app.kubernetes.io/component: backend
+  # -- Additional environment variables
+  extraEnv: []
+  # -- Additional volume mounts (e.g. SAML SP cert/key, mTLS client CA)
+  extraVolumeMounts: []
+  # -- Additional volumes
+  extraVolumes: []
+
+# -- Background workers (schedule runner + statesync reconcile loop)
+workers:
+  # -- Run the periodic workers in a DEDICATED single-replica deployment
+  # (recommended; required whenever backend.replicaCount > 1 or autoscaling
+  # is enabled). When false, the backend pods run the workers in-process.
+  dedicated: true
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+# -- Frontend (SPA) configuration
+frontend:
+  # -- Enable the frontend deployment
+  enabled: true
+  replicaCount: 2
+  image:
+    repository: terraform-state-manager-frontend
+    tag: ""
+    pullPolicy: IfNotPresent
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 200m
+      memory: 128Mi
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+# -- Server configuration
+server:
+  host: "0.0.0.0"
+  port: 8080
+  # -- Browser-facing URL of the app (post-login redirects, Secure cookies).
+  # Must be the public HTTPS hostname in production.
+  publicUrl: "https://tsm.example.com"
+  # -- Backend's own base URL (internal references). Usually same as publicUrl
+  # when the frontend proxies /api on the same host.
+  baseUrl: "https://tsm.example.com"
+  # -- URL CI runners post drift/version-lab results back to. MUST be reachable
+  # from your CI runners (GitHub-hosted runners need a public endpoint).
+  # Defaults to baseUrl when empty.
+  callbackUrl: ""
+  readTimeout: "30s"
+  writeTimeout: "30s"
+
+# -- External PostgreSQL. No database is deployed by this chart — use a managed
+# service (Azure Database for PostgreSQL Flexible Server, RDS, Cloud SQL).
+externalDatabase:
+  host: ""
+  port: 5432
+  name: "terraform_state_manager"
+  user: "tsm"
+  # -- Database password (ignored if existingSecret is set)
+  password: ""
+  sslMode: "require"
+  maxConnections: 25
+  minIdleConnections: 5
+  # -- Existing secret containing a TSM_DATABASE_PASSWORD key
+  existingSecret: ""
+
+# -- Authentication providers. All disabled by default; enable the ones your
+# IdP landscape needs. Secrets (client secret, bind password) live in the app
+# Secret / Key Vault — never in the ConfigMap.
+auth:
+  oidc:
+    enabled: false
+    issuerUrl: ""
+    clientId: ""
+    # -- Ignored if security.existingSecret provides TSM_AUTH_OIDC_CLIENT_SECRET
+    clientSecret: ""
+    # -- e.g. https://tsm.example.com/api/v1/auth/callback
+    redirectUrl: ""
+    scopes:
+      - openid
+      - email
+      - profile
+    groupClaimName: "groups"
+    # -- Role granted in the default org on first login when no group mapping matches
+    defaultRole: ""
+  ldap:
+    enabled: false
+    host: ""
+    # -- 0 selects 636 for LDAPS / 389 for StartTLS automatically
+    port: 0
+    useTls: true
+    startTls: false
+    baseDn: ""
+    bindDn: ""
+    # -- Ignored if security.existingSecret provides TSM_AUTH_LDAP_BIND_PASSWORD
+    bindPassword: ""
+    # -- Must contain %s for the escaped username, e.g. "(sAMAccountName=%s)"
+    userFilter: ""
+    userAttrEmail: "mail"
+    userAttrName: "displayName"
+    groupBaseDn: ""
+    groupFilter: ""
+    groupMemberAttr: "member"
+    defaultRole: ""
+  saml:
+    enabled: false
+    entityId: ""
+    # -- Must be the public URL, e.g. https://tsm.example.com/api/v1/auth/saml/acs
+    acsUrl: ""
+    # -- SP signing cert/key are FILES: mount them via backend.extraVolumes +
+    # extraVolumeMounts and point these at the mount paths.
+    certFile: ""
+    keyFile: ""
+    allowIdpInitiated: false
+    groupAttributeName: ""
+    defaultRole: ""
+  mtls:
+    # -- mTLS client-cert auth requires the backend to terminate TLS itself
+    # (tls.enabled below) — not compatible with ingress TLS termination.
+    enabled: false
+    # -- PEM bundle of trusted client CAs; mount via backend.extraVolumes.
+    clientCaFile: ""
+  scim:
+    # -- SCIM 2.0 provisioning endpoints at /scim/v2 (Bearer + scim:provision)
+    enabled: false
+
+# -- Direct TLS on the backend (only for mTLS or no-ingress installs; the
+# default is TLS termination at the ingress/gateway, leaving this disabled).
+tls:
+  enabled: false
+  # -- kubernetes.io/tls Secret with the server cert/key; mounted at
+  # /etc/tsm/tls and wired into TSM_SERVER_TLS_CERT_FILE/KEY_FILE.
+  existingSecret: ""
+
+# -- Security
+# IMPORTANT: in production use existingSecret (or Key Vault CSI) instead of
+# inline values — anything set here is stored in the Helm release Secret.
+security:
+  # -- JWT signing secret (required, min 32 chars). Ignored if existingSecret set.
+  jwtSecret: ""
+  # -- AES-256-GCM key for credentials at rest: exactly 32 raw bytes or 64 hex
+  # chars. Ignored if existingSecret is set. LOSING THIS KEY ORPHANS every
+  # stored source/CI credential — escrow it (see docs/disaster-recovery.md).
+  encryptionKey: ""
+  # -- Existing secret with TSM_JWT_SECRET + TSM_ENCRYPTION_KEY keys (and
+  # optionally TSM_DATABASE_PASSWORD, TSM_AUTH_OIDC_CLIENT_SECRET,
+  # TSM_AUTH_LDAP_BIND_PASSWORD). Recommended for production:
+  #   kubectl create secret generic tsm-secrets \
+  #     --from-literal=TSM_JWT_SECRET="$(openssl rand -hex 32)" \
+  #     --from-literal=TSM_ENCRYPTION_KEY="$(openssl rand -hex 32)" \
+  #     -n terraform-state-manager
+  existingSecret: ""
+
+# -- Optional PVC for "local"-type state sources (host-path state files). Most
+# production installs read state from remote backends (Azure Blob/S3/HCP/...)
+# and don't need this.
+localStates:
+  enabled: false
+  mountPath: "/data/states"
+  persistence:
+    storageClass: ""
+    accessMode: ReadWriteOnce
+    size: 5Gi
+    existingClaim: ""
+
+# -- Logging
+logging:
+  level: "info"
+  format: "json"
+
+# -- Telemetry
+telemetry:
+  metrics:
+    enabled: true
+    prometheusPort: 9090
+
+# -- Service configuration
+service:
+  backend:
+    type: ClusterIP
+    port: 8080
+    metricsPort: 9090
+  frontend:
+    type: ClusterIP
+    port: 80
+
+# -- Legacy nginx Ingress. Disable when gatewayAPI.enabled=true.
+ingress:
+  enabled: true
+  className: "nginx"
+  annotations: {}
+  hosts:
+    - host: tsm.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls:
+    - secretName: terraform-state-manager-tls
+      hosts:
+        - tsm.example.com
+
+# -- Kubernetes Gateway API (AKS AGfC / EKS ALB / GKE Gateway).
+# When enabled, set ingress.enabled=false.
+gatewayAPI:
+  enabled: false
+  # -- Create a GatewayClass (true for AKS/EKS; false for GKE, which
+  # pre-provisions its classes)
+  createGatewayClass: true
+  # -- AKS/AGfC: azure-alb-external | EKS: aws-alb-external |
+  # GKE: gke-l7-global-external-managed
+  gatewayClassName: azure-alb-external
+  # -- AKS/AGfC: alb.networking.azure.io/alb-controller |
+  # EKS: gateway.k8s.aws/alb | GKE: (unused)
+  controllerName: "alb.networking.azure.io/alb-controller"
+  # -- AKS/AGfC only: ARM resource ID of the Application Gateway for
+  # Containers resource
+  albId: ""
+  # -- Extra annotations merged onto the Gateway
+  gatewayAnnotations: {}
+  # -- Public hostname (must match DNS + certificate)
+  hostname: "tsm.example.com"
+  # -- cert-manager ClusterIssuer (letsencrypt-staging until validated)
+  certManagerIssuer: "letsencrypt-staging"
+  tlsSecretName: "terraform-state-manager-tls"
+  # -- Email for Let's Encrypt notifications (required when enabled)
+  email: ""
+
+# -- Azure Key Vault + Secrets Store CSI Driver (AKS). Syncs jwt-secret,
+# encryption-key, database-password (+ oidc-client-secret when OIDC enabled)
+# from Key Vault into the app Secret at pod start. For EKS/GKE equivalents see
+# values-eks.yaml / values-gke.yaml (secretsStore below).
+keyVault:
+  enabled: false
+  # -- Vault name (not the full URI)
+  name: ""
+  tenantId: ""
+  # -- Managed-identity client ID (must match workloadIdentity.clientId)
+  clientId: ""
+
+# -- Generic Secrets Store CSI provider (EKS: aws | GKE: gcp). Mutually
+# exclusive with keyVault.enabled.
+secretsStore:
+  enabled: false
+  # -- aws | gcp
+  provider: "aws"
+  # -- Provider-specific parameters block (verbatim YAML for the
+  # SecretProviderClass spec.parameters)
+  parameters: {}
+  # -- Mapping of provider object names to k8s Secret keys
+  secretObjects: []
+
+# -- Azure Workload Identity (AKS): annotates the ServiceAccount; pods carry
+# the azure.workload.identity/use label. For EKS IRSA / GKE WI use
+# serviceAccount.annotations directly.
+workloadIdentity:
+  enabled: false
+  clientId: ""
+
+# -- ServiceAccount
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+# -- Pod Disruption Budget (backend API pods)
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+
+# -- Horizontal Pod Autoscaler (backend API only; the worker never scales)
+autoscaling:
+  enabled: false
+  minReplicas: 2
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 70
+  targetMemoryUtilizationPercentage: 80
+
+# -- Prometheus ServiceMonitor (prometheus-operator)
+serviceMonitor:
+  enabled: false
+  interval: 30s
+  labels: {}
+
+# -- PrometheusRule alerts (prometheus-operator)
+prometheusRule:
+  enabled: false
+  labels: {}
+
+# -- Grafana dashboard ConfigMap (Grafana sidecar provisioning)
+grafanaDashboard:
+  enabled: false
+  labels: {}
+
+# -- NetworkPolicy: default-deny ingress + explicit allows. Requires a CNI
+# that enforces NetworkPolicy (Azure CNI, Calico, Cilium); kubenet ignores it.
+networkPolicy:
+  enabled: true
+  # -- Namespace where Prometheus scrapes from (allows :9090)
+  prometheusNamespace: "monitoring"
+
+# -- Optional pg_dump backup CronJob
+backup:
+  enabled: false
+  schedule: "0 2 * * *"
+  # -- s3 | azure | gcs
+  destination: "azure"
+  # -- Bucket / container name
+  bucket: ""
+  region: ""
+  prefix: "backups/terraform-state-manager"
+  image:
+    repository: postgres
+    tag: "16-alpine"
+    pullPolicy: IfNotPresent
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3

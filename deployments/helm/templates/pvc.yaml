@@ -1,0 +1,21 @@
+{{- if and .Values.localStates.enabled (not .Values.localStates.persistence.existingClaim) }}
+# Shared PVC for "local"-type state sources. Mounted by both the backend API
+# pods (reads/edits) and the worker (periodic sync), so a multi-replica install
+# needs a ReadWriteMany-capable storage class (e.g. Azure Files); single-replica
+# installs can use ReadWriteOnce.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "tsm.fullname" . }}-states
+  labels:
+    {{- include "tsm.labels" . | nindent 4 }}
+spec:
+  accessModes:
+    - {{ .Values.localStates.persistence.accessMode }}
+  {{- if .Values.localStates.persistence.storageClass }}
+  storageClassName: {{ .Values.localStates.persistence.storageClass | quote }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.localStates.persistence.size }}
+{{- end }}

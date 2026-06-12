@@ -1,0 +1,62 @@
+{{- if .Values.gatewayAPI.enabled -}}
+{{- if not .Values.gatewayAPI.email }}
+{{- fail "gatewayAPI.email is required when gatewayAPI.enabled=true for Let's Encrypt registration." }}
+{{- end }}
+# ── Let's Encrypt Staging (untrusted, generous rate limits — for testing) ─────
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt-staging
+  labels:
+    {{- include "tsm.labels" . | nindent 4 }}
+spec:
+  acme:
+    server: https://acme-staging-v02.api.letsencrypt.org/directory
+    email: {{ .Values.gatewayAPI.email | quote }}
+    privateKeySecretRef:
+      name: letsencrypt-staging-account-key
+    solvers:
+      - http01:
+          gatewayHTTPRoute:
+            parentRefs:
+              - name: {{ include "tsm.fullname" . }}-gateway
+                namespace: {{ .Release.Namespace }}
+                kind: Gateway
+---
+# ── Let's Encrypt Production (trusted, rate-limited) ──────────────────────────
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt-prod
+  labels:
+    {{- include "tsm.labels" . | nindent 4 }}
+spec:
+  acme:
+    server: https://acme-v02.api.letsencrypt.org/directory
+    email: {{ .Values.gatewayAPI.email | quote }}
+    privateKeySecretRef:
+      name: letsencrypt-prod-account-key
+    solvers:
+      - http01:
+          gatewayHTTPRoute:
+            parentRefs:
+              - name: {{ include "tsm.fullname" . }}-gateway
+                namespace: {{ .Release.Namespace }}
+                kind: Gateway
+---
+# ── TLS Certificate (issued by the configured ClusterIssuer) ──────────────────
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ include "tsm.fullname" . }}-tls
+  labels:
+    {{- include "tsm.labels" . | nindent 4 }}
+spec:
+  secretName: {{ .Values.gatewayAPI.tlsSecretName }}
+  issuerRef:
+    name: {{ .Values.gatewayAPI.certManagerIssuer }}
+    kind: ClusterIssuer
+    group: cert-manager.io
+  dnsNames:
+    - {{ .Values.gatewayAPI.hostname | quote }}
+{{- end }}

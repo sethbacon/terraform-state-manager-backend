@@ -1,0 +1,64 @@
+{{- if .Values.frontend.enabled -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "tsm.fullname" . }}-frontend-nginx
+  labels:
+    {{- include "tsm.labels" . | nindent 4 }}
+data:
+  default.conf: |
+    server {
+        listen 8080;
+        server_name _;
+        root /usr/share/nginx/html;
+        index index.html;
+
+        # State files can be large
+        client_max_body_size 100m;
+
+        # Security headers
+        add_header X-Frame-Options "DENY" always;
+        add_header X-Content-Type-Options "nosniff" always;
+        add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+        add_header Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=()" always;
+
+        location / {
+            try_files $uri $uri/ /index.html;
+        }
+
+        {{- $backendUrl := printf "http://%s:%d" (include "tsm.backendServiceName" .) (int .Values.service.backend.port) }}
+
+        location /api/ {
+            proxy_pass {{ $backendUrl }};
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+        }
+
+        # SCIM provisioning lives at the top level (outside /api)
+        location /scim/ {
+            proxy_pass {{ $backendUrl }};
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+        }
+
+        location = /health {
+            proxy_pass {{ $backendUrl }};
+        }
+
+        location = /ready {
+            proxy_pass {{ $backendUrl }};
+        }
+
+        location ~ ^/swagger {
+            proxy_pass {{ $backendUrl }};
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+        }
+    }
+{{- end }}

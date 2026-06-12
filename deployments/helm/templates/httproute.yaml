@@ -1,0 +1,96 @@
+{{- if .Values.gatewayAPI.enabled -}}
+# ── HTTP → HTTPS redirect ─────────────────────────────────────────────────────
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: {{ include "tsm.fullname" . }}-http-redirect
+  labels:
+    {{- include "tsm.labels" . | nindent 4 }}
+spec:
+  parentRefs:
+    - name: {{ include "tsm.fullname" . }}-gateway
+      sectionName: http
+  rules:
+    - filters:
+        - type: RequestRedirect
+          requestRedirect:
+            scheme: https
+            statusCode: 301
+---
+# ── Backend paths (HTTPS) ─────────────────────────────────────────────────────
+# /api (app + drift/version-lab callbacks), /scim (IdP provisioning), health
+# probes, and the OpenAPI spec go straight to the backend, bypassing the
+# frontend nginx.
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: {{ include "tsm.fullname" . }}-backend-routes
+  labels:
+    {{- include "tsm.labels" . | nindent 4 }}
+spec:
+  parentRefs:
+    - name: {{ include "tsm.fullname" . }}-gateway
+      sectionName: https
+  hostnames:
+    - {{ .Values.gatewayAPI.hostname | quote }}
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /api/
+      backendRefs:
+        - name: {{ include "tsm.backendServiceName" . }}
+          port: {{ .Values.service.backend.port }}
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /scim/
+      backendRefs:
+        - name: {{ include "tsm.backendServiceName" . }}
+          port: {{ .Values.service.backend.port }}
+    - matches:
+        - path:
+            type: Exact
+            value: /health
+      backendRefs:
+        - name: {{ include "tsm.backendServiceName" . }}
+          port: {{ .Values.service.backend.port }}
+    - matches:
+        - path:
+            type: Exact
+            value: /ready
+      backendRefs:
+        - name: {{ include "tsm.backendServiceName" . }}
+          port: {{ .Values.service.backend.port }}
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /swagger
+      backendRefs:
+        - name: {{ include "tsm.backendServiceName" . }}
+          port: {{ .Values.service.backend.port }}
+{{- if .Values.frontend.enabled }}
+---
+# ── Frontend SPA — catch-all (HTTPS) ──────────────────────────────────────────
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: {{ include "tsm.fullname" . }}-frontend-route
+  labels:
+    {{- include "tsm.labels" . | nindent 4 }}
+spec:
+  parentRefs:
+    - name: {{ include "tsm.fullname" . }}-gateway
+      sectionName: https
+  hostnames:
+    - {{ .Values.gatewayAPI.hostname | quote }}
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      backendRefs:
+        - name: {{ include "tsm.fullname" . }}-frontend
+          port: {{ .Values.service.frontend.port }}
+{{- end }}
+{{- end }}

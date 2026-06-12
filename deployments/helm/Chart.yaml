@@ -1,0 +1,15 @@
+apiVersion: v2
+name: terraform-state-manager
+description: A Helm chart for deploying the Terraform State Manager (backend API, background worker, and frontend SPA)
+type: application
+version: 0.1.0
+appVersion: "1.0.0"
+keywords:
+  - terraform
+  - state
+  - drift
+  - infrastructure
+  - devops
+home: https://github.com/sethbacon/terraform-state-manager-backend
+maintainers:
+  - name: terraform-state-manager

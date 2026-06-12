@@ -1,0 +1,54 @@
+{{- if .Values.grafanaDashboard.enabled }}
+# Grafana dashboard ConfigMap, auto-discovered by the Grafana Helm chart
+# sidecar when labeled to match its watch selector (commonly
+# grafana_dashboard: "1" — set via grafanaDashboard.labels).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "tsm.fullname" . }}-grafana-dashboard
+  labels:
+    {{- include "tsm.labels" . | nindent 4 }}
+    {{- with .Values.grafanaDashboard.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+data:
+  terraform-state-manager.json: |
+    {
+      "title": "Terraform State Manager",
+      "uid": "tsm-overview",
+      "timezone": "browser",
+      "refresh": "30s",
+      "time": { "from": "now-6h", "to": "now" },
+      "panels": [
+        {
+          "id": 1, "type": "timeseries", "title": "HTTP request rate by status",
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+          "targets": [{ "expr": "sum(rate(http_requests_total[5m])) by (status)", "legendFormat": "{{ "{{status}}" }}" }]
+        },
+        {
+          "id": 2, "type": "timeseries", "title": "Request latency (p50 / p95 / p99)",
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+          "targets": [
+            { "expr": "histogram_quantile(0.50, sum(rate(http_request_duration_seconds_bucket[5m])) by (le))", "legendFormat": "p50" },
+            { "expr": "histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket[5m])) by (le))", "legendFormat": "p95" },
+            { "expr": "histogram_quantile(0.99, sum(rate(http_request_duration_seconds_bucket[5m])) by (le))", "legendFormat": "p99" }
+          ]
+        },
+        {
+          "id": 3, "type": "timeseries", "title": "5xx rate",
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+          "targets": [{ "expr": "sum(rate(http_requests_total{status=~\"5..\"}[5m]))", "legendFormat": "5xx/s" }]
+        },
+        {
+          "id": 4, "type": "timeseries", "title": "Database connections",
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+          "targets": [
+            { "expr": "db_connections_open", "legendFormat": "open" },
+            { "expr": "db_connections_in_use", "legendFormat": "in use" },
+            { "expr": "db_connections_idle", "legendFormat": "idle" }
+          ]
+        }
+      ],
+      "schemaVersion": 39
+    }
+{{- end }}
