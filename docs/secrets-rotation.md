@@ -6,7 +6,7 @@
 | `TSM_DATABASE_PASSWORD` | Rotate on the server, update secret, restart | Brief reconnect blips |
 | OIDC client secret | New secret in the IdP, update `oidc-client-secret`, restart | New logins only |
 | LDAP bind password | Same pattern | |
-| API keys (`tsm_…`) | Self-service rotate in `/apikeys` (0–72h grace overlap) | Update the consumer during the grace window |
+| API keys (`tsm_…`) | Self-service rotate in `/admin/apikeys` (0–72h grace overlap) | Update the consumer during the grace window |
 | TLS certs | cert-manager auto-renews (chart); certbot renew (binary) | None |
 | `TSM_ENCRYPTION_KEY` | **Special** — see [disaster-recovery.md](disaster-recovery.md): new key, restart, re-enter all stored credentials | Manual credential re-entry |
 

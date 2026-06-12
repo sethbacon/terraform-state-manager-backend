@@ -17,7 +17,7 @@
 | OIDC "issuer mismatch" | issuer URL differs from the discovery document (trailing slash, http vs https) | copy issuer from `/.well-known/openid-configuration` |
 | Group mappings don't apply | claim name mismatch / Entra emits group GUIDs | set `TSM_AUTH_OIDC_GROUP_CLAIM_NAME`; map the GUIDs |
 | User lost access after login | reconciliation removed membership when they left a mapped group | expected; re-add to group |
-| API key 401 | expired / revoked / wrong prefix; keys are header-only (never cookies) | check `/apikeys` last-used + expiry |
+| API key 401 | expired / revoked / wrong prefix; keys are header-only (never cookies) | check `/admin/apikeys` last-used + expiry |
 
 ## Drift / Version Lab
 

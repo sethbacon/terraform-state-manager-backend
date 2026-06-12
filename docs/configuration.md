@@ -112,7 +112,7 @@ from the mapped orgs.
 | `TSM_AUTH_MTLS_CLIENT_CA_FILE` | | PEM bundle of trusted client CAs |
 | `TSM_AUTH_SCIM_ENABLED` | `false` | Mounts `/scim/v2` (RFC 7644). Bearer token with `scim:provision` scope; rate-limit at the proxy |
 
-API keys (`tsm_…` Bearer tokens, self-service under `/apikeys`) are always
+API keys (`tsm_…` Bearer tokens, self-service under `/admin/apikeys`) are always
 enabled and are the recommended credential for CI calls such as
 `POST /api/v1/drift/ingest`.
 

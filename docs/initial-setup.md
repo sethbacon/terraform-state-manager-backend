@@ -55,7 +55,7 @@ backfills the analysis store.
 - **Dispatched drift / Version Lab**: connect a CI source (GitHub/ADO), run
   the repo-setup wizard, and confirm the callback preflight is green
   (`TSM_SERVER_CALLBACK_URL` reachable from runners).
-- **Push-style drift**: create an **API key** (`/apikeys`, scopes
+- **Push-style drift**: create an **API key** (`/admin/apikeys`, scopes
   `state:read,state:drift`) and POST plan JSON to `/api/v1/drift/ingest`
   with `Authorization: Bearer tsm_…` and a per-run `external_ref`.
 
