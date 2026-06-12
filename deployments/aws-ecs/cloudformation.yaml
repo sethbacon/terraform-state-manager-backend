@@ -1,0 +1,353 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Terraform State Manager on ECS Fargate: backend API service (scalable),
+  single-task worker (schedule runner + state sync), frontend (nginx SPA),
+  ALB with path routing, and ECS Service Connect so the frontend's nginx
+  upstream http://backend:8080 resolves unmodified.
+
+Parameters:
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+  PrivateSubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: Private subnets for tasks
+  PublicSubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: Public subnets for the ALB
+  BackendImage:
+    Type: String
+    Description: e.g. <account>.dkr.ecr.<region>.amazonaws.com/terraform-state-manager-backend:v1.0.0
+  FrontendImage:
+    Type: String
+  DatabaseHost:
+    Type: String
+    Description: RDS endpoint
+  DatabaseSecretArn:
+    Type: String
+    Description: >
+      Secrets Manager secret ARN holding JSON keys TSM_DATABASE_PASSWORD,
+      TSM_JWT_SECRET, TSM_ENCRYPTION_KEY
+  PublicUrl:
+    Type: String
+    Description: https://tsm.yourdomain.com (DNS must point at the ALB)
+  CertificateArn:
+    Type: String
+    Description: ACM certificate ARN for the HTTPS listener
+  BackendDesiredCount:
+    Type: Number
+    Default: 2
+
+Resources:
+  Cluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: terraform-state-manager
+      ServiceConnectDefaults:
+        Namespace: tsm
+
+  TaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ecs-tasks.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+      Policies:
+        - PolicyName: read-app-secrets
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource: !Ref DatabaseSecretArn
+
+  TaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ecs-tasks.amazonaws.com }
+            Action: sts:AssumeRole
+
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /ecs/terraform-state-manager
+      RetentionInDays: 30
+
+  AlbSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: TSM ALB
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - { IpProtocol: tcp, FromPort: 80, ToPort: 80, CidrIp: 0.0.0.0/0 }
+        - { IpProtocol: tcp, FromPort: 443, ToPort: 443, CidrIp: 0.0.0.0/0 }
+
+  TaskSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: TSM tasks
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 8080
+          ToPort: 8080
+          SourceSecurityGroupId: !Ref AlbSecurityGroup
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          SourceSecurityGroupId: !Ref AlbSecurityGroup
+
+  TaskSelfIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref TaskSecurityGroup
+      IpProtocol: -1
+      SourceSecurityGroupId: !Ref TaskSecurityGroup
+
+  LoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Scheme: internet-facing
+      Subnets: !Ref PublicSubnetIds
+      SecurityGroups: [!Ref AlbSecurityGroup]
+
+  BackendTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      VpcId: !Ref VpcId
+      Port: 8080
+      Protocol: HTTP
+      TargetType: ip
+      HealthCheckPath: /ready
+      HealthCheckIntervalSeconds: 15
+
+  FrontendTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      VpcId: !Ref VpcId
+      Port: 80
+      Protocol: HTTP
+      TargetType: ip
+      HealthCheckPath: /
+      HealthCheckIntervalSeconds: 30
+
+  HttpListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref LoadBalancer
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: redirect
+          RedirectConfig:
+            Protocol: HTTPS
+            Port: "443"
+            StatusCode: HTTP_301
+
+  HttpsListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref LoadBalancer
+      Port: 443
+      Protocol: HTTPS
+      Certificates: [{ CertificateArn: !Ref CertificateArn }]
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref FrontendTargetGroup
+
+  BackendListenerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      ListenerArn: !Ref HttpsListener
+      Priority: 10
+      Conditions:
+        - Field: path-pattern
+          PathPatternConfig:
+            Values: ["/api/*", "/scim/*", "/health", "/ready", "/swagger*"]
+      Actions:
+        - Type: forward
+          TargetGroupArn: !Ref BackendTargetGroup
+
+  BackendTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: tsm-backend
+      RequiresCompatibilities: [FARGATE]
+      NetworkMode: awsvpc
+      Cpu: "512"
+      Memory: "1024"
+      ExecutionRoleArn: !Ref TaskExecutionRole
+      TaskRoleArn: !Ref TaskRole
+      ContainerDefinitions:
+        - Name: backend
+          Image: !Ref BackendImage
+          PortMappings:
+            - { Name: backend, ContainerPort: 8080, Protocol: tcp }
+          Environment:
+            - { Name: TSM_SERVER_HOST, Value: 0.0.0.0 }
+            - { Name: TSM_SERVER_PORT, Value: "8080" }
+            - { Name: TSM_SERVER_BASE_URL, Value: !Ref PublicUrl }
+            - { Name: TSM_SERVER_PUBLIC_URL, Value: !Ref PublicUrl }
+            - { Name: TSM_SERVER_CALLBACK_URL, Value: !Ref PublicUrl }
+            - { Name: TSM_DATABASE_HOST, Value: !Ref DatabaseHost }
+            - { Name: TSM_DATABASE_PORT, Value: "5432" }
+            - { Name: TSM_DATABASE_NAME, Value: terraform_state_manager }
+            - { Name: TSM_DATABASE_USER, Value: tsm }
+            - { Name: TSM_DATABASE_SSL_MODE, Value: require }
+            - { Name: TSM_LOGGING_LEVEL, Value: warn }
+            - { Name: TSM_LOGGING_FORMAT, Value: json }
+            - { Name: DEV_MODE, Value: "false" }
+            - { Name: TSM_WORKERS_ENABLED, Value: "false" }
+          Secrets:
+            - { Name: TSM_DATABASE_PASSWORD, ValueFrom: !Sub "${DatabaseSecretArn}:TSM_DATABASE_PASSWORD::" }
+            - { Name: TSM_JWT_SECRET, ValueFrom: !Sub "${DatabaseSecretArn}:TSM_JWT_SECRET::" }
+            - { Name: TSM_ENCRYPTION_KEY, ValueFrom: !Sub "${DatabaseSecretArn}:TSM_ENCRYPTION_KEY::" }
+          HealthCheck:
+            Command: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:8080/health || exit 1"]
+            Interval: 30
+            Retries: 3
+            StartPeriod: 15
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref LogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: backend
+
+  WorkerTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: tsm-worker
+      RequiresCompatibilities: [FARGATE]
+      NetworkMode: awsvpc
+      Cpu: "512"
+      Memory: "1024"
+      ExecutionRoleArn: !Ref TaskExecutionRole
+      TaskRoleArn: !Ref TaskRole
+      ContainerDefinitions:
+        - Name: worker
+          Image: !Ref BackendImage
+          Environment:
+            - { Name: TSM_SERVER_HOST, Value: 0.0.0.0 }
+            - { Name: TSM_SERVER_PORT, Value: "8080" }
+            - { Name: TSM_SERVER_BASE_URL, Value: !Ref PublicUrl }
+            - { Name: TSM_SERVER_PUBLIC_URL, Value: !Ref PublicUrl }
+            - { Name: TSM_SERVER_CALLBACK_URL, Value: !Ref PublicUrl }
+            - { Name: TSM_DATABASE_HOST, Value: !Ref DatabaseHost }
+            - { Name: TSM_DATABASE_PORT, Value: "5432" }
+            - { Name: TSM_DATABASE_NAME, Value: terraform_state_manager }
+            - { Name: TSM_DATABASE_USER, Value: tsm }
+            - { Name: TSM_DATABASE_SSL_MODE, Value: require }
+            - { Name: TSM_LOGGING_LEVEL, Value: warn }
+            - { Name: TSM_LOGGING_FORMAT, Value: json }
+            - { Name: DEV_MODE, Value: "false" }
+            - { Name: TSM_WORKERS_ENABLED, Value: "true" }
+          Secrets:
+            - { Name: TSM_DATABASE_PASSWORD, ValueFrom: !Sub "${DatabaseSecretArn}:TSM_DATABASE_PASSWORD::" }
+            - { Name: TSM_JWT_SECRET, ValueFrom: !Sub "${DatabaseSecretArn}:TSM_JWT_SECRET::" }
+            - { Name: TSM_ENCRYPTION_KEY, ValueFrom: !Sub "${DatabaseSecretArn}:TSM_ENCRYPTION_KEY::" }
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref LogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: worker
+
+  FrontendTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: tsm-frontend
+      RequiresCompatibilities: [FARGATE]
+      NetworkMode: awsvpc
+      Cpu: "256"
+      Memory: "512"
+      ExecutionRoleArn: !Ref TaskExecutionRole
+      ContainerDefinitions:
+        - Name: frontend
+          Image: !Ref FrontendImage
+          PortMappings:
+            - { ContainerPort: 80, Protocol: tcp }
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref LogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: frontend
+
+  BackendService:
+    Type: AWS::ECS::Service
+    DependsOn: BackendListenerRule
+    Properties:
+      Cluster: !Ref Cluster
+      ServiceName: backend
+      TaskDefinition: !Ref BackendTaskDefinition
+      DesiredCount: !Ref BackendDesiredCount
+      LaunchType: FARGATE
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          Subnets: !Ref PrivateSubnetIds
+          SecurityGroups: [!Ref TaskSecurityGroup]
+      LoadBalancers:
+        - ContainerName: backend
+          ContainerPort: 8080
+          TargetGroupArn: !Ref BackendTargetGroup
+      # Service Connect publishes the alias "backend:8080" inside the cluster
+      # namespace — the frontend's baked nginx upstream resolves unmodified.
+      ServiceConnectConfiguration:
+        Enabled: true
+        Services:
+          - PortName: backend
+            DiscoveryName: backend
+            ClientAliases:
+              - { Port: 8080, DnsName: backend }
+
+  WorkerService:
+    Type: AWS::ECS::Service
+    Properties:
+      Cluster: !Ref Cluster
+      ServiceName: worker
+      TaskDefinition: !Ref WorkerTaskDefinition
+      # EXACTLY ONE worker: the schedule runner has no cross-replica claim.
+      DesiredCount: 1
+      DeploymentConfiguration:
+        MinimumHealthyPercent: 0
+        MaximumPercent: 100
+      LaunchType: FARGATE
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          Subnets: !Ref PrivateSubnetIds
+          SecurityGroups: [!Ref TaskSecurityGroup]
+
+  FrontendService:
+    Type: AWS::ECS::Service
+    DependsOn: HttpsListener
+    Properties:
+      Cluster: !Ref Cluster
+      ServiceName: frontend
+      TaskDefinition: !Ref FrontendTaskDefinition
+      DesiredCount: 2
+      LaunchType: FARGATE
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          Subnets: !Ref PrivateSubnetIds
+          SecurityGroups: [!Ref TaskSecurityGroup]
+      LoadBalancers:
+        - ContainerName: frontend
+          ContainerPort: 80
+          TargetGroupArn: !Ref FrontendTargetGroup
+      ServiceConnectConfiguration:
+        Enabled: true
+
+Outputs:
+  LoadBalancerDNS:
+    Value: !GetAtt LoadBalancer.DNSName
+  ClusterName:
+    Value: !Ref Cluster

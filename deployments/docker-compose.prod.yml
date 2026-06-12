@@ -1,0 +1,109 @@
+# ============================================================
+# Production Docker Compose for Terraform State Manager
+# ============================================================
+# Self-contained production stack: backend API + dedicated worker + frontend,
+# with an OPTIONAL bundled PostgreSQL (profile "bundled-db") for small installs.
+# A managed PostgreSQL is recommended — point TSM_DATABASE_HOST at it and skip
+# the profile.
+#
+# Usage:
+#   cp .env.production.example .env.production   # fill in every <PLACEHOLDER>
+#   docker compose -f docker-compose.prod.yml --env-file .env.production up -d
+#   # with the bundled database:
+#   docker compose -f docker-compose.prod.yml --env-file .env.production \
+#     --profile bundled-db up -d
+#
+# TLS: terminate at a reverse proxy (Caddy/Traefik/nginx) in front of :80.
+# The metrics port (9090) is deliberately NOT published — scrape it from the
+# compose network or add a host binding behind your firewall.
+# See docs/deployment/docker-compose-production.md.
+# ============================================================
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    profiles: ["bundled-db"]
+    environment:
+      POSTGRES_USER: ${TSM_DATABASE_USER:-tsm}
+      POSTGRES_PASSWORD: ${TSM_DATABASE_PASSWORD:?set in .env.production}
+      POSTGRES_DB: ${TSM_DATABASE_NAME:-terraform_state_manager}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${TSM_DATABASE_USER:-tsm} -d ${TSM_DATABASE_NAME:-terraform_state_manager}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "1"
+          memory: 1G
+
+  backend:
+    image: ${TSM_BACKEND_IMAGE:?set in .env.production}
+    env_file:
+      - .env.production
+    environment:
+      DEV_MODE: "false"
+      TSM_LOGGING_FORMAT: json
+      # Periodic workers run in the dedicated "worker" service below.
+      TSM_WORKERS_ENABLED: "false"
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 -O /dev/null http://localhost:8080/health || exit 1"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "2"
+          memory: 1G
+
+  # Dedicated background worker (schedule runner + state sync). Exactly ONE —
+  # a second worker would double-dispatch due schedules.
+  worker:
+    image: ${TSM_BACKEND_IMAGE:?set in .env.production}
+    env_file:
+      - .env.production
+    environment:
+      DEV_MODE: "false"
+      TSM_LOGGING_FORMAT: json
+      TSM_WORKERS_ENABLED: "true"
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 -O /dev/null http://localhost:8080/health || exit 1"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+    deploy:
+      replicas: 1
+      resources:
+        limits:
+          cpus: "1"
+          memory: 1G
+
+  frontend:
+    # The image's baked nginx config proxies /api to http://backend:8080 —
+    # the service name above must stay "backend".
+    image: ${TSM_FRONTEND_IMAGE:?set in .env.production}
+    ports:
+      - "80:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
+
+volumes:
+  postgres_data:

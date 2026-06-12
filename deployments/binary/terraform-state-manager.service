@@ -1,0 +1,29 @@
+# systemd unit for the Terraform State Manager backend (API + workers in one
+# process — the single-replica topology, so workers stay enabled).
+# Install: see binary/install.sh and docs/deployment/binary-install.md.
+[Unit]
+Description=Terraform State Manager backend
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=tsm
+Group=tsm
+EnvironmentFile=/etc/terraform-state-manager/environment
+ExecStart=/opt/terraform-state-manager/terraform-state-manager serve
+Restart=on-failure
+RestartSec=5
+
+# Hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/terraform-state-manager
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+
+[Install]
+WantedBy=multi-user.target

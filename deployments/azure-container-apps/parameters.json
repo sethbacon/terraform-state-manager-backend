@@ -1,0 +1,21 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "environmentName": { "value": "tsm" },
+    "backendImage": { "value": "<ACR_NAME>.azurecr.io/terraform-state-manager-backend:v1.0.0" },
+    "frontendImage": { "value": "<ACR_NAME>.azurecr.io/terraform-state-manager-frontend:v1.0.0" },
+    "databaseHost": { "value": "<AZURE_POSTGRES_SERVER>.postgres.database.azure.com" },
+    "databasePassword": { "value": "<DATABASE_PASSWORD>" },
+    "jwtSecret": { "value": "<JWT_SECRET_openssl_rand_hex_32>" },
+    "encryptionKey": { "value": "<ENCRYPTION_KEY_openssl_rand_hex_32>" },
+    "customDomain": { "value": "" },
+    "acrLoginServer": { "value": "<ACR_NAME>.azurecr.io" },
+    "acrUsername": { "value": "<ACR_USERNAME>" },
+    "acrPassword": { "value": "<ACR_PASSWORD>" },
+    "oidcEnabled": { "value": false },
+    "oidcIssuerUrl": { "value": "" },
+    "oidcClientId": { "value": "" },
+    "oidcClientSecret": { "value": "" }
+  }
+}

@@ -1,0 +1,50 @@
+# Cloud Run service: frontend SPA.
+#
+# IMPORTANT: the image's baked nginx proxies /api to http://backend:8080,
+# which does not resolve on Cloud Run. deploy.sh generates a corrected
+# default.conf (proxying to the backend service URL over HTTPS), stores it in
+# Secret Manager (tsm-frontend-nginx), and this spec mounts it over
+# /etc/nginx/conf.d/default.conf.
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: tsm-frontend
+  labels:
+    app: terraform-state-manager
+    component: frontend
+  annotations:
+    run.googleapis.com/ingress: all
+spec:
+  template:
+    metadata:
+      annotations:
+        autoscaling.knative.dev/minScale: "1"
+        autoscaling.knative.dev/maxScale: "5"
+    spec:
+      containerConcurrency: 200
+      timeoutSeconds: 60
+      volumes:
+        - name: nginx-config
+          secret:
+            secretName: tsm-frontend-nginx
+            items:
+              - key: latest
+                path: default.conf
+      containers:
+        - image: REGION-docker.pkg.dev/PROJECT_ID/tsm/terraform-state-manager-frontend:v1.0.0
+          ports:
+            - name: http1
+              containerPort: 80
+          volumeMounts:
+            - name: nginx-config
+              mountPath: /etc/nginx/conf.d
+          resources:
+            limits: { cpu: "0.5", memory: 256Mi }
+          startupProbe:
+            httpGet: { path: /, port: 80 }
+            initialDelaySeconds: 2
+            periodSeconds: 3
+            failureThreshold: 5
+          livenessProbe:
+            httpGet: { path: /, port: 80 }
+            periodSeconds: 30
