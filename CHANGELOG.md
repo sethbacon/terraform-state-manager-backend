@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.10.1](https://github.com/sethbacon/terraform-state-manager-backend/compare/v0.10.0...v0.10.1) (2026-06-12)
+
+
+### Bug Fixes
+
+* **deps:** patch grpc 1.79.3 (critical GHSA-p77j-4mvh-x3m3) and otel 1.44.0 advisories ([bd6e6b1](https://github.com/sethbacon/terraform-state-manager-backend/commit/bd6e6b1753ea685a781a62073612a009a0267830))
+
 ## [0.10.0](https://github.com/sethbacon/terraform-state-manager-backend/compare/v0.9.0...v0.10.0) (2026-06-12)
 
 
