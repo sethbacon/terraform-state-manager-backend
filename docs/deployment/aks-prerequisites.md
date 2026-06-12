@@ -1,0 +1,117 @@
+# AKS prerequisites
+
+Everything the AKS deployment (Helm `values-aks.yaml` or the
+`overlays/aks` kustomization) expects to exist. The Terraform module
+`deployments/terraform/azure` provisions all of it — use it
+([README](../../deployments/terraform/azure/README.md)) or create the pieces
+manually as below.
+
+## Tooling
+
+`az` (≥2.60), `kubectl`, `helm` (≥3.14), `docker`. Log in: `az login`.
+
+## 1. Resource group + ACR
+
+```bash
+export RG=rg-terraform-state-manager LOCATION=eastus2 ACR=<globally-unique>
+az group create -n $RG -l $LOCATION
+az acr create -n $ACR -g $RG --sku Standard
+```
+
+Build and push the images:
+
+```bash
+az acr login -n $ACR
+docker build -t $ACR.azurecr.io/terraform-state-manager-backend:v1.0.0 backend/
+docker build -t $ACR.azurecr.io/terraform-state-manager-frontend:v1.0.0 \
+  ../terraform-state-manager-frontend/frontend/
+docker push $ACR.azurecr.io/terraform-state-manager-backend:v1.0.0
+docker push $ACR.azurecr.io/terraform-state-manager-frontend:v1.0.0
+```
+
+## 2. AKS cluster (required features)
+
+The cluster needs: **OIDC issuer**, **Workload Identity**, the **Key Vault
+Secrets Store CSI add-on**, and an enforcing CNI (the chart ships
+NetworkPolicies — kubenet ignores them).
+
+```bash
+az aks create -n tsm-aks -g $RG \
+  --enable-oidc-issuer --enable-workload-identity \
+  --enable-addons azure-keyvault-secrets-provider \
+  --network-plugin azure --network-policy azure \
+  --node-count 3 --node-vm-size Standard_D4s_v5 \
+  --attach-acr $ACR
+az aks get-credentials -n tsm-aks -g $RG
+export OIDC_ISSUER=$(az aks show -n tsm-aks -g $RG --query oidcIssuerProfile.issuerUrl -o tsv)
+```
+
+## 3. Azure Database for PostgreSQL Flexible Server
+
+```bash
+az postgres flexible-server create -n tsm-pg -g $RG -l $LOCATION \
+  --version 16 --tier GeneralPurpose --sku-name Standard_D2ds_v5 \
+  --storage-size 64 --admin-user tsm --admin-password "<strong-password>"
+az postgres flexible-server db create -s tsm-pg -g $RG -d terraform_state_manager
+# Networking: allow the AKS egress (or use VNet integration / private endpoint)
+```
+
+## 4. Key Vault + the three app secrets
+
+Secret NAMES are what the chart's SecretProviderClass expects.
+
+```bash
+export KV=<globally-unique>
+az keyvault create -n $KV -g $RG --enable-rbac-authorization true
+az role assignment create --assignee $(az ad signed-in-user show --query id -o tsv) \
+  --role "Key Vault Administrator" --scope $(az keyvault show -n $KV --query id -o tsv)
+
+az keyvault secret set --vault-name $KV -n jwt-secret        --value "$(openssl rand -hex 32)"
+az keyvault secret set --vault-name $KV -n encryption-key    --value "$(openssl rand -hex 32)"
+az keyvault secret set --vault-name $KV -n database-password --value "<strong-password>"
+# OIDC only:
+# az keyvault secret set --vault-name $KV -n oidc-client-secret --value "<app-reg-secret>"
+```
+
+> **Escrow `encryption-key`.** Losing it orphans every stored source/CI
+> credential ([disaster-recovery.md](../disaster-recovery.md)).
+
+## 5. Managed identity + federated credential
+
+The chart's pods read Key Vault through a user-assigned managed identity
+bound to the chart's ServiceAccount (`tsm-terraform-state-manager` in
+namespace `terraform-state-manager` for a release named `tsm`).
+
+```bash
+az identity create -n tsm-app-identity -g $RG
+export APP_CLIENT_ID=$(az identity show -n tsm-app-identity -g $RG --query clientId -o tsv)
+az role assignment create --assignee $APP_CLIENT_ID --role "Key Vault Secrets User" \
+  --scope $(az keyvault show -n $KV --query id -o tsv)
+az identity federated-credential create -n tsm-chart-sa \
+  --identity-name tsm-app-identity -g $RG \
+  --issuer "$OIDC_ISSUER" \
+  --subject "system:serviceaccount:terraform-state-manager:tsm-terraform-state-manager" \
+  --audiences api://AzureADTokenExchange
+```
+
+## 6. Application Gateway for Containers (AGfC)
+
+```bash
+az network alb create -n tsm-agfc -g $RG
+az network alb frontend create -n tsm-frontend -g $RG --alb-name tsm-agfc
+export ALB_ID=$(az network alb show -n tsm-agfc -g $RG --query id -o tsv)
+export AGFC_FQDN=$(az network alb frontend show -n tsm-frontend -g $RG --alb-name tsm-agfc \
+  --query properties.fqdn -o tsv)
+```
+
+Create a DNS CNAME for your hostname → `$AGFC_FQDN`.
+
+## 7. Entra ID app registration (OIDC login)
+
+See [initial-setup.md](../initial-setup.md#entra-id-oidc) — you'll need the
+tenant ID, the app's client ID, a client secret (→ Key Vault
+`oidc-client-secret`), redirect URI
+`https://<hostname>/api/v1/auth/callback`, and a `groups` claim.
+
+Continue with [aks-new-cluster.md](aks-new-cluster.md) (cluster components +
+helm install) or [aks-existing-cluster.md](aks-existing-cluster.md).
