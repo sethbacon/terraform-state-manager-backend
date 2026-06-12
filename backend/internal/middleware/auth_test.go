@@ -10,6 +10,7 @@ import (
 
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
 	"github.com/gin-gonic/gin"
+	idauth "github.com/sethbacon/terraform-suite-identity/identity/auth"
 	idstore "github.com/sethbacon/terraform-suite-identity/identity/store"
 
 	"github.com/terraform-state-manager/terraform-state-manager/internal/auth"
@@ -68,8 +69,12 @@ func expectUserFound(mock sqlmock.Sqlmock, userID string) {
 // authRouter wires AuthMiddleware plus a probe handler that reports the auth
 // context the middleware established.
 func authRouter(userRepo *idstore.UserRepository, tokenRepo *idstore.TokenRepository) *gin.Engine {
+	return authRouterWithKeys(userRepo, tokenRepo, nil)
+}
+
+func authRouterWithKeys(userRepo *idstore.UserRepository, tokenRepo *idstore.TokenRepository, keyRepo *idstore.APIKeyRepository) *gin.Engine {
 	r := gin.New()
-	r.Use(AuthMiddleware(userRepo, tokenRepo))
+	r.Use(AuthMiddleware(userRepo, tokenRepo, keyRepo))
 	r.GET("/", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{
 			"user_id":     c.GetString("user_id"),
@@ -104,7 +109,7 @@ func TestAuthMiddleware_MTLSPreAuthPassesThrough(t *testing.T) {
 	r := gin.New()
 	// Simulates mtls.AuthMiddleware running earlier in the chain.
 	r.Use(func(c *gin.Context) { c.Set("auth_method", "mtls"); c.Next() })
-	r.Use(AuthMiddleware(nil, nil))
+	r.Use(AuthMiddleware(nil, nil, nil))
 	r.GET("/", func(c *gin.Context) { c.Status(http.StatusOK) })
 
 	w := httptest.NewRecorder()
@@ -252,4 +257,115 @@ func TestOptionalAuthMiddleware_ValidToken(t *testing.T) {
 
 func contains(s, substr string) bool {
 	return strings.Contains(s, substr)
+}
+
+// --- API-key authentication ---
+
+var apiKeyCols = []string{"id", "user_id", "organization_id", "name", "description", "key_hash",
+	"key_prefix", "scopes", "expires_at", "last_used_at", "expiry_notification_sent_at", "created_at"}
+
+func newAPIKeyRepo(t *testing.T) (*idstore.APIKeyRepository, sqlmock.Sqlmock) {
+	t.Helper()
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New (apikey): %v", err)
+	}
+	mock.MatchExpectationsInOrder(false) // last-used update is async
+	t.Cleanup(func() { db.Close() })
+	return idstore.NewAPIKeyRepository(db), mock
+}
+
+func mintTestKey(t *testing.T) (fullKey, hash, prefix string) {
+	t.Helper()
+	fullKey, hash, prefix, err := idauth.GenerateAPIKey(APIKeyPrefix)
+	if err != nil {
+		t.Fatalf("GenerateAPIKey: %v", err)
+	}
+	return fullKey, hash, prefix
+}
+
+func keyRow(hash, prefix string, scopes string, expires *time.Time) *sqlmock.Rows {
+	return sqlmock.NewRows(apiKeyCols).
+		AddRow("k1", "u1", "org1", "ci", nil, hash, prefix, []byte(scopes), expires, nil, nil, time.Now())
+}
+
+func TestAuthMiddleware_APIKeyAuthenticates(t *testing.T) {
+	fullKey, hash, prefix := mintTestKey(t)
+	keyRepo, keyMock := newAPIKeyRepo(t)
+	userRepo, userMock := newUserRepo(t)
+	keyMock.ExpectQuery("FROM api_keys").WithArgs(prefix).
+		WillReturnRows(keyRow(hash, prefix, `["state:read","state:drift"]`, nil))
+	// Async last-used update may or may not land before the test ends.
+	keyMock.ExpectExec("UPDATE api_keys").WillReturnResult(sqlmock.NewResult(0, 1))
+	expectUserFound(userMock, "u1")
+
+	r := authRouterWithKeys(userRepo, nil, keyRepo)
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("Authorization", "Bearer "+fullKey)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (%s)", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), `"auth_method":"apikey"`) || !strings.Contains(w.Body.String(), `"user_id":"u1"`) {
+		t.Errorf("auth context = %s", w.Body.String())
+	}
+}
+
+func TestAuthMiddleware_APIKeyRejections(t *testing.T) {
+	fullKey, hash, prefix := mintTestKey(t)
+
+	// Wrong secret under a colliding prefix: bcrypt mismatch -> 401.
+	keyRepo, keyMock := newAPIKeyRepo(t)
+	keyMock.ExpectQuery("FROM api_keys").
+		WillReturnRows(keyRow(hash, prefix, `["state:read"]`, nil))
+	r := authRouterWithKeys(nil, nil, keyRepo)
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("Authorization", "Bearer "+fullKey[:len(fullKey)-2]+"xx")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("tampered key: status = %d, want 401", w.Code)
+	}
+
+	// Expired key: the matching hash must NOT authenticate.
+	keyRepo2, keyMock2 := newAPIKeyRepo(t)
+	past := time.Now().Add(-time.Hour)
+	keyMock2.ExpectQuery("FROM api_keys").
+		WillReturnRows(keyRow(hash, prefix, `["state:read"]`, &past))
+	r2 := authRouterWithKeys(nil, nil, keyRepo2)
+	req2 := httptest.NewRequest(http.MethodGet, "/", nil)
+	req2.Header.Set("Authorization", "Bearer "+fullKey)
+	w2 := httptest.NewRecorder()
+	r2.ServeHTTP(w2, req2)
+	if w2.Code != http.StatusUnauthorized {
+		t.Errorf("expired key: status = %d, want 401", w2.Code)
+	}
+
+	// A key whose owning user was deleted is orphaned -> 401.
+	keyRepo3, keyMock3 := newAPIKeyRepo(t)
+	keyMock3.ExpectQuery("FROM api_keys").
+		WillReturnRows(keyRow(hash, prefix, `["state:read"]`, nil))
+	userRepo3, userMock3 := newUserRepo(t)
+	userMock3.ExpectQuery("SELECT id, email, name, oidc_sub, created_at, updated_at").
+		WillReturnRows(sqlmock.NewRows(userCols))
+	r3 := authRouterWithKeys(userRepo3, nil, keyRepo3)
+	req3 := httptest.NewRequest(http.MethodGet, "/", nil)
+	req3.Header.Set("Authorization", "Bearer "+fullKey)
+	w3 := httptest.NewRecorder()
+	r3.ServeHTTP(w3, req3)
+	if w3.Code != http.StatusUnauthorized {
+		t.Errorf("orphaned key: status = %d, want 401", w3.Code)
+	}
+
+	// Keys never authenticate from cookies (API keys are header-only).
+	keyRepo4, _ := newAPIKeyRepo(t)
+	r4 := authRouterWithKeys(nil, nil, keyRepo4)
+	req4 := httptest.NewRequest(http.MethodGet, "/", nil)
+	req4.AddCookie(&http.Cookie{Name: AuthCookieName, Value: fullKey})
+	w4 := httptest.NewRecorder()
+	r4.ServeHTTP(w4, req4)
+	if w4.Code != http.StatusUnauthorized {
+		t.Errorf("cookie-presented key: status = %d, want 401", w4.Code)
+	}
 }

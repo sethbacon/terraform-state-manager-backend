@@ -34,6 +34,7 @@ type AuthHandlers struct {
 	userRepo      *idstore.UserRepository
 	orgRepo       *idstore.OrganizationRepository
 	tokenRepo     *idstore.TokenRepository
+	apiKeyRepo    *idstore.APIKeyRepository
 	oidcProvider  *auth.OIDCProvider
 	ldapProvider  *ldap.Provider
 	samlProviders map[string]*saml.Provider // keyed by IdP name; nil when SAML disabled
@@ -53,6 +54,7 @@ func NewAuthHandlers(cfg *config.Config, identityDB *sql.DB) (*AuthHandlers, err
 		userRepo:    idstore.NewUserRepository(identityDB),
 		orgRepo:     idstore.NewOrganizationRepository(identityDB),
 		tokenRepo:   idstore.NewTokenRepository(identityDB),
+		apiKeyRepo:  idstore.NewAPIKeyRepository(identityDB),
 		stateStore:  auth.NewMemoryStateStore(),
 		ssoSettings: repositories.NewSSOSettingsRepository(identityDB),
 		audit:       newAuditor(identityDB),
@@ -86,8 +88,10 @@ func NewAuthHandlers(cfg *config.Config, identityDB *sql.DB) (*AuthHandlers, err
 }
 
 // UserRepo and TokenRepo expose the identity repositories for the auth middleware.
-func (h *AuthHandlers) UserRepo() *idstore.UserRepository   { return h.userRepo }
-func (h *AuthHandlers) TokenRepo() *idstore.TokenRepository { return h.tokenRepo }
+func (h *AuthHandlers) UserRepo() *idstore.UserRepository     { return h.userRepo }
+func (h *AuthHandlers) TokenRepo() *idstore.TokenRepository   { return h.tokenRepo }
+func (h *AuthHandlers) APIKeyRepo() *idstore.APIKeyRepository { return h.apiKeyRepo }
+func (h *AuthHandlers) OrgRepo() *idstore.OrganizationRepository { return h.orgRepo }
 
 func generateState() (string, error) {
 	b := make([]byte, 32)

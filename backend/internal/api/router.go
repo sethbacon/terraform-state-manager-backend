@@ -65,7 +65,7 @@ func NewRouter(cfg *config.Config, database *sql.DB, identityDB *sql.DB) (*gin.E
 	if err != nil {
 		return nil, stop, err
 	}
-	requireAuth := middleware.AuthMiddleware(authHandlers.UserRepo(), authHandlers.TokenRepo())
+	requireAuth := middleware.AuthMiddleware(authHandlers.UserRepo(), authHandlers.TokenRepo(), authHandlers.APIKeyRepo())
 	optionalAuth := middleware.OptionalAuthMiddleware(authHandlers.UserRepo(), authHandlers.TokenRepo())
 
 	v1 := r.Group("/api/v1")
@@ -96,6 +96,20 @@ func NewRouter(cfg *config.Config, database *sql.DB, identityDB *sql.DB) (*gin.E
 
 		// Ad-hoc analysis of an uploaded state file (no stored source).
 		v1.POST("/analyze", requireAuth, middleware.RequireScope(auth.ScopeStateRead), AnalyzeUploadHandler())
+
+		// API keys (registry-modeled self-service): any authenticated user
+		// manages their own keys; admin sees all. No extra scope gate — the
+		// handlers enforce ownership and scope-grant limits themselves.
+		apiKeys := NewAPIKeysHandlers(identityDB)
+		ak := v1.Group("/apikeys", requireAuth)
+		{
+			ak.GET("", apiKeys.ListAPIKeys())
+			ak.POST("", apiKeys.CreateAPIKey())
+			ak.GET("/:id", apiKeys.GetAPIKey())
+			ak.PUT("/:id", apiKeys.UpdateAPIKey())
+			ak.DELETE("/:id", apiKeys.DeleteAPIKey())
+			ak.POST("/:id/rotate", apiKeys.RotateAPIKey())
+		}
 
 		// Phase 1 read plane: state sources + analysis.
 		sources := NewSourcesHandlers(database, identityDB)
