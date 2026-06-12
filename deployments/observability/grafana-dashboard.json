@@ -1,0 +1,43 @@
+{
+  "title": "Terraform State Manager",
+  "uid": "tsm-overview",
+  "timezone": "browser",
+  "refresh": "30s",
+  "time": { "from": "now-6h", "to": "now" },
+  "panels": [
+    {
+      "id": 1, "type": "timeseries", "title": "HTTP request rate by status",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "targets": [{ "expr": "sum(rate(http_requests_total[5m])) by (status)", "legendFormat": "{{status}}" }]
+    },
+    {
+      "id": 2, "type": "timeseries", "title": "Request latency (p50 / p95 / p99)",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "targets": [
+        { "expr": "histogram_quantile(0.50, sum(rate(http_request_duration_seconds_bucket[5m])) by (le))", "legendFormat": "p50" },
+        { "expr": "histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket[5m])) by (le))", "legendFormat": "p95" },
+        { "expr": "histogram_quantile(0.99, sum(rate(http_request_duration_seconds_bucket[5m])) by (le))", "legendFormat": "p99" }
+      ]
+    },
+    {
+      "id": 3, "type": "timeseries", "title": "5xx error ratio",
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 8 },
+      "targets": [{ "expr": "tsm:http_5xx:ratio5m", "legendFormat": "5xx ratio" }]
+    },
+    {
+      "id": 4, "type": "timeseries", "title": "Database connections",
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 8 },
+      "targets": [
+        { "expr": "db_connections_open", "legendFormat": "open" },
+        { "expr": "db_connections_in_use", "legendFormat": "in use" },
+        { "expr": "db_connections_idle", "legendFormat": "idle" }
+      ]
+    },
+    {
+      "id": 5, "type": "stat", "title": "Build info",
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 8 },
+      "targets": [{ "expr": "app_info", "legendFormat": "{{version}}" }]
+    }
+  ],
+  "schemaVersion": 39
+}

@@ -1,0 +1,35 @@
+groups:
+  - name: tsm-alerts
+    rules:
+      - alert: TSMTargetDown
+        expr: up == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "TSM target down"
+          description: "{{ $labels.instance }} has not been scraped for 5 minutes. If this is the worker, schedules and state sync are NOT running."
+      - alert: TSMHigh5xxRate
+        expr: tsm:http_5xx:ratio5m > 0.05
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "TSM 5xx rate above 5%"
+          description: "Sustained server errors — check backend logs (state backends unreachable? DB?)."
+      - alert: TSMHighLatencyP99
+        expr: tsm:http_latency:p99_5m > 5
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "TSM p99 latency above 5s"
+          description: "Slow requests — large state reads or a saturated DB pool are the usual suspects."
+      - alert: TSMDBPoolSaturated
+        expr: tsm:db_pool:utilization > 0.9
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "TSM database pool above 90%"
+          description: "Raise TSM_DATABASE_MAX_CONNECTIONS or investigate slow queries."

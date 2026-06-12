@@ -1,0 +1,14 @@
+groups:
+  - name: tsm-recording
+    interval: 30s
+    rules:
+      - record: tsm:http_requests:rate5m
+        expr: sum(rate(http_requests_total[5m]))
+      - record: tsm:http_5xx:ratio5m
+        expr: >
+          sum(rate(http_requests_total{status=~"5.."}[5m]))
+            / clamp_min(sum(rate(http_requests_total[5m])), 0.001)
+      - record: tsm:http_latency:p99_5m
+        expr: histogram_quantile(0.99, sum(rate(http_request_duration_seconds_bucket[5m])) by (le))
+      - record: tsm:db_pool:utilization
+        expr: db_connections_in_use / clamp_min(db_connections_open, 1)

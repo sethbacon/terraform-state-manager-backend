@@ -1,0 +1,15 @@
+# Standalone Prometheus scrape config for Terraform State Manager (compose /
+# binary installs; on Kubernetes use the chart's ServiceMonitor instead).
+global:
+  scrape_interval: 30s
+  evaluation_interval: 30s
+
+rule_files:
+  - alert-rules.yml
+  - recording-rules.yml
+
+scrape_configs:
+  - job_name: tsm-backend
+    static_configs:
+      # API replica + dedicated worker both expose :9090/metrics
+      - targets: ["backend:9090", "worker:9090"]
