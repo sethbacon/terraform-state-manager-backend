@@ -1,0 +1,27 @@
+# Legacy nginx Ingress. The cloud overlays (aks/eks/gke) DELETE this resource
+# and replace it with Gateway API (gateway.yaml + httproute.yaml).
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: tsm-ingress
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-body-size: "100m"
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - tsm.example.com
+      secretName: terraform-state-manager-tls
+  rules:
+    - host: tsm.example.com
+      http:
+        paths:
+          # The frontend nginx proxies /api, /scim, /health, /ready, /swagger
+          # to the backend, so one catch-all rule suffices.
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: tsm-frontend
+                port:
+                  number: 80

@@ -1,0 +1,29 @@
+# GKE pre-provisions its GatewayClasses (gke-l7-global-external-managed) — no
+# GatewayClass resource needed.
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: tsm-gateway
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-staging
+spec:
+  gatewayClassName: gke-l7-global-external-managed
+  listeners:
+    - name: http
+      port: 80
+      protocol: HTTP
+      allowedRoutes:
+        namespaces:
+          from: Same
+    - name: https
+      port: 443
+      protocol: HTTPS
+      hostname: "<HOSTNAME>"
+      tls:
+        mode: Terminate
+        certificateRefs:
+          - name: terraform-state-manager-tls
+            kind: Secret
+      allowedRoutes:
+        namespaces:
+          from: Same

@@ -1,0 +1,38 @@
+# Let's Encrypt issuers solving HTTP-01 through the Gateway. Start with
+# staging; switch the Gateway/Certificate references to letsencrypt-prod once
+# the challenge succeeds. REQUIRED: replace <EMAIL>.
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt-staging
+spec:
+  acme:
+    server: https://acme-staging-v02.api.letsencrypt.org/directory
+    email: "<EMAIL>"
+    privateKeySecretRef:
+      name: letsencrypt-staging-account-key
+    solvers:
+      - http01:
+          gatewayHTTPRoute:
+            parentRefs:
+              - name: tsm-gateway
+                namespace: terraform-state-manager
+                kind: Gateway
+---
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt-prod
+spec:
+  acme:
+    server: https://acme-v02.api.letsencrypt.org/directory
+    email: "<EMAIL>"
+    privateKeySecretRef:
+      name: letsencrypt-prod-account-key
+    solvers:
+      - http01:
+          gatewayHTTPRoute:
+            parentRefs:
+              - name: tsm-gateway
+                namespace: terraform-state-manager
+                kind: Gateway

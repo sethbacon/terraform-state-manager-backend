@@ -1,0 +1,34 @@
+# Non-secret configuration. Secrets (JWT, encryption key, DB password,
+# provider client secrets) live ONLY in the Secret / cloud secret store.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: tsm-config
+data:
+  TSM_SERVER_HOST: "0.0.0.0"
+  TSM_SERVER_PORT: "8080"
+  # REQUIRED: replace with your public URL in every real deployment (overlays
+  # patch these).
+  TSM_SERVER_BASE_URL: "https://tsm.example.com"
+  TSM_SERVER_PUBLIC_URL: "https://tsm.example.com"
+  # Must be reachable from CI runners (drift / version-lab result callbacks).
+  TSM_SERVER_CALLBACK_URL: "https://tsm.example.com"
+
+  TSM_DATABASE_HOST: "postgres.example.internal"
+  TSM_DATABASE_PORT: "5432"
+  TSM_DATABASE_NAME: "terraform_state_manager"
+  TSM_DATABASE_USER: "tsm"
+  TSM_DATABASE_SSL_MODE: "require"
+  TSM_DATABASE_MAX_CONNECTIONS: "25"
+
+  TSM_AUTH_OIDC_ENABLED: "false"
+  TSM_AUTH_LDAP_ENABLED: "false"
+  TSM_AUTH_SAML_ENABLED: "false"
+  TSM_AUTH_MTLS_ENABLED: "false"
+  TSM_AUTH_SCIM_ENABLED: "false"
+
+  TSM_LOGGING_LEVEL: "info"
+  TSM_LOGGING_FORMAT: "json"
+  TSM_TELEMETRY_METRICS_ENABLED: "true"
+  TSM_TELEMETRY_METRICS_PROMETHEUS_PORT: "9090"
+  DEV_MODE: "false"

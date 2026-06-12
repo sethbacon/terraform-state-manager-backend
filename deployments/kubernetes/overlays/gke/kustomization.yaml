@@ -1,0 +1,98 @@
+# ============================================================
+# GKE overlay — GKE Gateway + Secret Manager CSI + Workload Identity + Cloud SQL
+# ============================================================
+# Prerequisites (docs/deployment/gke-prerequisites.md):
+#   1. GKE with Workload Identity + Secrets Store CSI Driver + GCP provider
+#   2. Gateway API enabled (GKE Gateway controller is built in)
+#   3. cert-manager with Gateway API support enabled
+#   4. Secret Manager secrets: tsm-jwt-secret, tsm-encryption-key,
+#      tsm-database-password
+#   5. GSA with roles/secretmanager.secretAccessor, WI-bound to this SA
+#
+# REQUIRED placeholders: <PROJECT_ID> <REGION> <IMAGE_TAG> <GSA_NAME>
+#   <CLOUD_SQL_IP_OR_DNS> <HOSTNAME> <EMAIL>
+#
+# Apply: kubectl apply -k deployments/kubernetes/overlays/gke/
+# ============================================================
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: terraform-state-manager
+
+resources:
+  - ../../base
+  - gateway.yaml
+  - httproute.yaml
+  - secretproviderclass.yaml
+  - clusterissuer.yaml
+  - certificate.yaml
+
+patches:
+  - path: patches/serviceaccount-workload-identity.yaml
+    target:
+      kind: ServiceAccount
+      name: terraform-state-manager
+  - path: patches/backend-csi.yaml
+    target:
+      kind: Deployment
+      name: backend
+  - path: patches/worker-csi.yaml
+    target:
+      kind: Deployment
+      name: worker
+  # Production sizing + AKS endpoints
+  - target:
+      kind: Deployment
+      name: backend
+    patch: |-
+      - op: replace
+        path: /spec/replicas
+        value: 3
+  - target:
+      kind: ConfigMap
+      name: tsm-config
+    patch: |-
+      - op: replace
+        path: /data/TSM_DATABASE_HOST
+        value: "<CLOUD_SQL_IP_OR_DNS>"
+      - op: replace
+        path: /data/TSM_SERVER_BASE_URL
+        value: "https://<HOSTNAME>"
+      - op: replace
+        path: /data/TSM_SERVER_PUBLIC_URL
+        value: "https://<HOSTNAME>"
+      - op: replace
+        path: /data/TSM_SERVER_CALLBACK_URL
+        value: "https://<HOSTNAME>"
+      - op: replace
+        path: /data/TSM_LOGGING_LEVEL
+        value: warn
+  # Gateway API replaces the legacy Ingress
+  - target:
+      kind: Ingress
+      name: tsm-ingress
+    patch: |-
+      $patch: delete
+      apiVersion: networking.k8s.io/v1
+      kind: Ingress
+      metadata:
+        name: tsm-ingress
+  # The CSI driver owns tsm-secrets (synced from Key Vault) — drop the
+  # placeholder Secret so it can't shadow real values.
+  - target:
+      kind: Secret
+      name: tsm-secrets
+    patch: |-
+      $patch: delete
+      apiVersion: v1
+      kind: Secret
+      metadata:
+        name: tsm-secrets
+
+images:
+  - name: terraform-state-manager-backend
+    newName: <REGION>-docker.pkg.dev/<PROJECT_ID>/tsm/terraform-state-manager-backend
+    newTag: <IMAGE_TAG>
+  - name: terraform-state-manager-frontend
+    newName: <REGION>-docker.pkg.dev/<PROJECT_ID>/tsm/terraform-state-manager-frontend
+    newTag: <IMAGE_TAG>

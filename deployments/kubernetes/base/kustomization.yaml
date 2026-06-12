@@ -1,0 +1,25 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: terraform-state-manager
+
+resources:
+  - namespace.yaml
+  - serviceaccount.yaml
+  - configmap.yaml
+  - configmap-frontend-nginx.yaml
+  - secret.yaml
+  - deployment-backend.yaml
+  - deployment-worker.yaml
+  - deployment-frontend.yaml
+  - service-backend.yaml
+  - service-frontend.yaml
+  - ingress.yaml
+  - pdb.yaml
+  - networkpolicy.yaml
+
+labels:
+  - pairs:
+      app.kubernetes.io/name: terraform-state-manager
+      app.kubernetes.io/part-of: terraform-state-manager
+    includeSelectors: true

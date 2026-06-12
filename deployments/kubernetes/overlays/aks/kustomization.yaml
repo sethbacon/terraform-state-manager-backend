@@ -1,0 +1,99 @@
+# ============================================================
+# AKS overlay (PRIMARY TARGET) — Gateway API (AGfC) + Key Vault CSI +
+# Workload Identity + Azure Database for PostgreSQL.
+# ============================================================
+# Prerequisites (docs/deployment/aks-prerequisites.md):
+#   1. AKS with OIDC issuer + Workload Identity + Secrets Store CSI add-ons
+#   2. ALB Controller (Application Gateway for Containers) installed
+#   3. cert-manager with Gateway API support enabled
+#   4. Key Vault secrets: jwt-secret, encryption-key, database-password
+#   5. UAMI with Key Vault Secrets User + federated credential on this SA
+#
+# REQUIRED placeholders: <ACR_NAME> <IMAGE_TAG> <SUBSCRIPTION_ID>
+#   <RESOURCE_GROUP> <AGFC_NAME> <AZURE_POSTGRES_SERVER> <KEY_VAULT_NAME>
+#   <TENANT_ID> <AZURE_CLIENT_ID> <HOSTNAME> <EMAIL>
+#
+# Apply: kubectl apply -k deployments/kubernetes/overlays/aks/
+# ============================================================
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: terraform-state-manager
+
+resources:
+  - ../../base
+  - gateway.yaml
+  - httproute.yaml
+  - secretproviderclass.yaml
+  - clusterissuer.yaml
+  - certificate.yaml
+
+patches:
+  - path: patches/serviceaccount-workload-identity.yaml
+    target:
+      kind: ServiceAccount
+      name: terraform-state-manager
+  - path: patches/backend-csi.yaml
+    target:
+      kind: Deployment
+      name: backend
+  - path: patches/worker-csi.yaml
+    target:
+      kind: Deployment
+      name: worker
+  # Production sizing + AKS endpoints
+  - target:
+      kind: Deployment
+      name: backend
+    patch: |-
+      - op: replace
+        path: /spec/replicas
+        value: 3
+  - target:
+      kind: ConfigMap
+      name: tsm-config
+    patch: |-
+      - op: replace
+        path: /data/TSM_DATABASE_HOST
+        value: "<AZURE_POSTGRES_SERVER>.postgres.database.azure.com"
+      - op: replace
+        path: /data/TSM_SERVER_BASE_URL
+        value: "https://<HOSTNAME>"
+      - op: replace
+        path: /data/TSM_SERVER_PUBLIC_URL
+        value: "https://<HOSTNAME>"
+      - op: replace
+        path: /data/TSM_SERVER_CALLBACK_URL
+        value: "https://<HOSTNAME>"
+      - op: replace
+        path: /data/TSM_LOGGING_LEVEL
+        value: warn
+  # Gateway API replaces the legacy Ingress
+  - target:
+      kind: Ingress
+      name: tsm-ingress
+    patch: |-
+      $patch: delete
+      apiVersion: networking.k8s.io/v1
+      kind: Ingress
+      metadata:
+        name: tsm-ingress
+  # The CSI driver owns tsm-secrets (synced from Key Vault) — drop the
+  # placeholder Secret so it can't shadow real values.
+  - target:
+      kind: Secret
+      name: tsm-secrets
+    patch: |-
+      $patch: delete
+      apiVersion: v1
+      kind: Secret
+      metadata:
+        name: tsm-secrets
+
+images:
+  - name: terraform-state-manager-backend
+    newName: <ACR_NAME>.azurecr.io/terraform-state-manager-backend
+    newTag: <IMAGE_TAG>
+  - name: terraform-state-manager-frontend
+    newName: <ACR_NAME>.azurecr.io/terraform-state-manager-frontend
+    newTag: <IMAGE_TAG>

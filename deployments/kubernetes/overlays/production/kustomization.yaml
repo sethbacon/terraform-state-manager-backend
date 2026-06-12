@@ -1,0 +1,59 @@
+# Production overlay: 3 API replicas (worker stays at exactly 1), bigger
+# resources, warn-level json logs, node spread, pinned images.
+# REQUIRED: replace <REGISTRY>, <IMAGE_TAG>, and <YOUR_HOSTNAME>.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: terraform-state-manager
+
+resources:
+  - ../../base
+
+patches:
+  - target:
+      kind: Deployment
+      name: backend
+    patch: |-
+      - op: replace
+        path: /spec/replicas
+        value: 3
+      - op: replace
+        path: /spec/template/spec/containers/0/resources
+        value:
+          requests: { cpu: 250m, memory: 256Mi }
+          limits: { cpu: "1", memory: 1Gi }
+  - target:
+      kind: Deployment
+      name: frontend
+    patch: |-
+      - op: replace
+        path: /spec/replicas
+        value: 2
+  - path: patches/backend-topology-spread.yaml
+    target:
+      kind: Deployment
+      name: backend
+  - target:
+      kind: ConfigMap
+      name: tsm-config
+    patch: |-
+      - op: replace
+        path: /data/TSM_LOGGING_LEVEL
+        value: warn
+      - op: replace
+        path: /data/TSM_SERVER_BASE_URL
+        value: "https://<YOUR_HOSTNAME>"
+      - op: replace
+        path: /data/TSM_SERVER_PUBLIC_URL
+        value: "https://<YOUR_HOSTNAME>"
+      - op: replace
+        path: /data/TSM_SERVER_CALLBACK_URL
+        value: "https://<YOUR_HOSTNAME>"
+
+images:
+  - name: terraform-state-manager-backend
+    newName: <REGISTRY>/terraform-state-manager-backend
+    newTag: <IMAGE_TAG>
+  - name: terraform-state-manager-frontend
+    newName: <REGISTRY>/terraform-state-manager-frontend
+    newTag: <IMAGE_TAG>

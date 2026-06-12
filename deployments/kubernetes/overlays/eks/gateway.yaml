@@ -1,0 +1,37 @@
+# ── GatewayClass (AWS Load Balancer Controller with Gateway API support) ──────
+apiVersion: gateway.networking.k8s.io/v1
+kind: GatewayClass
+metadata:
+  name: aws-alb-external
+spec:
+  controllerName: gateway.k8s.aws/alb
+---
+# ── Gateway: HTTP (ACME + redirect) and HTTPS listeners ──────────────────────
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: tsm-gateway
+  annotations:
+    service.beta.kubernetes.io/aws-load-balancer-scheme: internet-facing
+    cert-manager.io/cluster-issuer: letsencrypt-staging
+spec:
+  gatewayClassName: aws-alb-external
+  listeners:
+    - name: http
+      port: 80
+      protocol: HTTP
+      allowedRoutes:
+        namespaces:
+          from: Same
+    - name: https
+      port: 443
+      protocol: HTTPS
+      hostname: "<HOSTNAME>"
+      tls:
+        mode: Terminate
+        certificateRefs:
+          - name: terraform-state-manager-tls
+            kind: Secret
+      allowedRoutes:
+        namespaces:
+          from: Same

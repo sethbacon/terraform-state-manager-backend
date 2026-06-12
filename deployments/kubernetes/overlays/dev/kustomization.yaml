@@ -1,0 +1,21 @@
+# Dev overlay: single replicas, readable text logs, debug level.
+# The placeholder Secret from base still applies — fine for throwaway clusters.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: terraform-state-manager
+
+resources:
+  - ../../base
+
+patches:
+  - target:
+      kind: ConfigMap
+      name: tsm-config
+    patch: |-
+      - op: replace
+        path: /data/TSM_LOGGING_LEVEL
+        value: debug
+      - op: replace
+        path: /data/TSM_LOGGING_FORMAT
+        value: text

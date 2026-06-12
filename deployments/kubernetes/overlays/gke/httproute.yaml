@@ -1,0 +1,71 @@
+# HTTP -> HTTPS redirect
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: tsm-http-redirect
+spec:
+  parentRefs:
+    - name: tsm-gateway
+      sectionName: http
+  rules:
+    - filters:
+        - type: RequestRedirect
+          requestRedirect:
+            scheme: https
+            statusCode: 301
+---
+# Backend paths: API + drift/version-lab callbacks, SCIM, probes, OpenAPI
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: tsm-backend-routes
+spec:
+  parentRefs:
+    - name: tsm-gateway
+      sectionName: https
+  hostnames:
+    - "<HOSTNAME>"
+  rules:
+    - matches:
+        - path: { type: PathPrefix, value: /api/ }
+      backendRefs:
+        - name: tsm-backend
+          port: 8080
+    - matches:
+        - path: { type: PathPrefix, value: /scim/ }
+      backendRefs:
+        - name: tsm-backend
+          port: 8080
+    - matches:
+        - path: { type: Exact, value: /health }
+      backendRefs:
+        - name: tsm-backend
+          port: 8080
+    - matches:
+        - path: { type: Exact, value: /ready }
+      backendRefs:
+        - name: tsm-backend
+          port: 8080
+    - matches:
+        - path: { type: PathPrefix, value: /swagger }
+      backendRefs:
+        - name: tsm-backend
+          port: 8080
+---
+# Frontend SPA catch-all
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: tsm-frontend-route
+spec:
+  parentRefs:
+    - name: tsm-gateway
+      sectionName: https
+  hostnames:
+    - "<HOSTNAME>"
+  rules:
+    - matches:
+        - path: { type: PathPrefix, value: / }
+      backendRefs:
+        - name: tsm-frontend
+          port: 80

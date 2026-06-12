@@ -1,0 +1,98 @@
+# ============================================================
+# EKS overlay — Gateway API (AWS LBC) + Secrets Manager (ASCP) + IRSA + RDS
+# ============================================================
+# Prerequisites (docs/deployment/eks-prerequisites.md):
+#   1. EKS with OIDC provider (IRSA) + Secrets Store CSI Driver + ASCP
+#   2. AWS Load Balancer Controller with Gateway API support installed
+#   3. cert-manager with Gateway API support enabled
+#   4. Secrets Manager secrets: tsm/jwt-secret, tsm/encryption-key,
+#      tsm/database-password
+#   5. IAM role with secretsmanager:GetSecretValue, trust-bound to this SA
+#
+# REQUIRED placeholders: <AWS_ACCOUNT_ID> <REGION> <IMAGE_TAG>
+#   <TSM_IRSA_ROLE> <RDS_ENDPOINT> <HOSTNAME> <EMAIL>
+#
+# Apply: kubectl apply -k deployments/kubernetes/overlays/eks/
+# ============================================================
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: terraform-state-manager
+
+resources:
+  - ../../base
+  - gateway.yaml
+  - httproute.yaml
+  - secretproviderclass.yaml
+  - clusterissuer.yaml
+  - certificate.yaml
+
+patches:
+  - path: patches/serviceaccount-irsa.yaml
+    target:
+      kind: ServiceAccount
+      name: terraform-state-manager
+  - path: patches/backend-csi.yaml
+    target:
+      kind: Deployment
+      name: backend
+  - path: patches/worker-csi.yaml
+    target:
+      kind: Deployment
+      name: worker
+  # Production sizing + AKS endpoints
+  - target:
+      kind: Deployment
+      name: backend
+    patch: |-
+      - op: replace
+        path: /spec/replicas
+        value: 3
+  - target:
+      kind: ConfigMap
+      name: tsm-config
+    patch: |-
+      - op: replace
+        path: /data/TSM_DATABASE_HOST
+        value: "<RDS_ENDPOINT>.rds.amazonaws.com"
+      - op: replace
+        path: /data/TSM_SERVER_BASE_URL
+        value: "https://<HOSTNAME>"
+      - op: replace
+        path: /data/TSM_SERVER_PUBLIC_URL
+        value: "https://<HOSTNAME>"
+      - op: replace
+        path: /data/TSM_SERVER_CALLBACK_URL
+        value: "https://<HOSTNAME>"
+      - op: replace
+        path: /data/TSM_LOGGING_LEVEL
+        value: warn
+  # Gateway API replaces the legacy Ingress
+  - target:
+      kind: Ingress
+      name: tsm-ingress
+    patch: |-
+      $patch: delete
+      apiVersion: networking.k8s.io/v1
+      kind: Ingress
+      metadata:
+        name: tsm-ingress
+  # The CSI driver owns tsm-secrets (synced from Key Vault) — drop the
+  # placeholder Secret so it can't shadow real values.
+  - target:
+      kind: Secret
+      name: tsm-secrets
+    patch: |-
+      $patch: delete
+      apiVersion: v1
+      kind: Secret
+      metadata:
+        name: tsm-secrets
+
+images:
+  - name: terraform-state-manager-backend
+    newName: <AWS_ACCOUNT_ID>.dkr.ecr.<REGION>.amazonaws.com/terraform-state-manager-backend
+    newTag: <IMAGE_TAG>
+  - name: terraform-state-manager-frontend
+    newName: <AWS_ACCOUNT_ID>.dkr.ecr.<REGION>.amazonaws.com/terraform-state-manager-frontend
+    newTag: <IMAGE_TAG>
