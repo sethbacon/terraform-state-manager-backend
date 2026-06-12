@@ -1,0 +1,184 @@
+Terraform State Manager
+Copyright 2026 Terraform State Manager Contributors
+
+This product is licensed under the Apache License, Version 2.0.
+See the LICENSE file for the full license text.
+
+---
+
+This software incorporates components from the following third-party projects.
+Their licenses are reproduced below or linked where the license text is
+available in the upstream project repository.
+
+---
+
+## hashicorp/errwrap, hashicorp/go-multierror (Mozilla Public License 2.0)
+
+  github.com/hashicorp/errwrap
+  github.com/hashicorp/go-multierror
+  Copyright (c) HashiCorp, Inc.
+  Licensed under the Mozilla Public License, Version 2.0
+  https://github.com/hashicorp/errwrap/blob/main/LICENSE
+  https://github.com/hashicorp/go-multierror/blob/main/LICENSE
+
+  Note: MPL-2.0 is a file-level copyleft license. These source files are used
+  unmodified (transitively, via github.com/sethbacon/terraform-suite-identity).
+  Any modifications to those files must be made available under MPL-2.0. This
+  project's own source code is not subject to MPL-2.0 obligations.
+
+## gin-gonic/gin (MIT License)
+
+  github.com/gin-gonic/gin
+  Copyright (c) 2014 Manu Martinez-Almeida
+  Licensed under the MIT License
+  https://github.com/gin-gonic/gin/blob/master/LICENSE
+
+## spf13/viper (MIT License)
+
+  github.com/spf13/viper
+  Copyright (c) 2014 Steve Francia
+  Licensed under the MIT License
+  https://github.com/spf13/viper/blob/master/LICENSE
+
+## jmoiron/sqlx (MIT License)
+
+  github.com/jmoiron/sqlx
+  Copyright (c) 2013, Jason Moiron
+  Licensed under the MIT License
+  https://github.com/jmoiron/sqlx/blob/master/LICENSE
+
+## lib/pq (MIT License)
+
+  github.com/lib/pq
+  Copyright (c) 2011-2013 'pq' Contributors
+  Licensed under the MIT License
+  https://github.com/lib/pq/blob/master/LICENSE.md
+
+## golang-migrate/migrate (MIT License)
+
+  github.com/golang-migrate/migrate/v4
+  Copyright (c) 2018 golang-migrate authors
+  Licensed under the MIT License
+  https://github.com/golang-migrate/migrate/blob/master/LICENSE
+
+## golang-jwt/jwt (MIT License)
+
+  github.com/golang-jwt/jwt/v5
+  Copyright (c) 2021 golang-jwt authors
+  Licensed under the MIT License
+  https://github.com/golang-jwt/jwt/blob/main/LICENSE
+
+## go-ldap/ldap (MIT License)
+
+  github.com/go-ldap/ldap/v3
+  Copyright (c) 2011-2015 Michael Mitton, portions copyright (c) 2015-2016 go-ldap Authors
+  Licensed under the MIT License
+  https://github.com/go-ldap/ldap/blob/master/LICENSE
+
+## robfig/cron (MIT License)
+
+  github.com/robfig/cron/v3
+  Copyright (c) 2012 Rob Figueiredo
+  Licensed under the MIT License
+  https://github.com/robfig/cron/blob/master/LICENSE
+
+## Azure/azure-sdk-for-go (MIT License)
+
+  github.com/Azure/azure-sdk-for-go/sdk/azcore
+  github.com/Azure/azure-sdk-for-go/sdk/storage/azblob
+  Copyright (c) Microsoft Corporation
+  Licensed under the MIT License
+  https://github.com/Azure/azure-sdk-for-go/blob/main/sdk/storage/azblob/LICENSE.txt
+
+## crewjam/saml (BSD 2-Clause License)
+
+  github.com/crewjam/saml
+  Copyright (c) 2015, Ross Kinder
+  Licensed under the BSD 2-Clause License
+  https://github.com/crewjam/saml/blob/main/LICENSE
+
+## google/uuid (BSD 3-Clause License)
+
+  github.com/google/uuid
+  Copyright (c) Google Inc.
+  Licensed under the BSD 3-Clause License
+  https://github.com/google/uuid/blob/master/LICENSE
+
+## DATA-DOG/go-sqlmock (BSD 3-Clause License — test dependency)
+
+  github.com/DATA-DOG/go-sqlmock
+  Copyright (c) 2013-2019, DATA-DOG team
+  Licensed under the BSD 3-Clause License
+  https://github.com/DATA-DOG/go-sqlmock/blob/master/LICENSE
+
+## golang.org/x/* (BSD 3-Clause License)
+
+  golang.org/x/crypto, golang.org/x/net, golang.org/x/oauth2, golang.org/x/text
+  Copyright (c) The Go Authors
+  Licensed under the BSD 3-Clause License
+  https://cs.opensource.google/go/x/crypto/+/refs/heads/master:LICENSE
+
+## aws/aws-sdk-go-v2, aws/smithy-go (Apache License 2.0)
+
+  github.com/aws/aws-sdk-go-v2
+  github.com/aws/smithy-go
+  Copyright (c) Amazon Web Services, Inc.
+  Licensed under the Apache License, Version 2.0
+  https://github.com/aws/aws-sdk-go-v2/blob/main/LICENSE.txt
+
+## go-git/go-git, go-git/go-billy (Apache License 2.0)
+
+  github.com/go-git/go-git/v5
+  github.com/go-git/go-billy/v5
+  Copyright (c) go-git contributors
+  Licensed under the Apache License, Version 2.0
+  https://github.com/go-git/go-git/blob/master/LICENSE
+
+## prometheus/client_golang (Apache License 2.0)
+
+  github.com/prometheus/client_golang
+  Copyright (c) The Prometheus Authors
+  Licensed under the Apache License, Version 2.0
+  https://github.com/prometheus/client_golang/blob/main/LICENSE
+
+## coreos/go-oidc, go-jose/go-jose (Apache License 2.0)
+
+  github.com/coreos/go-oidc/v3
+  github.com/go-jose/go-jose/v4
+  Copyright (c) CoreOS, Inc. / The go-jose Authors
+  Licensed under the Apache License, Version 2.0
+  https://github.com/coreos/go-oidc/blob/v3/LICENSE
+
+## russellhaering/goxmldsig (Apache License 2.0)
+
+  github.com/russellhaering/goxmldsig
+  Copyright (c) Russell Haering
+  Licensed under the Apache License, Version 2.0
+  https://github.com/russellhaering/goxmldsig/blob/main/LICENSE
+
+## google.golang.org/api, cloud.google.com/go (Apache License 2.0)
+
+  google.golang.org/api
+  cloud.google.com/go/storage
+  Copyright (c) Google LLC
+  Licensed under the Apache License, Version 2.0
+  https://github.com/googleapis/google-api-go-client/blob/main/LICENSE
+
+## gopkg.in/yaml.v3 (Apache License 2.0 / MIT License)
+
+  gopkg.in/yaml.v3
+  Copyright (c) 2006-2010 Kirill Simonov, copyright (c) 2011-2019 Canonical Ltd
+  Licensed under the Apache License 2.0 (with libyaml portions under MIT)
+  https://github.com/go-yaml/yaml/blob/v3/LICENSE
+
+## First-party shared module
+
+  github.com/sethbacon/terraform-suite-identity is a first-party component
+  maintained by the same authors and used under the same license terms as this
+  project.
+
+## All other transitive dependencies
+
+  The remaining transitive dependencies are licensed under the Apache License 2.0,
+  MIT License, or BSD 3-Clause License. Full license texts are available in the
+  respective upstream repositories referenced in backend/go.mod.

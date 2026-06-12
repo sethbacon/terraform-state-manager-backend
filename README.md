@@ -2,6 +2,7 @@
 
 Control-plane API for analyzing, manipulating, and watching Terraform state **where it already lives** — no state migration required.
 
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Go Version](https://img.shields.io/badge/Go-1.26+-00ADD8?logo=go)](https://go.dev/)
 [![Coverage](https://img.shields.io/endpoint?url=https://gist.githubusercontent.com/sethbacon/04a5fcc9b19b7b263059a3c62f5481bc/raw/coverage.json)](https://github.com/sethbacon/terraform-state-manager-backend/actions/workflows/ci.yml)
 
@@ -143,3 +144,13 @@ Operations and integration docs live in [`docs/`](docs/) — deployment guides p
 ## History
 
 This codebase is the second-generation implementation. The original draft is preserved on the [`archive/ogtsm`](https://github.com/sethbacon/terraform-state-manager-backend/tree/archive/ogtsm) branch; releases up to v0.9.0 were cut from that lineage.
+
+## License
+
+This project is licensed under the Apache License, Version 2.0 — see the [LICENSE](LICENSE) file for details. Third-party attributions are in [NOTICE](NOTICE).
+
+## Disclaimer
+
+This software is provided **"AS IS"**, without warranty of any kind, express or implied, including but not limited to the warranties of merchantability, fitness for a particular purpose, and non-infringement. In no event shall the authors or copyright holders be liable for any claim, damages, or other liability arising from the use of this software. See the [Apache 2.0 License](LICENSE) (Sections 7–8) for the full warranty disclaimer and limitation of liability.
+
+**Operational security is the responsibility of the deploying organization.** This includes, but is not limited to: securing the deployment environment, managing secrets and credentials (especially `TSM_ENCRYPTION_KEY` custody), configuring TLS, enforcing network boundaries, rotating API keys, auditing access, keeping dependencies up to date, and validating the fitness of this software for your specific compliance and security requirements. The maintainers make no guarantees regarding the security posture of any deployment.
