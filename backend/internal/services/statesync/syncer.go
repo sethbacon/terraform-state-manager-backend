@@ -117,6 +117,10 @@ func (s *Syncer) SyncAll(ctx context.Context) error {
 		}
 		s.syncSource(ctx, &sources[i])
 	}
+	// Bound the history table: one cheap DELETE per cycle.
+	if err := s.store.PruneHistory(ctx); err != nil {
+		s.logger.Error("failed to prune analysis history", "error", err)
+	}
 	return nil
 }
 
@@ -234,7 +238,17 @@ func (s *Syncer) syncOne(ctx context.Context, conn statesource.Connector, source
 	if err != nil {
 		return fmt.Errorf("analyze %s: %w", ref.Key, err)
 	}
-	return s.store.Upsert(ctx, analysisRow(sourceID, ref, a, int64(len(rs.Data))))
+	row := analysisRow(sourceID, ref, a, int64(len(rs.Data)))
+	if err := s.store.Upsert(ctx, row); err != nil {
+		return err
+	}
+	// Append-only history feeds per-state time series; the repository skips the
+	// insert when nothing changed vs the latest snapshot. Best-effort: the live
+	// store is already current.
+	if _, err := s.store.AppendHistoryIfChanged(ctx, row); err != nil {
+		s.logger.Error("failed to append analysis history", "key", ref.Key, "error", err)
+	}
+	return nil
 }
 
 // SyncKey refreshes a single state's analysis after a TSM-initiated write, so

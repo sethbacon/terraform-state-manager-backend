@@ -66,6 +66,7 @@ func newSourcesEnv(t *testing.T) *sourcesEnv {
 	v1.PUT("/sources/:id/state/raw", h.EditState())
 	v1.GET("/sources/:id/state/resources", h.ListStateResources())
 	v1.GET("/sources/:id/state/outputs", h.StateOutputs())
+	v1.GET("/sources/:id/state/history", h.StateHistory())
 	v1.GET("/sources/:id/state/report", h.StateReport())
 	v1.POST("/sources/:id/state/operations", h.StateOperation())
 	v1.GET("/sources/:id/state/backups", h.ListBackups())
@@ -317,6 +318,31 @@ func TestStateOutputs(t *testing.T) {
 	e.expectSource("s1", e.dir)
 	if w := e.do(http.MethodGet, "/api/v1/sources/s1/state/outputs?key=junk.tfstate", ""); w.Code != http.StatusUnprocessableEntity {
 		t.Errorf("junk state: status = %d, want 422", w.Code)
+	}
+}
+
+func TestStateHistory(t *testing.T) {
+	e := newSourcesEnv(t)
+
+	histCols := []string{"source_id", "state_key", "version_marker", "size", "terraform_version",
+		"serial", "lineage", "rum", "managed_resources", "data_sources", "total_resources",
+		"providers", "resource_types", "analyzed_at"}
+	e.mock.ExpectQuery("FROM state_analysis_history").WithArgs("s1", "app.tfstate", 200).
+		WillReturnRows(sqlmock.NewRows(histCols).
+			AddRow("s1", "app.tfstate", "12|y", 12, "1.9.5", 8, "lin", 5, 5, 1, 6,
+				[]byte(`{"aws":5}`), []byte(`{"aws_instance":5}`), "2026-06-11T10:00:00Z"))
+	w := e.do(http.MethodGet, "/api/v1/sources/s1/state/history?key=app.tfstate", "")
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"serial":8`) {
+		t.Fatalf("history: %d (%s)", w.Code, w.Body.String())
+	}
+
+	if w := e.do(http.MethodGet, "/api/v1/sources/s1/state/history", ""); w.Code != http.StatusBadRequest {
+		t.Errorf("missing key: %d", w.Code)
+	}
+
+	e.mock.ExpectQuery("FROM state_analysis_history").WillReturnError(errors.New("db down"))
+	if w := e.do(http.MethodGet, "/api/v1/sources/s1/state/history?key=k", ""); w.Code != http.StatusInternalServerError {
+		t.Errorf("db error: %d", w.Code)
 	}
 }
 

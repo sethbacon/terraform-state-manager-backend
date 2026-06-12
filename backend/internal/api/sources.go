@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -459,6 +460,36 @@ func (h *SourcesHandlers) StateOutputs() gin.HandlerFunc {
 			return
 		}
 		c.JSON(http.StatusOK, gin.H{"key": rs.Key, "outputs": outputs})
+	}
+}
+
+// StateHistory returns a state's analysis snapshots (newest first) from the
+// append-only history the statesync service maintains — one row per observed
+// change, powering per-state time series and point-in-time comparison.
+// @Summary      State analysis history
+// @Tags         Sources
+// @Produce      json
+// @Param        id     path   string  true   "Source ID"
+// @Param        key    query  string  true   "State file key"
+// @Param        limit  query  int     false  "Max snapshots (default 200)"
+// @Success      200  {object}  map[string]interface{}
+// @Security     BearerAuth
+// @Security     CookieAuth
+// @Router       /sources/{id}/state/history [get]
+func (h *SourcesHandlers) StateHistory() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		key := c.Query("key")
+		if key == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "key query parameter is required"})
+			return
+		}
+		limit, _ := strconv.Atoi(c.DefaultQuery("limit", "0"))
+		history, err := h.analysisRepo.History(c.Request.Context(), c.Param("id"), key, limit)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load analysis history"})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"key": key, "history": history})
 	}
 }
 

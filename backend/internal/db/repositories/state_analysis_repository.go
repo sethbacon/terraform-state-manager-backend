@@ -91,6 +91,86 @@ func (r *StateAnalysisRepository) Upsert(ctx context.Context, a *StateAnalysis) 
 	return err
 }
 
+// AppendHistoryIfChanged appends an analysis snapshot to the append-only
+// history when it differs from the LATEST history row for the state (marker,
+// serial, size, terraform version, rum, total resources). The in-SQL guard
+// keeps marker-less backends — re-read and re-upserted every cycle — from
+// piling up identical rows. Returns whether a row was appended.
+func (r *StateAnalysisRepository) AppendHistoryIfChanged(ctx context.Context, a *StateAnalysis) (bool, error) {
+	providersJSON, err := json.Marshal(orEmptyIntMap(a.Providers))
+	if err != nil {
+		return false, err
+	}
+	resTypesJSON, err := json.Marshal(orEmptyIntMap(a.ResourceTypes))
+	if err != nil {
+		return false, err
+	}
+	res, err := r.db.ExecContext(ctx, `
+		INSERT INTO state_analysis_history (
+			source_id, state_key, version_marker, size, terraform_version, serial, lineage,
+			rum, managed_resources, data_sources, total_resources, providers, resource_types
+		)
+		SELECT $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::jsonb,$13::jsonb
+		WHERE NOT EXISTS (
+			SELECT 1 FROM state_analysis_history h
+			WHERE h.source_id = $1 AND h.state_key = $2
+			  AND h.analyzed_at = (
+				SELECT max(analyzed_at) FROM state_analysis_history
+				WHERE source_id = $1 AND state_key = $2)
+			  AND h.version_marker = $3 AND h.size = $4 AND h.terraform_version = $5
+			  AND h.serial = $6 AND h.rum = $8 AND h.total_resources = $11
+		)`,
+		a.SourceID, a.StateKey, a.VersionMarker, a.Size, a.TerraformVersion, a.Serial, a.Lineage,
+		a.RUM, a.ManagedResources, a.DataSources, a.TotalResources, providersJSON, resTypesJSON)
+	if err != nil {
+		return false, err
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
+}
+
+// History returns a state's analysis snapshots, newest first.
+func (r *StateAnalysisRepository) History(ctx context.Context, sourceID, stateKey string, limit int) ([]StateAnalysis, error) {
+	if limit <= 0 || limit > 1000 {
+		limit = 200
+	}
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT source_id, state_key, version_marker, size, terraform_version, serial, lineage,
+		       rum, managed_resources, data_sources, total_resources, providers, resource_types,
+		       analyzed_at::text
+		FROM state_analysis_history
+		WHERE source_id = $1 AND state_key = $2
+		ORDER BY analyzed_at DESC
+		LIMIT $3`, sourceID, stateKey, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := []StateAnalysis{}
+	for rows.Next() {
+		var a StateAnalysis
+		var providersJSON, resTypesJSON []byte
+		if err := rows.Scan(&a.SourceID, &a.StateKey, &a.VersionMarker, &a.Size, &a.TerraformVersion,
+			&a.Serial, &a.Lineage, &a.RUM, &a.ManagedResources, &a.DataSources, &a.TotalResources,
+			&providersJSON, &resTypesJSON, &a.AnalyzedAt); err != nil {
+			return nil, err
+		}
+		_ = json.Unmarshal(providersJSON, &a.Providers)
+		_ = json.Unmarshal(resTypesJSON, &a.ResourceTypes)
+		out = append(out, a)
+	}
+	return out, rows.Err()
+}
+
+// PruneHistory drops history older than 180 days (one cheap DELETE per sync
+// cycle keeps the table bounded).
+func (r *StateAnalysisRepository) PruneHistory(ctx context.Context) error {
+	_, err := r.db.ExecContext(ctx,
+		`DELETE FROM state_analysis_history WHERE analyzed_at < now() - interval '180 days'`)
+	return err
+}
+
 // Markers returns state_key -> version_marker for a source, for sync diffing.
 func (r *StateAnalysisRepository) Markers(ctx context.Context, sourceID string) (map[string]string, error) {
 	rows, err := r.db.QueryContext(ctx,

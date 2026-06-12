@@ -201,3 +201,56 @@ func TestSourceSyncStatus(t *testing.T) {
 		t.Error(err)
 	}
 }
+
+func TestStateAnalysisHistory(t *testing.T) {
+	db, mock := newMock(t)
+	r := NewStateAnalysisRepository(db)
+	row := &StateAnalysis{SourceID: "s1", StateKey: "app.tfstate", VersionMarker: "10|x",
+		Size: 10, TerraformVersion: "1.9.5", Serial: 7, RUM: 4, TotalResources: 5,
+		Providers: map[string]int{"aws": 4}, ResourceTypes: map[string]int{"aws_instance": 4}}
+
+	// Changed vs latest snapshot -> appended (the WHERE NOT EXISTS guard is
+	// SQL-side; the contract here is rows-affected -> appended bool).
+	mock.ExpectExec("INSERT INTO state_analysis_history").WillReturnResult(sqlmock.NewResult(0, 1))
+	appended, err := r.AppendHistoryIfChanged(ctx, row)
+	if err != nil || !appended {
+		t.Fatalf("AppendHistoryIfChanged: %v appended=%v", err, appended)
+	}
+
+	// Identical to the latest snapshot -> guard suppresses the insert.
+	mock.ExpectExec("INSERT INTO state_analysis_history").WillReturnResult(sqlmock.NewResult(0, 0))
+	appended, err = r.AppendHistoryIfChanged(ctx, row)
+	if err != nil || appended {
+		t.Errorf("unchanged snapshot must not append: %v appended=%v", err, appended)
+	}
+
+	mock.ExpectExec("INSERT INTO state_analysis_history").WillReturnError(errDB)
+	if _, err := r.AppendHistoryIfChanged(ctx, row); err == nil {
+		t.Error("db error must surface")
+	}
+
+	// History returns snapshots newest-first with JSONB maps decoded.
+	histCols := []string{"source_id", "state_key", "version_marker", "size", "terraform_version",
+		"serial", "lineage", "rum", "managed_resources", "data_sources", "total_resources",
+		"providers", "resource_types", "analyzed_at"}
+	mock.ExpectQuery("FROM state_analysis_history").WithArgs("s1", "app.tfstate", 200).
+		WillReturnRows(sqlmock.NewRows(histCols).
+			AddRow("s1", "app.tfstate", "12|y", 12, "1.9.5", 8, "lin", 5, 5, 1, 6, []byte(`{"aws":5}`), []byte(`{"aws_instance":5}`), "2026-06-11T10:00:00Z").
+			AddRow("s1", "app.tfstate", "10|x", 10, "1.9.5", 7, "lin", 4, 4, 1, 5, []byte(`{"aws":4}`), []byte(`{"aws_instance":4}`), "2026-06-10T10:00:00Z"))
+	hist, err := r.History(ctx, "s1", "app.tfstate", 0)
+	if err != nil || len(hist) != 2 {
+		t.Fatalf("History: %v %+v", err, hist)
+	}
+	if hist[0].Serial != 8 || hist[0].Providers["aws"] != 5 || hist[1].RUM != 4 {
+		t.Errorf("history rows = %+v", hist)
+	}
+
+	mock.ExpectExec("DELETE FROM state_analysis_history WHERE analyzed_at").
+		WillReturnResult(sqlmock.NewResult(0, 9))
+	if err := r.PruneHistory(ctx); err != nil {
+		t.Errorf("PruneHistory: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Error(err)
+	}
+}

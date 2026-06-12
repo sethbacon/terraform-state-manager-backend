@@ -142,7 +142,10 @@ func TestSyncAll_FirstBackfillReadsEverything(t *testing.T) {
 		WillReturnRows(sqlmock.NewRows([]string{"state_key", "version_marker"}))
 	mock.ExpectExec("INSERT INTO state_analyses").WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec("INSERT INTO state_analyses").WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("INSERT INTO state_analysis_history").WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("INSERT INTO state_analysis_history").WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec("DELETE FROM state_analyses WHERE source_id").WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec("DELETE FROM state_analysis_history").WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectExec("INSERT INTO source_sync_status").WithArgs("s1", 2, 0, "").
 		WillReturnResult(sqlmock.NewResult(0, 1))
 
@@ -169,7 +172,9 @@ func TestSyncAll_UnchangedStatesAreNotReRead(t *testing.T) {
 			AddRow("stale.tfstate", "old-marker").
 			AddRow("deleted.tfstate", "whatever"))
 	mock.ExpectExec("INSERT INTO state_analyses").WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("INSERT INTO state_analysis_history").WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec("DELETE FROM state_analyses WHERE source_id").WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("DELETE FROM state_analysis_history").WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectExec("INSERT INTO source_sync_status").WithArgs("s1", 2, 0, "").
 		WillReturnResult(sqlmock.NewResult(0, 1))
 
@@ -187,6 +192,7 @@ func TestSyncAll_SourceFailuresAreRecordedNotFatal(t *testing.T) {
 	mock.ExpectQuery("SELECT .+ FROM state_sources ORDER BY").WillReturnRows(sourceRows("/x"))
 	mock.ExpectExec("INSERT INTO source_sync_status").WithArgs("s1", 0, 0, "connect: nope").
 		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("DELETE FROM state_analysis_history").WillReturnResult(sqlmock.NewResult(0, 0))
 	s := newSyncer(db, func(*repositories.Source) (statesource.Connector, error) {
 		return nil, errors.New("nope")
 	})
@@ -202,6 +208,7 @@ func TestSyncAll_SourceFailuresAreRecordedNotFatal(t *testing.T) {
 	mock2.ExpectQuery("SELECT .+ FROM state_sources ORDER BY").WillReturnRows(sourceRows("/x"))
 	mock2.ExpectExec("INSERT INTO source_sync_status").WithArgs("s1", 0, 0, "list: hcp 429").
 		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock2.ExpectExec("DELETE FROM state_analysis_history").WillReturnResult(sqlmock.NewResult(0, 0))
 	s2 := newSyncer(db2, func(*repositories.Source) (statesource.Connector, error) {
 		return &fakeConn{listErr: errors.New("hcp 429")}, nil
 	})
@@ -234,6 +241,7 @@ func TestSyncAll_ReadAndAnalyzeErrorsCount(t *testing.T) {
 	mock.ExpectExec("DELETE FROM state_analyses WHERE source_id").WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectExec("INSERT INTO source_sync_status").WithArgs("s1", 2, 2, sqlmock.AnyArg()).
 		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("DELETE FROM state_analysis_history").WillReturnResult(sqlmock.NewResult(0, 0))
 
 	s := newSyncer(db, func(*repositories.Source) (statesource.Connector, error) { return conn, nil })
 	if err := s.SyncAll(ctx); err != nil {
@@ -257,7 +265,9 @@ func TestSyncAll_TransientThrottleClearsOnRetry(t *testing.T) {
 	mock.ExpectQuery("SELECT state_key, version_marker FROM state_analyses").WithArgs("s1").
 		WillReturnRows(sqlmock.NewRows([]string{"state_key", "version_marker"}))
 	mock.ExpectExec("INSERT INTO state_analyses").WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("INSERT INTO state_analysis_history").WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec("DELETE FROM state_analyses WHERE source_id").WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec("DELETE FROM state_analysis_history").WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectExec("INSERT INTO source_sync_status").WithArgs("s1", 1, 0, "").
 		WillReturnResult(sqlmock.NewResult(0, 1))
 
@@ -295,6 +305,7 @@ func TestSyncKeyAndDropKey(t *testing.T) {
 	seed(t, dir, "app.tfstate", minState(7, "aws_instance"))
 
 	mock.ExpectExec("INSERT INTO state_analyses").WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("INSERT INTO state_analysis_history").WillReturnResult(sqlmock.NewResult(0, 1))
 	s := newSyncer(db, connectLocal)
 	s.SyncKey(localSource(dir), "app.tfstate")
 
