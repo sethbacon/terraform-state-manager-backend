@@ -7,6 +7,7 @@ package api
 import (
 	"database/sql"
 	"fmt"
+	"log/slog"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
@@ -275,24 +276,32 @@ func NewRouter(cfg *config.Config, database *sql.DB, identityDB *sql.DB) (*gin.E
 			ng.POST("/channels/:id/test", notif.TestChannel())
 		}
 
-		// Start the background runner. Guarded on database so unit tests that build
-		// the router with a nil DB don't spin up a goroutine that would hit it.
+		// Background workers. Guarded on database so unit tests that build the
+		// router with a nil DB don't spin up goroutines that would hit it. The
+		// syncer OBJECT is always attached (post-write refreshes and source-create
+		// backfills must work on every replica); the PERIODIC loops — schedule
+		// runner + statesync reconcile — start only when workers are enabled, so
+		// multi-replica deployments can scale API pods while exactly one dedicated
+		// worker replica fires schedules (GetDue has no cross-replica claim).
 		if database != nil {
-			runner := scheduler.New(repositories.NewScheduleRepository(database), driftDisp)
-			runner.Start()
-			// Keep the persistent analysis store reconciled (backfills on boot,
-			// then re-reads only changed states each cycle).
 			syncer := statesync.New(
 				repositories.NewSourceRepository(database),
 				repositories.NewStateAnalysisRepository(database),
 				ConnectSource,
 			)
 			sources.AttachSyncer(syncer)
-			syncer.Start()
-			runnerStop := runner.Stop
-			stop = func() {
-				runnerStop()
-				syncer.Stop()
+			if cfg.Workers.Enabled {
+				runner := scheduler.New(repositories.NewScheduleRepository(database), driftDisp)
+				runner.Start()
+				syncer.Start()
+				runnerStop := runner.Stop
+				stop = func() {
+					runnerStop()
+					syncer.Stop()
+				}
+			} else {
+				slog.Info("background workers disabled on this replica (workers.enabled=false); " +
+					"schedule firing and periodic state sync run on the dedicated worker")
 			}
 		}
 	}

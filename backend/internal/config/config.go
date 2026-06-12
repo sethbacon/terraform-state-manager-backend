@@ -25,6 +25,18 @@ type Config struct {
 	Logging   LoggingConfig   `mapstructure:"logging"`
 	Telemetry TelemetryConfig `mapstructure:"telemetry"`
 	Auth      AuthConfig      `mapstructure:"auth"`
+	Workers   WorkersConfig   `mapstructure:"workers"`
+}
+
+// WorkersConfig gates the periodic background workers (schedule runner +
+// statesync reconcile loop). In multi-replica deployments exactly ONE replica
+// should run them — the schedule runner has no cross-replica claim, so two
+// replicas would double-dispatch due schedules. Set TSM_WORKERS_ENABLED=false
+// on API replicas and true on a single dedicated worker replica. On-demand
+// syncs (post-write refresh, source-create backfill) stay available on every
+// replica regardless.
+type WorkersConfig struct {
+	Enabled bool `mapstructure:"enabled"`
 }
 
 // ServerConfig holds HTTP server settings.
@@ -293,6 +305,8 @@ func setDefaults(v *viper.Viper) {
 
 	v.SetDefault("telemetry.metrics.enabled", true)
 	v.SetDefault("telemetry.metrics.prometheus_port", 9090)
+
+	v.SetDefault("workers.enabled", true)
 
 	v.SetDefault("auth.oidc.enabled", false)
 	v.SetDefault("auth.oidc.issuer_url", "")

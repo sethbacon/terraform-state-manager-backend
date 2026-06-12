@@ -40,6 +40,15 @@ telemetry:
     enabled: true
     prometheus_port: 9090
 
+# Periodic background workers (schedule runner + statesync reconcile loop).
+# Multi-replica deployments: run exactly ONE replica with workers enabled and
+# set TSM_WORKERS_ENABLED=false on the API replicas (the schedule runner has
+# no cross-replica claim — two worker replicas would double-fire schedules).
+# On-demand syncs (post-write refresh, source-create backfill) work on every
+# replica regardless of this setting.
+workers:
+  enabled: true
+
 auth:
   oidc:
     enabled: false

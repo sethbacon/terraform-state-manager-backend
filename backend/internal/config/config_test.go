@@ -16,6 +16,22 @@ func TestLoadDefaults(t *testing.T) {
 	if got := cfg.Server.GetAddress(); got != "0.0.0.0:8080" {
 		t.Errorf("unexpected address: %q", got)
 	}
+	// Workers default ON: single-replica installs need no extra configuration.
+	if !cfg.Workers.Enabled {
+		t.Error("workers must default to enabled")
+	}
+}
+
+func TestWorkersEnvGate(t *testing.T) {
+	// API replicas in multi-replica deployments disable the periodic workers.
+	t.Setenv("TSM_WORKERS_ENABLED", "false")
+	cfg, err := Load("")
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if cfg.Workers.Enabled {
+		t.Error("TSM_WORKERS_ENABLED=false must disable workers")
+	}
 }
 
 func TestEnvOverride(t *testing.T) {
