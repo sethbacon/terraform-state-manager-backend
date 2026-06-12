@@ -191,5 +191,50 @@ jobs:
             exit 1
           fi
 
-  # NOTE: deployment-config validation (compose / helm / kustomize) lives in the
-  # frontend repo, where newtsm's deployments/ directory is maintained.
+  deployment-validate:
+    name: Deployment artifacts (helm / kustomize / compose)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - name: Install kubeconform
+        run: |
+          curl -sSL https://github.com/yannh/kubeconform/releases/download/v0.7.0/kubeconform-linux-amd64.tar.gz \
+            | tar xz -C /usr/local/bin kubeconform
+
+      - name: Helm lint
+        run: helm lint deployments/helm
+
+      - name: Helm template + kubeconform (default, aks, eks, gke)
+        # Required-value stubs let `required` guards pass; CRD-backed kinds
+        # (Gateway API, cert-manager, CSI, monitoring) skip via missing schemas.
+        run: |
+          set -euo pipefail
+          STUBS="--set security.jwtSecret=ci0123456789abcdef0123456789abcdef \
+                 --set security.encryptionKey=ci0123456789abcdef0123456789abcd \
+                 --set externalDatabase.password=ci --set externalDatabase.host=db"
+          for vf in "" values-aks.yaml values-eks.yaml values-gke.yaml; do
+            ARGS="$STUBS"
+            F=""
+            if [ -n "$vf" ]; then F="-f deployments/helm/$vf"; ARGS="$ARGS --set gatewayAPI.email=ci@example.com"; fi
+            echo "── profile: ${vf:-default}"
+            helm template tsm deployments/helm $F $ARGS \
+              | kubeconform -strict -ignore-missing-schemas -kubernetes-version 1.30.0 -summary
+          done
+
+      - name: Kustomize build + kubeconform (5 overlays)
+        run: |
+          set -euo pipefail
+          for ov in dev production aks eks gke; do
+            echo "── overlay: $ov"
+            kubectl kustomize deployments/kubernetes/overlays/$ov \
+              | kubeconform -strict -ignore-missing-schemas -kubernetes-version 1.30.0 -summary
+          done
+
+      - name: Compose config (production)
+        working-directory: deployments
+        run: |
+          sed -e 's|<[^>]*>|ci-placeholder|g' .env.production.example > .env.production
+          docker compose -f docker-compose.prod.yml --env-file .env.production config -q
+          rm -f .env.production
