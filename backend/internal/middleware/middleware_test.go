@@ -60,9 +60,14 @@ func TestSecurityHeaders(t *testing.T) {
 	r.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/", nil))
 
 	want := map[string]string{
-		"X-Content-Type-Options": "nosniff",
-		"X-Frame-Options":        "DENY",
-		"Referrer-Policy":        "strict-origin-when-cross-origin",
+		"X-Content-Type-Options":            "nosniff",
+		"X-Frame-Options":                   "DENY",
+		"Referrer-Policy":                   "no-referrer",
+		"Content-Security-Policy":           "default-src 'none'; frame-ancestors 'none'",
+		"X-Permitted-Cross-Domain-Policies": "none",
+		"Cross-Origin-Embedder-Policy":      "require-corp",
+		"Cross-Origin-Opener-Policy":        "same-origin",
+		"Cross-Origin-Resource-Policy":      "same-origin",
 	}
 	for header, value := range want {
 		if got := w.Header().Get(header); got != value {

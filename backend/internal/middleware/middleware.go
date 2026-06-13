@@ -28,14 +28,9 @@ func RequestID() gin.HandlerFunc {
 	}
 }
 
-// SecurityHeaders sets conservative default security response headers.
+// SecurityHeaders returns the full security-headers middleware with API defaults.
 func SecurityHeaders() gin.HandlerFunc {
-	return func(c *gin.Context) {
-		c.Header("X-Content-Type-Options", "nosniff")
-		c.Header("X-Frame-Options", "DENY")
-		c.Header("Referrer-Policy", "strict-origin-when-cross-origin")
-		c.Next()
-	}
+	return SecurityHeadersMiddleware(APISecurityHeadersConfig())
 }
 
 // Metrics records request counts and latency, labelled by the matched route
