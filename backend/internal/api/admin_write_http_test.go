@@ -239,6 +239,11 @@ func TestAdminOrganizationMembers(t *testing.T) {
 		t.Errorf("bad role id: status = %d, want 400", w.Code)
 	}
 
+	roleTemplateCols := []string{"id", "name", "display_name", "description", "scopes", "is_system", "created_at", "updated_at"}
+	e.mock.ExpectQuery("FROM role_templates WHERE").
+		WithArgs("6e9a2b62-0e58-4b34-8f4b-2a6f9d3c1ab0").
+		WillReturnRows(sqlmock.NewRows(roleTemplateCols).
+			AddRow("6e9a2b62-0e58-4b34-8f4b-2a6f9d3c1ab0", "viewer", "Viewer", "read-only", []byte(`[]`), false, time.Now(), time.Now()))
 	e.mock.ExpectExec("INSERT INTO organization_members").
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	w = e.do(http.MethodPost, "/api/v1/admin/organizations/o1/members",
@@ -247,6 +252,10 @@ func TestAdminOrganizationMembers(t *testing.T) {
 		t.Fatalf("add member: status = %d (%s)", w.Code, w.Body.String())
 	}
 
+	e.mock.ExpectQuery("FROM role_templates WHERE").
+		WithArgs("6e9a2b62-0e58-4b34-8f4b-2a6f9d3c1ab0").
+		WillReturnRows(sqlmock.NewRows(roleTemplateCols).
+			AddRow("6e9a2b62-0e58-4b34-8f4b-2a6f9d3c1ab0", "viewer", "Viewer", "read-only", []byte(`[]`), false, time.Now(), time.Now()))
 	e.mock.ExpectExec("UPDATE organization_members").WillReturnResult(sqlmock.NewResult(0, 1))
 	w = e.do(http.MethodPut, "/api/v1/admin/organizations/o1/members/u1",
 		`{"role_template_id":"6e9a2b62-0e58-4b34-8f4b-2a6f9d3c1ab0"}`)

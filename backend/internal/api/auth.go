@@ -254,6 +254,15 @@ func (h *AuthHandlers) CallbackHandler() gin.HandlerFunc {
 			return
 		}
 
+		if err := enforceEmailVerified(emailVerifiedClaim(idToken), h.cfg.Auth.OIDC.RequireVerifiedEmail); err != nil {
+			fail("email_not_verified", err.Error())
+			return
+		}
+		if err := h.guardEmailRebind(ctx, sub, email); err != nil {
+			fail("email_bound", err.Error())
+			return
+		}
+
 		user, err := h.userRepo.GetOrCreateUserByOIDC(ctx, sub, email, name)
 		if err != nil {
 			fail("user_creation_failed", "Failed to look up or create your account.")

@@ -188,6 +188,10 @@ func (h *AuthHandlers) SAMLACSHandler() gin.HandlerFunc {
 
 		// Stable identity for a SAML user is its NameID, namespaced per IdP.
 		sub := fmt.Sprintf("saml:%s:%s", idpName, info.NameID)
+		if err := h.guardEmailRebind(ctx, sub, info.Email); err != nil {
+			fail("email_bound", err.Error())
+			return
+		}
 		user, err := h.userRepo.GetOrCreateUserByOIDC(ctx, sub, info.Email, info.Name)
 		if err != nil {
 			fail("user_creation_failed", "Failed to look up or create your account.")

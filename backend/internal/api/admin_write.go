@@ -414,6 +414,10 @@ func (h *AdminHandlers) AddOrganizationMember() gin.HandlerFunc {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "user_id is required"})
 			return
 		}
+		if chk := h.checkRoleAssignment(c, req.RoleTemplateID); !chk.allowed {
+			c.JSON(chk.status, gin.H{"error": "role assignment not permitted"})
+			return
+		}
 		roleID, ok := validRoleTemplateID(req.RoleTemplateID)
 		if !ok {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid role_template_id"})
@@ -444,6 +448,10 @@ func (h *AdminHandlers) UpdateOrganizationMember() gin.HandlerFunc {
 		var req memberRequest
 		if err := c.ShouldBindJSON(&req); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
+			return
+		}
+		if chk := h.checkRoleAssignment(c, req.RoleTemplateID); !chk.allowed {
+			c.JSON(chk.status, gin.H{"error": "role assignment not permitted"})
 			return
 		}
 		roleID, ok := validRoleTemplateID(req.RoleTemplateID)
