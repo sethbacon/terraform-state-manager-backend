@@ -55,6 +55,9 @@ type ServerConfig struct {
 	// the direct-TLS mTLS path; leave empty when TLS is terminated by a proxy.
 	TLSCertFile string `mapstructure:"tls_cert_file"`
 	TLSKeyFile  string `mapstructure:"tls_key_file"`
+	// TrustedProxies lists CIDRs/IPs of reverse proxies allowed to set
+	// X-Forwarded-For. Empty (default) = trust no proxy.
+	TrustedProxies []string `mapstructure:"trusted_proxies"`
 }
 
 // CallbackBase returns the base URL for CI result callbacks (CallbackURL, else BaseURL).
@@ -298,6 +301,7 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("server.write_timeout", 30*time.Second)
 	v.SetDefault("server.tls_cert_file", "")
 	v.SetDefault("server.tls_key_file", "")
+	v.SetDefault("server.trusted_proxies", []string{})
 
 	v.SetDefault("database.host", "localhost")
 	v.SetDefault("database.port", 5432)
