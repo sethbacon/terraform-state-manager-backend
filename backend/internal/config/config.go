@@ -26,6 +26,7 @@ type Config struct {
 	Telemetry TelemetryConfig `mapstructure:"telemetry"`
 	Auth      AuthConfig      `mapstructure:"auth"`
 	Workers   WorkersConfig   `mapstructure:"workers"`
+	Suite     SuiteConfig     `mapstructure:"suite"`
 }
 
 // WorkersConfig gates the periodic background workers (schedule runner +
@@ -41,10 +42,10 @@ type WorkersConfig struct {
 
 // ServerConfig holds HTTP server settings.
 type ServerConfig struct {
-	Host         string        `mapstructure:"host"`
-	Port         int           `mapstructure:"port"`
-	BaseURL      string        `mapstructure:"base_url"`
-	PublicURL    string        `mapstructure:"public_url"`
+	Host      string `mapstructure:"host"`
+	Port      int    `mapstructure:"port"`
+	BaseURL   string `mapstructure:"base_url"`
+	PublicURL string `mapstructure:"public_url"`
 	// CallbackURL is the backend base URL the CI runner posts drift results to.
 	// It must be reachable from the CI runner (public internet). Defaults to BaseURL.
 	CallbackURL  string        `mapstructure:"callback_url"`
@@ -62,6 +63,13 @@ func (s ServerConfig) CallbackBase() string {
 		return s.CallbackURL
 	}
 	return s.BaseURL
+}
+
+// SuiteConfig configures optional runtime coupling to the sibling Suite app.
+// SiblingURL empty (default) = standalone.
+type SuiteConfig struct {
+	SiblingURL   string        `mapstructure:"sibling_url"`   // TSM_SUITE_SIBLING_URL
+	PollInterval time.Duration `mapstructure:"poll_interval"` // TSM_SUITE_POLL_INTERVAL, default 60s
 }
 
 // GetAddress returns the host:port the server listens on.
@@ -141,9 +149,9 @@ type LDAPConfig struct {
 	StartTLS           bool   `mapstructure:"start_tls"`            // upgrade plain LDAP to TLS
 	InsecureSkipVerify bool   `mapstructure:"insecure_skip_verify"` // dev only — never in production
 	BaseDN             string `mapstructure:"base_dn"`
-	BindDN             string `mapstructure:"bind_dn"`       // service account for search
+	BindDN             string `mapstructure:"bind_dn"` // service account for search
 	BindPassword       string `mapstructure:"bind_password"`
-	UserFilter         string `mapstructure:"user_filter"`  // must contain %s for the escaped username
+	UserFilter         string `mapstructure:"user_filter"` // must contain %s for the escaped username
 	UserAttrEmail      string `mapstructure:"user_attr_email"`
 	UserAttrName       string `mapstructure:"user_attr_name"`
 	GroupBaseDN        string `mapstructure:"group_base_dn"`
@@ -336,4 +344,8 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("auth.ldap.group_filter", "")
 	v.SetDefault("auth.ldap.group_member_attr", "member")
 	v.SetDefault("auth.ldap.default_role", "")
+
+	// Suite runtime discovery
+	v.SetDefault("suite.sibling_url", "")
+	v.SetDefault("suite.poll_interval", 60*time.Second)
 }

@@ -22,7 +22,7 @@ require (
 	github.com/lib/pq v1.12.3
 	github.com/prometheus/client_golang v1.23.2
 	github.com/robfig/cron/v3 v3.0.1
-	github.com/sethbacon/terraform-suite-identity v0.12.0
+	github.com/sethbacon/terraform-suite-identity v0.13.0
 	github.com/spf13/viper v1.21.0
 	google.golang.org/api v0.247.0
 	gopkg.in/yaml.v3 v3.0.1

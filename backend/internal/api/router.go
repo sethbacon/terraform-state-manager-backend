@@ -5,6 +5,7 @@
 package api
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"log/slog"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/jmoiron/sqlx"
+	"github.com/sethbacon/terraform-suite-identity/identity/suite"
 
 	"github.com/terraform-state-manager/terraform-state-manager/docs"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/api/scim"
@@ -69,11 +71,15 @@ func NewRouter(cfg *config.Config, database *sql.DB, identityDB *sql.DB) (*gin.E
 	requireAuth := middleware.AuthMiddleware(authHandlers.UserRepo(), authHandlers.TokenRepo(), authHandlers.APIKeyRepo())
 	optionalAuth := middleware.OptionalAuthMiddleware(authHandlers.UserRepo(), authHandlers.TokenRepo())
 
+	var suiteClient *suite.DiscoveryClient
+
 	v1 := r.Group("/api/v1")
 	// Enforce double-submit CSRF on cookie-authenticated, state-changing requests.
 	v1.Use(middleware.CSRFProtect())
 	{
 		v1.GET("/version", version)
+		v1.GET("/suite/manifest", suiteManifestHandler(cfg))
+		v1.GET("/ui/config", uiConfigHandler(func() *suite.DiscoveryClient { return suiteClient }))
 
 		a := v1.Group("/auth")
 		{
@@ -323,6 +329,15 @@ func NewRouter(cfg *config.Config, database *sql.DB, identityDB *sql.DB) (*gin.E
 			sc.GET("/Groups", scimHandlers.ListGroups())
 			sc.GET("/Groups/:id", scimHandlers.GetGroup())
 		}
+	}
+
+	if cfg.Suite.SiblingURL != "" {
+		dc := suite.NewDiscoveryClient(cfg.Suite.SiblingURL, buildSuiteManifest(cfg), cfg.Suite.PollInterval)
+		ctx, cancel := context.WithCancel(context.Background())
+		go dc.Start(ctx)
+		suiteClient = dc
+		prevStop := stop
+		stop = func() { cancel(); prevStop() }
 	}
 
 	return r, stop, nil
