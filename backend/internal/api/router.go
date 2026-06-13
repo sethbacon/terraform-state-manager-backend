@@ -35,6 +35,9 @@ import (
 func NewRouter(cfg *config.Config, database *sql.DB, identityDB *sql.DB) (*gin.Engine, func(), error) {
 	stop := func() {} // halts background workers; replaced when the scheduler starts
 	r := gin.New()
+	if err := r.SetTrustedProxies(cfg.Server.TrustedProxies); err != nil {
+		return nil, stop, fmt.Errorf("invalid trusted_proxies: %w", err)
+	}
 	r.Use(gin.Recovery())
 	r.Use(middleware.RequestID())
 	r.Use(middleware.SecurityHeaders())
