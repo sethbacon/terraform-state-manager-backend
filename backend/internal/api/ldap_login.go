@@ -49,7 +49,12 @@ func (h *AuthHandlers) LDAPLoginHandler() gin.HandlerFunc {
 
 		ctx := c.Request.Context()
 		// Stable identity for an LDAP user is its DN.
-		user, err := h.userRepo.GetOrCreateUserByOIDC(ctx, "ldap:"+strings.ToLower(info.DN), info.Email, info.Name)
+		sub := "ldap:" + strings.ToLower(info.DN)
+		if err := h.guardEmailRebind(ctx, sub, info.Email); err != nil {
+			c.JSON(http.StatusForbidden, gin.H{"error": err.Error()})
+			return
+		}
+		user, err := h.userRepo.GetOrCreateUserByOIDC(ctx, sub, info.Email, info.Name)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to provision account"})
 			return

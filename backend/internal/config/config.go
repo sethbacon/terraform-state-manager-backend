@@ -196,7 +196,8 @@ type OIDCConfig struct {
 	ClientID     string   `mapstructure:"client_id"`
 	ClientSecret string   `mapstructure:"client_secret"`
 	RedirectURL  string   `mapstructure:"redirect_url"`
-	Scopes       []string `mapstructure:"scopes"`
+	Scopes               []string `mapstructure:"scopes"`
+	RequireVerifiedEmail bool     `mapstructure:"require_verified_email"`
 
 	// GroupClaimName is the ID-token claim carrying the user's IdP groups.
 	GroupClaimName string `mapstructure:"group_claim_name"`
@@ -326,6 +327,7 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("auth.oidc.client_secret", "")
 	v.SetDefault("auth.oidc.redirect_url", "")
 	v.SetDefault("auth.oidc.scopes", []string{"openid", "email", "profile"})
+	v.SetDefault("auth.oidc.require_verified_email", true)
 	v.SetDefault("auth.oidc.group_claim_name", "groups")
 	v.SetDefault("auth.oidc.default_role", "")
 
