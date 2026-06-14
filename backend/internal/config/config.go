@@ -20,13 +20,18 @@ import (
 // Phase 0 scaffold; new sections (storage, auth, pipelines) are added as those
 // features land, following the sibling registry backend's layout.
 type Config struct {
-	Server    ServerConfig    `mapstructure:"server"`
-	Database  DatabaseConfig  `mapstructure:"database"`
-	Logging   LoggingConfig   `mapstructure:"logging"`
-	Telemetry TelemetryConfig `mapstructure:"telemetry"`
-	Auth      AuthConfig      `mapstructure:"auth"`
-	Workers   WorkersConfig   `mapstructure:"workers"`
-	Suite     SuiteConfig     `mapstructure:"suite"`
+	Server   ServerConfig   `mapstructure:"server"`
+	Database DatabaseConfig `mapstructure:"database"`
+	// IdentityDatabase optionally points the identity schema (users, orgs, roles,
+	// tokens) at a separate/shared database. Any unset field falls back to
+	// Database, so fully unset = the app database (standalone default). Set
+	// TSM_IDENTITY_DATABASE_* to share one identity store across the suite.
+	IdentityDatabase DatabaseConfig  `mapstructure:"identity_database"`
+	Logging          LoggingConfig   `mapstructure:"logging"`
+	Telemetry        TelemetryConfig `mapstructure:"telemetry"`
+	Auth             AuthConfig      `mapstructure:"auth"`
+	Workers          WorkersConfig   `mapstructure:"workers"`
+	Suite            SuiteConfig     `mapstructure:"suite"`
 }
 
 // WorkersConfig gates the periodic background workers (schedule runner +
@@ -119,6 +124,38 @@ func (d DatabaseConfig) GetDSN() string {
 // query unqualified table names) resolve to the identity schema.
 func (d DatabaseConfig) GetDSNWithSearchPath(searchPath string) string {
 	return d.GetDSN() + fmt.Sprintf(" options='-c search_path=%s'", searchPath)
+}
+
+// resolveIdentityDatabase fills any unset IdentityDatabase field from the primary
+// Database, so an operator can point identity at a different host or database name
+// while inheriting the rest (port, user, password, ssl_mode, pool sizing). Fully
+// unset → identical to Database (the standalone default).
+func (c *Config) resolveIdentityDatabase() {
+	id := &c.IdentityDatabase
+	if id.Host == "" {
+		id.Host = c.Database.Host
+	}
+	if id.Port == 0 {
+		id.Port = c.Database.Port
+	}
+	if id.Name == "" {
+		id.Name = c.Database.Name
+	}
+	if id.User == "" {
+		id.User = c.Database.User
+	}
+	if id.Password == "" {
+		id.Password = c.Database.Password
+	}
+	if id.SSLMode == "" {
+		id.SSLMode = c.Database.SSLMode
+	}
+	if id.MaxConnections == 0 {
+		id.MaxConnections = c.Database.MaxConnections
+	}
+	if id.MinIdleConnections == 0 {
+		id.MinIdleConnections = c.Database.MinIdleConnections
+	}
 }
 
 // LoggingConfig controls structured logging.
@@ -301,6 +338,7 @@ func Load(path string) (*Config, error) {
 	if err := v.Unmarshal(&cfg); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal config: %w", err)
 	}
+	cfg.resolveIdentityDatabase()
 	return &cfg, nil
 }
 
@@ -326,6 +364,18 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("database.ssl_mode", "prefer")
 	v.SetDefault("database.max_connections", 25)
 	v.SetDefault("database.min_idle_connections", 5)
+
+	// Identity database — empty defaults so each field falls back to the app
+	// database (above) unless TSM_IDENTITY_DATABASE_* overrides it. Registering
+	// the keys lets AutomaticEnv bind the nested overrides.
+	v.SetDefault("identity_database.host", "")
+	v.SetDefault("identity_database.port", 0)
+	v.SetDefault("identity_database.name", "")
+	v.SetDefault("identity_database.user", "")
+	v.SetDefault("identity_database.password", "")
+	v.SetDefault("identity_database.ssl_mode", "")
+	v.SetDefault("identity_database.max_connections", 0)
+	v.SetDefault("identity_database.min_idle_connections", 0)
 
 	v.SetDefault("logging.level", "info")
 	v.SetDefault("logging.format", "json")
