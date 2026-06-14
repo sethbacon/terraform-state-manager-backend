@@ -138,6 +138,7 @@ func NewRouter(cfg *config.Config, database *sql.DB, identityDB *sql.DB) (*gin.E
 			s.GET("/:id/state/outputs", middleware.RequireScope(auth.ScopeStateRead), sources.StateOutputs())
 			s.GET("/:id/state/history", middleware.RequireScope(auth.ScopeStateRead), sources.StateHistory())
 			s.GET("/:id/state/report", middleware.RequireScope(auth.ScopeStateRead), sources.StateReport())
+			s.GET("/:id/modules", middleware.RequireScope(auth.ScopeStateRead), sources.ListStateModules())
 
 			// Phase 2 edit plane (validate → backup → write → audit; restore).
 			s.PUT("/:id/state/raw", middleware.RequireScope(auth.ScopeStateWrite), sources.EditState())
@@ -152,6 +153,10 @@ func NewRouter(cfg *config.Config, database *sql.DB, identityDB *sql.DB) (*gin.E
 		}
 
 		v1.GET("/transfers/:id", requireAuth, middleware.RequireScope(auth.ScopeStateRead), sources.GetTransfer())
+
+		// Cross-app: states consuming a given registry module (a sibling registry
+		// server-proxies to this to power its "Consumed by" panel).
+		v1.GET("/consumers", requireAuth, middleware.RequireScope(auth.ScopeStateRead), sources.Consumers())
 
 		// Home dashboard: cross-source aggregated overview.
 		v1.GET("/dashboard/overview", requireAuth, middleware.RequireScope(auth.ScopeStateRead), sources.DashboardOverview())
