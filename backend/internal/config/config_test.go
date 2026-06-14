@@ -133,3 +133,44 @@ func TestRoleSeedOwnerEnvOverride(t *testing.T) {
 		t.Errorf("Suite.RoleSeedOwner = %q, want tsm (TSM_SUITE_ROLE_SEED_OWNER override)", cfg.Suite.RoleSeedOwner)
 	}
 }
+
+func TestIdentityDatabaseDefaultsToAppDB(t *testing.T) {
+	cfg, err := Load("")
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	// Unset → the identity database is byte-for-byte the app database.
+	if cfg.IdentityDatabase != cfg.Database {
+		t.Errorf("IdentityDatabase = %+v, want == Database %+v", cfg.IdentityDatabase, cfg.Database)
+	}
+}
+
+func TestIdentityDatabasePartialOverride(t *testing.T) {
+	// Override only host + database name; everything else inherits the app DB —
+	// the common "shared identity DB on the same server" case.
+	t.Setenv("TSM_IDENTITY_DATABASE_HOST", "identity.db.internal")
+	t.Setenv("TSM_IDENTITY_DATABASE_NAME", "terraform_suite_identity")
+	cfg, err := Load("")
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if cfg.IdentityDatabase.Host != "identity.db.internal" {
+		t.Errorf("IdentityDatabase.Host = %q, want identity.db.internal", cfg.IdentityDatabase.Host)
+	}
+	if cfg.IdentityDatabase.Name != "terraform_suite_identity" {
+		t.Errorf("IdentityDatabase.Name = %q, want terraform_suite_identity", cfg.IdentityDatabase.Name)
+	}
+	// Inherited from the app database (unset identity fields fall back).
+	if cfg.IdentityDatabase.User != cfg.Database.User {
+		t.Errorf("IdentityDatabase.User = %q, want inherited %q", cfg.IdentityDatabase.User, cfg.Database.User)
+	}
+	if cfg.IdentityDatabase.Port != cfg.Database.Port {
+		t.Errorf("IdentityDatabase.Port = %d, want inherited %d", cfg.IdentityDatabase.Port, cfg.Database.Port)
+	}
+	if cfg.IdentityDatabase.SSLMode != cfg.Database.SSLMode {
+		t.Errorf("IdentityDatabase.SSLMode = %q, want inherited %q", cfg.IdentityDatabase.SSLMode, cfg.Database.SSLMode)
+	}
+	if cfg.IdentityDatabase.MaxConnections != cfg.Database.MaxConnections {
+		t.Errorf("IdentityDatabase.MaxConnections = %d, want inherited %d", cfg.IdentityDatabase.MaxConnections, cfg.Database.MaxConnections)
+	}
+}

@@ -136,22 +136,25 @@ func serve(cfg *config.Config) error {
 		slog.Info("database schema ready", "version", version, "dirty", dirty)
 	}
 
-	// Shared identity schema (terraform-suite-identity): create its tables, then
-	// open a connection whose search_path resolves the identity repositories to the
-	// identity schema. The app owns only role templates + the default org, seeded
-	// idempotently here.
-	slog.Info("running identity schema migrations")
-	if err := identity.RunMigrations(database, "up"); err != nil {
-		return fmt.Errorf("failed to run identity migrations: %w", err)
-	}
+	// Shared identity schema (terraform-suite-identity). The identity store lives
+	// in a separate/shared database when TSM_IDENTITY_DATABASE_* is set, otherwise
+	// the app database (default). Open the identity connection first, then run its
+	// migrations and bootstrap against it. The migrations are schema-qualified
+	// (identity.*), so running them on this search_path pool matches the previous
+	// app-pool behavior when the identity and app databases coincide (the default).
 	identityDB, err := db.Connect(
-		cfg.Database.GetDSNWithSearchPath("identity,public"),
-		cfg.Database.MaxConnections, cfg.Database.MinIdleConnections,
+		cfg.IdentityDatabase.GetDSNWithSearchPath("identity,public"),
+		cfg.IdentityDatabase.MaxConnections, cfg.IdentityDatabase.MinIdleConnections,
 	)
 	if err != nil {
 		return fmt.Errorf("failed to connect to identity schema: %w", err)
 	}
 	defer func() { _ = identityDB.Close() }()
+
+	slog.Info("running identity schema migrations")
+	if err := identity.RunMigrations(identityDB, "up"); err != nil {
+		return fmt.Errorf("failed to run identity migrations: %w", err)
+	}
 	// Under a shared identity database, only the designated app seeds role
 	// templates (suite.role_seed_owner) to avoid clobbering the sibling's role
 	// scopes. Default "self" seeds as today. The default org is always ensured.
