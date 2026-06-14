@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.2.0](https://github.com/sethbacon/terraform-state-manager-backend/compare/v1.1.0...v1.2.0) (2026-06-14)
+
+
+### Features
+
+* **identity:** support a separable identity database DSN ([#97](https://github.com/sethbacon/terraform-state-manager-backend/issues/97)) ([4f45441](https://github.com/sethbacon/terraform-state-manager-backend/commit/4f45441ee6cab3eb6080a1544f3d3c43860c2a91))
+* **suite:** advertise and forward the identity shared-store signal ([#99](https://github.com/sethbacon/terraform-state-manager-backend/issues/99)) ([b7d0d72](https://github.com/sethbacon/terraform-state-manager-backend/commit/b7d0d72e9e7dc3c57562024c0daf321e006148b5))
+
+
+### Bug Fixes
+
+* **identity:** gate system-role seeding on suite.role_seed_owner ([#96](https://github.com/sethbacon/terraform-state-manager-backend/issues/96)) ([d91d911](https://github.com/sethbacon/terraform-state-manager-backend/commit/d91d911f418ebfa18ed142b5cac7eb99abb57027))
+
 ## [1.1.0](https://github.com/sethbacon/terraform-state-manager-backend/compare/v1.0.1...v1.1.0) (2026-06-14)
 
 
