@@ -130,6 +130,11 @@ func (h *DriftHandlers) IngestDrift() gin.HandlerFunc {
 			added, changed, destroyed = res.Added, res.Changed, res.Destroyed
 			summary, _ = json.Marshal(res.Summary)
 			drifted = res.Drifted()
+			// Best-effort: capture registry-module provenance from the plan's
+			// configuration block. Never fails the ingest — the drift record is the
+			// primary product; provenance powers the optional "modules in use" /
+			// "consumed by" views.
+			h.captureModuleRefs(ctx, req.SourceID, req.StateKey, &plan)
 		}
 		if req.Drifted != nil {
 			drifted = *req.Drifted
@@ -170,6 +175,25 @@ func (h *DriftHandlers) IngestDrift() gin.HandlerFunc {
 			map[string]interface{}{"state_key": req.StateKey, "drifted": true, "severity": rec.Severity, "external_ref": req.ExternalRef})
 		h.notifyIngestedDrift(src.Name, req.StateKey, added, changed, destroyed)
 		c.JSON(http.StatusOK, gin.H{"record": rec})
+	}
+}
+
+// captureModuleRefs persists the registry-module provenance found in an ingested
+// plan, replacing any prior refs for the (source, state). Best-effort: a failure
+// is logged, never surfaced — the drift record is the primary product.
+func (h *DriftHandlers) captureModuleRefs(ctx context.Context, sourceID, stateKey string, plan *driftingest.Plan) {
+	refs := driftingest.ModuleRefs(plan)
+	rows := make([]repositories.StateModuleRef, len(refs))
+	for i, m := range refs {
+		rows[i] = repositories.StateModuleRef{
+			ModuleSource:  m.ModuleSource,
+			RegistryHost:  m.RegistryHost,
+			ModuleVersion: m.ModuleVersion,
+		}
+	}
+	if err := h.moduleRefRepo.ReplaceForState(ctx, sourceID, stateKey, rows); err != nil {
+		driftLog.Warn("failed to capture module provenance",
+			"source_id", sourceID, "state_key", stateKey, "error", err)
 	}
 }
 

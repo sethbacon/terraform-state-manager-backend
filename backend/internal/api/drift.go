@@ -28,14 +28,15 @@ import (
 
 // DriftHandlers serves pipeline-connection, drift-run, and drift-record endpoints.
 type DriftHandlers struct {
-	cfg          *config.Config
-	pipelineRepo *repositories.PipelineRepository
-	ciSourceRepo *repositories.CISourceRepository
-	driftRepo    *repositories.DriftRepository
-	recordRepo   *repositories.DriftRecordRepository
-	sourceRepo   *repositories.SourceRepository
-	audit        auditor
-	notifier     *notify.Notifier // may be nil (notifications disabled / no DB)
+	cfg           *config.Config
+	pipelineRepo  *repositories.PipelineRepository
+	ciSourceRepo  *repositories.CISourceRepository
+	driftRepo     *repositories.DriftRepository
+	recordRepo    *repositories.DriftRecordRepository
+	sourceRepo    *repositories.SourceRepository
+	moduleRefRepo *repositories.StateModuleRefRepository
+	audit         auditor
+	notifier      *notify.Notifier // may be nil (notifications disabled / no DB)
 }
 
 // NewDriftHandlers constructs the handlers over the app (public) connection.
@@ -43,14 +44,15 @@ type DriftHandlers struct {
 // nil) fires alerts when a result callback reports drift/failure.
 func NewDriftHandlers(cfg *config.Config, database, identityDB *sql.DB, notifier *notify.Notifier) *DriftHandlers {
 	return &DriftHandlers{
-		cfg:          cfg,
-		pipelineRepo: repositories.NewPipelineRepository(database),
-		ciSourceRepo: repositories.NewCISourceRepository(database),
-		driftRepo:    repositories.NewDriftRepository(database),
-		recordRepo:   repositories.NewDriftRecordRepository(database),
-		sourceRepo:   repositories.NewSourceRepository(database),
-		audit:        newAuditor(identityDB),
-		notifier:     notifier,
+		cfg:           cfg,
+		pipelineRepo:  repositories.NewPipelineRepository(database),
+		ciSourceRepo:  repositories.NewCISourceRepository(database),
+		driftRepo:     repositories.NewDriftRepository(database),
+		recordRepo:    repositories.NewDriftRecordRepository(database),
+		sourceRepo:    repositories.NewSourceRepository(database),
+		moduleRefRepo: repositories.NewStateModuleRefRepository(database),
+		audit:         newAuditor(identityDB),
+		notifier:      notifier,
 	}
 }
 

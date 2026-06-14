@@ -63,3 +63,51 @@ func TestSummarize_NoOpAndNilPlans(t *testing.T) {
 		t.Errorf("read entry handling: %+v", res)
 	}
 }
+
+func TestModuleRefs(t *testing.T) {
+	planJSON := `{
+		"configuration": {
+			"root_module": {
+				"module_calls": {
+					"vpc":   {"source": "terraform-aws-modules/vpc/aws", "version_constraint": "~> 5.0"},
+					"acme":  {"source": "app.terraform.io/acme/network/aws", "version_constraint": "1.2.0"},
+					"local": {"source": "./modules/db"},
+					"vcs":   {"source": "git::https://example.com/mod.git"},
+					"gh":    {"source": "github.com/org/repo"}
+				}
+			}
+		}
+	}`
+	var plan Plan
+	if err := json.Unmarshal([]byte(planJSON), &plan); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	// module_calls is a map (unordered); index by module_source to assert.
+	got := map[string]ModuleRef{}
+	for _, r := range ModuleRefs(&plan) {
+		got[r.ModuleSource] = r
+	}
+	if len(got) != 2 {
+		t.Fatalf("captured %d registry modules, want 2 (local/git/github skipped): %+v", len(got), got)
+	}
+	if r := got["terraform-aws-modules/vpc/aws"]; r.RegistryHost != "registry.terraform.io" {
+		t.Errorf("bare source must resolve to the public registry, got host %q", r.RegistryHost)
+	}
+	if r := got["acme/network/aws"]; r.RegistryHost != "app.terraform.io" {
+		t.Errorf("host-prefixed source must keep its host + strip it from module_source, got %+v", r)
+	}
+	for src, r := range got {
+		if r.ModuleVersion != nil {
+			t.Errorf("module_version must be nil (constraint-only, no lockfile): %s = %v", src, *r.ModuleVersion)
+		}
+	}
+}
+
+func TestModuleRefs_NilAndEmpty(t *testing.T) {
+	if refs := ModuleRefs(nil); len(refs) != 0 {
+		t.Errorf("nil plan → no refs, got %v", refs)
+	}
+	if refs := ModuleRefs(&Plan{}); len(refs) != 0 {
+		t.Errorf("plan with no configuration → no refs, got %v", refs)
+	}
+}
