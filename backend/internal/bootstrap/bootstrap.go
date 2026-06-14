@@ -17,11 +17,18 @@ import (
 	"github.com/terraform-state-manager/terraform-state-manager/internal/auth"
 )
 
-// Run seeds app-owned role templates and ensures the default organization exists.
-// Idempotent; safe to call on every startup.
-func Run(ctx context.Context, identityDB *sql.DB) error {
-	if err := seedRoleTemplates(ctx, identityDB); err != nil {
-		return fmt.Errorf("seed role templates: %w", err)
+// Run ensures the default organization exists and, when seedRoles is true, seeds
+// the app-owned role templates. Idempotent; safe to call on every startup.
+//
+// seedRoles is gated by suite.role_seed_owner: when two apps share one identity
+// database, only the designated owner seeds role templates, so the apps don't
+// overwrite each other's role scopes. The default organization is always ensured
+// — it is a single-tenant app concern, not a cross-app collision.
+func Run(ctx context.Context, identityDB *sql.DB, seedRoles bool) error {
+	if seedRoles {
+		if err := seedRoleTemplates(ctx, identityDB); err != nil {
+			return fmt.Errorf("seed role templates: %w", err)
+		}
 	}
 	if err := ensureDefaultOrg(ctx, identityDB); err != nil {
 		return fmt.Errorf("ensure default organization: %w", err)

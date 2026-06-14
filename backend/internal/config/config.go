@@ -73,6 +73,20 @@ func (s ServerConfig) CallbackBase() string {
 type SuiteConfig struct {
 	SiblingURL   string        `mapstructure:"sibling_url"`   // TSM_SUITE_SIBLING_URL
 	PollInterval time.Duration `mapstructure:"poll_interval"` // TSM_SUITE_POLL_INTERVAL, default 60s
+	// RoleSeedOwner controls which app seeds the shared identity schema's system
+	// role templates. "self" (default) = this app seeds its own store, matching
+	// standalone behavior. When two apps share one identity database, exactly one
+	// must own the seed ("registry" or "tsm"); otherwise they overwrite each
+	// other's role scopes on every restart.
+	RoleSeedOwner string `mapstructure:"role_seed_owner"` // TSM_SUITE_ROLE_SEED_OWNER: self|registry|tsm
+}
+
+// ShouldSeedRoles reports whether this app (identified by app, e.g. "tsm") should
+// seed system role templates given the configured RoleSeedOwner. "self" (the
+// default) means every app seeds its own store; otherwise only the named owner
+// seeds, so a shared identity database is written by exactly one app.
+func (s SuiteConfig) ShouldSeedRoles(app string) bool {
+	return s.RoleSeedOwner == "self" || s.RoleSeedOwner == app
 }
 
 // GetAddress returns the host:port the server listens on.
@@ -191,11 +205,11 @@ type MTLSSubjectMapping struct {
 
 // OIDCConfig holds generic OpenID Connect provider configuration.
 type OIDCConfig struct {
-	Enabled      bool     `mapstructure:"enabled"`
-	IssuerURL    string   `mapstructure:"issuer_url"`
-	ClientID     string   `mapstructure:"client_id"`
-	ClientSecret string   `mapstructure:"client_secret"`
-	RedirectURL  string   `mapstructure:"redirect_url"`
+	Enabled              bool     `mapstructure:"enabled"`
+	IssuerURL            string   `mapstructure:"issuer_url"`
+	ClientID             string   `mapstructure:"client_id"`
+	ClientSecret         string   `mapstructure:"client_secret"`
+	RedirectURL          string   `mapstructure:"redirect_url"`
 	Scopes               []string `mapstructure:"scopes"`
 	RequireVerifiedEmail bool     `mapstructure:"require_verified_email"`
 
@@ -354,4 +368,5 @@ func setDefaults(v *viper.Viper) {
 	// Suite runtime discovery
 	v.SetDefault("suite.sibling_url", "")
 	v.SetDefault("suite.poll_interval", 60*time.Second)
+	v.SetDefault("suite.role_seed_owner", "self")
 }
