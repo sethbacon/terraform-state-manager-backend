@@ -22,12 +22,13 @@ import (
 
 // SourcesHandlers serves state-source, analysis, edit, and transfer endpoints.
 type SourcesHandlers struct {
-	repo         *repositories.SourceRepository
-	editRepo     *repositories.StateEditRepository
-	transferRepo *repositories.TransferRepository
-	lockRepo     *repositories.StateLockRepository
-	analysisRepo *repositories.StateAnalysisRepository
-	audit        auditor
+	repo          *repositories.SourceRepository
+	editRepo      *repositories.StateEditRepository
+	transferRepo  *repositories.TransferRepository
+	lockRepo      *repositories.StateLockRepository
+	analysisRepo  *repositories.StateAnalysisRepository
+	moduleRefRepo *repositories.StateModuleRefRepository
+	audit         auditor
 	// syncer reconciles the persistent analysis store; nil in rigs that don't
 	// exercise the dashboard (handlers must nil-check).
 	syncer *statesync.Syncer
@@ -38,12 +39,13 @@ type SourcesHandlers struct {
 // tables live. identityDB (may be nil) carries the shared audit log.
 func NewSourcesHandlers(database, identityDB *sql.DB) *SourcesHandlers {
 	return &SourcesHandlers{
-		repo:         repositories.NewSourceRepository(database),
-		editRepo:     repositories.NewStateEditRepository(database),
-		transferRepo: repositories.NewTransferRepository(database),
-		lockRepo:     repositories.NewStateLockRepository(database),
-		analysisRepo: repositories.NewStateAnalysisRepository(database),
-		audit:        newAuditor(identityDB),
+		repo:          repositories.NewSourceRepository(database),
+		editRepo:      repositories.NewStateEditRepository(database),
+		transferRepo:  repositories.NewTransferRepository(database),
+		lockRepo:      repositories.NewStateLockRepository(database),
+		analysisRepo:  repositories.NewStateAnalysisRepository(database),
+		moduleRefRepo: repositories.NewStateModuleRefRepository(database),
+		audit:         newAuditor(identityDB),
 	}
 }
 
@@ -490,6 +492,61 @@ func (h *SourcesHandlers) StateHistory() gin.HandlerFunc {
 			return
 		}
 		c.JSON(http.StatusOK, gin.H{"key": key, "history": history})
+	}
+}
+
+// ListStateModules returns the registry modules captured from ingested plans for
+// a source, optionally narrowed to one state via ?key=. The list is empty when
+// no provenance has been captured (normal — capture only happens when a full
+// plan is pushed to /drift/ingest), not an error.
+// @Summary      List a source's captured module provenance
+// @Tags         Sources
+// @Produce      json
+// @Param        id   path   string  true   "Source ID"
+// @Param        key  query  string  false  "Restrict to a single state key"
+// @Success      200  {object}  map[string]interface{}
+// @Security     BearerAuth
+// @Security     CookieAuth
+// @Router       /sources/{id}/modules [get]
+func (h *SourcesHandlers) ListStateModules() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		mods, err := h.moduleRefRepo.ListBySource(c.Request.Context(), c.Param("id"), c.Query("key"))
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load module provenance"})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"modules": mods})
+	}
+}
+
+// Consumers returns the states that consume a given registry module — the
+// cross-app read surface a sibling registry server-proxies to power its
+// "Consumed by" panel. Both host and module are required; results are matched on
+// (registry_host, module_source) so a local module named like a public one never
+// produces a false join.
+// @Summary      List states consuming a registry module
+// @Tags         Sources
+// @Produce      json
+// @Param        host    query  string  true  "Registry host, e.g. registry.terraform.io"
+// @Param        module  query  string  true  "Module source as namespace/name/system"
+// @Success      200  {object}  map[string]interface{}
+// @Failure      400  {object}  map[string]interface{}
+// @Security     BearerAuth
+// @Security     CookieAuth
+// @Router       /consumers [get]
+func (h *SourcesHandlers) Consumers() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		host, module := c.Query("host"), c.Query("module")
+		if host == "" || module == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "host and module query parameters are required"})
+			return
+		}
+		consumers, err := h.moduleRefRepo.FindConsumers(c.Request.Context(), host, module)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load consumers"})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"consumers": consumers, "total": len(consumers)})
 	}
 }
 
