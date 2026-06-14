@@ -1,5 +1,25 @@
 # Changelog
 
+## [1.1.0](https://github.com/sethbacon/terraform-state-manager-backend/compare/v1.0.1...v1.1.0) (2026-06-14)
+
+
+### Features
+
+* **suite:** add runtime discovery contract (Phase 0) ([#88](https://github.com/sethbacon/terraform-state-manager-backend/issues/88)) ([2612c97](https://github.com/sethbacon/terraform-state-manager-backend/commit/2612c97de9fd00e5b4b48ad4f139b9b75ea433d8))
+
+
+### Bug Fixes
+
+* **helm:** activate CSP nonce in frontend nginx configmap ([#95](https://github.com/sethbacon/terraform-state-manager-backend/issues/95)) ([3793c03](https://github.com/sethbacon/terraform-state-manager-backend/commit/3793c035ce978502f489da8b015df6cd286cdbbe))
+* **helm:** allow disabling OIDC require_verified_email via values ([#94](https://github.com/sethbacon/terraform-state-manager-backend/issues/94)) ([d7ffeda](https://github.com/sethbacon/terraform-state-manager-backend/commit/d7ffedade44de5d443a4be08081157524efb4953))
+* **server:** restrict trusted proxies to prevent X-Forwarded-For spoofing ([#90](https://github.com/sethbacon/terraform-state-manager-backend/issues/90)) ([1defd69](https://github.com/sethbacon/terraform-state-manager-backend/commit/1defd696beb18508f00a36969238925ebf4b254a))
+
+
+### Security
+
+* enforce verified email and block cross-provider account rebind ([#91](https://github.com/sethbacon/terraform-state-manager-backend/issues/91)) ([c06d4fd](https://github.com/sethbacon/terraform-state-manager-backend/commit/c06d4fd50112ba9be828b2f5759518dc06b6e8dc))
+* harden response headers with full HSTS/CSP/CORP/COOP/COEP ([#92](https://github.com/sethbacon/terraform-state-manager-backend/issues/92)) ([dc73597](https://github.com/sethbacon/terraform-state-manager-backend/commit/dc73597adf3eed3876a5ef25988e2628fc912c15))
+
 ## [1.0.1](https://github.com/sethbacon/terraform-state-manager-backend/compare/v1.0.0...v1.0.1) (2026-06-12)
 
 
