@@ -5,10 +5,25 @@
 // driftingest with the summary adapted to drift_runs' [{address, actions}] form.
 package driftingest
 
+import "strings"
+
 // Plan is the subset of a `terraform show -json` document the ingest path
 // needs; all other top-level keys are ignored.
 type Plan struct {
 	ResourceChanges []ResourceChange `json:"resource_changes"`
+	Configuration   Configuration    `json:"configuration"`
+}
+
+// Configuration is the subset of the plan's `configuration` block used to
+// capture module provenance: the source address + version constraint of each
+// top-level module call. Nested/transitive module calls are not captured.
+type Configuration struct {
+	RootModule struct {
+		ModuleCalls map[string]struct {
+			Source            string `json:"source"`
+			VersionConstraint string `json:"version_constraint"`
+		} `json:"module_calls"`
+	} `json:"root_module"`
 }
 
 // ResourceChange mirrors one entry of the plan's resource_changes array.
@@ -80,4 +95,69 @@ func hasAction(actions []string, action string) bool {
 		}
 	}
 	return false
+}
+
+// ModuleRef is one captured registry-module dependency of a state: the module's
+// source address (ns/name/provider), the registry host it resolves to, and (when
+// known) a locked version. ModuleVersion is always nil today — only the plan's
+// version constraint is available without a lockfile, and a constraint is not a
+// locked version.
+type ModuleRef struct {
+	ModuleSource  string
+	RegistryHost  string
+	ModuleVersion *string
+}
+
+// ModuleRefs extracts registry-module provenance from a plan's top-level module
+// calls. Only registry-style sources are captured (bare "ns/name/provider" → the
+// public registry, or "host/ns/name/provider" → that host); local ("./", "../")
+// and VCS (git::, github.com/...) sources are skipped because they have no
+// registry host to join on.
+func ModuleRefs(plan *Plan) []ModuleRef {
+	if plan == nil {
+		return nil
+	}
+	refs := []ModuleRef{}
+	for _, call := range plan.Configuration.RootModule.ModuleCalls {
+		host, source, ok := registryModuleAddress(call.Source)
+		if !ok {
+			continue
+		}
+		refs = append(refs, ModuleRef{ModuleSource: source, RegistryHost: host})
+	}
+	return refs
+}
+
+// publicRegistryHost is the implied host for a bare "ns/name/provider" address.
+const publicRegistryHost = "registry.terraform.io"
+
+// registryModuleAddress parses a Terraform module source into its registry host
+// and "ns/name/provider" source, reporting ok=false for non-registry (local or
+// VCS) sources. Conservative by design (the honesty guard): anything that does
+// not look exactly like a registry address is skipped.
+func registryModuleAddress(src string) (host, source string, ok bool) {
+	if src == "" ||
+		strings.HasPrefix(src, "./") || strings.HasPrefix(src, "../") || strings.HasPrefix(src, "/") ||
+		strings.Contains(src, "::") || strings.Contains(src, "?") || strings.HasPrefix(src, "git@") {
+		return "", "", false
+	}
+	// Drop a "//subdir" submodule selector; the parent module is the dependency.
+	if i := strings.Index(src, "//"); i >= 0 {
+		src = src[:i]
+	}
+	parts := strings.Split(src, "/")
+	switch len(parts) {
+	case 3: // ns/name/provider → public registry; first part must NOT look like a host
+		if strings.ContainsAny(parts[0], ".:") {
+			return "", "", false // e.g. github.com/org/repo is VCS, not a registry module
+		}
+		return publicRegistryHost, src, true
+	case 4: // host/ns/name/provider → host-prefixed registry; first part must look like a host
+		if !strings.ContainsAny(parts[0], ".:") {
+			return "", "", false
+		}
+		return parts[0], strings.Join(parts[1:], "/"), true
+	default:
+		return "", "", false
+	}
 }
