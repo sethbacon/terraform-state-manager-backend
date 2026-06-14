@@ -93,3 +93,43 @@ func TestOIDCEnvBinding(t *testing.T) {
 		t.Error("expected default OIDC scopes to be preserved")
 	}
 }
+
+func TestSuiteConfig_ShouldSeedRoles(t *testing.T) {
+	cases := []struct {
+		owner string
+		app   string
+		want  bool
+	}{
+		{"self", "tsm", true},      // standalone default: every app seeds its own
+		{"tsm", "tsm", true},       // this app is the designated owner
+		{"registry", "tsm", false}, // sibling owns the shared seed → skip
+		{"self", "registry", true}, // "self" is app-agnostic
+		{"", "tsm", false},         // unset (shouldn't happen post-default) → not owner
+	}
+	for _, c := range cases {
+		if got := (SuiteConfig{RoleSeedOwner: c.owner}).ShouldSeedRoles(c.app); got != c.want {
+			t.Errorf("ShouldSeedRoles(owner=%q, app=%q) = %v, want %v", c.owner, c.app, got, c.want)
+		}
+	}
+}
+
+func TestRoleSeedOwnerDefault(t *testing.T) {
+	cfg, err := Load("")
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if cfg.Suite.RoleSeedOwner != "self" {
+		t.Errorf("default Suite.RoleSeedOwner = %q, want self", cfg.Suite.RoleSeedOwner)
+	}
+}
+
+func TestRoleSeedOwnerEnvOverride(t *testing.T) {
+	t.Setenv("TSM_SUITE_ROLE_SEED_OWNER", "tsm")
+	cfg, err := Load("")
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if cfg.Suite.RoleSeedOwner != "tsm" {
+		t.Errorf("Suite.RoleSeedOwner = %q, want tsm (TSM_SUITE_ROLE_SEED_OWNER override)", cfg.Suite.RoleSeedOwner)
+	}
+}

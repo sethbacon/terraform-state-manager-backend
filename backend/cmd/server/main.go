@@ -152,7 +152,10 @@ func serve(cfg *config.Config) error {
 		return fmt.Errorf("failed to connect to identity schema: %w", err)
 	}
 	defer func() { _ = identityDB.Close() }()
-	if err := bootstrap.Run(context.Background(), identityDB); err != nil {
+	// Under a shared identity database, only the designated app seeds role
+	// templates (suite.role_seed_owner) to avoid clobbering the sibling's role
+	// scopes. Default "self" seeds as today. The default org is always ensured.
+	if err := bootstrap.Run(context.Background(), identityDB, cfg.Suite.ShouldSeedRoles("tsm")); err != nil {
 		return fmt.Errorf("failed to bootstrap identity data: %w", err)
 	}
 	slog.Info("identity schema ready (role templates + default org seeded)")
