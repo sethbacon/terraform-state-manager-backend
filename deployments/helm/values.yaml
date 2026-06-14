@@ -148,6 +148,10 @@ auth:
       - email
       - profile
     groupClaimName: "groups"
+    # -- Reject logins whose OIDC token lacks email_verified (or sets it false).
+    # Default true for security. SET FALSE for Entra/Azure AD, which omits the
+    # email_verified claim — otherwise first login fails with email_not_verified.
+    requireVerifiedEmail: true
     # -- Role granted in the default org on first login when no group mapping matches
     defaultRole: ""
   ldap:

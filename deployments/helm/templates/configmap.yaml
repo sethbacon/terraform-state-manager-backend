@@ -37,6 +37,7 @@ data:
   TSM_AUTH_OIDC_REDIRECT_URL: {{ .Values.auth.oidc.redirectUrl | quote }}
   TSM_AUTH_OIDC_SCOPES: {{ join "," .Values.auth.oidc.scopes | quote }}
   TSM_AUTH_OIDC_GROUP_CLAIM_NAME: {{ .Values.auth.oidc.groupClaimName | quote }}
+  TSM_AUTH_OIDC_REQUIRE_VERIFIED_EMAIL: {{ .Values.auth.oidc.requireVerifiedEmail | quote }}
   {{- if .Values.auth.oidc.defaultRole }}
   TSM_AUTH_OIDC_DEFAULT_ROLE: {{ .Values.auth.oidc.defaultRole | quote }}
   {{- end }}
