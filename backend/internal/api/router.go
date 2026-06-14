@@ -82,7 +82,7 @@ func NewRouter(cfg *config.Config, database *sql.DB, identityDB *sql.DB) (*gin.E
 	{
 		v1.GET("/version", version)
 		v1.GET("/suite/manifest", suiteManifestHandler(cfg))
-		v1.GET("/ui/config", uiConfigHandler(func() *suite.DiscoveryClient { return suiteClient }))
+		v1.GET("/ui/config", uiConfigHandler(cfg, func() *suite.DiscoveryClient { return suiteClient }))
 
 		a := v1.Group("/auth")
 		{
