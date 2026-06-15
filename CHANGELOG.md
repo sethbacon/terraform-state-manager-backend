@@ -1,5 +1,25 @@
 # Changelog
 
+## [1.3.0](https://github.com/sethbacon/terraform-state-manager-backend/compare/v1.2.0...v1.3.0) (2026-06-15)
+
+
+### Features
+
+* **api:** add module-provenance query endpoints ([#102](https://github.com/sethbacon/terraform-state-manager-backend/issues/102)) ([1309a3d](https://github.com/sethbacon/terraform-state-manager-backend/commit/1309a3d5b6273bcd523ad7e10c867e7712613922))
+* **drift:** capture registry-module provenance from ingested plans ([#100](https://github.com/sethbacon/terraform-state-manager-backend/issues/100)) ([0a7cb08](https://github.com/sethbacon/terraform-state-manager-backend/commit/0a7cb082f38793259ae7c1f385b077c4ceb1e956))
+* **suite:** canonical-host generated column + host-alias matching ([#106](https://github.com/sethbacon/terraform-state-manager-backend/issues/106)) ([d65fa2c](https://github.com/sethbacon/terraform-state-manager-backend/commit/d65fa2c89eeb89a883f0fff4fb5636b30d18bf39))
+* **suite:** gate /consumers on a shared suite service token ([#103](https://github.com/sethbacon/terraform-state-manager-backend/issues/103)) ([8c47727](https://github.com/sethbacon/terraform-state-manager-backend/commit/8c477270fcb90a5a5127c59b4d938cd2c01ae4cb))
+
+
+### Bug Fixes
+
+* **suite:** canonicalize registry host on capture and consumers read ([#105](https://github.com/sethbacon/terraform-state-manager-backend/issues/105)) ([95acaa2](https://github.com/sethbacon/terraform-state-manager-backend/commit/95acaa26a8e8be8a7c01c69f7a2f60ebb7d93eb2))
+
+
+### Refactor
+
+* **suite:** adopt shared suite.CanonicalHost (drop local copy) ([#107](https://github.com/sethbacon/terraform-state-manager-backend/issues/107)) ([9074fa1](https://github.com/sethbacon/terraform-state-manager-backend/commit/9074fa17626a3bde1316f13c397348157ef9dd49))
+
 ## [1.2.0](https://github.com/sethbacon/terraform-state-manager-backend/compare/v1.1.0...v1.2.0) (2026-06-14)
 
 
