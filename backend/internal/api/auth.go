@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -35,7 +36,7 @@ type AuthHandlers struct {
 	orgRepo       *idstore.OrganizationRepository
 	tokenRepo     *idstore.TokenRepository
 	apiKeyRepo    *idstore.APIKeyRepository
-	oidcProvider  *auth.OIDCProvider
+	oidcProvider  atomic.Pointer[auth.OIDCProvider]
 	ldapProvider  *ldap.Provider
 	samlProviders map[string]*saml.Provider // keyed by IdP name; nil when SAML disabled
 	stateStore    auth.StateStore
@@ -64,7 +65,7 @@ func NewAuthHandlers(cfg *config.Config, identityDB *sql.DB) (*AuthHandlers, err
 		if err != nil {
 			return nil, err
 		}
-		h.oidcProvider = p
+		h.oidcProvider.Store(p)
 	}
 	if cfg.Auth.LDAP.Enabled {
 		p, err := ldap.NewProvider(cfg.Auth.LDAP)
@@ -88,9 +89,9 @@ func NewAuthHandlers(cfg *config.Config, identityDB *sql.DB) (*AuthHandlers, err
 }
 
 // UserRepo and TokenRepo expose the identity repositories for the auth middleware.
-func (h *AuthHandlers) UserRepo() *idstore.UserRepository     { return h.userRepo }
-func (h *AuthHandlers) TokenRepo() *idstore.TokenRepository   { return h.tokenRepo }
-func (h *AuthHandlers) APIKeyRepo() *idstore.APIKeyRepository { return h.apiKeyRepo }
+func (h *AuthHandlers) UserRepo() *idstore.UserRepository        { return h.userRepo }
+func (h *AuthHandlers) TokenRepo() *idstore.TokenRepository      { return h.tokenRepo }
+func (h *AuthHandlers) APIKeyRepo() *idstore.APIKeyRepository    { return h.apiKeyRepo }
 func (h *AuthHandlers) OrgRepo() *idstore.OrganizationRepository { return h.orgRepo }
 
 func generateState() (string, error) {
@@ -159,13 +160,22 @@ func deriveFrontendURL(cfg *config.Config) string {
 	return strings.TrimRight(cfg.Server.BaseURL, "/")
 }
 
+// SetOIDCProvider atomically swaps the active OIDC provider. The setup wizard
+// calls this to activate a freshly configured provider at runtime — no restart —
+// and the boot path calls it to load a DB-stored config. Login/Callback read the
+// provider via Load(), so the swap is race-free.
+func (h *AuthHandlers) SetOIDCProvider(p *auth.OIDCProvider) {
+	h.oidcProvider.Store(p)
+	slog.Info("OIDC provider activated at runtime")
+}
+
 // ProvidersHandler lists configured auth providers for the login page picker.
 // SAML IdPs carry an "id" so the SPA can request that specific IdP
 // (provider=saml:<id>); LDAP is rendered as a username/password form.
 func (h *AuthHandlers) ProvidersHandler() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		providers := make([]gin.H, 0, 2)
-		if h.oidcProvider != nil {
+		if h.oidcProvider.Load() != nil {
 			providers = append(providers, gin.H{"type": "oidc", "name": "OpenID Connect"})
 		}
 		for name := range h.samlProviders {
@@ -186,7 +196,8 @@ func (h *AuthHandlers) LoginHandler() gin.HandlerFunc {
 			h.samlLogin(c, provider)
 			return
 		}
-		if h.oidcProvider == nil {
+		op := h.oidcProvider.Load()
+		if op == nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "OIDC provider not configured"})
 			return
 		}
@@ -200,7 +211,7 @@ func (h *AuthHandlers) LoginHandler() gin.HandlerFunc {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to save session state"})
 			return
 		}
-		c.Redirect(http.StatusFound, h.oidcProvider.GetAuthURL(state))
+		c.Redirect(http.StatusFound, op.GetAuthURL(state))
 	}
 }
 
@@ -220,7 +231,8 @@ func (h *AuthHandlers) CallbackHandler() gin.HandlerFunc {
 				frontendBase, url.QueryEscape(code), url.QueryEscape(desc)))
 		}
 
-		if h.oidcProvider == nil {
+		op := h.oidcProvider.Load()
+		if op == nil {
 			fail("provider_not_configured", "OIDC provider is not configured.")
 			return
 		}
@@ -233,7 +245,7 @@ func (h *AuthHandlers) CallbackHandler() gin.HandlerFunc {
 			return
 		}
 
-		token, err := h.oidcProvider.ExchangeCode(ctx, c.Query("code"))
+		token, err := op.ExchangeCode(ctx, c.Query("code"))
 		if err != nil {
 			fail("token_exchange_failed", "Failed to exchange the authorization code.")
 			return
@@ -243,12 +255,12 @@ func (h *AuthHandlers) CallbackHandler() gin.HandlerFunc {
 			fail("no_id_token", "The identity provider did not return an ID token.")
 			return
 		}
-		idToken, err := h.oidcProvider.VerifyIDToken(ctx, rawIDToken)
+		idToken, err := op.VerifyIDToken(ctx, rawIDToken)
 		if err != nil {
 			fail("id_token_invalid", "The ID token could not be verified.")
 			return
 		}
-		sub, email, name, err := h.oidcProvider.ExtractUserInfo(idToken)
+		sub, email, name, err := op.ExtractUserInfo(idToken)
 		if err != nil {
 			fail("user_info_failed", "Failed to read user information from the ID token.")
 			return
@@ -274,7 +286,7 @@ func (h *AuthHandlers) CallbackHandler() gin.HandlerFunc {
 		// signature-verified ID token above. The claim name honours the
 		// admin-saved overlay (see effectiveOIDCGroupConfig).
 		claimName, _, _ := h.effectiveOIDCGroupConfig(ctx)
-		groups := h.oidcProvider.ExtractGroups(idToken, claimName)
+		groups := op.ExtractGroups(idToken, claimName)
 		if mapErr := h.applyGroupMappings(ctx, user.ID, groups); mapErr != nil {
 			slog.Warn("failed to apply OIDC group mappings", "user_id", user.ID, "error", mapErr)
 		}
@@ -332,9 +344,9 @@ func (h *AuthHandlers) MeHandler() gin.HandlerFunc {
 		memberships := make([]gin.H, 0, len(userWithRoles.Memberships))
 		for _, m := range userWithRoles.Memberships {
 			memberships = append(memberships, gin.H{
-				"organization_id":   m.OrganizationID,
-				"organization_name": m.OrganizationName,
-				"role_template_name": m.RoleTemplateName,
+				"organization_id":      m.OrganizationID,
+				"organization_name":    m.OrganizationName,
+				"role_template_name":   m.RoleTemplateName,
 				"role_template_scopes": m.RoleTemplateScopes,
 			})
 		}
@@ -398,8 +410,8 @@ func (h *AuthHandlers) LogoutHandler() gin.HandlerFunc {
 		h.clearSessionCookies(c)
 
 		postLogout := deriveFrontendURL(h.cfg) + "/"
-		if h.oidcProvider != nil {
-			if endSession := h.oidcProvider.GetEndSessionEndpoint(); endSession != "" {
+		if op := h.oidcProvider.Load(); op != nil {
+			if endSession := op.GetEndSessionEndpoint(); endSession != "" {
 				if u, err := url.Parse(endSession); err == nil {
 					q := u.Query()
 					q.Set("post_logout_redirect_uri", postLogout)
