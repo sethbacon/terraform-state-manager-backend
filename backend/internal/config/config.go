@@ -89,6 +89,11 @@ type SuiteConfig struct {
 	// the "you may need to sign in" hint only when both this app AND the sibling
 	// assert it. Default false. Env: TSM_SUITE_IDENTITY_SHARED_STORE.
 	IdentitySharedStore bool `mapstructure:"identity_shared_store"`
+	// ServiceToken is a shared secret the sibling app presents (X-Suite-Service-Token)
+	// for server-to-server cross-app reads (GET /consumers). Empty (default) leaves
+	// that endpoint disabled; set it to the SAME value as the sibling registry's
+	// TFR_SUITE_SIBLING_TOKEN to enable the "Consumed by" join.
+	ServiceToken string `mapstructure:"service_token"` // TSM_SUITE_SERVICE_TOKEN
 }
 
 // ShouldSeedRoles reports whether this app (identified by app, e.g. "tsm") should
@@ -425,4 +430,5 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("suite.poll_interval", 60*time.Second)
 	v.SetDefault("suite.role_seed_owner", "self")
 	v.SetDefault("suite.identity_shared_store", false)
+	v.SetDefault("suite.service_token", "")
 }
