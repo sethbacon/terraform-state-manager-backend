@@ -5,7 +5,11 @@
 // driftingest with the summary adapted to drift_runs' [{address, actions}] form.
 package driftingest
 
-import "strings"
+import (
+	"strings"
+
+	"github.com/sethbacon/terraform-suite-identity/identity/suite"
+)
 
 // Plan is the subset of a `terraform show -json` document the ingest path
 // needs; all other top-level keys are ignored.
@@ -152,14 +156,14 @@ func registryModuleAddress(src string) (host, source string, ok bool) {
 			return "", "", false // e.g. github.com/org/repo is VCS, not a registry module
 		}
 		// publicRegistryHost is already canonical; routed through for symmetry.
-		return CanonicalHost(publicRegistryHost), src, true
+		return suite.CanonicalHost(publicRegistryHost), src, true
 	case 4: // host/ns/name/provider → host-prefixed registry; first part must look like a host
 		if !strings.ContainsAny(parts[0], ".:") {
 			return "", "", false
 		}
 		// Canonicalize so the stored host matches the registry's emitted join key
 		// regardless of case / default port / trailing dot.
-		return CanonicalHost(parts[0]), strings.Join(parts[1:], "/"), true
+		return suite.CanonicalHost(parts[0]), strings.Join(parts[1:], "/"), true
 	default:
 		return "", "", false
 	}

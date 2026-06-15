@@ -12,11 +12,12 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/sethbacon/terraform-suite-identity/identity/suite"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/analyzer"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/crypto"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/db/repositories"
+
 	"github.com/terraform-state-manager/terraform-state-manager/internal/reporting"
-	"github.com/terraform-state-manager/terraform-state-manager/internal/services/driftingest"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/services/statesync"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/statesource"
 )
@@ -547,7 +548,7 @@ func (h *SourcesHandlers) Consumers() gin.HandlerFunc {
 		seen := map[string]struct{}{}
 		hosts := make([]string, 0, len(c.QueryArray("host")))
 		for _, raw := range c.QueryArray("host") {
-			ch := driftingest.CanonicalHost(raw)
+			ch := suite.CanonicalHost(raw)
 			if ch == "" {
 				continue
 			}

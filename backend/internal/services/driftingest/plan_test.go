@@ -111,3 +111,36 @@ func TestModuleRefs_NilAndEmpty(t *testing.T) {
 		t.Errorf("plan with no configuration → no refs, got %v", refs)
 	}
 }
+
+// TestModuleRefs_CanonicalizesHost proves capture folds host variants (via the
+// shared suite.CanonicalHost) so the stored registry_host matches the registry's
+// emitted (also-canonical) join key.
+func TestModuleRefs_CanonicalizesHost(t *testing.T) {
+	// Host-prefixed source with uppercase + an explicit default port: must be
+	// stored as the bare lowercase host.
+	planJSON := `{
+		"configuration": {
+			"root_module": {
+				"module_calls": {
+					"vpc": {"source": "REG.Example.com:443/myorg/vpc/aws", "version_constraint": "1.0.0"}
+				}
+			}
+		}
+	}`
+	var plan Plan
+	if err := json.Unmarshal([]byte(planJSON), &plan); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	var found bool
+	for _, r := range ModuleRefs(&plan) {
+		if r.ModuleSource == "myorg/vpc/aws" {
+			found = true
+			if r.RegistryHost != "reg.example.com" {
+				t.Errorf("RegistryHost = %q, want canonical %q", r.RegistryHost, "reg.example.com")
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("expected a captured ref for myorg/vpc/aws")
+	}
+}
