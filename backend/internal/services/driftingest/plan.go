@@ -151,12 +151,15 @@ func registryModuleAddress(src string) (host, source string, ok bool) {
 		if strings.ContainsAny(parts[0], ".:") {
 			return "", "", false // e.g. github.com/org/repo is VCS, not a registry module
 		}
-		return publicRegistryHost, src, true
+		// publicRegistryHost is already canonical; routed through for symmetry.
+		return CanonicalHost(publicRegistryHost), src, true
 	case 4: // host/ns/name/provider → host-prefixed registry; first part must look like a host
 		if !strings.ContainsAny(parts[0], ".:") {
 			return "", "", false
 		}
-		return parts[0], strings.Join(parts[1:], "/"), true
+		// Canonicalize so the stored host matches the registry's emitted join key
+		// regardless of case / default port / trailing dot.
+		return CanonicalHost(parts[0]), strings.Join(parts[1:], "/"), true
 	default:
 		return "", "", false
 	}
