@@ -16,6 +16,7 @@ import (
 	"github.com/terraform-state-manager/terraform-state-manager/internal/crypto"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/db/repositories"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/reporting"
+	"github.com/terraform-state-manager/terraform-state-manager/internal/services/driftingest"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/services/statesync"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/statesource"
 )
@@ -541,6 +542,10 @@ func (h *SourcesHandlers) Consumers() gin.HandlerFunc {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "host and module query parameters are required"})
 			return
 		}
+		// Canonicalize the inbound host so the exact-match join is symmetric with
+		// the form captured from module source addresses, and tolerant of a peer
+		// registry that has not yet upgraded to emit a canonical key.
+		host = driftingest.CanonicalHost(host)
 		consumers, err := h.moduleRefRepo.FindConsumers(c.Request.Context(), host, module)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load consumers"})
