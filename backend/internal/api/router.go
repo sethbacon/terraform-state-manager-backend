@@ -17,6 +17,7 @@ import (
 
 	"github.com/terraform-state-manager/terraform-state-manager/docs"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/api/scim"
+	"github.com/terraform-state-manager/terraform-state-manager/internal/api/setup"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/auth"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/auth/mtls"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/config"
@@ -83,6 +84,19 @@ func NewRouter(cfg *config.Config, database *sql.DB, identityDB *sql.DB) (*gin.E
 		v1.GET("/version", version)
 		v1.GET("/suite/manifest", suiteManifestHandler(cfg))
 		v1.GET("/ui/config", uiConfigHandler(cfg, func() *suite.DiscoveryClient { return suiteClient }))
+
+		// First-run setup wizard. Status is public so the SPA can decide whether
+		// to show the wizard; mutating endpoints sit behind the setup-token
+		// middleware and are permanently disabled once setup completes. CSRF is a
+		// no-op here (no session cookie exists during first-run setup).
+		settingsRepo := repositories.NewSystemSettingsRepository(database)
+		setupHandlers := setup.NewHandlers(settingsRepo, cfg)
+		v1.GET("/setup/status", setupHandlers.GetSetupStatus)
+		setupGroup := v1.Group("/setup")
+		setupGroup.Use(middleware.SetupTokenMiddleware(settingsRepo))
+		{
+			setupGroup.POST("/validate-token", setupHandlers.ValidateToken)
+		}
 
 		a := v1.Group("/auth")
 		{
