@@ -156,7 +156,7 @@ func NewRouter(cfg *config.Config, database *sql.DB, identityDB *sql.DB) (*gin.E
 
 		// Cross-app: states consuming a given registry module (a sibling registry
 		// server-proxies to this to power its "Consumed by" panel).
-		v1.GET("/consumers", requireAuth, middleware.RequireScope(auth.ScopeStateRead), sources.Consumers())
+		v1.GET("/consumers", middleware.RequireSuiteServiceToken(cfg.Suite.ServiceToken), sources.Consumers())
 
 		// Home dashboard: cross-source aggregated overview.
 		v1.GET("/dashboard/overview", requireAuth, middleware.RequireScope(auth.ScopeStateRead), sources.DashboardOverview())

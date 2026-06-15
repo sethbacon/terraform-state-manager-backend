@@ -528,11 +528,11 @@ func (h *SourcesHandlers) ListStateModules() gin.HandlerFunc {
 // @Tags         Sources
 // @Produce      json
 // @Param        host    query  string  true  "Registry host, e.g. registry.terraform.io"
-// @Param        module  query  string  true  "Module source as namespace/name/system"
+// @Param        module                 query   string  true  "Module source as namespace/name/system"
+// @Param        X-Suite-Service-Token  header  string  true  "Shared suite service token (server-to-server cross-app read)"
 // @Success      200  {object}  map[string]interface{}
 // @Failure      400  {object}  map[string]interface{}
-// @Security     BearerAuth
-// @Security     CookieAuth
+// @Failure      401  {object}  map[string]interface{}
 // @Router       /consumers [get]
 func (h *SourcesHandlers) Consumers() gin.HandlerFunc {
 	return func(c *gin.Context) {
