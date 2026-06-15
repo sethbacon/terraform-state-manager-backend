@@ -9,7 +9,7 @@ import (
 
 // SuiteServiceTokenHeader carries the shared secret a sibling Suite app presents
 // to reach cross-app, server-to-server read endpoints (e.g. GET /consumers).
-const SuiteServiceTokenHeader = "X-Suite-Service-Token"
+const SuiteServiceTokenHeader = "X-Suite-Service-Token" // #nosec G101 -- HTTP header NAME, not a credential value
 
 // RequireSuiteServiceToken gates an endpoint on a shared suite service token, for
 // server-to-server calls from the sibling app that carry no user session. When
