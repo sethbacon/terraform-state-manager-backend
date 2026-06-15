@@ -32,15 +32,19 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/base64"
 	"fmt"
 	"log"
 	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"runtime"
+	"strings"
 	"syscall"
 	"time"
 
@@ -48,12 +52,14 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/sethbacon/terraform-suite-identity/identity"
 	idstore "github.com/sethbacon/terraform-suite-identity/identity/store"
+	"golang.org/x/crypto/bcrypt"
 
 	"github.com/terraform-state-manager/terraform-state-manager/internal/api"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/auth"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/bootstrap"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/config"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/db"
+	"github.com/terraform-state-manager/terraform-state-manager/internal/db/repositories"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/telemetry"
 )
 
@@ -134,6 +140,13 @@ func serve(cfg *config.Config) error {
 	}
 	if version, dirty, verr := db.GetMigrationVersion(database); verr == nil {
 		slog.Info("database schema ready", "version", version, "dirty", dirty)
+	}
+
+	// Generate the first-run setup-wizard token if setup isn't complete. The raw
+	// token is printed to stdout (and optional SETUP_TOKEN_FILE); only its bcrypt
+	// hash is stored, and it's cleared when the wizard completes.
+	if err := handleSetupToken(repositories.NewSystemSettingsRepository(database)); err != nil {
+		return fmt.Errorf("failed to prepare setup token: %w", err)
 	}
 
 	// Shared identity schema (terraform-suite-identity). The identity store lives
@@ -283,5 +296,74 @@ func runMigrations(cfg *config.Config, direction string) error {
 		return fmt.Errorf("failed to get migration version: %w", err)
 	}
 	slog.Info("migration complete", "version", version, "dirty", dirty)
+	return nil
+}
+
+// handleSetupToken generates the first-run setup-wizard token when setup is not
+// yet complete. The raw token (prefix "tsm_setup_") is printed to stdout and,
+// when SETUP_TOKEN_FILE is set, written to that file for container secret
+// mounting; only the bcrypt hash is persisted in system_settings. Idempotent: a
+// pre-existing hash (server restarted mid-setup) is left intact.
+func handleSetupToken(repo *repositories.SystemSettingsRepository) error {
+	ctx := context.Background()
+
+	completed, err := repo.IsSetupCompleted(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to check setup status: %w", err)
+	}
+	if completed {
+		hasPending, perr := repo.HasPendingFeatureSetup(ctx)
+		if perr != nil {
+			return fmt.Errorf("failed to check pending feature setup: %w", perr)
+		}
+		if !hasPending {
+			return nil // setup fully done
+		}
+	}
+
+	if existing, gerr := repo.GetSetupTokenHash(ctx); gerr != nil {
+		return fmt.Errorf("failed to check existing setup token: %w", gerr)
+	} else if existing != "" {
+		slog.Info("setup required: a setup token was already generated; delete setup_token_hash from system_settings and restart to regenerate")
+		return nil
+	}
+
+	tokenBytes := make([]byte, 32)
+	if _, err := rand.Read(tokenBytes); err != nil {
+		return fmt.Errorf("failed to generate setup token: %w", err)
+	}
+	rawToken := "tsm_setup_" + base64.URLEncoding.WithPadding(base64.NoPadding).EncodeToString(tokenBytes)
+
+	hash, err := bcrypt.GenerateFromPassword([]byte(rawToken), bcrypt.DefaultCost)
+	if err != nil {
+		return fmt.Errorf("failed to hash setup token: %w", err)
+	}
+	if err := repo.SetSetupTokenHash(ctx, string(hash)); err != nil {
+		return fmt.Errorf("failed to store setup token hash: %w", err)
+	}
+
+	sep := strings.Repeat("=", 66)
+	fmt.Println("\n" + sep)
+	fmt.Println("  INITIAL SETUP REQUIRED")
+	fmt.Printf("  Setup Token: %s\n", rawToken)
+	fmt.Println("  Complete setup in the browser at /setup, or:")
+	fmt.Println("    POST /api/v1/setup/validate-token   (Authorization: SetupToken <token>)")
+	fmt.Println("  Single-use; invalidated after setup. Treat it like a root password.")
+	fmt.Println(sep + "\n")
+
+	// Optionally mirror the token to a file (container secret mount). The path is
+	// operator-supplied config: reject traversal sequences, then clean it.
+	if tokenFile := os.Getenv("SETUP_TOKEN_FILE"); tokenFile != "" {
+		if strings.Contains(filepath.ToSlash(tokenFile), "..") {
+			slog.Warn("SETUP_TOKEN_FILE contains path-traversal sequences; ignoring", "path", tokenFile)
+		} else {
+			clean := filepath.Clean(tokenFile)
+			if werr := os.WriteFile(clean, []byte(rawToken), 0o600); werr != nil { // #nosec G306 -- 0600 is restrictive; path is operator config, cleaned + traversal-checked
+				slog.Warn("failed to write setup token file", "path", clean, "error", werr)
+			} else {
+				slog.Info("setup token written to file", "path", clean)
+			}
+		}
+	}
 	return nil
 }
