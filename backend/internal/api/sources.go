@@ -537,16 +537,31 @@ func (h *SourcesHandlers) ListStateModules() gin.HandlerFunc {
 // @Router       /consumers [get]
 func (h *SourcesHandlers) Consumers() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		host, module := c.Query("host"), c.Query("module")
-		if host == "" || module == "" {
+		module := c.Query("module")
+		// A registry may emit several acceptable host identities (its public host,
+		// its discovery host, plus operator-configured aliases) as repeated
+		// ?host= params. Canonicalize + de-dup them so the exact-match join is
+		// symmetric with the form captured from module source addresses and
+		// tolerant of vanity-CNAME / port-asymmetry deployments. A single ?host=
+		// (the pre-alias contract) still works — QueryArray returns one element.
+		seen := map[string]struct{}{}
+		hosts := make([]string, 0, len(c.QueryArray("host")))
+		for _, raw := range c.QueryArray("host") {
+			ch := driftingest.CanonicalHost(raw)
+			if ch == "" {
+				continue
+			}
+			if _, dup := seen[ch]; dup {
+				continue
+			}
+			seen[ch] = struct{}{}
+			hosts = append(hosts, ch)
+		}
+		if len(hosts) == 0 || module == "" {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "host and module query parameters are required"})
 			return
 		}
-		// Canonicalize the inbound host so the exact-match join is symmetric with
-		// the form captured from module source addresses, and tolerant of a peer
-		// registry that has not yet upgraded to emit a canonical key.
-		host = driftingest.CanonicalHost(host)
-		consumers, err := h.moduleRefRepo.FindConsumers(c.Request.Context(), host, module)
+		consumers, err := h.moduleRefRepo.FindConsumers(c.Request.Context(), hosts, module)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load consumers"})
 			return

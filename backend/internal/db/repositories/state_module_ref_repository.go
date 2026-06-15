@@ -3,6 +3,8 @@ package repositories
 import (
 	"context"
 	"database/sql"
+
+	"github.com/lib/pq"
 )
 
 // StateModuleRef is one captured module dependency of a state (migration 000015).
@@ -91,15 +93,20 @@ func (r *StateModuleRefRepository) ListBySource(ctx context.Context, sourceID, s
 }
 
 // FindConsumers returns the states that consume a given registry module, matched
-// on (registry_host, module_source) — the honesty-guarded join key, so a local
-// module named like a public one never produces a false "consumed by" result.
-func (r *StateModuleRefRepository) FindConsumers(ctx context.Context, host, moduleSource string) ([]StateModuleConsumer, error) {
+// on (registry_host_canon, module_source) — the honesty-guarded join key, so a
+// local module named like a public one never produces a false "consumed by"
+// result. hosts is the set of acceptable canonical host identities for the
+// calling registry (its public host plus any operator-configured aliases); a
+// row matches if its canonical host is any of them. Matching the generated
+// registry_host_canon column (not raw registry_host) also rescues rows captured
+// before host canonicalization without a backfill.
+func (r *StateModuleRefRepository) FindConsumers(ctx context.Context, hosts []string, moduleSource string) ([]StateModuleConsumer, error) {
 	const q = `SELECT r.source_id, COALESCE(s.name, ''), r.state_key, r.module_version, r.observed_at::text
 	           FROM state_module_refs r
 	           LEFT JOIN state_sources s ON s.id = r.source_id
-	           WHERE r.registry_host = $1 AND r.module_source = $2
+	           WHERE r.registry_host_canon = ANY($1) AND r.module_source = $2
 	           ORDER BY r.observed_at DESC`
-	rows, err := r.db.QueryContext(ctx, q, host, moduleSource)
+	rows, err := r.db.QueryContext(ctx, q, pq.Array(hosts), moduleSource)
 	if err != nil {
 		return nil, err
 	}

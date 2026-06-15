@@ -8,6 +8,7 @@ import (
 
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
 	"github.com/gin-gonic/gin"
+	"github.com/lib/pq"
 )
 
 // newModulesRouter mounts the module-provenance read handlers bare (no auth
@@ -63,13 +64,15 @@ func TestConsumers_MissingParamsIs400(t *testing.T) {
 func TestConsumers_HostMatchedJoin(t *testing.T) {
 	r, mock := newModulesRouter(t)
 	cols := []string{"source_id", "source_name", "state_key", "module_version", "observed_at"}
-	mock.ExpectQuery("WHERE r.registry_host = .+ AND r.module_source").
-		WithArgs("registry.terraform.io", "terraform-aws-modules/vpc/aws").
+	mock.ExpectQuery("WHERE r.registry_host_canon = ANY.+ AND r.module_source").
+		WithArgs(pq.Array([]string{"registry.terraform.io"}), "terraform-aws-modules/vpc/aws").
 		WillReturnRows(sqlmock.NewRows(cols).AddRow("s1", "prod", "app.tfstate", nil, "2026-06-14"))
 
 	w := httptest.NewRecorder()
+	// Mixed-case + default port on the inbound host must be folded to the
+	// canonical form before the join (and de-duplicated against itself).
 	r.ServeHTTP(w, httptest.NewRequest(http.MethodGet,
-		"/api/v1/consumers?host=registry.terraform.io&module=terraform-aws-modules/vpc/aws", nil))
+		"/api/v1/consumers?host=Registry.Terraform.io:443&module=terraform-aws-modules/vpc/aws", nil))
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d (%s)", w.Code, w.Body.String())
 	}
