@@ -1,5 +1,22 @@
 # Changelog
 
+## [1.4.0](https://github.com/sethbacon/terraform-state-manager-backend/compare/v1.3.0...v1.4.0) (2026-06-16)
+
+
+### Features
+
+* **chart:** wire suite coupling config + setup-wizard hint ([#114](https://github.com/sethbacon/terraform-state-manager-backend/issues/114)) ([45f265b](https://github.com/sethbacon/terraform-state-manager-backend/commit/45f265b84e207a16b84319db6b3a16ead5d8539e))
+* **helm:** add setup.token value for a pre-seeded wizard token ([#116](https://github.com/sethbacon/terraform-state-manager-backend/issues/116)) ([7567e7e](https://github.com/sethbacon/terraform-state-manager-backend/commit/7567e7e3e21a322accce94051dec08308ecf054f))
+* **setup:** first-run setup-wizard foundation (token gate + status) ([#109](https://github.com/sethbacon/terraform-state-manager-backend/issues/109)) ([b1cd98c](https://github.com/sethbacon/terraform-state-manager-backend/commit/b1cd98c09bd1ab12961920d78cc4a15e146b44e5))
+* **setup:** owner, sources, and complete handlers (wizard backend done) ([#113](https://github.com/sethbacon/terraform-state-manager-backend/issues/113)) ([016a34c](https://github.com/sethbacon/terraform-state-manager-backend/commit/016a34c74b2a052c49bb09e4d26f65c99eb87ff6))
+* **setup:** runtime OIDC config for the wizard (DB-backed + boot-reload) ([#112](https://github.com/sethbacon/terraform-state-manager-backend/issues/112)) ([31ec623](https://github.com/sethbacon/terraform-state-manager-backend/commit/31ec623c4bac775852414f80151ae27100e47f97))
+* **setup:** support an operator-provided setup token (SETUP_TOKEN) ([#115](https://github.com/sethbacon/terraform-state-manager-backend/issues/115)) ([0c15f16](https://github.com/sethbacon/terraform-state-manager-backend/commit/0c15f1673975542d42381b0f3a8b05b8537460de))
+
+
+### Refactor
+
+* **auth:** make the OIDC provider runtime-swappable (atomic pointer) ([#111](https://github.com/sethbacon/terraform-state-manager-backend/issues/111)) ([99cbbeb](https://github.com/sethbacon/terraform-state-manager-backend/commit/99cbbebe812ae92f26bb1abe9c50b132e08ebdef))
+
 ## [1.3.0](https://github.com/sethbacon/terraform-state-manager-backend/compare/v1.2.0...v1.3.0) (2026-06-15)
 
 
