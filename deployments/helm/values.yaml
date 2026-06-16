@@ -215,12 +215,30 @@ security:
   encryptionKey: ""
   # -- Existing secret with TSM_JWT_SECRET + TSM_ENCRYPTION_KEY keys (and
   # optionally TSM_DATABASE_PASSWORD, TSM_AUTH_OIDC_CLIENT_SECRET,
-  # TSM_AUTH_LDAP_BIND_PASSWORD). Recommended for production:
+  # TSM_AUTH_LDAP_BIND_PASSWORD, TSM_SUITE_SERVICE_TOKEN). Recommended for production:
   #   kubectl create secret generic tsm-secrets \
   #     --from-literal=TSM_JWT_SECRET="$(openssl rand -hex 32)" \
   #     --from-literal=TSM_ENCRYPTION_KEY="$(openssl rand -hex 32)" \
   #     -n terraform-state-manager
   existingSecret: ""
+
+# -- Suite coupling with the Terraform Registry. Standalone by default. The
+# first-run setup wizard reads roleSeedOwner to decide whether to run the
+# identity steps (self/tsm) or defer them to the registry (any other value), so
+# a COUPLED deployment MUST set roleSeedOwner=registry to avoid clobbering the
+# shared identity store. The setup token itself is printed to the backend logs
+# at first start ("kubectl logs ... | grep 'Setup Token'") and consumed at /setup.
+suite:
+  # -- Role-template seeder / identity owner: self | tsm | registry.
+  roleSeedOwner: "self"
+  # -- Sibling registry's public origin (its /suite/manifest is polled). Empty = standalone.
+  siblingUrl: ""
+  # -- Set true only when both apps share one identity database + IdP (enables seamless SSO).
+  identitySharedStore: false
+  # -- Shared service token gating the cross-app "Consumed by" read; must equal
+  # the registry's TFR_SUITE_SIBLING_TOKEN. Empty disables it. Ignored if
+  # security.existingSecret is set (add TSM_SUITE_SERVICE_TOKEN there instead).
+  serviceToken: ""
 
 # -- Optional PVC for "local"-type state sources (host-path state files). Most
 # production installs read state from remote backends (Azure Blob/S3/HCP/...)
