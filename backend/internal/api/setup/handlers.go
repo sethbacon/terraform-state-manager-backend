@@ -9,6 +9,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/terraform-state-manager/terraform-state-manager/internal/auth"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/config"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/db/repositories"
 )
@@ -16,12 +17,23 @@ import (
 // Handlers serves the setup-wizard endpoints.
 type Handlers struct {
 	settings *repositories.SystemSettingsRepository
+	oidc     *repositories.OIDCConfigRepository
 	cfg      *config.Config
+	// activateOIDC swaps the live auth handler's OIDC provider at runtime. It is
+	// injected by the router (the api package owns AuthHandlers, and setup must
+	// not import api — that would be an import cycle).
+	activateOIDC func(*auth.OIDCProvider)
 }
 
-// NewHandlers constructs the setup handlers over the system_settings repository.
-func NewHandlers(settings *repositories.SystemSettingsRepository, cfg *config.Config) *Handlers {
-	return &Handlers{settings: settings, cfg: cfg}
+// NewHandlers constructs the setup handlers. activateOIDC may be nil in contexts
+// that never serve the OIDC step (e.g. status-only tests).
+func NewHandlers(
+	settings *repositories.SystemSettingsRepository,
+	oidc *repositories.OIDCConfigRepository,
+	cfg *config.Config,
+	activateOIDC func(*auth.OIDCProvider),
+) *Handlers {
+	return &Handlers{settings: settings, oidc: oidc, cfg: cfg, activateOIDC: activateOIDC}
 }
 
 // GetSetupStatus reports first-run setup state (public — no auth).
