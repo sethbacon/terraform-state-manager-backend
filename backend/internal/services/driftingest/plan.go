@@ -6,6 +6,7 @@
 package driftingest
 
 import (
+	"encoding/json"
 	"strings"
 
 	"github.com/sethbacon/terraform-suite-identity/identity/suite"
@@ -103,21 +104,68 @@ func hasAction(actions []string, action string) bool {
 
 // ModuleRef is one captured registry-module dependency of a state: the module's
 // source address (ns/name/provider), the registry host it resolves to, and (when
-// known) a locked version. ModuleVersion is always nil today — only the plan's
-// version constraint is available without a lockfile, and a constraint is not a
-// locked version.
+// known) a locked version. ModuleVersion is nil unless a module lockfile
+// (.terraform/modules/modules.json) was ingested alongside the plan — the plan's
+// configuration carries only a version constraint, which is not a locked version.
 type ModuleRef struct {
 	ModuleSource  string
 	RegistryHost  string
 	ModuleVersion *string
 }
 
+// ModuleLocks maps a registry module's canonical (host, source) identity to its
+// resolved/locked version, parsed from a Terraform module manifest
+// (.terraform/modules/modules.json). It is the only source of a *locked* module
+// version available to the ingest path; pass nil when no manifest was uploaded.
+type ModuleLocks map[string]string
+
+// lockKey is the join key shared by ParseModuleLocks and ModuleRefs: both sides
+// run their raw source through registryModuleAddress first, so the lookup is
+// exact regardless of //subdir selectors, host casing, or default ports.
+func lockKey(host, source string) string { return host + "|" + source }
+
+// ParseModuleLocks reads a `.terraform/modules/modules.json` manifest into a
+// (host, source) → version map. Only registry modules with a resolved Version
+// are included; the root module, local, and VCS entries (no Version, or a
+// non-registry source) are skipped. Invalid JSON yields nil (the caller then
+// captures provenance without locked versions, exactly as before lockfiles).
+func ParseModuleLocks(raw []byte) ModuleLocks {
+	if len(raw) == 0 {
+		return nil
+	}
+	var doc struct {
+		Modules []struct {
+			Source  string `json:"Source"`
+			Version string `json:"Version"`
+		} `json:"Modules"`
+	}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		return nil
+	}
+	locks := ModuleLocks{}
+	for _, m := range doc.Modules {
+		if m.Version == "" {
+			continue
+		}
+		host, source, ok := registryModuleAddress(m.Source)
+		if !ok {
+			continue
+		}
+		locks[lockKey(host, source)] = m.Version
+	}
+	if len(locks) == 0 {
+		return nil
+	}
+	return locks
+}
+
 // ModuleRefs extracts registry-module provenance from a plan's top-level module
 // calls. Only registry-style sources are captured (bare "ns/name/provider" → the
 // public registry, or "host/ns/name/provider" → that host); local ("./", "../")
 // and VCS (git::, github.com/...) sources are skipped because they have no
-// registry host to join on.
-func ModuleRefs(plan *Plan) []ModuleRef {
+// registry host to join on. When locks is non-nil, each ref's resolved version
+// is filled in from the matching module-manifest entry.
+func ModuleRefs(plan *Plan, locks ModuleLocks) []ModuleRef {
 	if plan == nil {
 		return nil
 	}
@@ -127,7 +175,13 @@ func ModuleRefs(plan *Plan) []ModuleRef {
 		if !ok {
 			continue
 		}
-		refs = append(refs, ModuleRef{ModuleSource: source, RegistryHost: host})
+		ref := ModuleRef{ModuleSource: source, RegistryHost: host}
+		if locks != nil {
+			if v := locks[lockKey(host, source)]; v != "" {
+				ref.ModuleVersion = &v
+			}
+		}
+		refs = append(refs, ref)
 	}
 	return refs
 }
