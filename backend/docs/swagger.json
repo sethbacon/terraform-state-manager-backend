@@ -941,6 +941,74 @@
                 }
             }
         },
+        "/audit/ingest": {
+            "post": {
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Suite"
+                ],
+                "summary": "Ingest a federated audit entry from a sibling app",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Shared suite service token (server-to-server)",
+                        "name": "X-Suite-Service-Token",
+                        "in": "header",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "Sibling app id, e.g. terraform-registry",
+                        "name": "X-Suite-Source-App",
+                        "in": "header"
+                    },
+                    {
+                        "description": "Audit entry (registry audit.LogEntry shape)",
+                        "name": "entry",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/api.federatedAuditEntry"
+                        }
+                    }
+                ],
+                "responses": {
+                    "202": {
+                        "description": "Accepted",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "403": {
+                        "description": "Forbidden",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    }
+                }
+            }
+        },
         "/auth/ldap/login": {
             "post": {
                 "description": "Search-bind authentication against the configured LDAP directory. Sets the session cookie on success.",
@@ -3398,6 +3466,42 @@
         }
     },
     "definitions": {
+        "api.federatedAuditEntry": {
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string"
+                },
+                "auth_method": {
+                    "type": "string"
+                },
+                "ip_address": {
+                    "type": "string"
+                },
+                "metadata": {
+                    "type": "object",
+                    "additionalProperties": true
+                },
+                "organization_id": {
+                    "type": "string"
+                },
+                "resource_id": {
+                    "type": "string"
+                },
+                "resource_type": {
+                    "type": "string"
+                },
+                "status_code": {
+                    "type": "integer"
+                },
+                "timestamp": {
+                    "type": "string"
+                },
+                "user_id": {
+                    "type": "string"
+                }
+            }
+        },
         "scim.SCIMEmail": {
             "type": "object",
             "properties": {

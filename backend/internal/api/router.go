@@ -203,6 +203,11 @@ func NewRouter(cfg *config.Config, database *sql.DB, identityDB *sql.DB) (*gin.E
 		// server-proxies to this to power its "Consumed by" panel).
 		v1.GET("/consumers", middleware.RequireSuiteServiceToken(cfg.Suite.ServiceToken), sources.Consumers())
 
+		// Cross-app: a sibling app federates its audit entries here (shared-store
+		// only — enforced in the handler, and advertised via audit.ingest.v1).
+		auditIngest := NewAuditIngestHandlers(identityDB, cfg)
+		v1.POST("/audit/ingest", middleware.RequireSuiteServiceToken(cfg.Suite.ServiceToken), auditIngest.Ingest())
+
 		// Home dashboard: cross-source aggregated overview.
 		v1.GET("/dashboard/overview", requireAuth, middleware.RequireScope(auth.ScopeStateRead), sources.DashboardOverview())
 
