@@ -115,14 +115,18 @@ func NewRouter(cfg *config.Config, database *sql.DB, identityDB *sql.DB) (*gin.E
 		// middleware and are permanently disabled once setup completes. CSRF is a
 		// no-op here (no session cookie exists during first-run setup).
 		settingsRepo := repositories.NewSystemSettingsRepository(database)
-		setupHandlers := setup.NewHandlers(settingsRepo, oidcConfigRepo, cfg, authHandlers.SetOIDCProvider)
+		setupHandlers := setup.NewHandlers(settingsRepo, oidcConfigRepo, repositories.NewSourceRepository(database), identityDB, cfg, authHandlers.SetOIDCProvider)
 		v1.GET("/setup/status", setupHandlers.GetSetupStatus)
 		setupGroup := v1.Group("/setup")
 		setupGroup.Use(middleware.SetupTokenMiddleware(settingsRepo))
 		{
 			setupGroup.POST("/validate-token", setupHandlers.ValidateToken)
+			setupGroup.POST("/admin", setupHandlers.ConfigureAdmin)
 			setupGroup.POST("/oidc/test", setupHandlers.TestOIDCConfig)
 			setupGroup.POST("/oidc", setupHandlers.SaveOIDCConfig)
+			setupGroup.POST("/sources/test", setupHandlers.TestSource)
+			setupGroup.POST("/sources", setupHandlers.SaveSource)
+			setupGroup.POST("/complete", setupHandlers.CompleteSetup)
 		}
 
 		a := v1.Group("/auth")

@@ -5,6 +5,7 @@
 package setup
 
 import (
+	"database/sql"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
@@ -18,22 +19,28 @@ import (
 type Handlers struct {
 	settings *repositories.SystemSettingsRepository
 	oidc     *repositories.OIDCConfigRepository
-	cfg      *config.Config
+	sources  *repositories.SourceRepository
+	// identityDB backs the owner step's user/membership writes; the idstore repos
+	// are built lazily in ConfigureAdmin so a nil-DB construction never panics.
+	identityDB *sql.DB
+	cfg        *config.Config
 	// activateOIDC swaps the live auth handler's OIDC provider at runtime. It is
 	// injected by the router (the api package owns AuthHandlers, and setup must
 	// not import api — that would be an import cycle).
 	activateOIDC func(*auth.OIDCProvider)
 }
 
-// NewHandlers constructs the setup handlers. activateOIDC may be nil in contexts
-// that never serve the OIDC step (e.g. status-only tests).
+// NewHandlers constructs the setup handlers. Dependencies may be nil in contexts
+// that never serve the corresponding step (e.g. status-only tests).
 func NewHandlers(
 	settings *repositories.SystemSettingsRepository,
 	oidc *repositories.OIDCConfigRepository,
+	sources *repositories.SourceRepository,
+	identityDB *sql.DB,
 	cfg *config.Config,
 	activateOIDC func(*auth.OIDCProvider),
 ) *Handlers {
-	return &Handlers{settings: settings, oidc: oidc, cfg: cfg, activateOIDC: activateOIDC}
+	return &Handlers{settings: settings, oidc: oidc, sources: sources, identityDB: identityDB, cfg: cfg, activateOIDC: activateOIDC}
 }
 
 // GetSetupStatus reports first-run setup state (public — no auth).
