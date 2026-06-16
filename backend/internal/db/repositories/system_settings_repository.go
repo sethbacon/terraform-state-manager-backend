@@ -70,6 +70,14 @@ func (r *SystemSettingsRepository) SetSetupTokenHash(ctx context.Context, hash s
 	return err
 }
 
+// SetOIDCConfigured records that OIDC is configured and sets the auth method.
+func (r *SystemSettingsRepository) SetOIDCConfigured(ctx context.Context) error {
+	_, err := r.db.ExecContext(ctx,
+		`UPDATE system_settings SET oidc_configured = true, auth_method = 'oidc', updated_at = $1 WHERE id = 1`,
+		time.Now())
+	return err
+}
+
 // SetSetupCompleted marks setup complete and clears the token — the permanent,
 // GitOps-safe self-disable (the wizard middleware then 403s on every endpoint).
 func (r *SystemSettingsRepository) SetSetupCompleted(ctx context.Context) error {

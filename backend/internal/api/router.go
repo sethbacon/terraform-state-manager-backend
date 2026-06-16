@@ -21,6 +21,7 @@ import (
 	"github.com/terraform-state-manager/terraform-state-manager/internal/auth"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/auth/mtls"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/config"
+	"github.com/terraform-state-manager/terraform-state-manager/internal/crypto"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/db/repositories"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/middleware"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/services/notify"
@@ -72,6 +73,30 @@ func NewRouter(cfg *config.Config, database *sql.DB, identityDB *sql.DB) (*gin.E
 	if err != nil {
 		return nil, stop, err
 	}
+
+	// Load any DB-stored OIDC config (written by the setup wizard) into the live
+	// auth handler, so OIDC configured via the wizard survives a restart without
+	// needing config-file settings. Takes precedence over an empty config.
+	oidcConfigRepo := repositories.NewOIDCConfigRepository(database)
+	if database != nil {
+		if active, oerr := oidcConfigRepo.GetActiveOIDCConfig(context.Background()); oerr == nil && active != nil {
+			if secret, derr := crypto.Decrypt(active.ClientSecretEncrypted); derr != nil {
+				slog.Error("failed to decrypt stored OIDC client secret", "error", derr)
+			} else if provider, perr := auth.NewOIDCProvider(&config.OIDCConfig{
+				Enabled:      true,
+				IssuerURL:    active.IssuerURL,
+				ClientID:     active.ClientID,
+				ClientSecret: string(secret),
+				RedirectURL:  active.RedirectURL,
+				Scopes:       active.Scopes,
+			}); perr != nil {
+				slog.Error("failed to build OIDC provider from stored config", "error", perr)
+			} else {
+				authHandlers.SetOIDCProvider(provider)
+				slog.Info("OIDC provider loaded from database configuration")
+			}
+		}
+	}
 	requireAuth := middleware.AuthMiddleware(authHandlers.UserRepo(), authHandlers.TokenRepo(), authHandlers.APIKeyRepo())
 	optionalAuth := middleware.OptionalAuthMiddleware(authHandlers.UserRepo(), authHandlers.TokenRepo())
 
@@ -90,12 +115,14 @@ func NewRouter(cfg *config.Config, database *sql.DB, identityDB *sql.DB) (*gin.E
 		// middleware and are permanently disabled once setup completes. CSRF is a
 		// no-op here (no session cookie exists during first-run setup).
 		settingsRepo := repositories.NewSystemSettingsRepository(database)
-		setupHandlers := setup.NewHandlers(settingsRepo, cfg)
+		setupHandlers := setup.NewHandlers(settingsRepo, oidcConfigRepo, cfg, authHandlers.SetOIDCProvider)
 		v1.GET("/setup/status", setupHandlers.GetSetupStatus)
 		setupGroup := v1.Group("/setup")
 		setupGroup.Use(middleware.SetupTokenMiddleware(settingsRepo))
 		{
 			setupGroup.POST("/validate-token", setupHandlers.ValidateToken)
+			setupGroup.POST("/oidc/test", setupHandlers.TestOIDCConfig)
+			setupGroup.POST("/oidc", setupHandlers.SaveOIDCConfig)
 		}
 
 		a := v1.Group("/auth")
