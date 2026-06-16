@@ -32,10 +32,8 @@ package main
 
 import (
 	"context"
-	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
-	"encoding/base64"
 	"fmt"
 	"log"
 	"log/slog"
@@ -55,6 +53,7 @@ import (
 	"golang.org/x/crypto/bcrypt"
 
 	"github.com/terraform-state-manager/terraform-state-manager/internal/api"
+	"github.com/terraform-state-manager/terraform-state-manager/internal/api/setup"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/auth"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/bootstrap"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/config"
@@ -299,11 +298,13 @@ func runMigrations(cfg *config.Config, direction string) error {
 	return nil
 }
 
-// handleSetupToken generates the first-run setup-wizard token when setup is not
-// yet complete. The raw token (prefix "tsm_setup_") is printed to stdout and,
-// when SETUP_TOKEN_FILE is set, written to that file for container secret
-// mounting; only the bcrypt hash is persisted in system_settings. Idempotent: a
-// pre-existing hash (server restarted mid-setup) is left intact.
+// handleSetupToken prepares the first-run setup-wizard token when setup is not
+// yet complete. If SETUP_TOKEN is set, that operator-supplied token is used (and
+// never echoed); otherwise a random token (prefix "tsm_setup_") is generated,
+// printed to stdout, and — when SETUP_TOKEN_FILE is set — written to that file
+// for container secret mounting. Only the bcrypt hash is persisted in
+// system_settings. Idempotent: a pre-existing hash (restarted mid-setup) is left
+// intact.
 func handleSetupToken(repo *repositories.SystemSettingsRepository) error {
 	ctx := context.Background()
 
@@ -328,11 +329,10 @@ func handleSetupToken(repo *repositories.SystemSettingsRepository) error {
 		return nil
 	}
 
-	tokenBytes := make([]byte, 32)
-	if _, err := rand.Read(tokenBytes); err != nil {
-		return fmt.Errorf("failed to generate setup token: %w", err)
+	rawToken, generated, err := setup.ResolveSetupToken(os.Getenv("SETUP_TOKEN"))
+	if err != nil {
+		return err
 	}
-	rawToken := "tsm_setup_" + base64.URLEncoding.WithPadding(base64.NoPadding).EncodeToString(tokenBytes)
 
 	hash, err := bcrypt.GenerateFromPassword([]byte(rawToken), bcrypt.DefaultCost)
 	if err != nil {
@@ -340,6 +340,13 @@ func handleSetupToken(repo *repositories.SystemSettingsRepository) error {
 	}
 	if err := repo.SetSetupTokenHash(ctx, string(hash)); err != nil {
 		return fmt.Errorf("failed to store setup token hash: %w", err)
+	}
+
+	// An operator-supplied token is already known to them: don't echo it or mirror
+	// it to a file — just record that setup is required.
+	if !generated {
+		slog.Info("setup required: using the operator-supplied setup token (SETUP_TOKEN); complete setup at /setup")
+		return nil
 	}
 
 	sep := strings.Repeat("=", 66)
@@ -358,7 +365,7 @@ func handleSetupToken(repo *repositories.SystemSettingsRepository) error {
 			slog.Warn("SETUP_TOKEN_FILE contains path-traversal sequences; ignoring", "path", tokenFile)
 		} else {
 			clean := filepath.Clean(tokenFile)
-			if werr := os.WriteFile(clean, []byte(rawToken), 0o600); werr != nil { // #nosec G306 -- 0600 is restrictive; path is operator config, cleaned + traversal-checked
+			if werr := os.WriteFile(clean, []byte(rawToken), 0o600); werr != nil { // #nosec G306 G703 -- 0600 perms; SETUP_TOKEN_FILE is operator config, filepath.Clean'd and ".." rejected above
 				slog.Warn("failed to write setup token file", "path", clean, "error", werr)
 			} else {
 				slog.Info("setup token written to file", "path", clean)
