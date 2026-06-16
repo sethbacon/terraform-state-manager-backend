@@ -184,6 +184,9 @@ func NewRouter(cfg *config.Config, database *sql.DB, identityDB *sql.DB) (*gin.E
 			s.GET("/:id/state/history", middleware.RequireScope(auth.ScopeStateRead), sources.StateHistory())
 			s.GET("/:id/state/report", middleware.RequireScope(auth.ScopeStateRead), sources.StateReport())
 			s.GET("/:id/modules", middleware.RequireScope(auth.ScopeStateRead), sources.ListStateModules())
+			// Freshness: locked module versions vs the sibling registry's latest.
+			// Inert when standalone (no active sibling -> every module "no_registry").
+			s.GET("/:id/modules/freshness", middleware.RequireScope(auth.ScopeStateRead), sources.ListStateModuleFreshness(func() *suite.DiscoveryClient { return suiteClient }))
 
 			// Phase 2 edit plane (validate → backup → write → audit; restore).
 			s.PUT("/:id/state/raw", middleware.RequireScope(auth.ScopeStateWrite), sources.EditState())
