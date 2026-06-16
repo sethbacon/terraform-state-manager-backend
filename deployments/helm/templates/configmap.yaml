@@ -29,6 +29,14 @@ data:
   TSM_DATABASE_MAX_CONNECTIONS: {{ .Values.externalDatabase.maxConnections | quote }}
   TSM_DATABASE_MIN_IDLE_CONNECTIONS: {{ .Values.externalDatabase.minIdleConnections | quote }}
 
+  # Suite coupling. Standalone by default (roleSeedOwner=self, no sibling). When
+  # coupled with the Terraform Registry, set roleSeedOwner=registry + siblingUrl
+  # so the setup wizard hides the identity steps and the apps don't clobber the
+  # shared identity. The service token (Consumed-by gate) lives in the Secret.
+  TSM_SUITE_ROLE_SEED_OWNER: {{ .Values.suite.roleSeedOwner | quote }}
+  TSM_SUITE_SIBLING_URL: {{ .Values.suite.siblingUrl | quote }}
+  TSM_SUITE_IDENTITY_SHARED_STORE: {{ .Values.suite.identitySharedStore | quote }}
+
   # Auth — OIDC
   TSM_AUTH_OIDC_ENABLED: {{ .Values.auth.oidc.enabled | quote }}
   {{- if .Values.auth.oidc.enabled }}
