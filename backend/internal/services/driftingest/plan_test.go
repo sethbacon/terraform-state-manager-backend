@@ -84,7 +84,7 @@ func TestModuleRefs(t *testing.T) {
 	}
 	// module_calls is a map (unordered); index by module_source to assert.
 	got := map[string]ModuleRef{}
-	for _, r := range ModuleRefs(&plan) {
+	for _, r := range ModuleRefs(&plan, nil) {
 		got[r.ModuleSource] = r
 	}
 	if len(got) != 2 {
@@ -104,10 +104,10 @@ func TestModuleRefs(t *testing.T) {
 }
 
 func TestModuleRefs_NilAndEmpty(t *testing.T) {
-	if refs := ModuleRefs(nil); len(refs) != 0 {
+	if refs := ModuleRefs(nil, nil); len(refs) != 0 {
 		t.Errorf("nil plan → no refs, got %v", refs)
 	}
-	if refs := ModuleRefs(&Plan{}); len(refs) != 0 {
+	if refs := ModuleRefs(&Plan{}, nil); len(refs) != 0 {
 		t.Errorf("plan with no configuration → no refs, got %v", refs)
 	}
 }
@@ -132,7 +132,7 @@ func TestModuleRefs_CanonicalizesHost(t *testing.T) {
 		t.Fatalf("unmarshal: %v", err)
 	}
 	var found bool
-	for _, r := range ModuleRefs(&plan) {
+	for _, r := range ModuleRefs(&plan, nil) {
 		if r.ModuleSource == "myorg/vpc/aws" {
 			found = true
 			if r.RegistryHost != "reg.example.com" {
@@ -142,5 +142,82 @@ func TestModuleRefs_CanonicalizesHost(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("expected a captured ref for myorg/vpc/aws")
+	}
+}
+
+// modulesManifest is a representative .terraform/modules/modules.json: a root
+// entry (skipped — no version), two registry modules (one public, one
+// host-prefixed with mixed case to prove canonicalization), and a local module
+// (skipped — no version / non-registry source).
+const modulesManifest = `{
+	"Modules": [
+		{"Key": "", "Source": "", "Dir": "."},
+		{"Key": "vpc", "Source": "terraform-aws-modules/vpc/aws", "Version": "5.3.0", "Dir": ".terraform/modules/vpc"},
+		{"Key": "net", "Source": "App.Terraform.io/acme/network/aws", "Version": "1.2.0", "Dir": ".terraform/modules/net"},
+		{"Key": "db", "Source": "./modules/db", "Dir": "modules/db"}
+	]
+}`
+
+func TestParseModuleLocks(t *testing.T) {
+	locks := ParseModuleLocks([]byte(modulesManifest))
+	if locks == nil {
+		t.Fatal("expected locks, got nil")
+	}
+	if got := locks[lockKey("registry.terraform.io", "terraform-aws-modules/vpc/aws")]; got != "5.3.0" {
+		t.Errorf("public module version = %q, want 5.3.0", got)
+	}
+	// Host folded to lowercase via the shared canonicalizer; source host-stripped.
+	if got := locks[lockKey("app.terraform.io", "acme/network/aws")]; got != "1.2.0" {
+		t.Errorf("host-prefixed module version = %q, want 1.2.0", got)
+	}
+	if len(locks) != 2 {
+		t.Errorf("want 2 locked registry modules (root/local skipped), got %d: %v", len(locks), locks)
+	}
+}
+
+func TestParseModuleLocks_EmptyAndInvalid(t *testing.T) {
+	if ParseModuleLocks(nil) != nil {
+		t.Error("nil input → nil locks")
+	}
+	if ParseModuleLocks([]byte(`{not json`)) != nil {
+		t.Error("invalid JSON → nil locks (degrade to constraint-only)")
+	}
+	// A manifest of only local/versionless modules yields nil (nothing to lock).
+	if ParseModuleLocks([]byte(`{"Modules":[{"Key":"db","Source":"./db","Dir":"db"}]}`)) != nil {
+		t.Error("no registry versions → nil locks")
+	}
+}
+
+// TestModuleRefs_WithLocks proves an ingested module manifest fills resolved
+// versions onto the matching refs, joined on the canonical (host, source) — and
+// that a ref with no manifest entry stays version-nil (honest constraint-only).
+func TestModuleRefs_WithLocks(t *testing.T) {
+	planJSON := `{
+		"configuration": {
+			"root_module": {
+				"module_calls": {
+					"vpc":  {"source": "terraform-aws-modules/vpc/aws", "version_constraint": "~> 5.0"},
+					"net":  {"source": "app.terraform.io/acme/network/aws", "version_constraint": "~> 1.0"},
+					"only": {"source": "hashicorp/consul/aws", "version_constraint": "~> 0.1"}
+				}
+			}
+		}
+	}`
+	var plan Plan
+	if err := json.Unmarshal([]byte(planJSON), &plan); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	got := map[string]ModuleRef{}
+	for _, r := range ModuleRefs(&plan, ParseModuleLocks([]byte(modulesManifest))) {
+		got[r.ModuleSource] = r
+	}
+	if r := got["terraform-aws-modules/vpc/aws"]; r.ModuleVersion == nil || *r.ModuleVersion != "5.3.0" {
+		t.Errorf("vpc resolved version not filled: %+v", r)
+	}
+	if r := got["acme/network/aws"]; r.ModuleVersion == nil || *r.ModuleVersion != "1.2.0" {
+		t.Errorf("host-prefixed resolved version not filled (canonical-host join): %+v", r)
+	}
+	if r := got["hashicorp/consul/aws"]; r.ModuleVersion != nil {
+		t.Errorf("module absent from the manifest must stay version-nil, got %v", *r.ModuleVersion)
 	}
 }

@@ -90,6 +90,9 @@ func (h *DriftHandlers) IngestDrift() gin.HandlerFunc {
 			Drifted     *bool           `json:"drifted"`
 			Summary     json.RawMessage `json:"summary"`
 			Detail      string          `json:"detail"`
+			// ModuleLocks is an optional .terraform/modules/modules.json upload; it
+			// supplies resolved module versions the plan's configuration lacks.
+			ModuleLocks json.RawMessage `json:"module_locks"`
 		}
 		if err := json.Unmarshal(raw, &req); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid JSON body"})
@@ -134,7 +137,7 @@ func (h *DriftHandlers) IngestDrift() gin.HandlerFunc {
 			// configuration block. Never fails the ingest — the drift record is the
 			// primary product; provenance powers the optional "modules in use" /
 			// "consumed by" views.
-			h.captureModuleRefs(ctx, req.SourceID, req.StateKey, &plan)
+			h.captureModuleRefs(ctx, req.SourceID, req.StateKey, &plan, req.ModuleLocks)
 		}
 		if req.Drifted != nil {
 			drifted = *req.Drifted
@@ -181,8 +184,8 @@ func (h *DriftHandlers) IngestDrift() gin.HandlerFunc {
 // captureModuleRefs persists the registry-module provenance found in an ingested
 // plan, replacing any prior refs for the (source, state). Best-effort: a failure
 // is logged, never surfaced — the drift record is the primary product.
-func (h *DriftHandlers) captureModuleRefs(ctx context.Context, sourceID, stateKey string, plan *driftingest.Plan) {
-	refs := driftingest.ModuleRefs(plan)
+func (h *DriftHandlers) captureModuleRefs(ctx context.Context, sourceID, stateKey string, plan *driftingest.Plan, moduleLocks []byte) {
+	refs := driftingest.ModuleRefs(plan, driftingest.ParseModuleLocks(moduleLocks))
 	rows := make([]repositories.StateModuleRef, len(refs))
 	for i, m := range refs {
 		rows[i] = repositories.StateModuleRef{
