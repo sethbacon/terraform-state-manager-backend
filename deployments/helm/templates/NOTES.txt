@@ -24,9 +24,14 @@ Workloads:
 {{- end }}
 
 First-run setup:
+{{- if .Values.setup.token }}
+  A setup token was pre-seeded (setup.token). Open the wizard at /setup and enter
+  that token — it is not printed to the logs.
+{{- else }}
   On first start the backend prints a one-time setup token. Retrieve it and open
   the wizard at /setup:
     kubectl logs -n {{ .Release.Namespace }} deploy/{{ include "tsm.fullname" . }}-backend | grep -A1 "Setup Token"
+{{- end }}
 {{- if eq .Values.suite.roleSeedOwner "registry" }}
   (Coupled mode: suite.roleSeedOwner=registry — the wizard skips the owner/OIDC
   steps; identity is managed by the registry.)
