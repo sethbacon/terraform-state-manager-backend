@@ -23,6 +23,15 @@ Workloads:
   Frontend:     {{ include "tsm.fullname" . }}-frontend ({{ .Values.frontend.replicaCount }} replicas)
 {{- end }}
 
+First-run setup:
+  On first start the backend prints a one-time setup token. Retrieve it and open
+  the wizard at /setup:
+    kubectl logs -n {{ .Release.Namespace }} deploy/{{ include "tsm.fullname" . }}-backend | grep -A1 "Setup Token"
+{{- if eq .Values.suite.roleSeedOwner "registry" }}
+  (Coupled mode: suite.roleSeedOwner=registry — the wizard skips the owner/OIDC
+  steps; identity is managed by the registry.)
+{{- end }}
+
 Verify:
   kubectl get pods -n {{ .Release.Namespace }} -l app.kubernetes.io/instance={{ .Release.Name }}
   kubectl port-forward -n {{ .Release.Namespace }} svc/{{ include "tsm.fullname" . }}-backend {{ .Values.service.backend.port }}:{{ .Values.service.backend.port }}
