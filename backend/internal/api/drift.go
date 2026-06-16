@@ -23,6 +23,7 @@ import (
 	"github.com/terraform-state-manager/terraform-state-manager/internal/crypto"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/db/repositories"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/pipelines"
+	"github.com/terraform-state-manager/terraform-state-manager/internal/services/driftingest"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/services/notify"
 )
 
@@ -344,6 +345,11 @@ func (h *DriftHandlers) RunResults() gin.HandlerFunc {
 			Drifted   *bool           `json:"drifted"`
 			Detail    string          `json:"detail"`
 			Summary   json.RawMessage `json:"summary"`
+			// Optional module provenance: the plan's configuration (module calls)
+			// and the resolved module lockfile. Small (module_calls + modules.json,
+			// not the full plan), so no size cap is needed. Absent on older runners.
+			Plan        json.RawMessage `json:"plan"`
+			ModuleLocks json.RawMessage `json:"module_locks"`
 		}
 		_ = c.ShouldBindJSON(&body)
 
@@ -390,6 +396,17 @@ func (h *DriftHandlers) RunResults() gin.HandlerFunc {
 
 		h.recordDriftOutcome(ctx, run, status, body.Added, body.Changed, body.Destroyed, drifted, body.Summary)
 		h.notifyDriftResult(run.ID, status, body.Added, body.Changed, body.Destroyed, drifted, body.Detail)
+
+		// Best-effort module provenance for dispatched runs: if the runner uploaded
+		// the plan's module calls (+ optional locks), capture them against this
+		// run's source/state (both taken from the token-scoped run record, never the
+		// body). Never fails the callback — the drift result is the primary product.
+		if run.SourceID != nil && len(body.Plan) > 0 {
+			var plan driftingest.Plan
+			if err := json.Unmarshal(body.Plan, &plan); err == nil {
+				h.captureModuleRefs(ctx, *run.SourceID, run.StateKey, &plan, body.ModuleLocks)
+			}
+		}
 		c.JSON(http.StatusOK, gin.H{"status": "recorded"})
 	}
 }
