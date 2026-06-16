@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.5.0](https://github.com/sethbacon/terraform-state-manager-backend/compare/v1.4.0...v1.5.0) (2026-06-16)
+
+
+### Features
+
+* **drift:** ingest module lockfiles to record resolved module versions (P2-5) ([#118](https://github.com/sethbacon/terraform-state-manager-backend/issues/118)) ([ce0ad97](https://github.com/sethbacon/terraform-state-manager-backend/commit/ce0ad97f558b45133f8106b837b40923077dd505))
+* **suite:** add cross-app audit federation ingest endpoint (P2-7) ([#117](https://github.com/sethbacon/terraform-state-manager-backend/issues/117)) ([0ef5aa6](https://github.com/sethbacon/terraform-state-manager-backend/commit/0ef5aa60f01d6b747b172e38c794348e5df32e19))
+
+
+### Bug Fixes
+
+* **helm:** make the frontend CSP nonce reach emotion (configmap parity) ([#120](https://github.com/sethbacon/terraform-state-manager-backend/issues/120)) ([514aec9](https://github.com/sethbacon/terraform-state-manager-backend/commit/514aec9bb5513e60f8057fd79607b45ef5446a4d))
+
 ## [1.4.0](https://github.com/sethbacon/terraform-state-manager-backend/compare/v1.3.0...v1.4.0) (2026-06-16)
 
 
