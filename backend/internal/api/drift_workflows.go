@@ -59,11 +59,18 @@ jobs:
           DEL=$(jq '[.resource_changes[]? | select(.change.actions | index("delete"))] | length' plan.json)
           DRIFTED=$( [ "$PLAN_EXIT" = "2" ] && echo true || echo false )
           SUMMARY=$(jq -c '[.resource_changes[]? | select(.change.actions != ["no-op"]) | {address: .address, actions: .change.actions}]' plan.json)
+          # Module provenance (optional): the configuration's module calls plus the
+          # resolved module lockfile, so TSM records which registry modules this
+          # state uses and how fresh they are. Both ride the existing jq -n payload
+          # via --argjson (never string-concatenated), and are ignored by older servers.
+          MODULE_CALLS=$(jq -c '{configuration:{root_module:{module_calls:(.configuration.root_module.module_calls // {})}}}' plan.json)
+          MODULE_LOCKS=$( [ -f .terraform/modules/modules.json ] && jq -c . .terraform/modules/modules.json || echo null )
           PAYLOAD=$(jq -n \
             --argjson added "$ADD" --argjson changed "$CHG" --argjson destroyed "$DEL" \
             --argjson drifted "$DRIFTED" --argjson summary "$SUMMARY" \
+            --argjson plan "$MODULE_CALLS" --argjson module_locks "$MODULE_LOCKS" \
             --arg detail "github run $GITHUB_RUN_ID" \
-            '{status:"completed", added:$added, changed:$changed, destroyed:$destroyed, drifted:$drifted, summary:$summary, detail:$detail}')
+            '{status:"completed", added:$added, changed:$changed, destroyed:$destroyed, drifted:$drifted, summary:$summary, plan:$plan, module_locks:$module_locks, detail:$detail}')
           curl -sf -X POST "$CALLBACK_URL" \
             -H "Content-Type: application/json" \
             -H "X-TSM-Callback-Token: $CALLBACK_TOKEN" \
@@ -102,11 +109,18 @@ steps:
       DEL=$(jq '[.resource_changes[]? | select(.change.actions | index("delete"))] | length' plan.json)
       DRIFTED=$( [ "$PLAN_EXIT" = "2" ] && echo true || echo false )
       SUMMARY=$(jq -c '[.resource_changes[]? | select(.change.actions != ["no-op"]) | {address: .address, actions: .change.actions}]' plan.json)
+      # Module provenance (optional): the configuration's module calls plus the
+      # resolved module lockfile, so TSM records which registry modules this state
+      # uses and how fresh they are. Both ride the existing jq -n payload via
+      # --argjson (never string-concatenated), and are ignored by older servers.
+      MODULE_CALLS=$(jq -c '{configuration:{root_module:{module_calls:(.configuration.root_module.module_calls // {})}}}' plan.json)
+      MODULE_LOCKS=$( [ -f .terraform/modules/modules.json ] && jq -c . .terraform/modules/modules.json || echo null )
       PAYLOAD=$(jq -n \
         --argjson added "$ADD" --argjson changed "$CHG" --argjson destroyed "$DEL" \
         --argjson drifted "$DRIFTED" --argjson summary "$SUMMARY" \
+        --argjson plan "$MODULE_CALLS" --argjson module_locks "$MODULE_LOCKS" \
         --arg detail "azdo build $BUILD_BUILDID" \
-        '{status:"completed", added:$added, changed:$changed, destroyed:$destroyed, drifted:$drifted, summary:$summary, detail:$detail}')
+        '{status:"completed", added:$added, changed:$changed, destroyed:$destroyed, drifted:$drifted, summary:$summary, plan:$plan, module_locks:$module_locks, detail:$detail}')
       curl -sf -X POST "$CALLBACK_URL" \
         -H "Content-Type: application/json" \
         -H "X-TSM-Callback-Token: $CALLBACK_TOKEN" \
