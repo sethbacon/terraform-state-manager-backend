@@ -16,6 +16,15 @@ func buildSuiteManifest(cfg *config.Config) suite.Manifest {
 	if pub == "" {
 		pub = cfg.Server.BaseURL
 	}
+	// audit.ingest.v1 is advertised only under a shared identity store: it tells a
+	// sibling it may federate its audit trail here (POST /audit/ingest), which is
+	// only coherent when user/org IDs are shared. Standalone/federated-DB mode
+	// omits it so a sibling never ships entries that would mis-attribute or fail
+	// the user_id FK.
+	caps := []suite.Capability{{ID: "state.v1"}}
+	if cfg.Suite.IdentitySharedStore {
+		caps = append(caps, suite.Capability{ID: "audit.ingest.v1"})
+	}
 	return suite.Manifest{
 		SchemaVersion: suite.SchemaVersionV1,
 		App:           "terraform-state-manager",
@@ -23,7 +32,7 @@ func buildSuiteManifest(cfg *config.Config) suite.Manifest {
 		BuildDate:     AppBuildDate,
 		PublicURL:     pub,
 		Identity:      suite.IdentityInfo{Issuer: suiteIssuer, SharedStore: cfg.Suite.IdentitySharedStore, Schema: "identity"},
-		Capabilities:  []suite.Capability{{ID: "state.v1"}},
+		Capabilities:  caps,
 		Links:         map[string]string{"sourceDetail": "/sources/{id}"},
 	}
 }
