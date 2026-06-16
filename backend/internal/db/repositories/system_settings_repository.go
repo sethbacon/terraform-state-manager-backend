@@ -70,6 +70,20 @@ func (r *SystemSettingsRepository) SetSetupTokenHash(ctx context.Context, hash s
 	return err
 }
 
+// SetAdminConfigured records that the first owner has been created.
+func (r *SystemSettingsRepository) SetAdminConfigured(ctx context.Context) error {
+	_, err := r.db.ExecContext(ctx,
+		`UPDATE system_settings SET admin_configured = true, updated_at = $1 WHERE id = 1`, time.Now())
+	return err
+}
+
+// SetSourcesConfigured records that at least one state source has been added.
+func (r *SystemSettingsRepository) SetSourcesConfigured(ctx context.Context) error {
+	_, err := r.db.ExecContext(ctx,
+		`UPDATE system_settings SET sources_configured = true, updated_at = $1 WHERE id = 1`, time.Now())
+	return err
+}
+
 // SetOIDCConfigured records that OIDC is configured and sets the auth method.
 func (r *SystemSettingsRepository) SetOIDCConfigured(ctx context.Context) error {
 	_, err := r.db.ExecContext(ctx,
