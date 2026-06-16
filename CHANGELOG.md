@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.6.0](https://github.com/sethbacon/terraform-state-manager-backend/compare/v1.5.0...v1.6.0) (2026-06-16)
+
+
+### Features
+
+* **drift:** capture module provenance from dispatched CI runs (P2-5) ([#123](https://github.com/sethbacon/terraform-state-manager-backend/issues/123)) ([441e4fc](https://github.com/sethbacon/terraform-state-manager-backend/commit/441e4fcd334cef3653bd1a0612c87d94ff57359f))
+* **suite:** module freshness proxy vs the sibling registry (P2-5) ([#122](https://github.com/sethbacon/terraform-state-manager-backend/issues/122)) ([48fb14a](https://github.com/sethbacon/terraform-state-manager-backend/commit/48fb14a7ee75b1914c2b5b3d03d3e743d6b0c31a))
+
 ## [1.5.0](https://github.com/sethbacon/terraform-state-manager-backend/compare/v1.4.0...v1.5.0) (2026-06-16)
 
 
