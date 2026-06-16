@@ -240,6 +240,15 @@ suite:
   # security.existingSecret is set (add TSM_SUITE_SERVICE_TOKEN there instead).
   serviceToken: ""
 
+# -- First-run setup wizard. By default the backend GENERATES a one-time setup
+# token and prints it to the logs at first start (see NOTES). Set `token` to PIN
+# a known value instead (>= 16 chars) so GitOps deploys needn't scrape logs; it
+# is bcrypt-hashed at boot and burned once the wizard completes. Stored in the
+# chart Secret as SETUP_TOKEN — ignored if security.existingSecret is set (add a
+# SETUP_TOKEN key to that Secret instead). Empty = keep generate-and-log.
+setup:
+  token: ""
+
 # -- Optional PVC for "local"-type state sources (host-path state files). Most
 # production installs read state from remote backends (Azure Blob/S3/HCP/...)
 # and don't need this.
