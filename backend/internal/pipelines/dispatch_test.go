@@ -93,10 +93,10 @@ func TestDispatchGitHub_DefaultsToMainAndSurfacesErrors(t *testing.T) {
 
 func TestDispatchAzureDevOps_Validation(t *testing.T) {
 	ctx := context.Background()
-	if err := DispatchAzureDevOps(ctx, "pat", AzureDevOpsConfig{Project: "p", PipelineID: "1"}, "", nil); err == nil {
+	if err := DispatchAzureDevOps(ctx, ADOPAT("pat"), AzureDevOpsConfig{Project: "p", PipelineID: "1"}, "", nil); err == nil {
 		t.Error("missing organization must error")
 	}
-	if err := DispatchAzureDevOps(ctx, "", AzureDevOpsConfig{Organization: "o", Project: "p", PipelineID: "1"}, "", nil); err == nil {
+	if err := DispatchAzureDevOps(ctx, ADOPAT(""), AzureDevOpsConfig{Organization: "o", Project: "p", PipelineID: "1"}, "", nil); err == nil {
 		t.Error("missing PAT must error")
 	}
 }
@@ -127,7 +127,7 @@ func TestDispatchAzureDevOps_NormalizesRefAndAuth(t *testing.T) {
 	defer func() { azureDevOpsBaseURL = old }()
 
 	cfg := AzureDevOpsConfig{Organization: "corp", Project: "Platform", PipelineID: "42"}
-	err := DispatchAzureDevOpsDrift(context.Background(), "pat-secret", cfg, "feature/x",
+	err := DispatchAzureDevOpsDrift(context.Background(), ADOPAT("pat-secret"), cfg, "feature/x",
 		DriftInputs{CallbackURL: "https://tsm/cb", CallbackToken: "cbt"})
 	if err != nil {
 		t.Fatalf("dispatch: %v", err)
@@ -159,7 +159,7 @@ func TestDispatchAzureDevOps_OmitsRefWhenUnset(t *testing.T) {
 	defer func() { azureDevOpsBaseURL = old }()
 
 	cfg := AzureDevOpsConfig{Organization: "corp", Project: "P", PipelineID: "1"}
-	if err := DispatchAzureDevOps(context.Background(), "pat", cfg, "", map[string]string{"a": "b"}); err != nil {
+	if err := DispatchAzureDevOps(context.Background(), ADOPAT("pat"), cfg, "", map[string]string{"a": "b"}); err != nil {
 		t.Fatalf("dispatch: %v", err)
 	}
 	// No ref configured anywhere → the run must use the pipeline's own default
@@ -169,7 +169,7 @@ func TestDispatchAzureDevOps_OmitsRefWhenUnset(t *testing.T) {
 	}
 
 	// An already-qualified ref passes through untouched.
-	if err := DispatchAzureDevOps(context.Background(), "pat", cfg, "refs/tags/v1", nil); err != nil {
+	if err := DispatchAzureDevOps(context.Background(), ADOPAT("pat"), cfg, "refs/tags/v1", nil); err != nil {
 		t.Fatalf("dispatch: %v", err)
 	}
 	if got.Resources == nil || got.Resources.Repositories.Self.RefName != "refs/tags/v1" {
@@ -187,7 +187,7 @@ func TestDispatchAzureDevOps_SurfacesAPIErrors(t *testing.T) {
 	defer func() { azureDevOpsBaseURL = old }()
 
 	cfg := AzureDevOpsConfig{Organization: "corp", Project: "P", PipelineID: "1"}
-	err := DispatchAzureDevOps(context.Background(), "pat", cfg, "main", nil)
+	err := DispatchAzureDevOps(context.Background(), ADOPAT("pat"), cfg, "main", nil)
 	if err == nil || !strings.Contains(err.Error(), "Unable to resolve") {
 		t.Errorf("API error body must surface: %v", err)
 	}

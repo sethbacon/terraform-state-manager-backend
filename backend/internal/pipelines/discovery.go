@@ -6,7 +6,6 @@ package pipelines
 import (
 	"bytes"
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -80,10 +79,8 @@ func discoveryGET(ctx context.Context, u string, authorize func(*http.Request)) 
 	return body, resp.StatusCode, resp.Header, nil
 }
 
-func adoAuth(pat string) func(*http.Request) {
-	return func(req *http.Request) {
-		req.Header.Set("Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte(":"+pat)))
-	}
+func adoAuth(cred ADOToken) func(*http.Request) {
+	return cred.authorize
 }
 
 func githubAuth(token string) func(*http.Request) {
@@ -93,11 +90,45 @@ func githubAuth(token string) func(*http.Request) {
 	}
 }
 
+// VerifyAzureDevOps performs a cheap authenticated call (list a single project)
+// to confirm an Azure DevOps credential — PAT or Entra app token — is valid for
+// the organization. A non-200 (typically 401/403) means bad or under-privileged
+// credentials.
+func VerifyAzureDevOps(ctx context.Context, cred ADOToken, organization string) error {
+	if cred.empty() || organization == "" {
+		return fmt.Errorf("azure devops verification requires organization and a credential")
+	}
+	u := fmt.Sprintf("%s/%s/_apis/projects?api-version=7.1&$top=1", azureDevOpsBaseURL, url.PathEscape(organization))
+	_, status, _, err := discoveryGET(ctx, u, adoAuth(cred))
+	if err != nil {
+		return fmt.Errorf("azure devops verification failed: %w", err)
+	}
+	if status != http.StatusOK {
+		return fmt.Errorf("azure devops verification returned %d", status)
+	}
+	return nil
+}
+
+// VerifyGitHub confirms a GitHub token by calling the authenticated-user endpoint.
+func VerifyGitHub(ctx context.Context, token string) error {
+	if token == "" {
+		return fmt.Errorf("github verification requires a token")
+	}
+	_, status, _, err := discoveryGET(ctx, githubAPIBaseURL+"/user", githubAuth(token))
+	if err != nil {
+		return fmt.Errorf("github verification failed: %w", err)
+	}
+	if status != http.StatusOK {
+		return fmt.Errorf("github verification returned %d", status)
+	}
+	return nil
+}
+
 // ListAzurePipelines returns the pipeline definitions in an ADO project,
 // following the continuation-token pagination so large projects list fully.
-func ListAzurePipelines(ctx context.Context, pat, organization, project string) ([]PipelineRef, error) {
-	if pat == "" || organization == "" || project == "" {
-		return nil, fmt.Errorf("azure devops discovery requires organization, project, and a PAT")
+func ListAzurePipelines(ctx context.Context, cred ADOToken, organization, project string) ([]PipelineRef, error) {
+	if cred.empty() || organization == "" || project == "" {
+		return nil, fmt.Errorf("azure devops discovery requires organization, project, and a credential")
 	}
 	base := fmt.Sprintf("%s/%s/%s/_apis/pipelines?api-version=7.1&$top=500",
 		azureDevOpsBaseURL, url.PathEscape(organization), url.PathEscape(project))
@@ -108,7 +139,7 @@ func ListAzurePipelines(ctx context.Context, pat, organization, project string) 
 		if continuation != "" {
 			u += "&continuationToken=" + url.QueryEscape(continuation)
 		}
-		body, status, header, err := discoveryGET(ctx, u, adoAuth(pat))
+		body, status, header, err := discoveryGET(ctx, u, adoAuth(cred))
 		if err != nil {
 			return nil, fmt.Errorf("azure devops pipeline list failed: %w", err)
 		}
@@ -263,13 +294,13 @@ type ServiceConnectionRef struct {
 }
 
 // ListAzureRepos returns the Git repositories in an ADO project.
-func ListAzureRepos(ctx context.Context, pat, organization, project string) ([]AzureRepoRef, error) {
-	if pat == "" || organization == "" || project == "" {
-		return nil, fmt.Errorf("azure devops discovery requires organization, project, and a PAT")
+func ListAzureRepos(ctx context.Context, cred ADOToken, organization, project string) ([]AzureRepoRef, error) {
+	if cred.empty() || organization == "" || project == "" {
+		return nil, fmt.Errorf("azure devops discovery requires organization, project, and a credential")
 	}
 	u := fmt.Sprintf("%s/%s/%s/_apis/git/repositories?api-version=7.1",
 		azureDevOpsBaseURL, url.PathEscape(organization), url.PathEscape(project))
-	body, status, _, err := discoveryGET(ctx, u, adoAuth(pat))
+	body, status, _, err := discoveryGET(ctx, u, adoAuth(cred))
 	if err != nil {
 		return nil, fmt.Errorf("azure devops repo list failed: %w", err)
 	}
@@ -297,13 +328,13 @@ func ListAzureRepos(ctx context.Context, pat, organization, project string) ([]A
 // ListAzureServiceConnections returns the project's service connections so the
 // wizard can name one in the generated pipeline's credential guidance. Requires
 // the PAT to carry Service Connections (read); callers degrade gracefully on 403.
-func ListAzureServiceConnections(ctx context.Context, pat, organization, project string) ([]ServiceConnectionRef, error) {
-	if pat == "" || organization == "" || project == "" {
-		return nil, fmt.Errorf("azure devops discovery requires organization, project, and a PAT")
+func ListAzureServiceConnections(ctx context.Context, cred ADOToken, organization, project string) ([]ServiceConnectionRef, error) {
+	if cred.empty() || organization == "" || project == "" {
+		return nil, fmt.Errorf("azure devops discovery requires organization, project, and a credential")
 	}
 	u := fmt.Sprintf("%s/%s/%s/_apis/serviceendpoint/endpoints?api-version=7.1-preview.4",
 		azureDevOpsBaseURL, url.PathEscape(organization), url.PathEscape(project))
-	body, status, _, err := discoveryGET(ctx, u, adoAuth(pat))
+	body, status, _, err := discoveryGET(ctx, u, adoAuth(cred))
 	if err != nil {
 		return nil, fmt.Errorf("azure devops service connection list failed: %w", err)
 	}
@@ -331,9 +362,9 @@ func ListAzureServiceConnections(ctx context.Context, pat, organization, project
 // CreateAzurePipeline creates a YAML pipeline definition pointing at yamlPath in
 // the given repository (the wizard's "create the pipeline for me" step). The PAT
 // must carry Build (read & execute) with pipeline-creation rights.
-func CreateAzurePipeline(ctx context.Context, pat, organization, project, name, yamlPath, repoID string) (*PipelineRef, error) {
-	if pat == "" || organization == "" || project == "" {
-		return nil, fmt.Errorf("azure devops pipeline creation requires organization, project, and a PAT")
+func CreateAzurePipeline(ctx context.Context, cred ADOToken, organization, project, name, yamlPath, repoID string) (*PipelineRef, error) {
+	if cred.empty() || organization == "" || project == "" {
+		return nil, fmt.Errorf("azure devops pipeline creation requires organization, project, and a credential")
 	}
 	if name == "" || yamlPath == "" || repoID == "" {
 		return nil, fmt.Errorf("azure devops pipeline creation requires name, yaml_path, and repository id")
@@ -355,7 +386,7 @@ func CreateAzurePipeline(ctx context.Context, pat, organization, project, name, 
 	if err != nil {
 		return nil, err
 	}
-	adoAuth(pat)(req)
+	adoAuth(cred)(req)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
 	resp, err := httpClient.Do(req)
