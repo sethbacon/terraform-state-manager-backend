@@ -1,5 +1,21 @@
 # Changelog
 
+## [1.7.0](https://github.com/sethbacon/terraform-state-manager-backend/compare/v1.6.0...v1.7.0) (2026-06-18)
+
+
+### Features
+
+* **drift:** add GitHub App auth for GitHub CI sources ([#127](https://github.com/sethbacon/terraform-state-manager-backend/issues/127)) ([f060ead](https://github.com/sethbacon/terraform-state-manager-backend/commit/f060ead860e6b9052c4933dd196b487f48ef0422))
+* **drift:** Entra app-registration auth for Azure DevOps CI sources ([#126](https://github.com/sethbacon/terraform-state-manager-backend/issues/126)) ([3d506df](https://github.com/sethbacon/terraform-state-manager-backend/commit/3d506dfd3d8088000d7bc1b802f1403d6c145cf5))
+
+
+### Documentation
+
+* add governance, architecture, ADRs, and suite-coupling/SSO guides ([#129](https://github.com/sethbacon/terraform-state-manager-backend/issues/129)) ([9507173](https://github.com/sethbacon/terraform-state-manager-backend/commit/9507173f2818c8a19fd13bd8edfca5defe865a5c))
+* document configuration, suite coupling, and deployment caveats ([#132](https://github.com/sethbacon/terraform-state-manager-backend/issues/132)) ([318558b](https://github.com/sethbacon/terraform-state-manager-backend/commit/318558bef7e8fca70b812d8ccf014a652e4af01f))
+* **drift:** align GitHub App runbook table formatting ([#131](https://github.com/sethbacon/terraform-state-manager-backend/issues/131)) ([0a62b75](https://github.com/sethbacon/terraform-state-manager-backend/commit/0a62b750112ccab86b83fb069e56f2f9be73c2ba))
+* **plans:** add drift CI app-auth plans (Entra app for ADO, GitHub App) ([#125](https://github.com/sethbacon/terraform-state-manager-backend/issues/125)) ([f94439e](https://github.com/sethbacon/terraform-state-manager-backend/commit/f94439ebac8b725ae9e2fd28fa6387749a6a781a))
+
 ## [1.6.0](https://github.com/sethbacon/terraform-state-manager-backend/compare/v1.5.0...v1.6.0) (2026-06-16)
 
 
