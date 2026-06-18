@@ -181,20 +181,26 @@ func (h *SourcesHandlers) StatesByVersion() gin.HandlerFunc {
 func filterStatesByVersion(rows []repositories.StateVersionRow, ver, op string) []repositories.StateVersionRow {
 	out := make([]repositories.StateVersionRow, 0)
 	for _, r := range rows {
-		if op == "eq" {
-			if matchesExactVersion(r.TerraformVersion, ver) {
-				out = append(out, r)
-			}
-			continue
-		}
-		if !semver.IsValid(r.TerraformVersion) || !semver.IsValid(ver) {
-			continue
-		}
-		if rangeMatch(semver.Compare(r.TerraformVersion, ver), op) {
+		if matchesVersion(r.TerraformVersion, ver, op) {
 			out = append(out, r)
 		}
 	}
 	return out
+}
+
+// matchesVersion reports whether a stored Terraform version satisfies (ver, op).
+// "eq" is an exact string match (with "unknown"/"" mapping to the empty version
+// the store records); the range operators compare by semantic version and never
+// match when either side isn't valid semver. Shared by the version drill-down
+// and the Reports filter so both treat versions identically.
+func matchesVersion(stored, ver, op string) bool {
+	if op == "eq" {
+		return matchesExactVersion(stored, ver)
+	}
+	if !semver.IsValid(stored) || !semver.IsValid(ver) {
+		return false
+	}
+	return rangeMatch(semver.Compare(stored, ver), op)
 }
 
 // matchesExactVersion reports whether a stored version equals the requested one,

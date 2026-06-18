@@ -215,6 +215,10 @@ func NewRouter(cfg *config.Config, database *sql.DB, identityDB *sql.DB) (*gin.E
 		v1.GET("/dashboard/overview", requireAuth, middleware.RequireScope(auth.ScopeStateRead), sources.DashboardOverview())
 		v1.GET("/dashboard/states-by-version", requireAuth, middleware.RequireScope(auth.ScopeStateRead), sources.StatesByVersion())
 
+		// Reports: cross-fleet state-file query, preview, and multi-format export.
+		v1.GET("/reports/states", requireAuth, middleware.RequireScope(auth.ScopeStateRead), sources.ReportStates())
+		v1.GET("/reports/states/export", requireAuth, middleware.RequireScope(auth.ScopeStateRead), sources.ReportStatesExport())
+
 		// Identity management (admin scope): users, organizations, roles, audit log.
 		admin := NewAdminHandlers(sqlx.NewDb(identityDB, "postgres"))
 		ag := v1.Group("/admin", requireAuth, middleware.RequireScope(auth.ScopeAdmin))
