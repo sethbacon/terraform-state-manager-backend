@@ -10,21 +10,26 @@ import (
 // owner) whose credential is shared by the pipeline connections created from it.
 //
 // AuthMethod selects the credential: "pat" uses EncryptedToken (a personal
-// access token); "app" uses a Microsoft Entra app registration (TenantID,
-// ClientID, EncryptedClientSecret) whose access token is minted on demand.
+// access token); "app" uses a Microsoft Entra app registration (Azure DevOps:
+// TenantID, ClientID, EncryptedClientSecret) or a GitHub App (GithubAppID,
+// GithubInstallationID, EncryptedAppPrivateKey) whose access token is minted on
+// demand.
 type CISource struct {
-	ID                    string  `json:"id"`
-	Name                  string  `json:"name"`
-	Provider              string  `json:"provider"`
-	Organization          string  `json:"organization"`
-	Project               *string `json:"project,omitempty"`
-	AuthMethod            string  `json:"auth_method"`
-	EncryptedToken        []byte  `json:"-"`
-	TenantID              *string `json:"tenant_id,omitempty"`
-	ClientID              *string `json:"client_id,omitempty"`
-	EncryptedClientSecret []byte  `json:"-"`
-	CreatedAt             string  `json:"created_at"`
-	UpdatedAt             string  `json:"updated_at"`
+	ID                     string  `json:"id"`
+	Name                   string  `json:"name"`
+	Provider               string  `json:"provider"`
+	Organization           string  `json:"organization"`
+	Project                *string `json:"project,omitempty"`
+	AuthMethod             string  `json:"auth_method"`
+	EncryptedToken         []byte  `json:"-"`
+	TenantID               *string `json:"tenant_id,omitempty"`
+	ClientID               *string `json:"client_id,omitempty"`
+	EncryptedClientSecret  []byte  `json:"-"`
+	GithubAppID            *string `json:"github_app_id,omitempty"`
+	GithubInstallationID   *string `json:"github_installation_id,omitempty"`
+	EncryptedAppPrivateKey []byte  `json:"-"`
+	CreatedAt              string  `json:"created_at"`
+	UpdatedAt              string  `json:"updated_at"`
 }
 
 // CISourceRepository is the DAO for ci_sources.
@@ -36,12 +41,13 @@ func NewCISourceRepository(db *sql.DB) *CISourceRepository {
 	return &CISourceRepository{db: db}
 }
 
-const ciSourceColumns = `id, name, provider, organization, project, auth_method, encrypted_token, tenant_id, client_id, encrypted_client_secret, created_at::text, updated_at::text`
+const ciSourceColumns = `id, name, provider, organization, project, auth_method, encrypted_token, tenant_id, client_id, encrypted_client_secret, github_app_id, github_installation_id, encrypted_app_private_key, created_at::text, updated_at::text`
 
 func scanCISource(scanner interface{ Scan(dest ...any) error }) (*CISource, error) {
 	var s CISource
 	if err := scanner.Scan(&s.ID, &s.Name, &s.Provider, &s.Organization, &s.Project,
 		&s.AuthMethod, &s.EncryptedToken, &s.TenantID, &s.ClientID, &s.EncryptedClientSecret,
+		&s.GithubAppID, &s.GithubInstallationID, &s.EncryptedAppPrivateKey,
 		&s.CreatedAt, &s.UpdatedAt); err != nil {
 		return nil, err
 	}
@@ -80,10 +86,11 @@ func (r *CISourceRepository) Create(ctx context.Context, s *CISource) (*CISource
 		authMethod = "pat"
 	}
 	return scanCISource(r.db.QueryRowContext(ctx,
-		`INSERT INTO ci_sources (name, provider, organization, project, auth_method, encrypted_token, tenant_id, client_id, encrypted_client_secret)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING `+ciSourceColumns,
+		`INSERT INTO ci_sources (name, provider, organization, project, auth_method, encrypted_token, tenant_id, client_id, encrypted_client_secret, github_app_id, github_installation_id, encrypted_app_private_key)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) RETURNING `+ciSourceColumns,
 		s.Name, s.Provider, s.Organization, s.Project, authMethod,
-		s.EncryptedToken, s.TenantID, s.ClientID, s.EncryptedClientSecret))
+		s.EncryptedToken, s.TenantID, s.ClientID, s.EncryptedClientSecret,
+		s.GithubAppID, s.GithubInstallationID, s.EncryptedAppPrivateKey))
 }
 
 func (r *CISourceRepository) Delete(ctx context.Context, id string) error {

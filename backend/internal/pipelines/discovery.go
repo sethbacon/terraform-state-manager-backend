@@ -124,6 +124,23 @@ func VerifyGitHub(ctx context.Context, token string) error {
 	return nil
 }
 
+// VerifyGitHubInstallation confirms a GitHub App installation access token. An
+// installation token cannot call /user (that is a user endpoint), so it lists
+// the installation's repositories instead.
+func VerifyGitHubInstallation(ctx context.Context, token string) error {
+	if token == "" {
+		return fmt.Errorf("github verification requires a token")
+	}
+	_, status, _, err := discoveryGET(ctx, githubAPIBaseURL+"/installation/repositories?per_page=1", githubAuth(token))
+	if err != nil {
+		return fmt.Errorf("github verification failed: %w", err)
+	}
+	if status != http.StatusOK {
+		return fmt.Errorf("github verification returned %d", status)
+	}
+	return nil
+}
+
 // ListAzurePipelines returns the pipeline definitions in an ADO project,
 // following the continuation-token pagination so large projects list fully.
 func ListAzurePipelines(ctx context.Context, cred ADOToken, organization, project string) ([]PipelineRef, error) {
