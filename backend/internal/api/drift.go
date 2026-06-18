@@ -237,7 +237,7 @@ func (h *DriftHandlers) dispatchDrift(ctx context.Context, tgt DriftTarget, acto
 		return nil, errPipelineNotFound
 	}
 	// Connection-level token, or the shared token of its CI source.
-	token, err := resolvePipelineToken(ctx, h.ciSourceRepo, conn)
+	token, bearer, err := resolvePipelineToken(ctx, h.ciSourceRepo, conn)
 	if err != nil {
 		return nil, err
 	}
@@ -267,7 +267,7 @@ func (h *DriftHandlers) dispatchDrift(ctx context.Context, tgt DriftTarget, acto
 	case "github_actions":
 		dispatchErr = pipelines.DispatchGitHubDrift(ctx, token, pipelines.GitHubConfigFromMap(conn.Config), tgt.RepoRef, inputs)
 	case "azure_devops":
-		dispatchErr = pipelines.DispatchAzureDevOpsDrift(ctx, token, pipelines.AzureDevOpsConfigFromMap(conn.Config), tgt.RepoRef, inputs)
+		dispatchErr = pipelines.DispatchAzureDevOpsDrift(ctx, adoCred(token, bearer), pipelines.AzureDevOpsConfigFromMap(conn.Config), tgt.RepoRef, inputs)
 	default:
 		dispatchErr = errUnsupportedProvider(conn.Provider)
 	}

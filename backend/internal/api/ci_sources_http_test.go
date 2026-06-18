@@ -39,6 +39,7 @@ func newCISourcesEnv(t *testing.T) *sourcesEnv {
 	v1.GET("", h.ListCISources())
 	v1.POST("", h.CreateCISource())
 	v1.DELETE("/:id", h.DeleteCISource())
+	v1.POST("/:id/verify", h.VerifyCISource())
 	v1.GET("/:id/pipelines", h.ListSourcePipelines())
 	v1.GET("/:id/repos", h.ListSourceRepos())
 	v1.GET("/:id/repos/:repo/workflows", h.ListSourceWorkflows())
@@ -49,7 +50,7 @@ func newCISourcesEnv(t *testing.T) *sourcesEnv {
 	return &sourcesEnv{r: r, mock: mock}
 }
 
-var ciSrcCols = []string{"id", "name", "provider", "organization", "project", "encrypted_token", "created_at", "updated_at"}
+var ciSrcCols = []string{"id", "name", "provider", "organization", "project", "auth_method", "encrypted_token", "tenant_id", "client_id", "encrypted_client_secret", "created_at", "updated_at"}
 
 func ciSrcRow(t *testing.T, provider string, project *string, token string) *sqlmock.Rows {
 	t.Helper()
@@ -58,7 +59,52 @@ func ciSrcRow(t *testing.T, provider string, project *string, token string) *sql
 		t.Fatalf("Encrypt: %v", err)
 	}
 	return sqlmock.NewRows(ciSrcCols).
-		AddRow("c1", "corp", provider, "corp-org", project, enc, "2026-06-10", "2026-06-10")
+		AddRow("c1", "corp", provider, "corp-org", project, "pat", enc, nil, nil, nil, "2026-06-10", "2026-06-10")
+}
+
+// appCiSrcRow builds an Entra app-auth ADO source row whose encrypted client
+// secret decrypts to "the-secret".
+func appCiSrcRow(t *testing.T) *sqlmock.Rows {
+	t.Helper()
+	enc, err := crypto.Encrypt([]byte("the-secret"))
+	if err != nil {
+		t.Fatalf("Encrypt: %v", err)
+	}
+	proj := "Platform"
+	return sqlmock.NewRows(ciSrcCols).
+		AddRow("c1", "corp", "azure_devops", "corp-org", &proj, "app", nil, "the-tenant", "the-client", enc, "2026-06-10", "2026-06-10")
+}
+
+func TestCISources_CreateApp(t *testing.T) {
+	e := newCISourcesEnv(t)
+
+	// App auth is ADO-only in this first cut.
+	if w := e.do(http.MethodPost, "/api/v1/ci-sources",
+		`{"name":"x","provider":"github_actions","organization":"o","auth_method":"app","tenant_id":"t","client_id":"c","client_secret":"s"}`); w.Code != http.StatusBadRequest {
+		t.Errorf("github app: status = %d, want 400", w.Code)
+	}
+	// Missing Entra fields.
+	if w := e.do(http.MethodPost, "/api/v1/ci-sources",
+		`{"name":"x","provider":"azure_devops","project":"P","organization":"o","auth_method":"app","client_id":"c","client_secret":"s"}`); w.Code != http.StatusBadRequest {
+		t.Errorf("app missing tenant: status = %d, want 400", w.Code)
+	}
+
+	// Valid app source.
+	e.mock.ExpectQuery("INSERT INTO ci_sources").WillReturnRows(appCiSrcRow(t))
+	w := e.do(http.MethodPost, "/api/v1/ci-sources",
+		`{"name":"corp","provider":"azure_devops","project":"Platform","organization":"corp-org","auth_method":"app","tenant_id":"the-tenant","client_id":"the-client","client_secret":"the-secret"}`)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("create app: status = %d (%s)", w.Code, w.Body.String())
+	}
+	body := w.Body.String()
+	if strings.Contains(body, "the-secret") {
+		t.Error("create response leaked the client secret")
+	}
+	for _, want := range []string{`"auth_method":"app"`, `"has_client_secret":true`, `"tenant_id":"the-tenant"`, `"client_id":"the-client"`, `"has_token":false`} {
+		if !strings.Contains(body, want) {
+			t.Errorf("create app body missing %s: %s", want, body)
+		}
+	}
 }
 
 func TestCISources_CRUD(t *testing.T) {
@@ -123,7 +169,7 @@ func TestCISources_LoadWithTokenGuards(t *testing.T) {
 	// Corrupted sealed token → 500 before any provider call.
 	e.mock.ExpectQuery("SELECT .+ FROM ci_sources WHERE id").WithArgs("c1").
 		WillReturnRows(sqlmock.NewRows(ciSrcCols).
-			AddRow("c1", "corp", "github_actions", "corp-org", nil, []byte("not-a-ciphertext"), "2026-06-10", "2026-06-10"))
+			AddRow("c1", "corp", "github_actions", "corp-org", nil, "pat", []byte("not-a-ciphertext"), nil, nil, nil, "2026-06-10", "2026-06-10"))
 	if w := e.do(http.MethodGet, "/api/v1/ci-sources/c1/repos", ""); w.Code != http.StatusInternalServerError {
 		t.Errorf("corrupt token: status = %d, want 500", w.Code)
 	}

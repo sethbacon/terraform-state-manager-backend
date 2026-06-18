@@ -3,7 +3,6 @@ package pipelines
 import (
 	"bytes"
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -30,14 +29,15 @@ func AzureDevOpsConfigFromMap(m map[string]any) AzureDevOpsConfig {
 }
 
 // DispatchAzureDevOps triggers an Azure DevOps pipeline run via the Pipelines
-// REST API, passing the given template parameters. Auth is a PAT (Basic). The run
-// reports back through the callback.
-func DispatchAzureDevOps(ctx context.Context, pat string, cfg AzureDevOpsConfig, ref string, params map[string]string) error {
+// REST API, passing the given template parameters. Auth is either a PAT (Basic)
+// or an Entra app access token (Bearer), per the ADOToken. The run reports back
+// through the callback.
+func DispatchAzureDevOps(ctx context.Context, cred ADOToken, cfg AzureDevOpsConfig, ref string, params map[string]string) error {
 	if cfg.Organization == "" || cfg.Project == "" || cfg.PipelineID == "" {
 		return fmt.Errorf("azure devops connection requires config.organization, config.project, and config.pipeline_id")
 	}
-	if pat == "" {
-		return fmt.Errorf("azure devops connection requires a personal access token")
+	if cred.empty() {
+		return fmt.Errorf("azure devops connection requires a credential (personal access token or Entra app registration)")
 	}
 	if ref == "" {
 		ref = cfg.Ref
@@ -63,8 +63,8 @@ func DispatchAzureDevOps(ctx context.Context, pat string, cfg AzureDevOpsConfig,
 	if err != nil {
 		return err
 	}
-	// PAT auth: Basic base64(":" + pat).
-	req.Header.Set("Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte(":"+pat)))
+	// PAT -> Basic base64(":"+pat); Entra app token -> Bearer.
+	cred.authorize(req)
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := httpClient.Do(req)
@@ -87,8 +87,8 @@ func DispatchAzureDevOps(ctx context.Context, pat string, cfg AzureDevOpsConfig,
 }
 
 // DispatchAzureDevOpsDrift dispatches a pipeline with the standard drift parameters.
-func DispatchAzureDevOpsDrift(ctx context.Context, pat string, cfg AzureDevOpsConfig, ref string, inputs DriftInputs) error {
-	return DispatchAzureDevOps(ctx, pat, cfg, ref, map[string]string{
+func DispatchAzureDevOpsDrift(ctx context.Context, cred ADOToken, cfg AzureDevOpsConfig, ref string, inputs DriftInputs) error {
+	return DispatchAzureDevOps(ctx, cred, cfg, ref, map[string]string{
 		"callback_url":   inputs.CallbackURL,
 		"callback_token": inputs.CallbackToken,
 		"working_dir":    inputs.WorkingDir,

@@ -35,6 +35,40 @@ func fakeADO(t *testing.T) *httptest.Server {
 	return srv
 }
 
+// TestVerifyCISource_App: VerifyCISource on an app source mints an Entra token
+// and presents it to ADO as a Bearer credential, end to end.
+func TestVerifyCISource_App(t *testing.T) {
+	pipelines.ResetEntraTokenCacheForTest()
+
+	entraSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(w, `{"access_token":"minted","expires_in":3600}`)
+	}))
+	t.Cleanup(entraSrv.Close)
+	defer pipelines.OverrideEntraLoginURLForTest(entraSrv.URL)()
+
+	var gotAuth string
+	adoSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		fmt.Fprint(w, `{"count":0,"value":[]}`)
+	}))
+	t.Cleanup(adoSrv.Close)
+	defer pipelines.OverrideBaseURLsForTest(adoSrv.URL, "")()
+
+	e := newCISourcesEnv(t)
+	e.mock.ExpectQuery("SELECT .+ FROM ci_sources WHERE id").WithArgs("c1").
+		WillReturnRows(appCiSrcRow(t))
+	w := e.do(http.MethodPost, "/api/v1/ci-sources/c1/verify", "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("verify app: status = %d (%s)", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), `"ok":true`) {
+		t.Errorf("verify app body = %s", w.Body.String())
+	}
+	if gotAuth != "Bearer minted" {
+		t.Errorf("ADO auth = %q, want Bearer minted (app token)", gotAuth)
+	}
+}
+
 func TestCISourceProxies_AzureDevOps(t *testing.T) {
 	srv := fakeADO(t)
 	restore := pipelines.OverrideBaseURLsForTest(srv.URL, "")
