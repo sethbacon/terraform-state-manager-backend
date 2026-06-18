@@ -38,6 +38,14 @@
 | Source shows decrypt errors | `TSM_ENCRYPTION_KEY` changed/lost | re-enter credentials ([disaster-recovery.md](disaster-recovery.md)) |
 | local source empty | PVC/mount path mismatch with the source's base_path | `localStates.mountPath` vs source config |
 
+## Suite / shared identity
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| Role scopes reset on every restart | two apps share one identity DB but both seed it (`role_seed_owner=self` on both) | set `TSM_SUITE_ROLE_SEED_OWNER` so exactly one app owns the seed (`registry` or `tsm`) |
+| "Consumed by" panel empty / `GET /consumers` 401 | service tokens don't match (or `TSM_SUITE_SERVICE_TOKEN` empty ⇒ endpoint disabled) | set `TSM_SUITE_SERVICE_TOKEN` to the SAME value as the sibling registry's `TFR_SUITE_SIBLING_TOKEN` |
+| Module freshness / cross-app features missing | sibling not discovered | set `TSM_SUITE_SIBLING_URL`; check `TSM_SUITE_POLL_INTERVAL` and that the sibling manifest is reachable |
+
 ## Production vs dev differences that bite
 
 - No Keycloak in production — the dev realm (admin.user etc.) is a dev-stack

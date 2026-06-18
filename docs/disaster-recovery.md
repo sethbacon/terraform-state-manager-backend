@@ -51,3 +51,30 @@ that encrypted it.
   pipelines keep working).
 - **Accidental state edit**: not a DR event — every edit/restore/transfer
   wrote a pre-write backup row; use the Backups tab to restore.
+
+## RTO / RPO targets
+
+TSM's recovery profile is simpler than the registry's: there is **no object
+store** — recovery is a PostgreSQL restore plus the escrowed
+`TSM_ENCRYPTION_KEY`.
+
+| Tier | RPO (data loss) | RTO (time to recover) | Driven by |
+|---|---|---|---|
+| Managed PG + PITR | seconds–minutes | restore time + redeploy | platform PITR / 14-day retention |
+| Nightly `pg_dump` | up to 24h | restore time + redeploy | dump cadence |
+
+The encryption key is **not** part of RPO/RTO arithmetic — it is a constant
+prerequisite: a restored dump is unusable without the matching key, so escrow it
+versioned alongside every backup.
+
+## DR drill checklist
+
+Run periodically (e.g. quarterly) against a non-production environment:
+
+1. Restore the latest dump (`pg_restore --clean --if-exists`) and start the
+   backend with the **matching** `TSM_ENCRYPTION_KEY`.
+2. Confirm `/ready` returns 200 (DB reachable, migrations reconciled).
+3. Run **Test connection** on a state source — confirms reachability and config.
+4. Confirm the dashboard repopulates after one sync cycle.
+5. Confirm an **encrypted credential decrypts** (open a source that has stored
+   secrets and use it — no decrypt error = the right key was escrowed).

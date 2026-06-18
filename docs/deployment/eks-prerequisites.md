@@ -16,6 +16,10 @@
    trust policy bound to
    `system:serviceaccount:terraform-state-manager:tsm-terraform-state-manager`.
 6. Cluster add-ons:
+   - **Gateway API CRDs** (`gateway.networking.k8s.io/v1`) — the chart renders
+     `Gateway`/`HTTPRoute` objects that depend on them; not present on a fresh
+     cluster unless the AWS Load Balancer Controller install provides them:
+     `kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.1.0/standard-install.yaml`
    - AWS Load Balancer Controller **with Gateway API support** (`aws-alb-external`)
    - Secrets Store CSI Driver + AWS provider (ASCP):
      `helm install csi-secrets-store secrets-store-csi-driver/secrets-store-csi-driver -n kube-system`

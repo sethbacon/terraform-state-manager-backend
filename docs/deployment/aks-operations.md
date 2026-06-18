@@ -34,6 +34,10 @@ kubectl -n terraform-state-manager get certificate,certificaterequest
 kubectl -n terraform-state-manager describe certificate tsm-terraform-state-manager-tls
 ```
 
+The Certificate resource is named `tsm-terraform-state-manager-tls`, but the TLS
+**Secret** it writes is the unprefixed `terraform-state-manager-tls` (the chart's
+`gatewayAPI.tlsSecretName`) — both names are intentional, not a typo.
+
 Stuck HTTP-01 challenges are almost always DNS not pointing at the AGfC
 frontend FQDN, or the Gateway not Programmed (check ALB controller logs in
 `azure-alb-system`).
@@ -45,7 +49,11 @@ CSI volume; the add-on's rotation poll also refreshes them (~2m), but env
 vars are read at process start — **restart the deployments after rotating**:
 
 ```bash
-kubectl -n terraform-state-manager rollout restart deploy
+# Only the backend and worker consume the app Secret; the frontend reads no
+# app secrets. Restarting the worker bounces the single-replica scheduler, so
+# expect the same short no-schedule gap as an upgrade.
+kubectl -n terraform-state-manager rollout restart deploy \
+  -l 'app.kubernetes.io/component in (backend,worker)'
 ```
 
 Caveats for `TSM_ENCRYPTION_KEY` in [secrets-rotation.md](../secrets-rotation.md)

@@ -18,6 +18,17 @@ sudo systemctl start terraform-state-manager && sudo systemctl reload nginx
 curl -s http://127.0.0.1:8080/health
 ```
 
+The environment file is seeded from
+[`deployments/binary/environment.example`](../../deployments/binary/environment.example);
+the **mandatory** keys are `TSM_DATABASE_HOST`/`_PASSWORD`, `TSM_JWT_SECRET`, and
+`TSM_ENCRYPTION_KEY` (plus the `TSM_SERVER_*` URLs for a real hostname) — see
+[configuration.md](../configuration.md) for the full set.
+
+The systemd unit runs the binary's `serve` subcommand, which **applies database
+migrations on start** (under advisory locks). For a manual pre-step you can run
+`terraform-state-manager migrate up` (also `migrate down`); `version` prints the
+build.
+
 Requirements: PostgreSQL 14+, nginx, **git** (the git state connector shells
 out to it), a TLS certificate (certbot works with the provided nginx conf).
 The unit is hardened (`ProtectSystem=strict`, `NoNewPrivileges`,

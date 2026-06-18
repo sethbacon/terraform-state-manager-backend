@@ -5,13 +5,16 @@
 Prometheus metrics on a **separate, unauthenticated** port (default 9090 —
 never expose it publicly): `http_requests_total{method,path,status}`,
 `http_request_duration_seconds` (histogram), `db_connections_{open,in_use,idle}`,
-`app_info{version}`, plus Go runtime metrics.
+`app_info{version,go_version,build_date}`, plus Go runtime metrics.
 
 - Kubernetes: `serviceMonitor.enabled=true` (+ `prometheusRule.enabled`,
   `grafanaDashboard.enabled`) in the chart; NetworkPolicy already admits the
   `monitoring` namespace on 9090.
 - Compose/binary: `deployments/observability/prometheus.yml` scrapes both
   the API replica and the worker.
+- `deployments/observability/recording-rules.yml` precomputes the common
+  series the dashboard/alerts use — request rate, 5xx ratio, p99 latency, and
+  DB-pool utilization — load it alongside the scrape config.
 
 ## Alerts
 
@@ -33,6 +36,9 @@ level `warn` keeps volume low but **suppresses boot/info lines** (including
 the worker-gate notice) — drop to `info` when diagnosing. Useful components:
 `statesync` (per-source sync results), scheduler dispatches,
 `statesource.hcp`/`drift` mutation logs, auth provider initialization.
+
+No profiling endpoint (`pprof`) is exposed — there is no `TSM_TELEMETRY_PROFILING_*`
+setting; the only side-channel port is `/metrics`.
 
 ## Audit trail
 
