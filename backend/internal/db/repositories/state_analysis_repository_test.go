@@ -192,6 +192,44 @@ func TestStateAnalysisStateVersions(t *testing.T) {
 	}
 }
 
+func TestStateAnalysisAllStates(t *testing.T) {
+	db, mock := newMock(t)
+	r := NewStateAnalysisRepository(db)
+
+	cols := []string{
+		"source_id", "name", "type", "state_key", "terraform_version", "serial", "lineage", "size",
+		"rum", "managed_resources", "data_sources", "total_resources", "providers", "resource_types", "analyzed_at",
+	}
+	mock.ExpectQuery("FROM state_analyses a").WillReturnRows(
+		sqlmock.NewRows(cols).
+			AddRow("s1", "prod", "s3", "app.tfstate", "1.5.7", 10, "lin-1", 2048, 40, 38, 2, 42,
+				[]byte(`{"aws":40}`), []byte(`{"aws_instance":12}`), "2026-06-18T00:00:00Z").
+			AddRow("s2", "dev", "local", "x.tfstate", "", 1, "", 64, 0, 0, 0, 0,
+				[]byte(`{}`), []byte(`{}`), "2026-06-18T00:00:00Z"))
+	got, err := r.AllStates(ctx)
+	if err != nil {
+		t.Fatalf("AllStates: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("AllStates len = %d", len(got))
+	}
+	if got[0].SourceType != "s3" || got[0].Size != 2048 ||
+		got[0].Providers["aws"] != 40 || got[0].ResourceTypes["aws_instance"] != 12 {
+		t.Errorf("AllStates[0] = %+v", got[0])
+	}
+	if got[1].TerraformVersion != "" || len(got[1].Providers) != 0 {
+		t.Errorf("AllStates[1] = %+v", got[1])
+	}
+
+	mock.ExpectQuery("FROM state_analyses a").WillReturnError(errDB)
+	if _, err := r.AllStates(ctx); err == nil {
+		t.Error("AllStates: expected error")
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Error(err)
+	}
+}
+
 func TestSourceSyncStatus(t *testing.T) {
 	db, mock := newMock(t)
 	r := NewStateAnalysisRepository(db)

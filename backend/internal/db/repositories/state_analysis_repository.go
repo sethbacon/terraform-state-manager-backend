@@ -60,6 +60,28 @@ type StateVersionRow struct {
 	RUM              int    `json:"rum"`
 }
 
+// StateRow is one analyzed state file with its full scalar field set plus the
+// provider and resource-type maps, joined to its owning source's name and type.
+// It backs the Reports page's cross-fleet query/filter/export, where any of
+// these fields can be a filter predicate or an exported column.
+type StateRow struct {
+	SourceID         string         `json:"source_id"`
+	SourceName       string         `json:"source_name"`
+	SourceType       string         `json:"source_type"`
+	StateKey         string         `json:"state_key"`
+	TerraformVersion string         `json:"terraform_version"`
+	Serial           int64          `json:"serial"`
+	Lineage          string         `json:"lineage"`
+	Size             int64          `json:"size"`
+	RUM              int            `json:"rum"`
+	ManagedResources int            `json:"managed_resources"`
+	DataSources      int            `json:"data_sources"`
+	TotalResources   int            `json:"total_resources"`
+	Providers        map[string]int `json:"providers"`
+	ResourceTypes    map[string]int `json:"resource_types"`
+	AnalyzedAt       string         `json:"analyzed_at"`
+}
+
 // StateAnalysisRepository is the DAO for state_analyses and source_sync_status.
 type StateAnalysisRepository struct {
 	db *sql.DB
@@ -299,6 +321,42 @@ func (r *StateAnalysisRepository) StateVersions(ctx context.Context) ([]StateVer
 		if err := rows.Scan(&v.SourceID, &v.SourceName, &v.StateKey, &v.TerraformVersion, &v.RUM); err != nil {
 			return nil, err
 		}
+		out = append(out, v)
+	}
+	return out, rows.Err()
+}
+
+// AllStates returns every analyzed state file with its full scalar field set,
+// provider/resource-type maps, and owning source name + type. The Reports page
+// filters these in the handler (the store is one row per state file, so an
+// in-memory pass is simpler and more flexible than encoding every predicate —
+// substring, semver range, provider/type membership, numeric ranges — in SQL).
+func (r *StateAnalysisRepository) AllStates(ctx context.Context) ([]StateRow, error) {
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT a.source_id, COALESCE(s.name, ''), COALESCE(s.type, ''), a.state_key,
+		       a.terraform_version, a.serial, a.lineage, a.size,
+		       a.rum, a.managed_resources, a.data_sources, a.total_resources,
+		       a.providers, a.resource_types, a.analyzed_at::text
+		FROM state_analyses a
+		LEFT JOIN state_sources s ON s.id = a.source_id
+		ORDER BY s.name, a.state_key`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := []StateRow{}
+	for rows.Next() {
+		var v StateRow
+		var providersJSON, resTypesJSON []byte
+		if err := rows.Scan(&v.SourceID, &v.SourceName, &v.SourceType, &v.StateKey,
+			&v.TerraformVersion, &v.Serial, &v.Lineage, &v.Size,
+			&v.RUM, &v.ManagedResources, &v.DataSources, &v.TotalResources,
+			&providersJSON, &resTypesJSON, &v.AnalyzedAt); err != nil {
+			return nil, err
+		}
+		_ = json.Unmarshal(providersJSON, &v.Providers)
+		_ = json.Unmarshal(resTypesJSON, &v.ResourceTypes)
 		out = append(out, v)
 	}
 	return out, rows.Err()
