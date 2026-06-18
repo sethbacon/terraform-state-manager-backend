@@ -79,7 +79,7 @@ func (h *HealthHandlers) CreateRun() gin.HandlerFunc {
 			return
 		}
 		// Connection-level token, or the shared token of its CI source.
-		token, err := resolvePipelineToken(ctx, h.ciSourceRepo, conn)
+		token, bearer, err := resolvePipelineToken(ctx, h.ciSourceRepo, conn)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to resolve pipeline token"})
 			return
@@ -127,7 +127,7 @@ func (h *HealthHandlers) CreateRun() gin.HandlerFunc {
 		case "github_actions":
 			dispatchErr = pipelines.DispatchGitHub(ctx, token, pipelines.GitHubConfigFromMap(conn.Config), req.RepoRef, inputs)
 		case "azure_devops":
-			dispatchErr = pipelines.DispatchAzureDevOps(ctx, token, pipelines.AzureDevOpsConfigFromMap(conn.Config), req.RepoRef, inputs)
+			dispatchErr = pipelines.DispatchAzureDevOps(ctx, adoCred(token, bearer), pipelines.AzureDevOpsConfigFromMap(conn.Config), req.RepoRef, inputs)
 		default:
 			dispatchErr = errUnsupportedProvider(conn.Provider)
 		}

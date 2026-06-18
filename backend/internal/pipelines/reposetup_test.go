@@ -65,7 +65,7 @@ func TestSetupAzureWorkflowCreatesBranchAndPR(t *testing.T) {
 	azureDevOpsBaseURL = srv.URL
 	defer func() { azureDevOpsBaseURL = old }()
 
-	res, err := SetupAzureWorkflow(context.Background(), "pat", "o", "p", "r1",
+	res, err := SetupAzureWorkflow(context.Background(), ADOPAT("pat"), "o", "p", "r1",
 		[]FileSpec{{Path: AzureWorkflowPath, Content: "yaml-content"}})
 	if err != nil {
 		t.Fatal(err)
@@ -94,7 +94,7 @@ func TestSetupAzureWorkflowIdempotentWhenFileExists(t *testing.T) {
 	azureDevOpsBaseURL = srv.URL
 	defer func() { azureDevOpsBaseURL = old }()
 
-	res, err := SetupAzureWorkflow(context.Background(), "pat", "o", "p", "r1",
+	res, err := SetupAzureWorkflow(context.Background(), ADOPAT("pat"), "o", "p", "r1",
 		[]FileSpec{{Path: AzureWorkflowPath, Content: "c"}})
 	if err != nil {
 		t.Fatal(err)
@@ -169,10 +169,10 @@ func TestPRStateNormalization(t *testing.T) {
 	defer func() { azureDevOpsBaseURL, githubAPIBaseURL = oldA, oldG }()
 
 	ctx := context.Background()
-	if s, _ := AzurePRState(ctx, "p", "o", "p", "r", 1); s != "merged" {
+	if s, _ := AzurePRState(ctx, ADOPAT("p"), "o", "p", "r", 1); s != "merged" {
 		t.Errorf("ado completed → %s", s)
 	}
-	if s, _ := AzurePRState(ctx, "p", "o", "p", "r", 2); s != "open" {
+	if s, _ := AzurePRState(ctx, ADOPAT("p"), "o", "p", "r", 2); s != "open" {
 		t.Errorf("ado active → %s", s)
 	}
 	if s, _ := GitHubPRState(ctx, "t", "o", "r", 3); s != "merged" {
@@ -182,7 +182,6 @@ func TestPRStateNormalization(t *testing.T) {
 		t.Errorf("gh closed-unmerged → %s", s)
 	}
 }
-
 
 func TestSetupAzureWorkflowMultiFileSkipsExisting(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -226,7 +225,7 @@ func TestSetupAzureWorkflowMultiFileSkipsExisting(t *testing.T) {
 	azureDevOpsBaseURL = srv.URL
 	defer func() { azureDevOpsBaseURL = old }()
 
-	res, err := SetupAzureWorkflow(context.Background(), "pat", "o", "p", "r1", []FileSpec{
+	res, err := SetupAzureWorkflow(context.Background(), ADOPAT("pat"), "o", "p", "r1", []FileSpec{
 		{Path: WorkflowPaths["drift"].Azure, Content: "a"},
 		{Path: WorkflowPaths["versionlab"].Azure, Content: "b"},
 	})

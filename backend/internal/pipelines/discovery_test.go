@@ -31,7 +31,7 @@ func TestListAzurePipelinesFollowsContinuation(t *testing.T) {
 	azureDevOpsBaseURL = srv.URL
 	defer func() { azureDevOpsBaseURL = old }()
 
-	refs, err := ListAzurePipelines(context.Background(), "pat", "myorg", "myproj")
+	refs, err := ListAzurePipelines(context.Background(), ADOPAT("pat"), "myorg", "myproj")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -39,7 +39,7 @@ func TestListAzurePipelinesFollowsContinuation(t *testing.T) {
 		t.Fatalf("expected 3 pipelines across pages, got: %+v", refs)
 	}
 
-	if _, err := ListAzurePipelines(context.Background(), "", "o", "p"); err == nil {
+	if _, err := ListAzurePipelines(context.Background(), ADOPAT(""), "o", "p"); err == nil {
 		t.Fatal("empty PAT accepted")
 	}
 }
@@ -139,14 +139,14 @@ func TestListAzureReposAndServiceConnections(t *testing.T) {
 	azureDevOpsBaseURL = srv.URL
 	defer func() { azureDevOpsBaseURL = old }()
 
-	repos, err := ListAzureRepos(context.Background(), "pat", "o", "p")
+	repos, err := ListAzureRepos(context.Background(), ADOPAT("pat"), "o", "p")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(repos) != 2 || repos[0].Name != "app" || repos[1].ID != "r2" {
 		t.Fatalf("unexpected repos: %+v", repos)
 	}
-	scs, err := ListAzureServiceConnections(context.Background(), "pat", "o", "p")
+	scs, err := ListAzureServiceConnections(context.Background(), ADOPAT("pat"), "o", "p")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -184,14 +184,14 @@ func TestCreateAzurePipeline(t *testing.T) {
 	azureDevOpsBaseURL = srv.URL
 	defer func() { azureDevOpsBaseURL = old }()
 
-	ref, err := CreateAzurePipeline(context.Background(), "pat", "o", "p", "TSM Drift", "/azure-pipelines-tsm-drift.yml", "r1")
+	ref, err := CreateAzurePipeline(context.Background(), ADOPAT("pat"), "o", "p", "TSM Drift", "/azure-pipelines-tsm-drift.yml", "r1")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if ref.ID != 99 || ref.Name != "TSM Drift" {
 		t.Fatalf("unexpected ref: %+v", ref)
 	}
-	if _, err := CreateAzurePipeline(context.Background(), "pat", "o", "p", "", "/x.yml", "r1"); err == nil {
+	if _, err := CreateAzurePipeline(context.Background(), ADOPAT("pat"), "o", "p", "", "/x.yml", "r1"); err == nil {
 		t.Fatal("empty name accepted")
 	}
 }

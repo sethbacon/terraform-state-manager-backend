@@ -278,6 +278,7 @@ func NewRouter(cfg *config.Config, database *sql.DB, identityDB *sql.DB) (*gin.E
 			cs.GET("", ciSources.ListCISources())
 			cs.POST("", ciSources.CreateCISource())
 			cs.DELETE("/:id", ciSources.DeleteCISource())
+			cs.POST("/:id/verify", ciSources.VerifyCISource())
 			cs.GET("/:id/pipelines", ciSources.ListSourcePipelines())
 			cs.GET("/:id/repos", ciSources.ListSourceRepos())
 			cs.GET("/:id/repos/:repo/workflows", ciSources.ListSourceWorkflows())
