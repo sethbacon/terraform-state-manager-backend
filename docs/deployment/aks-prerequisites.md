@@ -62,7 +62,9 @@ Secret NAMES are what the chart's SecretProviderClass expects.
 
 ```bash
 export KV=<globally-unique>
-az keyvault create -n $KV -g $RG --enable-rbac-authorization true
+# --enable-purge-protection true matches the Terraform module (recommended for
+# production: protects the escrowed encryption-key from accidental/early deletion).
+az keyvault create -n $KV -g $RG --enable-rbac-authorization true --enable-purge-protection true
 az role assignment create --assignee $(az ad signed-in-user show --query id -o tsv) \
   --role "Key Vault Administrator" --scope $(az keyvault show -n $KV --query id -o tsv)
 
@@ -112,6 +114,11 @@ See [initial-setup.md](../initial-setup.md#entra-id-oidc) — you'll need the
 tenant ID, the app's client ID, a client secret (→ Key Vault
 `oidc-client-secret`), redirect URI
 `https://<hostname>/api/v1/auth/callback`, and a `groups` claim.
+
+> **Entra/Azure AD:** set `auth.oidc.requireVerifiedEmail=false` (chart default
+> is `true`). Entra omits the `email_verified` claim, so leaving the default on
+> makes the **first login fail with `email_not_verified`**. Referenced again at
+> [aks-new-cluster.md](aks-new-cluster.md) §5 (first login).
 
 Continue with [aks-new-cluster.md](aks-new-cluster.md) (cluster components +
 helm install) or [aks-existing-cluster.md](aks-existing-cluster.md).

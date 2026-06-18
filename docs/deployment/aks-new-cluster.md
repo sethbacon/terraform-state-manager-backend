@@ -8,6 +8,12 @@ they fill).
 
 **ALB Controller** (drives AGfC via Gateway API):
 
+> **Applied the Terraform module?** It already creates this identity
+> (`tsm-alb-controller`), its role assignment, and the federated credential with
+> the same subject. **Skip the `az identity`/role/federated-credential commands
+> below** and set `ALB_CLIENT_ID` from the module's `alb_controller_client_id`
+> output — go straight to the `helm install`.
+
 ```bash
 az identity create -n tsm-alb-controller -g $RG
 export ALB_CLIENT_ID=$(az identity show -n tsm-alb-controller -g $RG --query clientId -o tsv)
@@ -33,6 +39,15 @@ helm install cert-manager jetstack/cert-manager \
   --namespace cert-manager --create-namespace \
   --set crds.enabled=true \
   --set "extraArgs={--enable-gateway-api}"
+```
+
+**Gateway API CRDs** — the chart renders `Gateway`/`GatewayClass`/`HTTPRoute`
+objects (`gateway.networking.k8s.io/v1`), which are not present on a fresh AKS
+cluster. Install the standard bundle before the helm install (skip if your ALB
+controller install already provides them):
+
+```bash
+kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.1.0/standard-install.yaml
 ```
 
 ## 2. Fill in the values file
@@ -74,6 +89,10 @@ kubectl -n terraform-state-manager delete secret terraform-state-manager-tls  # 
 ```
 
 ## 5. First login + smoke
+
+> **Entra login fails with `email_not_verified`?** Set
+> `auth.oidc.requireVerifiedEmail=false` — Entra omits the `email_verified`
+> claim. See [aks-prerequisites.md](aks-prerequisites.md) §7.
 
 Follow [initial-setup.md](../initial-setup.md) (Entra login → admin role via
 group mapping or default role; add a state source; run the e2e checklist:

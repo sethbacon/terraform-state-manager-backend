@@ -8,6 +8,14 @@ optional YAML file (path via `CONFIG_PATH`; see `backend/config.example.yaml`)
 **Secret** values must come from a secret store (Key Vault / Secrets Manager /
 Secret Manager / Kubernetes Secrets) — never config files or Helm values.
 
+**Sections:** [Server](#server) · [Database](#database) ·
+[Identity database](#identity-database-shared--standalone) ·
+[Core secrets](#core-secrets) · [Workers](#workers) ·
+[OIDC](#authentication--oidc) · [LDAP](#authentication--ldap--active-directory) ·
+[SAML](#authentication--saml-20) · [mTLS & SCIM](#authentication--mtls-and-scim) ·
+[Logging & telemetry](#logging--telemetry) · [Suite coupling](#suite-coupling) ·
+[Endpoints](#endpoints-a-deployment-should-know)
+
 ## Server
 
 | Variable | Default | Required | Secret | Description |
@@ -21,6 +29,7 @@ Secret Manager / Kubernetes Secrets) — never config files or Helm values.
 | `TSM_SERVER_WRITE_TIMEOUT` | `30s` | | | HTTP write timeout |
 | `TSM_SERVER_TLS_CERT_FILE` | (empty) | | | Serve HTTPS directly (required for mTLS); empty = terminate TLS upstream |
 | `TSM_SERVER_TLS_KEY_FILE` | (empty) | | | Pairs with CERT_FILE |
+| `TSM_SERVER_TRUSTED_PROXIES` | (empty) | | | Comma-separated CIDRs/IPs of reverse proxies allowed to set `X-Forwarded-For`. Empty = trust no proxy (client IP in audit logs is the connecting peer). Set to your ingress/load-balancer CIDR to honour `X-Forwarded-For` |
 
 ## Database
 
@@ -38,6 +47,30 @@ Secret Manager / Kubernetes Secrets) — never config files or Helm values.
 PostgreSQL 14+ (16 recommended). Migrations (app schema + shared identity
 schema) run on every boot under advisory locks — multi-replica rollouts are
 safe — and are also available imperatively: `terraform-state-manager migrate up|down`.
+
+## Identity database (shared / standalone)
+
+The identity schema (users, organizations, roles, tokens) can optionally point
+at a **separate or shared** database, independent of the app database above.
+Any unset field falls back to the corresponding `TSM_DATABASE_*` value, so
+leaving the whole section unset = use the app database (the standalone default).
+Set `TSM_IDENTITY_DATABASE_*` to share one identity store across the suite
+(e.g. one identity DB used by both this app and the sibling registry).
+
+| Variable | Default | Required | Secret | Description |
+|---|---|---|---|---|
+| `TSM_IDENTITY_DATABASE_HOST` | (⇒ `TSM_DATABASE_HOST`) | | | Identity DB host |
+| `TSM_IDENTITY_DATABASE_PORT` | (⇒ `TSM_DATABASE_PORT`) | | | |
+| `TSM_IDENTITY_DATABASE_NAME` | (⇒ `TSM_DATABASE_NAME`) | | | |
+| `TSM_IDENTITY_DATABASE_USER` | (⇒ `TSM_DATABASE_USER`) | | | |
+| `TSM_IDENTITY_DATABASE_PASSWORD` | (⇒ `TSM_DATABASE_PASSWORD`) | | **yes** | |
+| `TSM_IDENTITY_DATABASE_SSL_MODE` | (⇒ `TSM_DATABASE_SSL_MODE`) | | | As `TSM_DATABASE_SSL_MODE` |
+| `TSM_IDENTITY_DATABASE_MAX_CONNECTIONS` | (⇒ `TSM_DATABASE_MAX_CONNECTIONS`) | | | Pool cap **per replica** |
+| `TSM_IDENTITY_DATABASE_MIN_IDLE_CONNECTIONS` | (⇒ `TSM_DATABASE_MIN_IDLE_CONNECTIONS`) | | | |
+
+When two suite apps share **one** identity database, exactly one must own the
+role-template seed — see [`TSM_SUITE_ROLE_SEED_OWNER`](#suite-coupling) below or
+they overwrite each other's role scopes on every restart.
 
 ## Core secrets
 
@@ -67,9 +100,12 @@ safe — and are also available imperatively: `terraform-state-manager migrate u
 | `TSM_AUTH_OIDC_GROUP_CLAIM_NAME` | `groups` | IdP claim carrying group memberships |
 | `TSM_AUTH_OIDC_DEFAULT_ROLE` | (empty) | Role granted on FIRST login when no group mapping matches (admin/editor/operator/viewer) |
 
-Group→role mappings are managed in the UI (Administration → OIDC groups) and
-reconcile on every login — users removed from mapped groups are deprovisioned
-from the mapped orgs.
+OIDC group→role mappings (`auth.oidc.group_mappings`) are managed in the UI
+(Administration → OIDC groups) and reconcile on every login — users removed from
+mapped groups are deprovisioned from the mapped orgs. They may also be declared
+in the YAML file (see [`config.example.yaml`](../backend/config.example.yaml)).
+OIDC is the only provider whose group mappings are UI-editable; the LDAP/SAML
+mappings below are **file config only**.
 
 ## Authentication — LDAP / Active Directory
 
@@ -92,6 +128,10 @@ from the mapped orgs.
 | `TSM_AUTH_LDAP_GROUP_MEMBER_ATTR` | `member` | |
 | `TSM_AUTH_LDAP_DEFAULT_ROLE` | (empty) | As OIDC |
 
+LDAP group→role mappings (`auth.ldap.group_mappings`) are a YAML list (group DN →
+organization + role) and are **file config only** — there is no `TSM_` scalar for
+them. See [`config.example.yaml`](../backend/config.example.yaml).
+
 ## Authentication — SAML 2.0
 
 | Variable | Default | Description |
@@ -104,6 +144,11 @@ from the mapped orgs.
 | `TSM_AUTH_SAML_GROUP_ATTRIBUTE_NAME` | (empty) | Assertion attribute carrying groups |
 | `TSM_AUTH_SAML_DEFAULT_ROLE` | (empty) | As OIDC |
 
+The IdP list (`auth.saml.idps`, one or more IdPs by metadata URL or inline XML)
+and the SAML group→role mappings (`auth.saml.group_mappings`) are YAML lists and
+are **file config only** — there is no `TSM_` scalar for them. At least one IdP
+must be declared. See [`config.example.yaml`](../backend/config.example.yaml).
+
 ## Authentication — mTLS and SCIM
 
 | Variable | Default | Description |
@@ -111,6 +156,12 @@ from the mapped orgs.
 | `TSM_AUTH_MTLS_ENABLED` | `false` | Client-cert auth; requires the backend to terminate TLS itself (`TSM_SERVER_TLS_*`) |
 | `TSM_AUTH_MTLS_CLIENT_CA_FILE` | | PEM bundle of trusted client CAs |
 | `TSM_AUTH_SCIM_ENABLED` | `false` | Mounts `/scim/v2` (RFC 7644). Bearer token with `scim:provision` scope; rate-limit at the proxy |
+
+A verified client cert is granted scopes via `auth.mtls.mappings` (**file config
+only** — see [`config.example.yaml`](../backend/config.example.yaml)), which maps
+a subject to a list of scopes. The subject may be `CN=<name>`, `dns:<san>`, or a
+full DN. With no matching mapping the cert authenticates but carries **no
+scopes** (so it can reach nothing) — define a mapping for every client cert.
 
 API keys (`tsm_…` Bearer tokens, self-service under `/admin/apikeys`) are always
 enabled and are the recommended credential for CI calls such as
@@ -125,6 +176,28 @@ enabled and are the recommended credential for CI calls such as
 | `TSM_TELEMETRY_METRICS_ENABLED` | `true` | Prometheus exporter |
 | `TSM_TELEMETRY_METRICS_PROMETHEUS_PORT` | `9090` | `/metrics` listens here, **unauthenticated** — never expose publicly |
 
+## Suite coupling
+
+Optional runtime coupling to the sibling suite app (the Terraform registry).
+Leaving `TSM_SUITE_SIBLING_URL` empty (the default) runs this app **standalone**.
+When set, the app discovers the sibling's manifest and lights up cross-app
+features (module freshness, the "Consumed by" join, audit federation).
+
+| Variable | Default | Required | Secret | Description |
+|---|---|---|---|---|
+| `TSM_SUITE_SIBLING_URL` | (empty) | | | Base URL of the sibling registry. Empty = standalone (no discovery, cross-app features inert) |
+| `TSM_SUITE_POLL_INTERVAL` | `60s` | | | How often the sibling manifest is re-fetched |
+| `TSM_SUITE_ROLE_SEED_OWNER` | `self` | | | Which app seeds the shared identity schema's system role templates: `self` \| `registry` \| `tsm`. **See the hazard below** |
+| `TSM_SUITE_IDENTITY_SHARED_STORE` | `false` | | | Operator assertion that this app uses the shared identity store + single IdP. Advertised in the manifest; the SPA only drops the "you may need to sign in" hint when **both** apps assert it |
+| `TSM_SUITE_SERVICE_TOKEN` | (empty) | | **yes** | Shared secret the sibling presents (`X-Suite-Service-Token`) for server-to-server reads (`GET /consumers`). Empty = that endpoint stays disabled. Set to the **same** value as the sibling registry's `TFR_SUITE_SIBLING_TOKEN` to enable the "Consumed by" join |
+
+> **Role-seed hazard.** `TSM_SUITE_ROLE_SEED_OWNER=self` (default) means every
+> app seeds its own identity store — correct for standalone, and when each app
+> has its own identity database. But when **two apps share one identity
+> database**, exactly one must own the seed (`registry` or `tsm`); otherwise they
+> overwrite each other's role scopes on **every restart**. Set this together with
+> `TSM_IDENTITY_DATABASE_*` whenever you share an identity store.
+
 ## Endpoints a deployment should know
 
 | Endpoint | Auth | Use |
@@ -136,3 +209,6 @@ enabled and are the recommended credential for CI calls such as
 | `POST /api/v1/drift/runs/{id}/results` | one-shot run token | CI drift callback |
 | `POST /api/v1/drift/ingest` | Bearer (`state:drift`) | Push-style drift intake |
 | `/scim/v2/*` | Bearer (`scim:provision`) | IdP provisioning (when enabled) |
+| `GET /api/v1/suite/manifest` | none | Suite capability manifest the sibling app discovers (advertises shared-store + cross-app features) |
+| `GET /api/v1/consumers` | `X-Suite-Service-Token` (`TSM_SUITE_SERVICE_TOKEN`) | States consuming a given registry module; the sibling registry proxies this to power its "Consumed by" panel |
+| `POST /api/v1/audit/ingest` | `X-Suite-Service-Token` (`TSM_SUITE_SERVICE_TOKEN`) | Receiving side of audit federation — a sibling app federates its audit entries here (shared-store only) |

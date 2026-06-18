@@ -31,6 +31,22 @@ database:
   max_connections: 25
   min_idle_connections: 5
 
+# Identity database (users, organizations, roles, tokens). Optional: point the
+# identity schema at a SEPARATE or SHARED database. Any field left unset falls
+# back to the matching database.* value above, so leaving the whole block out =
+# use the app database (the standalone default). Set these (TSM_IDENTITY_DATABASE_*)
+# to share one identity store across the suite. When two apps share one identity
+# database, set suite.role_seed_owner so exactly one app owns the role seed.
+# identity_database:
+#   host: ""                # => database.host
+#   port: 0                 # => database.port
+#   name: ""                # => database.name
+#   user: ""                # => database.user
+#   password: ""            # => database.password
+#   ssl_mode: ""            # => database.ssl_mode
+#   max_connections: 0      # => database.max_connections
+#   min_idle_connections: 0 # => database.min_idle_connections
+
 logging:
   level: "info"             # debug | info | warn | error
   format: "json"            # json | text
@@ -126,3 +142,26 @@ auth:
   # at the proxy. Deletes/active=false deactivate (remove memberships), not destroy.
   scim:
     enabled: false
+
+# Optional runtime coupling to the sibling suite app (the Terraform registry).
+# sibling_url empty (default) = standalone; cross-app features (module freshness,
+# the "Consumed by" join, audit federation) stay inert. When set, the app polls
+# the sibling manifest and lights those up.
+suite:
+  sibling_url: ""           # base URL of the sibling registry; empty = standalone
+  poll_interval: 60s        # how often the sibling manifest is re-fetched
+  # Which app seeds the shared identity schema's system role templates:
+  # self | registry | tsm. "self" (default) = each app seeds its own store
+  # (correct for standalone and for separate identity DBs). When two apps SHARE
+  # one identity database, exactly one must own the seed ("registry" or "tsm") or
+  # they overwrite each other's role scopes on every restart.
+  role_seed_owner: "self"
+  # Operator assertion that THIS app uses the shared identity store + single IdP.
+  # Advertised in the manifest; the SPA only drops the "you may need to sign in"
+  # hint when BOTH this app and the sibling assert it.
+  identity_shared_store: false
+  # Shared secret the sibling presents (X-Suite-Service-Token) for server-to-server
+  # reads (GET /consumers). Empty leaves that endpoint disabled; set it to the SAME
+  # value as the sibling registry's TFR_SUITE_SIBLING_TOKEN to enable "Consumed by".
+  # Read from TSM_SUITE_SERVICE_TOKEN in production (a secret — do not commit it).
+  service_token: ""

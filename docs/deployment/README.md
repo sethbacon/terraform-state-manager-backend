@@ -1,4 +1,17 @@
-# Kubernetes deployment
+# Kubernetes deployment (Helm & Kustomize)
+
+> This page covers **Kubernetes topology** only. For the full deployment target
+> matrix (serverless, binary, Terraform IaC) and the cross-cutting references,
+> see [docs/deployment.md](../deployment.md).
+>
+> Per-target guides in this folder:
+> **AKS** ([new cluster](aks-new-cluster.md) · [existing](aks-existing-cluster.md) · [prerequisites](aks-prerequisites.md) · [operations](aks-operations.md)) ·
+> **EKS** ([deployment](eks-deployment.md) · [prerequisites](eks-prerequisites.md)) ·
+> **GKE** ([deployment](gke-deployment.md) · [prerequisites](gke-prerequisites.md)).
+> Non-Kubernetes targets: [Azure Container Apps](azure-container-apps.md) ·
+> [AWS ECS](aws-ecs.md) · [Google Cloud Run](google-cloud-run.md) ·
+> [Docker Compose (prod)](docker-compose-production.md) ·
+> [binary/systemd](binary-install.md).
 
 Two equivalent packagings:
 
@@ -68,4 +81,6 @@ preflight warns when it looks unreachable.
 Drift CI sources authenticate to the provider that hosts their pipelines. For
 **Azure DevOps** you can use either a personal access token or a **Microsoft
 Entra app registration** (recommended for scheduled drift — headless, no PAT
-expiry). See [Azure DevOps app-registration auth](ado-app-registration.md).
+expiry). See [Azure DevOps app-registration auth](ado-app-registration.md). For
+**GitHub** you can use either a personal access token or a **GitHub App**
+(headless installation tokens). See [GitHub App auth](github-app.md).
