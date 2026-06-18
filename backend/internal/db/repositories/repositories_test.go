@@ -198,12 +198,12 @@ func TestStateLockRepository_AcquireRelease(t *testing.T) {
 // CISourceRepository
 // ---------------------------------------------------------------------------
 
-var ciCols = []string{"id", "name", "provider", "organization", "project", "auth_method", "encrypted_token", "tenant_id", "client_id", "encrypted_client_secret", "created_at", "updated_at"}
+var ciCols = []string{"id", "name", "provider", "organization", "project", "auth_method", "encrypted_token", "tenant_id", "client_id", "encrypted_client_secret", "github_app_id", "github_installation_id", "encrypted_app_private_key", "created_at", "updated_at"}
 
 func ciRow() *sqlmock.Rows {
 	proj := "Platform"
 	return sqlmock.NewRows(ciCols).
-		AddRow("c1", "corp-ado", "azuredevops", "corp", proj, "pat", []byte("sealed"), nil, nil, nil, "2026-06-10", "2026-06-10")
+		AddRow("c1", "corp-ado", "azuredevops", "corp", proj, "pat", []byte("sealed"), nil, nil, nil, nil, nil, nil, "2026-06-10", "2026-06-10")
 }
 
 func TestCISourceRepository_CRUD(t *testing.T) {

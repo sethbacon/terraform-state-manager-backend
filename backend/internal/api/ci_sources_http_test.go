@@ -1,6 +1,11 @@
 package api
 
 import (
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
+	"encoding/json"
+	"encoding/pem"
 	"net/http"
 	"strings"
 	"testing"
@@ -50,7 +55,7 @@ func newCISourcesEnv(t *testing.T) *sourcesEnv {
 	return &sourcesEnv{r: r, mock: mock}
 }
 
-var ciSrcCols = []string{"id", "name", "provider", "organization", "project", "auth_method", "encrypted_token", "tenant_id", "client_id", "encrypted_client_secret", "created_at", "updated_at"}
+var ciSrcCols = []string{"id", "name", "provider", "organization", "project", "auth_method", "encrypted_token", "tenant_id", "client_id", "encrypted_client_secret", "github_app_id", "github_installation_id", "encrypted_app_private_key", "created_at", "updated_at"}
 
 func ciSrcRow(t *testing.T, provider string, project *string, token string) *sqlmock.Rows {
 	t.Helper()
@@ -59,7 +64,7 @@ func ciSrcRow(t *testing.T, provider string, project *string, token string) *sql
 		t.Fatalf("Encrypt: %v", err)
 	}
 	return sqlmock.NewRows(ciSrcCols).
-		AddRow("c1", "corp", provider, "corp-org", project, "pat", enc, nil, nil, nil, "2026-06-10", "2026-06-10")
+		AddRow("c1", "corp", provider, "corp-org", project, "pat", enc, nil, nil, nil, nil, nil, nil, "2026-06-10", "2026-06-10")
 }
 
 // appCiSrcRow builds an Entra app-auth ADO source row whose encrypted client
@@ -72,17 +77,12 @@ func appCiSrcRow(t *testing.T) *sqlmock.Rows {
 	}
 	proj := "Platform"
 	return sqlmock.NewRows(ciSrcCols).
-		AddRow("c1", "corp", "azure_devops", "corp-org", &proj, "app", nil, "the-tenant", "the-client", enc, "2026-06-10", "2026-06-10")
+		AddRow("c1", "corp", "azure_devops", "corp-org", &proj, "app", nil, "the-tenant", "the-client", enc, nil, nil, nil, "2026-06-10", "2026-06-10")
 }
 
 func TestCISources_CreateApp(t *testing.T) {
 	e := newCISourcesEnv(t)
 
-	// App auth is ADO-only in this first cut.
-	if w := e.do(http.MethodPost, "/api/v1/ci-sources",
-		`{"name":"x","provider":"github_actions","organization":"o","auth_method":"app","tenant_id":"t","client_id":"c","client_secret":"s"}`); w.Code != http.StatusBadRequest {
-		t.Errorf("github app: status = %d, want 400", w.Code)
-	}
 	// Missing Entra fields.
 	if w := e.do(http.MethodPost, "/api/v1/ci-sources",
 		`{"name":"x","provider":"azure_devops","project":"P","organization":"o","auth_method":"app","client_id":"c","client_secret":"s"}`); w.Code != http.StatusBadRequest {
@@ -103,6 +103,55 @@ func TestCISources_CreateApp(t *testing.T) {
 	for _, want := range []string{`"auth_method":"app"`, `"has_client_secret":true`, `"tenant_id":"the-tenant"`, `"client_id":"the-client"`, `"has_token":false`} {
 		if !strings.Contains(body, want) {
 			t.Errorf("create app body missing %s: %s", want, body)
+		}
+	}
+}
+
+func TestCISources_CreateGitHubApp(t *testing.T) {
+	e := newCISourcesEnv(t)
+
+	// Missing GitHub App fields.
+	if w := e.do(http.MethodPost, "/api/v1/ci-sources",
+		`{"name":"x","provider":"github_actions","organization":"o","auth_method":"app","github_app_id":"1"}`); w.Code != http.StatusBadRequest {
+		t.Errorf("gh app missing fields: status = %d, want 400", w.Code)
+	}
+	// A non-PEM private key is rejected.
+	if w := e.do(http.MethodPost, "/api/v1/ci-sources",
+		`{"name":"x","provider":"github_actions","organization":"o","auth_method":"app","github_app_id":"1","github_installation_id":"2","app_private_key":"not-a-pem"}`); w.Code != http.StatusBadRequest {
+		t.Errorf("gh app bad key: status = %d, want 400", w.Code)
+	}
+
+	// Valid GitHub App source.
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("GenerateKey: %v", err)
+	}
+	pemStr := string(pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)}))
+	enc, err := crypto.Encrypt([]byte(pemStr))
+	if err != nil {
+		t.Fatalf("Encrypt: %v", err)
+	}
+	e.mock.ExpectQuery("INSERT INTO ci_sources").WillReturnRows(
+		sqlmock.NewRows(ciSrcCols).
+			AddRow("c1", "corp", "github_actions", "corp-org", nil, "app", nil, nil, nil, nil, "app-123", "inst-9", enc, "2026-06-10", "2026-06-10"))
+	payload, _ := json.Marshal(map[string]string{
+		"name": "corp-gh", "provider": "github_actions", "organization": "corp-org",
+		"auth_method": "app", "github_app_id": "app-123", "github_installation_id": "inst-9",
+		"app_private_key": pemStr,
+	})
+	w := e.do(http.MethodPost, "/api/v1/ci-sources", string(payload))
+	if w.Code != http.StatusCreated {
+		t.Fatalf("create gh app: status = %d (%s)", w.Code, w.Body.String())
+	}
+	body := w.Body.String()
+	// The PEM (its "BEGIN ... PRIVATE KEY" marker) must never appear in the
+	// response; only the has_app_private_key boolean is exposed.
+	if strings.Contains(body, "BEGIN") || strings.Contains(body, "PRIVATE KEY") {
+		t.Error("create response leaked the private key")
+	}
+	for _, want := range []string{`"auth_method":"app"`, `"has_app_private_key":true`, `"github_app_id":"app-123"`, `"github_installation_id":"inst-9"`, `"has_token":false`} {
+		if !strings.Contains(body, want) {
+			t.Errorf("create gh app body missing %s: %s", want, body)
 		}
 	}
 }
@@ -169,7 +218,7 @@ func TestCISources_LoadWithTokenGuards(t *testing.T) {
 	// Corrupted sealed token → 500 before any provider call.
 	e.mock.ExpectQuery("SELECT .+ FROM ci_sources WHERE id").WithArgs("c1").
 		WillReturnRows(sqlmock.NewRows(ciSrcCols).
-			AddRow("c1", "corp", "github_actions", "corp-org", nil, "pat", []byte("not-a-ciphertext"), nil, nil, nil, "2026-06-10", "2026-06-10"))
+			AddRow("c1", "corp", "github_actions", "corp-org", nil, "pat", []byte("not-a-ciphertext"), nil, nil, nil, nil, nil, nil, "2026-06-10", "2026-06-10"))
 	if w := e.do(http.MethodGet, "/api/v1/ci-sources/c1/repos", ""); w.Code != http.StatusInternalServerError {
 		t.Errorf("corrupt token: status = %d, want 500", w.Code)
 	}

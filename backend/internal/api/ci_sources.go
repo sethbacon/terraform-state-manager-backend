@@ -47,18 +47,21 @@ func ciSourceJSON(s *repositories.CISource) gin.H {
 		authMethod = "pat"
 	}
 	return gin.H{
-		"id":                s.ID,
-		"name":              s.Name,
-		"provider":          s.Provider,
-		"organization":      s.Organization,
-		"project":           s.Project,
-		"auth_method":       authMethod,
-		"has_token":         len(s.EncryptedToken) > 0,
-		"tenant_id":         s.TenantID,
-		"client_id":         s.ClientID,
-		"has_client_secret": len(s.EncryptedClientSecret) > 0,
-		"created_at":        s.CreatedAt,
-		"updated_at":        s.UpdatedAt,
+		"id":                     s.ID,
+		"name":                   s.Name,
+		"provider":               s.Provider,
+		"organization":           s.Organization,
+		"project":                s.Project,
+		"auth_method":            authMethod,
+		"has_token":              len(s.EncryptedToken) > 0,
+		"tenant_id":              s.TenantID,
+		"client_id":              s.ClientID,
+		"has_client_secret":      len(s.EncryptedClientSecret) > 0,
+		"github_app_id":          s.GithubAppID,
+		"github_installation_id": s.GithubInstallationID,
+		"has_app_private_key":    len(s.EncryptedAppPrivateKey) > 0,
+		"created_at":             s.CreatedAt,
+		"updated_at":             s.UpdatedAt,
 	}
 }
 
@@ -92,9 +95,13 @@ type ciSourceRequest struct {
 	Project      string `json:"project"`
 	AuthMethod   string `json:"auth_method"` // "pat" (default) | "app"
 	Token        string `json:"token"`       // pat
-	TenantID     string `json:"tenant_id"`   // app (Entra)
-	ClientID     string `json:"client_id"`   // app (Entra)
+	TenantID     string `json:"tenant_id"`   // app (Entra / ADO)
+	ClientID     string `json:"client_id"`   // app (Entra / ADO)
 	ClientSecret string `json:"client_secret"`
+	// app (GitHub App)
+	GithubAppID          string `json:"github_app_id"`
+	GithubInstallationID string `json:"github_installation_id"`
+	AppPrivateKey        string `json:"app_private_key"`
 }
 
 // CreateCISource registers a CI source, encrypting its credential.
@@ -161,26 +168,45 @@ func (h *CISourceHandlers) CreateCISource() gin.HandlerFunc {
 			}
 			src.EncryptedToken = enc
 		case "app":
-			// App-registration auth is Azure DevOps-only in this first cut
-			// (GitHub App is a separate plan).
-			if req.Provider != "azure_devops" {
-				c.JSON(http.StatusBadRequest, gin.H{"error": "app auth is currently supported only for azure_devops sources"})
+			switch req.Provider {
+			case "azure_devops":
+				req.TenantID = strings.TrimSpace(req.TenantID)
+				req.ClientID = strings.TrimSpace(req.ClientID)
+				if req.TenantID == "" || req.ClientID == "" || req.ClientSecret == "" {
+					c.JSON(http.StatusBadRequest, gin.H{"error": "azure_devops app auth requires tenant_id, client_id, and client_secret"})
+					return
+				}
+				enc, err := crypto.Encrypt([]byte(req.ClientSecret))
+				if err != nil {
+					c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to encrypt client secret"})
+					return
+				}
+				src.EncryptedClientSecret = enc
+				src.TenantID = &req.TenantID
+				src.ClientID = &req.ClientID
+			case "github_actions":
+				req.GithubAppID = strings.TrimSpace(req.GithubAppID)
+				req.GithubInstallationID = strings.TrimSpace(req.GithubInstallationID)
+				if req.GithubAppID == "" || req.GithubInstallationID == "" || strings.TrimSpace(req.AppPrivateKey) == "" {
+					c.JSON(http.StatusBadRequest, gin.H{"error": "github app auth requires github_app_id, github_installation_id, and app_private_key"})
+					return
+				}
+				if !pipelines.ValidRSAPrivateKey(req.AppPrivateKey) {
+					c.JSON(http.StatusBadRequest, gin.H{"error": "app_private_key must be a PEM-encoded RSA private key"})
+					return
+				}
+				enc, err := crypto.Encrypt([]byte(req.AppPrivateKey))
+				if err != nil {
+					c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to encrypt app private key"})
+					return
+				}
+				src.EncryptedAppPrivateKey = enc
+				src.GithubAppID = &req.GithubAppID
+				src.GithubInstallationID = &req.GithubInstallationID
+			default:
+				c.JSON(http.StatusBadRequest, gin.H{"error": "app auth is not supported for this provider"})
 				return
 			}
-			req.TenantID = strings.TrimSpace(req.TenantID)
-			req.ClientID = strings.TrimSpace(req.ClientID)
-			if req.TenantID == "" || req.ClientID == "" || req.ClientSecret == "" {
-				c.JSON(http.StatusBadRequest, gin.H{"error": "app auth requires tenant_id, client_id, and client_secret"})
-				return
-			}
-			enc, err := crypto.Encrypt([]byte(req.ClientSecret))
-			if err != nil {
-				c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to encrypt client secret"})
-				return
-			}
-			src.EncryptedClientSecret = enc
-			src.TenantID = &req.TenantID
-			src.ClientID = &req.ClientID
 		default:
 			c.JSON(http.StatusBadRequest, gin.H{"error": "auth_method must be pat or app"})
 			return
@@ -240,7 +266,11 @@ func (h *CISourceHandlers) VerifyCISource() gin.HandlerFunc {
 		case "azure_devops":
 			err = pipelines.VerifyAzureDevOps(c.Request.Context(), adoCred(token, src.AuthMethod == "app"), src.Organization)
 		case "github_actions":
-			err = pipelines.VerifyGitHub(c.Request.Context(), token)
+			if src.AuthMethod == "app" {
+				err = pipelines.VerifyGitHubInstallation(c.Request.Context(), token)
+			} else {
+				err = pipelines.VerifyGitHub(c.Request.Context(), token)
+			}
 		default:
 			c.JSON(http.StatusBadRequest, gin.H{"error": "unsupported provider"})
 			return
@@ -255,18 +285,34 @@ func (h *CISourceHandlers) VerifyCISource() gin.HandlerFunc {
 
 // sourceToken returns a usable Azure DevOps / GitHub credential value for a CI
 // source: the decrypted personal access token for auth_method "pat", or a freshly
-// minted (cached) Microsoft Entra app access token for "app".
+// minted (cached) app access token for "app" — a Microsoft Entra app token for
+// Azure DevOps, or a GitHub App installation token for GitHub.
 func sourceToken(ctx context.Context, src *repositories.CISource) (string, error) {
 	if src.AuthMethod == "app" {
-		secret, err := crypto.Decrypt(src.EncryptedClientSecret)
-		if err != nil {
-			return "", fmt.Errorf("decrypt client secret: %w", err)
+		switch src.Provider {
+		case "azure_devops":
+			secret, err := crypto.Decrypt(src.EncryptedClientSecret)
+			if err != nil {
+				return "", fmt.Errorf("decrypt client secret: %w", err)
+			}
+			return pipelines.MintEntraADOToken(ctx, pipelines.EntraCreds{
+				TenantID:     ptrStr(src.TenantID),
+				ClientID:     ptrStr(src.ClientID),
+				ClientSecret: string(secret),
+			})
+		case "github_actions":
+			key, err := crypto.Decrypt(src.EncryptedAppPrivateKey)
+			if err != nil {
+				return "", fmt.Errorf("decrypt app private key: %w", err)
+			}
+			return pipelines.MintGitHubInstallationToken(ctx, pipelines.GitHubAppCreds{
+				AppID:          ptrStr(src.GithubAppID),
+				InstallationID: ptrStr(src.GithubInstallationID),
+				PrivateKeyPEM:  string(key),
+			})
+		default:
+			return "", fmt.Errorf("app auth is not supported for provider %q", src.Provider)
 		}
-		return pipelines.MintEntraADOToken(ctx, pipelines.EntraCreds{
-			TenantID:     ptrStr(src.TenantID),
-			ClientID:     ptrStr(src.ClientID),
-			ClientSecret: string(secret),
-		})
 	}
 	pt, err := crypto.Decrypt(src.EncryptedToken)
 	if err != nil {
