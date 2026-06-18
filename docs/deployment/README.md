@@ -62,3 +62,10 @@ Drift and Version Lab runs end with the CI job POSTing results to
 ADO Microsoft-hosted runners need that endpoint to be **publicly reachable**;
 self-hosted runners need a network path to it. The drift wizard's callback
 preflight warns when it looks unreachable.
+
+## Drift CI credentials
+
+Drift CI sources authenticate to the provider that hosts their pipelines. For
+**Azure DevOps** you can use either a personal access token or a **Microsoft
+Entra app registration** (recommended for scheduled drift — headless, no PAT
+expiry). See [Azure DevOps app-registration auth](ado-app-registration.md).

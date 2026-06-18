@@ -1,12 +1,19 @@
 package api
 
 import (
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
+	"encoding/pem"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
+	sqlmock "github.com/DATA-DOG/go-sqlmock"
+
+	"github.com/terraform-state-manager/terraform-state-manager/internal/crypto"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/pipelines"
 )
 
@@ -33,6 +40,97 @@ func fakeADO(t *testing.T) *httptest.Server {
 	}))
 	t.Cleanup(srv.Close)
 	return srv
+}
+
+// TestVerifyCISource_App: VerifyCISource on an app source mints an Entra token
+// and presents it to ADO as a Bearer credential, end to end.
+func TestVerifyCISource_App(t *testing.T) {
+	pipelines.ResetEntraTokenCacheForTest()
+
+	entraSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(w, `{"access_token":"minted","expires_in":3600}`)
+	}))
+	t.Cleanup(entraSrv.Close)
+	defer pipelines.OverrideEntraLoginURLForTest(entraSrv.URL)()
+
+	var gotAuth string
+	adoSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		fmt.Fprint(w, `{"count":0,"value":[]}`)
+	}))
+	t.Cleanup(adoSrv.Close)
+	defer pipelines.OverrideBaseURLsForTest(adoSrv.URL, "")()
+
+	e := newCISourcesEnv(t)
+	e.mock.ExpectQuery("SELECT .+ FROM ci_sources WHERE id").WithArgs("c1").
+		WillReturnRows(appCiSrcRow(t))
+	w := e.do(http.MethodPost, "/api/v1/ci-sources/c1/verify", "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("verify app: status = %d (%s)", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), `"ok":true`) {
+		t.Errorf("verify app body = %s", w.Body.String())
+	}
+	if gotAuth != "Bearer minted" {
+		t.Errorf("ADO auth = %q, want Bearer minted (app token)", gotAuth)
+	}
+}
+
+// ghAppCiSrcRow builds a GitHub App source row whose encrypted private key
+// decrypts to a freshly generated RSA PEM (so minting can sign a real JWT).
+func ghAppCiSrcRow(t *testing.T) *sqlmock.Rows {
+	t.Helper()
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("GenerateKey: %v", err)
+	}
+	pemBytes := pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)})
+	enc, err := crypto.Encrypt(pemBytes)
+	if err != nil {
+		t.Fatalf("Encrypt: %v", err)
+	}
+	return sqlmock.NewRows(ciSrcCols).
+		AddRow("c1", "corp", "github_actions", "corp-org", nil, "app", nil, nil, nil, nil, "app-123", "inst-9", enc, "2026-06-10", "2026-06-10")
+}
+
+// TestVerifyCISource_GitHubApp: VerifyCISource on a GitHub App source mints an
+// installation token (signing an app JWT) and verifies via the installation
+// repositories endpoint, end to end.
+func TestVerifyCISource_GitHubApp(t *testing.T) {
+	pipelines.ResetGitHubAppTokenCacheForTest()
+
+	var sawTokenMint, sawVerify bool
+	var verifyAuth string
+	ghSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/access_tokens"):
+			sawTokenMint = true
+			w.WriteHeader(http.StatusCreated)
+			fmt.Fprint(w, `{"token":"ghs_inst","expires_at":"2099-01-01T00:00:00Z"}`)
+		case strings.Contains(r.URL.Path, "/installation/repositories"):
+			sawVerify = true
+			verifyAuth = r.Header.Get("Authorization")
+			fmt.Fprint(w, `{"total_count":0,"repositories":[]}`)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(ghSrv.Close)
+	defer pipelines.OverrideBaseURLsForTest("", ghSrv.URL)()
+
+	e := newCISourcesEnv(t)
+	e.mock.ExpectQuery("SELECT .+ FROM ci_sources WHERE id").WithArgs("c1").
+		WillReturnRows(ghAppCiSrcRow(t))
+	w := e.do(http.MethodPost, "/api/v1/ci-sources/c1/verify", "")
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"ok":true`) {
+		t.Fatalf("verify gh app: status = %d (%s)", w.Code, w.Body.String())
+	}
+	if !sawTokenMint || !sawVerify {
+		t.Errorf("expected mint(%v) and verify(%v) calls", sawTokenMint, sawVerify)
+	}
+	if verifyAuth != "Bearer ghs_inst" {
+		t.Errorf("verify auth = %q, want Bearer ghs_inst (installation token)", verifyAuth)
+	}
 }
 
 func TestCISourceProxies_AzureDevOps(t *testing.T) {
