@@ -9,6 +9,7 @@ import (
 	"github.com/terraform-state-manager/terraform-state-manager/internal/analyzer"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/db/repositories"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/services/statesync"
+	semver "github.com/terraform-state-manager/terraform-state-manager/internal/version"
 )
 
 // The dashboard aggregates the persistent state-analysis store (kept
@@ -122,6 +123,103 @@ func (h *SourcesHandlers) DashboardOverview() gin.HandlerFunc {
 		}
 		c.JSON(http.StatusOK, resp)
 	}
+}
+
+// versionOps are the comparison operators the states-by-version drill-down
+// accepts: eq matches the stored version verbatim; the range operators compare
+// by semantic version.
+var versionOps = map[string]struct{}{"eq": {}, "lt": {}, "lte": {}, "gt": {}, "gte": {}}
+
+// StatesByVersion lists the state files whose Terraform version matches the
+// given version and comparison operator, backing the dashboard's click-a-version
+// drill-down. op defaults to "eq"; lt/lte/gt/gte select a semver range (e.g.
+// everything older than 1.0.0). Requires state:read.
+// @Summary      State files by Terraform version
+// @Description  Lists state files matching a Terraform version and operator (eq, lt, lte, gt, gte). Range operators compare by semantic version and skip non-semver versions (e.g. "unknown"). Requires state:read.
+// @Tags         Dashboard
+// @Produce      json
+// @Param        version  query     string  true   "Terraform version to match, or 'unknown' for states with no recorded version"
+// @Param        op       query     string  false  "Comparison operator: eq (default), lt, lte, gt, gte"
+// @Success      200      {object}  map[string]interface{}
+// @Failure      400      {object}  map[string]interface{}
+// @Security     BearerAuth
+// @Security     CookieAuth
+// @Router       /dashboard/states-by-version [get]
+func (h *SourcesHandlers) StatesByVersion() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		ver := c.Query("version")
+		if ver == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "version is required"})
+			return
+		}
+		op := c.Query("op")
+		if op == "" {
+			op = "eq"
+		}
+		if _, ok := versionOps[op]; !ok {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid op"})
+			return
+		}
+		rows, err := h.analysisRepo.StateVersions(c.Request.Context())
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load state versions"})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{
+			"version": ver,
+			"op":      op,
+			"states":  filterStatesByVersion(rows, ver, op),
+		})
+	}
+}
+
+// filterStatesByVersion selects the states matching (ver, op). For "eq" the
+// match is exact on the stored string, with "unknown"/"" treated as the empty
+// version the store records for stateless or legacy files. The range operators
+// use semantic-version precedence and skip states whose version (or the pivot)
+// isn't valid semver, since "unknown" has no place in a "< 1.0.0" range.
+func filterStatesByVersion(rows []repositories.StateVersionRow, ver, op string) []repositories.StateVersionRow {
+	out := make([]repositories.StateVersionRow, 0)
+	for _, r := range rows {
+		if op == "eq" {
+			if matchesExactVersion(r.TerraformVersion, ver) {
+				out = append(out, r)
+			}
+			continue
+		}
+		if !semver.IsValid(r.TerraformVersion) || !semver.IsValid(ver) {
+			continue
+		}
+		if rangeMatch(semver.Compare(r.TerraformVersion, ver), op) {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+// matchesExactVersion reports whether a stored version equals the requested one,
+// mapping the dashboard's "unknown" bucket (and the empty pivot) to the empty
+// string the store persists for states with no recorded version.
+func matchesExactVersion(stored, ver string) bool {
+	if ver == "unknown" || ver == "" {
+		return stored == ""
+	}
+	return stored == ver
+}
+
+// rangeMatch reports whether a semver comparison result satisfies a range op.
+func rangeMatch(cmp int, op string) bool {
+	switch op {
+	case "lt":
+		return cmp < 0
+	case "lte":
+		return cmp <= 0
+	case "gt":
+		return cmp > 0
+	case "gte":
+		return cmp >= 0
+	}
+	return false
 }
 
 // refreshAnalysisAsync re-analyzes one state in the background after a
