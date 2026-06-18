@@ -1,0 +1,21 @@
+# Default owner for all files
+* @sethbacon
+
+# CI/CD workflows require explicit review
+.github/ @sethbacon
+
+# Backend core
+backend/ @sethbacon
+
+# Deployment configurations
+deployments/ @sethbacon
+
+# Release configuration
+.goreleaser.yml @sethbacon
+.release-please-config.json @sethbacon
+.release-please-manifest.json @sethbacon
+
+# Security policy and credential-handling code define how stored source/CI
+# credentials and state-write guards are protected — changes require a
+# security-aware owner before merging.
+SECURITY.md @sethbaconbackend/internal/crypto/ @sethbaconbackend/internal/auth/ @sethbacon
