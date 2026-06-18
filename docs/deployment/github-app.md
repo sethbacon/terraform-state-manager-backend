@@ -12,11 +12,11 @@ user binding, no PAT expiry. The PAT path remains fully supported as a fallback.
 
 ## When to use which
 
-| | PAT (`auth_method: pat`) | GitHub App (`auth_method: app`) |
-| --- | --- | --- |
-| Owner | A user | A GitHub App installation (no user) |
-| Expiry | Manual rotation | Installation tokens auto-minted (~1 h) |
-| Best for | Quick setup, trials | Production / scheduled drift |
+|          | PAT (`auth_method: pat`) | GitHub App (`auth_method: app`)        |
+| -------- | ------------------------ | -------------------------------------- |
+| Owner    | A user                   | A GitHub App installation (no user)    |
+| Expiry   | Manual rotation          | Installation tokens auto-minted (~1 h) |
+| Best for | Quick setup, trials      | Production / scheduled drift           |
 
 ## 1. Create the GitHub App
 
@@ -65,12 +65,12 @@ credential, so a rotated key takes effect on the next dispatch with no restart.
 
 ## Troubleshooting
 
-| Symptom | Likely cause |
-| --- | --- |
-| `Test connection` 401 | Wrong App ID, or the private key does not match the app. |
-| `Test connection` 404 | Wrong Installation ID, or the app is not installed. |
-| Dispatch fails 403 but verify passed | The installation lacks **Actions: write** on the target repo. |
-| `encryption key not configured` | `TSM_ENCRYPTION_KEY` is unset/invalid — required to store the key. |
+| Symptom                              | Likely cause                                                       |
+| ------------------------------------ | ------------------------------------------------------------------ |
+| `Test connection` 401                | Wrong App ID, or the private key does not match the app.           |
+| `Test connection` 404                | Wrong Installation ID, or the app is not installed.                |
+| Dispatch fails 403 but verify passed | The installation lacks **Actions: write** on the target repo.      |
+| `encryption key not configured`      | `TSM_ENCRYPTION_KEY` is unset/invalid — required to store the key. |
 
 See also: [Azure DevOps app-registration auth](ado-app-registration.md) for the
 equivalent ADO setup, and [CI callback reachability](README.md#ci-callback-reachability).
