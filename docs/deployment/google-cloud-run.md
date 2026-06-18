@@ -19,6 +19,13 @@ cd deployments/google-cloud-run
 PROJECT_ID=<project> REGION=<region> ./deploy.sh
 ```
 
+**Reaching Cloud SQL:** the backend/worker manifests connect over the
+instance's IP with TLS — set `TSM_DATABASE_HOST=<CLOUD_SQL_IP_OR_DNS>` and keep
+`TSM_DATABASE_SSL_MODE=require` (both are placeholders in `backend-service.yaml`
+/ `worker-service.yaml`). Prefer the private-IP path; if you instead use the
+Cloud SQL Auth Proxy, add `--add-cloudsql-instances <conn-name>` to the service
+and point `TSM_DATABASE_HOST` at the proxy socket/host.
+
 For a single custom domain, front both services with an external HTTPS load
 balancer (serverless NEGs) routing `/api/*`, `/scim/*` → backend and `/*` →
 frontend, or simply use the frontend URL (it proxies API paths) and map your

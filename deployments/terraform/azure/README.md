@@ -18,6 +18,11 @@ terraform apply \
   -var encryption_key="$(openssl rand -hex 32)"
 ```
 
+`acr_name` and `key_vault_name` must each be **globally unique** (across all of
+Azure). The ACR name is **alphanumeric only** (no hyphens), and the Key Vault
+name must be **3–24 characters**; a first apply commonly fails on ACR name
+validation if these are not met.
+
 Then continue with [docs/deployment/aks-new-cluster.md](../../../docs/deployment/aks-new-cluster.md)
 from the "Install cluster components" step — the outputs of this module map
 1:1 onto the `values-aks.yaml` placeholders (each output's description names
