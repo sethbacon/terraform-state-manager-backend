@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.8.0](https://github.com/sethbacon/terraform-state-manager-backend/compare/v1.7.0...v1.8.0) (2026-06-18)
+
+
+### Features
+
+* **dashboard:** add states-by-version endpoint ([#133](https://github.com/sethbacon/terraform-state-manager-backend/issues/133)) ([28249bc](https://github.com/sethbacon/terraform-state-manager-backend/commit/28249bc2e8f8f62565dcc623900bca4ff10e8c41))
+
 ## [1.7.0](https://github.com/sethbacon/terraform-state-manager-backend/compare/v1.6.0...v1.7.0) (2026-06-18)
 
 
