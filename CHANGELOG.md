@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.9.0](https://github.com/sethbacon/terraform-state-manager-backend/compare/v1.8.0...v1.9.0) (2026-06-18)
+
+
+### Features
+
+* operator-managed CI workflow template registry ([#137](https://github.com/sethbacon/terraform-state-manager-backend/issues/137)) ([a1f87b2](https://github.com/sethbacon/terraform-state-manager-backend/commit/a1f87b29b8a0bb0bb0d12677cd8f43a43a989751))
+* **reports:** cross-fleet state query and multi-format export ([#135](https://github.com/sethbacon/terraform-state-manager-backend/issues/135)) ([735d48f](https://github.com/sethbacon/terraform-state-manager-backend/commit/735d48f29e8584af095587ffeaa38cbd64bb6765))
+
 ## [1.8.0](https://github.com/sethbacon/terraform-state-manager-backend/compare/v1.7.0...v1.8.0) (2026-06-18)
 
 
