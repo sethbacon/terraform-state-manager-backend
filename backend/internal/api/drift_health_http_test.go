@@ -36,7 +36,7 @@ func newDriftEnv(t *testing.T) *sourcesEnv {
 	v1.POST("/drift/runs", h.CreateRun())
 	v1.GET("/drift/runs/:id", h.GetRun())
 	v1.POST("/drift/runs/:id/results", h.RunResults())
-	v1.GET("/drift/workflow", h.WorkflowTemplate())
+	v1.GET("/drift/workflow", h.WorkflowTemplate(nil))
 	v1.POST("/drift/ingest", h.IngestDrift())
 	v1.GET("/drift/records", h.ListDriftRecords())
 	v1.GET("/drift/records/:id", h.GetDriftRecord())
@@ -46,7 +46,7 @@ func newDriftEnv(t *testing.T) *sourcesEnv {
 	v1.POST("/health-lab/runs", hh.CreateRun())
 	v1.GET("/health-lab/runs/:id", hh.GetRun())
 	v1.POST("/health-lab/runs/:id/results", hh.RunResults())
-	v1.GET("/health-lab/workflow", hh.WorkflowTemplate())
+	v1.GET("/health-lab/workflow", hh.WorkflowTemplate(nil))
 	return &sourcesEnv{r: r, mock: mock}
 }
 

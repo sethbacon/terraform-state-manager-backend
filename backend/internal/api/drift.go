@@ -443,16 +443,10 @@ func (h *DriftHandlers) notifyDriftResult(runID, status string, added, changed, 
 }
 
 // WorkflowTemplate returns the runner-side CI definition to copy into a repo.
-// GET /api/v1/drift/workflow?provider=github_actions|azure_devops
-func (h *DriftHandlers) WorkflowTemplate() gin.HandlerFunc {
-	return func(c *gin.Context) {
-		switch c.DefaultQuery("provider", "github_actions") {
-		case "azure_devops":
-			c.Data(http.StatusOK, "text/yaml; charset=utf-8", []byte(azureDriftPipeline))
-		default:
-			c.Data(http.StatusOK, "text/yaml; charset=utf-8", []byte(githubDriftWorkflow))
-		}
-	}
+// GET /api/v1/drift/workflow?provider=github_actions|azure_devops[&profile=default]
+// Served from the operator-managed store (falling back to the embedded built-in).
+func (h *DriftHandlers) WorkflowTemplate(templates *repositories.WorkflowTemplateRepository) gin.HandlerFunc {
+	return serveWorkflowTemplate(templates, "drift")
 }
 
 func errUnsupportedProvider(p string) error {

@@ -141,6 +141,12 @@ func serve(cfg *config.Config) error {
 		slog.Info("database schema ready", "version", version, "dirty", dirty)
 	}
 
+	// Seed the built-in CI workflow templates so operators have an editable
+	// baseline in the store (idempotent; falls back to embedded consts if absent).
+	if err := api.SeedWorkflowTemplates(context.Background(), database); err != nil {
+		return fmt.Errorf("failed to seed workflow templates: %w", err)
+	}
+
 	// Generate the first-run setup-wizard token if setup isn't complete. The raw
 	// token is printed to stdout (and optional SETUP_TOKEN_FILE); only its bcrypt
 	// hash is stored, and it's cleared when the wizard completes.

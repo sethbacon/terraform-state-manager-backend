@@ -247,6 +247,15 @@ func NewRouter(cfg *config.Config, database *sql.DB, identityDB *sql.DB) (*gin.E
 			ag.GET("/roles", admin.ListRoles())
 			ag.GET("/audit-logs", admin.ListAuditLogs())
 
+			// CI workflow templates: operator edit/add/replace of the drift /
+			// version-lab YAML per (provider, kind, profile).
+			ciTemplates := NewCITemplateHandlers(database, identityDB)
+			ag.GET("/ci/templates", ciTemplates.ListCITemplates())
+			ag.GET("/ci/templates/:id", ciTemplates.GetCITemplate())
+			ag.POST("/ci/templates", ciTemplates.CreateCITemplate())
+			ag.PUT("/ci/templates/:id", ciTemplates.UpdateCITemplate())
+			ag.DELETE("/ci/templates/:id", ciTemplates.DeleteCITemplate())
+
 			// Read-only view of configured SSO/identity providers + mappings.
 			ag.GET("/sso", authHandlers.SSOConfigHandler())
 			// OIDC group-mapping settings (runtime-editable overlay) + read-only
@@ -262,6 +271,13 @@ func NewRouter(cfg *config.Config, database *sql.DB, identityDB *sql.DB) (*gin.E
 		var notifier *notify.Notifier
 		if database != nil {
 			notifier = notify.New(repositories.NewNotificationChannelRepository(database))
+		}
+
+		// Operator-managed workflow-template store backs the /workflow endpoints;
+		// nil with a nil DB (unit tests) so the handler falls back to the const.
+		var templateRepo *repositories.WorkflowTemplateRepository
+		if database != nil {
+			templateRepo = repositories.NewWorkflowTemplateRepository(database)
 		}
 
 		// Phase 3 drift: CI pipeline connections + drift runs.
@@ -296,7 +312,7 @@ func NewRouter(cfg *config.Config, database *sql.DB, identityDB *sql.DB) (*gin.E
 		}
 		d := v1.Group("/drift", requireAuth)
 		{
-			d.GET("/workflow", middleware.RequireScope(auth.ScopeStateRead), drift.WorkflowTemplate())
+			d.GET("/workflow", middleware.RequireScope(auth.ScopeStateRead), drift.WorkflowTemplate(templateRepo))
 			d.POST("/runs", middleware.RequireScope(auth.ScopeStateDrift), drift.CreateRun())
 			d.GET("/runs", middleware.RequireScope(auth.ScopeStateRead), drift.ListRuns())
 			d.GET("/runs/:id", middleware.RequireScope(auth.ScopeStateRead), drift.GetRun())
@@ -316,7 +332,7 @@ func NewRouter(cfg *config.Config, database *sql.DB, identityDB *sql.DB) (*gin.E
 		health := NewHealthHandlers(cfg, database, identityDB)
 		hg := v1.Group("/health-lab", requireAuth)
 		{
-			hg.GET("/workflow", middleware.RequireScope(auth.ScopeStateRead), health.WorkflowTemplate())
+			hg.GET("/workflow", middleware.RequireScope(auth.ScopeStateRead), health.WorkflowTemplate(templateRepo))
 			hg.POST("/runs", middleware.RequireScope(auth.ScopeStateExecute), health.CreateRun())
 			hg.GET("/runs", middleware.RequireScope(auth.ScopeStateRead), health.ListRuns())
 			hg.GET("/runs/:id", middleware.RequireScope(auth.ScopeStateRead), health.GetRun())

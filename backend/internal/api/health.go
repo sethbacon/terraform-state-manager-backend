@@ -247,16 +247,10 @@ func (h *HealthHandlers) RunResults() gin.HandlerFunc {
 	}
 }
 
-// WorkflowTemplate returns the runner-side health CI definition.
-func (h *HealthHandlers) WorkflowTemplate() gin.HandlerFunc {
-	return func(c *gin.Context) {
-		switch c.DefaultQuery("provider", "github_actions") {
-		case "azure_devops":
-			c.Data(http.StatusOK, "text/yaml; charset=utf-8", []byte(azureHealthPipeline))
-		default:
-			c.Data(http.StatusOK, "text/yaml; charset=utf-8", []byte(githubHealthWorkflow))
-		}
-	}
+// WorkflowTemplate returns the runner-side health CI definition, served from the
+// operator-managed store (falling back to the embedded built-in).
+func (h *HealthHandlers) WorkflowTemplate(templates *repositories.WorkflowTemplateRepository) gin.HandlerFunc {
+	return serveWorkflowTemplate(templates, "versionlab")
 }
 
 func boolVal(p *bool) bool { return p != nil && *p }
