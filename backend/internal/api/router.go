@@ -213,6 +213,7 @@ func NewRouter(cfg *config.Config, database *sql.DB, identityDB *sql.DB) (*gin.E
 
 		// Home dashboard: cross-source aggregated overview.
 		v1.GET("/dashboard/overview", requireAuth, middleware.RequireScope(auth.ScopeStateRead), sources.DashboardOverview())
+		v1.GET("/dashboard/states-by-version", requireAuth, middleware.RequireScope(auth.ScopeStateRead), sources.StatesByVersion())
 
 		// Identity management (admin scope): users, organizations, roles, audit log.
 		admin := NewAdminHandlers(sqlx.NewDb(identityDB, "postgres"))

@@ -48,6 +48,18 @@ type AnalysisTotals struct {
 	TotalResources   int `json:"total_resources"`
 }
 
+// StateVersionRow is one state file's Terraform version with enough identity to
+// link back to it (owning source id + name, state key) plus its RUM. It backs
+// the dashboard's click-a-version drill-down, which lists the states behind a
+// version bar.
+type StateVersionRow struct {
+	SourceID         string `json:"source_id"`
+	SourceName       string `json:"source_name"`
+	StateKey         string `json:"state_key"`
+	TerraformVersion string `json:"terraform_version"`
+	RUM              int    `json:"rum"`
+}
+
 // StateAnalysisRepository is the DAO for state_analyses and source_sync_status.
 type StateAnalysisRepository struct {
 	db *sql.DB
@@ -263,6 +275,33 @@ func (r *StateAnalysisRepository) VersionCounts(ctx context.Context) (map[string
 	return r.jsonbCounts(ctx, `
 		SELECT CASE WHEN terraform_version = '' THEN 'unknown' ELSE terraform_version END, COUNT(*)
 		FROM state_analyses GROUP BY 1`)
+}
+
+// StateVersions returns every analyzed state file with its Terraform version,
+// owning source (id + name), and RUM. The dashboard filters these by a clicked
+// version — optionally a semver range — to list which states use it. The store
+// is small (one row per state file), so filtering in the handler is simpler and
+// clearer than encoding semantic-version comparison in SQL.
+func (r *StateAnalysisRepository) StateVersions(ctx context.Context) ([]StateVersionRow, error) {
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT a.source_id, COALESCE(s.name, ''), a.state_key, a.terraform_version, a.rum
+		FROM state_analyses a
+		LEFT JOIN state_sources s ON s.id = a.source_id
+		ORDER BY a.terraform_version, s.name, a.state_key`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []StateVersionRow
+	for rows.Next() {
+		var v StateVersionRow
+		if err := rows.Scan(&v.SourceID, &v.SourceName, &v.StateKey, &v.TerraformVersion, &v.RUM); err != nil {
+			return nil, err
+		}
+		out = append(out, v)
+	}
+	return out, rows.Err()
 }
 
 func (r *StateAnalysisRepository) jsonbCounts(ctx context.Context, query string) (map[string]int, error) {

@@ -167,6 +167,31 @@ func TestStateAnalysisAggregates(t *testing.T) {
 	}
 }
 
+func TestStateAnalysisStateVersions(t *testing.T) {
+	db, mock := newMock(t)
+	r := NewStateAnalysisRepository(db)
+
+	mock.ExpectQuery("FROM state_analyses a").WillReturnRows(
+		sqlmock.NewRows([]string{"source_id", "name", "state_key", "terraform_version", "rum"}).
+			AddRow("s1", "prod", "a.tfstate", "1.5.7", 12).
+			AddRow("s2", "dev", "b.tfstate", "", 0))
+	got, err := r.StateVersions(ctx)
+	if err != nil {
+		t.Fatalf("StateVersions: %v", err)
+	}
+	if len(got) != 2 || got[0].SourceName != "prod" || got[0].RUM != 12 || got[1].TerraformVersion != "" {
+		t.Errorf("StateVersions = %+v", got)
+	}
+
+	mock.ExpectQuery("FROM state_analyses a").WillReturnError(errDB)
+	if _, err := r.StateVersions(ctx); err == nil {
+		t.Error("StateVersions: expected error")
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Error(err)
+	}
+}
+
 func TestSourceSyncStatus(t *testing.T) {
 	db, mock := newMock(t)
 	r := NewStateAnalysisRepository(db)
