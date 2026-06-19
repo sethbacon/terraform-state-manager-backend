@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.10.0](https://github.com/sethbacon/terraform-state-manager-backend/compare/v1.9.0...v1.10.0) (2026-06-19)
+
+
+### Features
+
+* **drift:** add pipeline connection update endpoint ([#138](https://github.com/sethbacon/terraform-state-manager-backend/issues/138)) ([4f76886](https://github.com/sethbacon/terraform-state-manager-backend/commit/4f76886a3e73f1540c9ec33f05b433684de9634c))
+
 ## [1.9.0](https://github.com/sethbacon/terraform-state-manager-backend/compare/v1.8.0...v1.9.0) (2026-06-18)
 
 
