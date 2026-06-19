@@ -140,6 +140,49 @@ func (h *DriftHandlers) CreatePipeline() gin.HandlerFunc {
 	}
 }
 
+// UpdatePipeline edits a connection's name and config. The provider is immutable
+// and the stored token is rotated only when a new one is supplied.
+func (h *DriftHandlers) UpdatePipeline() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		id := c.Param("id")
+		var req struct {
+			Name   string         `json:"name" binding:"required"`
+			Config map[string]any `json:"config"`
+			Token  string         `json:"token"`
+		}
+		if err := c.ShouldBindJSON(&req); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "name is required"})
+			return
+		}
+		pc := &repositories.PipelineConnection{ID: id, Name: req.Name, Config: req.Config}
+		updateToken := req.Token != ""
+		if updateToken {
+			if !crypto.Available() {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "cannot store token: encryption key not configured (set TSM_ENCRYPTION_KEY)"})
+				return
+			}
+			enc, err := crypto.Encrypt([]byte(req.Token))
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to encrypt token"})
+				return
+			}
+			pc.EncryptedToken = enc
+		}
+		saved, err := h.pipelineRepo.Update(c.Request.Context(), pc, updateToken)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update pipeline connection"})
+			return
+		}
+		if saved == nil {
+			c.JSON(http.StatusNotFound, gin.H{"error": "pipeline connection not found"})
+			return
+		}
+		h.audit.write(c, "pipeline.update", "pipeline_connection", saved.ID,
+			map[string]interface{}{"name": saved.Name})
+		c.JSON(http.StatusOK, saved)
+	}
+}
+
 // DeletePipeline removes a CI connection.
 func (h *DriftHandlers) DeletePipeline() gin.HandlerFunc {
 	return func(c *gin.Context) {
