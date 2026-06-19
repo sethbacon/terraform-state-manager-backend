@@ -286,6 +286,7 @@ func NewRouter(cfg *config.Config, database *sql.DB, identityDB *sql.DB) (*gin.E
 		{
 			p.GET("", middleware.RequireScope(auth.ScopeSourcesManage), drift.ListPipelines())
 			p.POST("", middleware.RequireScope(auth.ScopeSourcesManage), drift.CreatePipeline())
+			p.PUT("/:id", middleware.RequireScope(auth.ScopeSourcesManage), drift.UpdatePipeline())
 			p.DELETE("/:id", middleware.RequireScope(auth.ScopeSourcesManage), drift.DeletePipeline())
 			// Repo-setup wizard preflight: is the callback URL reachable from CI?
 			p.GET("/callback-preflight", middleware.RequireScope(auth.ScopeSourcesManage), drift.CallbackPreflight())

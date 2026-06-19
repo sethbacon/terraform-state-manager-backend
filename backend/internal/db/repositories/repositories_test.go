@@ -277,6 +277,21 @@ func TestPipelineRepository_CRUD(t *testing.T) {
 		t.Fatalf("Create: %v %+v", err, created)
 	}
 
+	mock.ExpectQuery("UPDATE pipeline_connections").
+		WithArgs("p1", "renamed", `{"repo":"org/repo"}`, false, nil).
+		WillReturnRows(pipelineRow())
+	updated, err := r.Update(ctx, &PipelineConnection{
+		ID: "p1", Name: "renamed", Config: map[string]any{"repo": "org/repo"},
+	}, false)
+	if err != nil || updated == nil || updated.ID != "p1" {
+		t.Fatalf("Update: %v %+v", err, updated)
+	}
+
+	mock.ExpectQuery("UPDATE pipeline_connections").WillReturnError(sql.ErrNoRows)
+	if u, err := r.Update(ctx, &PipelineConnection{ID: "nope", Name: "x"}, false); err != nil || u != nil {
+		t.Errorf("Update of missing row should be (nil, nil), got %+v %v", u, err)
+	}
+
 	mock.ExpectExec("DELETE FROM pipeline_connections").WithArgs("p1").WillReturnResult(sqlmock.NewResult(0, 1))
 	if err := r.Delete(ctx, "p1"); err != nil {
 		t.Errorf("Delete: %v", err)

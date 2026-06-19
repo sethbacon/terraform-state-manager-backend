@@ -86,6 +86,37 @@ func (r *PipelineRepository) Create(ctx context.Context, p *PipelineConnection) 
 	return scanPipeline(row)
 }
 
+// Update edits a connection's name and config. The provider is immutable. The
+// stored token is replaced only when updateToken is true (callers pass false to
+// preserve the existing credential). Returns (nil, nil) when no row matches.
+func (r *PipelineRepository) Update(ctx context.Context, p *PipelineConnection, updateToken bool) (*PipelineConnection, error) {
+	configJSON, err := json.Marshal(orEmptyMap(p.Config))
+	if err != nil {
+		return nil, err
+	}
+	var token any
+	if len(p.EncryptedToken) > 0 {
+		token = p.EncryptedToken
+	}
+	row := r.db.QueryRowContext(ctx, `
+		UPDATE pipeline_connections
+		SET name = $2,
+		    config = $3::jsonb,
+		    encrypted_token = CASE WHEN $4 THEN $5 ELSE encrypted_token END,
+		    updated_at = now()
+		WHERE id = $1
+		RETURNING `+pipelineColumns,
+		p.ID, p.Name, string(configJSON), updateToken, token)
+	updated, err := scanPipeline(row)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return updated, nil
+}
+
 func (r *PipelineRepository) Delete(ctx context.Context, id string) error {
 	_, err := r.db.ExecContext(ctx, `DELETE FROM pipeline_connections WHERE id = $1`, id)
 	return err

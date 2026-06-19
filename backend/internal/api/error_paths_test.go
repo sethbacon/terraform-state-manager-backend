@@ -49,6 +49,7 @@ func TestErrorPaths_DriftHealthSchedules(t *testing.T) {
 	}{
 		{http.MethodGet, "/api/v1/pipelines", "", http.StatusInternalServerError},
 		{http.MethodPost, "/api/v1/pipelines", `{"name":"x","provider":"github_actions"}`, http.StatusInternalServerError},
+		{http.MethodPut, "/api/v1/pipelines/p1", `{"name":"x"}`, http.StatusInternalServerError},
 		{http.MethodDelete, "/api/v1/pipelines/p1", "", http.StatusInternalServerError},
 		{http.MethodGet, "/api/v1/drift/runs", "", http.StatusInternalServerError},
 		{http.MethodGet, "/api/v1/drift/runs/d1", "", http.StatusInternalServerError},
