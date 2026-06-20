@@ -91,6 +91,35 @@ func TestNotify_SlackPayload(t *testing.T) {
 	}
 }
 
+func TestNotify_TeamsPayload(t *testing.T) {
+	var got map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&got)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	n, mock := newNotifier(t)
+	mock.ExpectQuery("FROM notification_channels WHERE enabled").WithArgs(EventDriftDetected).
+		WillReturnRows(channelRow(t, "teams", srv.URL))
+	mock.ExpectExec("UPDATE notification_channels").
+		WithArgs("n1", "sent", "", sqlmock.AnyArg()).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+
+	n.Notify(context.Background(), Event{Type: EventDriftDetected, Title: "Drift", Message: "3 resources drifted"})
+
+	// Adaptive Card envelope: type=message with one adaptive-card attachment whose
+	// body carries the title and message text blocks.
+	if got["type"] != "message" {
+		t.Fatalf("teams payload not a message envelope: %+v", got)
+	}
+	body, _ := json.Marshal(got)
+	if !strings.Contains(string(body), "AdaptiveCard") || !strings.Contains(string(body), "Drift") ||
+		!strings.Contains(string(body), "3 resources drifted") {
+		t.Errorf("teams payload missing card/title/message: %s", body)
+	}
+}
+
 func TestNotify_DestinationFailureRecorded(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusBadGateway)

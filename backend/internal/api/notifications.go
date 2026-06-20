@@ -16,7 +16,7 @@ import (
 	"github.com/terraform-state-manager/terraform-state-manager/internal/services/notify"
 )
 
-var validChannelTypes = map[string]bool{"webhook": true, "slack": true}
+var validChannelTypes = map[string]bool{"webhook": true, "slack": true, "teams": true}
 var validEvents = map[string]bool{notify.EventDriftDetected: true, notify.EventRunFailed: true}
 
 // NotificationHandlers serves the notification-channel endpoints.
@@ -47,7 +47,7 @@ type channelRequest struct {
 // validate checks the type, events, and (when present) the target URL.
 func (req *channelRequest) validate() error {
 	if !validChannelTypes[req.Type] {
-		return fmt.Errorf("type must be \"webhook\" or \"slack\"")
+		return fmt.Errorf("type must be one of \"webhook\", \"slack\", \"teams\"")
 	}
 	for _, e := range req.Events {
 		if !validEvents[e] {

@@ -10,6 +10,7 @@ func TestChannelRequestValidate(t *testing.T) {
 	}{
 		{"valid webhook", channelRequest{Name: "a", Type: "webhook", Target: "https://example.com/hook"}, false},
 		{"valid slack", channelRequest{Name: "a", Type: "slack", Target: "https://hooks.slack.com/x"}, false},
+		{"valid teams", channelRequest{Name: "a", Type: "teams", Target: "https://example.webhook.office.com/x"}, false},
 		{"valid no target (edit)", channelRequest{Name: "a", Type: "webhook"}, false},
 		{"valid event filter", channelRequest{Name: "a", Type: "webhook", Target: "https://x.io", Events: []string{"drift_detected"}}, false},
 		{"bad type", channelRequest{Name: "a", Type: "email", Target: "https://x.io"}, true},

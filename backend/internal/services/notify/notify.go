@@ -110,6 +110,11 @@ func (n *Notifier) send(ctx context.Context, channelType, url, title, message st
 	case "slack":
 		// Slack incoming-webhook format.
 		payload = map[string]string{"text": title + "\n" + message}
+	case "teams":
+		// Microsoft Teams via a Power Automate "Workflows" incoming webhook, which
+		// expects an Adaptive Card message envelope (the classic Office 365
+		// connector MessageCard format is being retired).
+		payload = teamsPayload(title, message)
 	default:
 		// Generic JSON webhook.
 		payload = map[string]any{"title": title, "message": message, "source": "terraform-state-manager"}
@@ -133,6 +138,26 @@ func (n *Notifier) send(ctx context.Context, channelType, url, title, message st
 		return fmt.Errorf("destination returned status %d", resp.StatusCode)
 	}
 	return nil
+}
+
+// teamsPayload builds the Adaptive Card message envelope a Teams "Workflows"
+// incoming webhook accepts: a single text card with a bold title over the body.
+func teamsPayload(title, message string) map[string]any {
+	return map[string]any{
+		"type": "message",
+		"attachments": []map[string]any{{
+			"contentType": "application/vnd.microsoft.card.adaptive",
+			"content": map[string]any{
+				"$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+				"type":    "AdaptiveCard",
+				"version": "1.4",
+				"body": []map[string]any{
+					{"type": "TextBlock", "text": title, "weight": "Bolder", "size": "Medium", "wrap": true},
+					{"type": "TextBlock", "text": message, "wrap": true},
+				},
+			},
+		}},
+	}
 }
 
 func (n *Notifier) record(ctx context.Context, channelID string, sendErr error) {
