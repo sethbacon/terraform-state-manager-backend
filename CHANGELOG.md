@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.11.0](https://github.com/sethbacon/terraform-state-manager-backend/compare/v1.10.0...v1.11.0) (2026-06-20)
+
+
+### Features
+
+* **drift:** reconcile ingest summarizer with dispatch contract (read-skip, attrs, masking) ([#140](https://github.com/sethbacon/terraform-state-manager-backend/issues/140)) ([6c73ffe](https://github.com/sethbacon/terraform-state-manager-backend/commit/6c73ffe8ae312b444478156211dd8498c11ce2d5))
+* **notifications:** add Microsoft Teams and email channel types ([#142](https://github.com/sethbacon/terraform-state-manager-backend/issues/142)) ([f5888e3](https://github.com/sethbacon/terraform-state-manager-backend/commit/f5888e34024d36594df9013c8d6051e9ff0a3b61))
+
 ## [1.10.0](https://github.com/sethbacon/terraform-state-manager-backend/compare/v1.9.0...v1.10.0) (2026-06-19)
 
 
