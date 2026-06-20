@@ -37,6 +37,17 @@ data:
   TSM_SUITE_SIBLING_URL: {{ .Values.suite.siblingUrl | quote }}
   TSM_SUITE_IDENTITY_SHARED_STORE: {{ .Values.suite.identitySharedStore | quote }}
 
+  # Notifications — shared SMTP relay backing the "email" channel type. Empty host
+  # (default) leaves the email channel disabled. The AUTH password lives in the Secret.
+  {{- if .Values.notifications.smtp.host }}
+  TSM_NOTIFICATIONS_SMTP_HOST: {{ .Values.notifications.smtp.host | quote }}
+  TSM_NOTIFICATIONS_SMTP_PORT: {{ .Values.notifications.smtp.port | quote }}
+  TSM_NOTIFICATIONS_SMTP_FROM: {{ .Values.notifications.smtp.from | quote }}
+  {{- if .Values.notifications.smtp.username }}
+  TSM_NOTIFICATIONS_SMTP_USERNAME: {{ .Values.notifications.smtp.username | quote }}
+  {{- end }}
+  {{- end }}
+
   # Auth — OIDC
   TSM_AUTH_OIDC_ENABLED: {{ .Values.auth.oidc.enabled | quote }}
   {{- if .Values.auth.oidc.enabled }}

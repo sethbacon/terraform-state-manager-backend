@@ -34,6 +34,39 @@ func TestWorkersEnvGate(t *testing.T) {
 	}
 }
 
+func TestSMTPDefaults(t *testing.T) {
+	cfg, err := Load("")
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	// Email channel disabled by default (no relay host), submission port assumed.
+	if cfg.Notifications.SMTP.Host != "" {
+		t.Errorf("default SMTP host = %q, want empty (email disabled)", cfg.Notifications.SMTP.Host)
+	}
+	if cfg.Notifications.SMTP.Port != 587 {
+		t.Errorf("default SMTP port = %d, want 587", cfg.Notifications.SMTP.Port)
+	}
+}
+
+func TestSMTPEnvBinding(t *testing.T) {
+	t.Setenv("TSM_NOTIFICATIONS_SMTP_HOST", "smtp.internal")
+	t.Setenv("TSM_NOTIFICATIONS_SMTP_FROM", "tsm@example.com")
+	t.Setenv("TSM_NOTIFICATIONS_SMTP_USERNAME", "relay-user")
+	cfg, err := Load("")
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if cfg.Notifications.SMTP.Host != "smtp.internal" {
+		t.Errorf("SMTP host = %q, want smtp.internal", cfg.Notifications.SMTP.Host)
+	}
+	if cfg.Notifications.SMTP.From != "tsm@example.com" {
+		t.Errorf("SMTP from = %q, want tsm@example.com", cfg.Notifications.SMTP.From)
+	}
+	if cfg.Notifications.SMTP.Username != "relay-user" {
+		t.Errorf("SMTP username = %q, want relay-user", cfg.Notifications.SMTP.Username)
+	}
+}
+
 func TestEnvOverride(t *testing.T) {
 	t.Setenv("TSM_SERVER_PORT", "9999")
 	t.Setenv("TSM_DATABASE_HOST", "db.internal")
