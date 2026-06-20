@@ -131,3 +131,111 @@ steps:
       CALLBACK_TOKEN: ${{ parameters.callback_token }}
       WORKING_DIR: ${{ parameters.working_dir }}
 `
+
+// Suite variants (profile="suite") use the published Terraform-suite CI
+// components instead of inline jq: the terraform-drift-report GitHub Action and
+// the PipelineTerraformDriftReport Azure DevOps task. Both bundle the same
+// terraform-drift-contract parser as the /drift/ingest path, so the result is
+// identical — but there is no jq dependency, no shell-built JSON, and the runner
+// works on Windows agents too. The dispatch inputs are unchanged, so these are
+// drop-in alternatives to the built-in templates above.
+
+const githubDriftWorkflowSuite = `# .github/workflows/tsm-drift.yml  (Terraform-suite actions)
+name: TSM Drift
+on:
+  workflow_dispatch:
+    inputs:
+      callback_url:
+        description: TSM callback URL
+        required: true
+        type: string
+      callback_token:
+        description: TSM callback token
+        required: true
+        type: string
+      working_dir:
+        description: Terraform working directory
+        required: false
+        default: "."
+        type: string
+permissions:
+  id-token: write   # for cloud OIDC (e.g. AWS/Azure/GCP federation)
+  contents: read
+jobs:
+  drift:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: sethbacon/setup-terraform-hardened@v1
+        with:
+          binary: terraform
+          version: latest          # ### EDIT: pin if the app's state needs it
+          require-checksum: "true"
+      # Configure cloud credentials here, preferably via OIDC, e.g.:
+      # - uses: aws-actions/configure-aws-credentials@v4
+      #   with: { role-to-assume: <role-arn>, aws-region: <region> }
+      - name: Plan
+        working-directory: ${{ inputs.working_dir }}
+        run: |
+          set -e
+          terraform init -input=false
+          set +e
+          terraform plan -detailed-exitcode -out=tfplan -input=false
+          set -e
+          terraform show -json tfplan > plan.json
+      - name: Report drift to TSM
+        uses: sethbacon/terraform-drift-report@v1
+        with:
+          plan-json-file: ${{ inputs.working_dir }}/plan.json
+          module-manifest: ${{ inputs.working_dir }}/.terraform/modules/modules.json
+          detail: github run ${{ github.run_id }}
+          callback-url: ${{ inputs.callback_url }}
+          callback-token: ${{ inputs.callback_token }}
+`
+
+const azureDriftPipelineSuite = `# azure-pipelines-tsm-drift.yml  (Azure DevOps — Terraform-suite extension)
+parameters:
+  - name: callback_url
+    type: string
+  - name: callback_token
+    type: string
+  - name: working_dir
+    type: string
+    default: "."
+trigger: none
+pool:
+  vmImage: ubuntu-latest
+steps:
+  - checkout: self
+  - task: PipelineTerraformInstaller@1
+    displayName: Install Terraform
+    inputs:
+      terraformVersion: latest          # ### EDIT: pin if the app's state needs it
+  - task: PipelineTerraformTask@5
+    displayName: terraform init
+    inputs:
+      provider: azurerm                 # ### EDIT for your cloud (aws|gcp|oci)
+      command: init
+      workingDirectory: ${{ parameters.working_dir }}
+      # ### EDIT: configure your state backend (backendType + backend* inputs).
+  - task: PipelineTerraformTask@5
+    displayName: terraform plan
+    continueOnError: true               # exit code 2 (drift) must not fail the job
+    inputs:
+      provider: azurerm                 # ### EDIT for your cloud
+      command: plan
+      workingDirectory: ${{ parameters.working_dir }}
+      commandOptions: -detailed-exitcode -out=tfplan -input=false
+      # ### EDIT: environmentServiceNameAzureRM (or AWS/GCP/OCI) service connection.
+  - bash: terraform show -json tfplan > plan.json
+    displayName: terraform show -json
+    workingDirectory: ${{ parameters.working_dir }}
+  - task: PipelineTerraformDriftReport@1
+    displayName: Report drift to TSM
+    inputs:
+      planJsonFile: ${{ parameters.working_dir }}/plan.json
+      moduleManifest: ${{ parameters.working_dir }}/.terraform/modules/modules.json
+      detail: azdo build $(Build.BuildId)
+      callbackUrl: ${{ parameters.callback_url }}
+      callbackToken: ${{ parameters.callback_token }}
+`
