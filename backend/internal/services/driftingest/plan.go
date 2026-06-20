@@ -7,7 +7,9 @@ package driftingest
 
 import (
 	"encoding/json"
+	"sort"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/sethbacon/terraform-suite-identity/identity/suite"
 )
@@ -38,16 +40,35 @@ type ResourceChange struct {
 }
 
 // Change holds the planned actions for a single resource: ["no-op"],
-// ["create"], ["update"], ["delete"], or ["delete","create"] for a replacement.
+// ["create"], ["update"], ["delete"], or ["delete","create"] for a replacement,
+// plus the before/after values (and their sensitivity masks) used to derive the
+// per-attribute diff. before/after are raw so we only parse them when both are
+// JSON objects (in-place updates/replaces).
 type Change struct {
-	Actions []string `json:"actions"`
+	Actions         []string        `json:"actions"`
+	Before          json.RawMessage `json:"before"`
+	After           json.RawMessage `json:"after"`
+	BeforeSensitive json.RawMessage `json:"before_sensitive"`
+	AfterSensitive  json.RawMessage `json:"after_sensitive"`
+}
+
+// AttrChange is one changed top-level attribute of a resource. Before/After are
+// nil (rendered as JSON null) for absent/None values; a value the plan marks
+// sensitive is replaced with the literal "(sensitive)" before formatting, so a
+// secret never reaches the formatter or the stored summary.
+type AttrChange struct {
+	Name   string  `json:"name"`
+	Before *string `json:"before"`
+	After  *string `json:"after"`
 }
 
 // SummaryEntry matches the rows of drift_runs.summary so the frontend renders
-// both origins uniformly.
+// both origins (ingested + dispatched) uniformly. Attrs is omitted unless the
+// change is an in-place update/replace with at least one differing key.
 type SummaryEntry struct {
-	Address string   `json:"address"`
-	Actions []string `json:"actions"`
+	Address string       `json:"address"`
+	Actions []string     `json:"actions"`
+	Attrs   []AttrChange `json:"attrs,omitempty"`
 }
 
 // Result carries the counts and summary derived from a plan. Count semantics
@@ -61,34 +82,43 @@ type Result struct {
 	Summary   []SummaryEntry
 }
 
-// Drifted reports whether the plan contained any non-no-op resource change.
+// Drifted reports whether the plan planned any add/change/destroy. Matches the
+// dispatch summarizer (drift_summary.py): a pure replacement has Changed==0 but
+// Added+Destroyed>0, so it is still drift; a read-only refresh is not.
 func (r *Result) Drifted() bool {
-	return len(r.Summary) > 0
+	return r.Added+r.Changed+r.Destroyed > 0
 }
 
-// Summarize classifies each resource change. Entries whose actions are exactly
-// ["no-op"] are excluded from the summary (the jq filter `!= ["no-op"]`);
-// read-only refreshes (["read"]) appear in the summary but count toward
-// nothing, again matching the workflow.
+// Summarize classifies each resource change, reconciled with the authoritative
+// dispatch summarizer (drift_summary.py): resource changes whose actions are
+// exactly ["no-op"] or ["read"] are skipped entirely; for in-place updates and
+// replacements (before and after both JSON objects) the per-attribute diff is
+// captured with sensitive masking. Counts are replace-aware and not mutually
+// exclusive (a replacement counts as both added and destroyed).
 func Summarize(plan *Plan) *Result {
 	res := &Result{Summary: []SummaryEntry{}}
 	if plan == nil {
 		return res
 	}
 	for _, rc := range plan.ResourceChanges {
-		if hasAction(rc.Change.Actions, "create") {
-			res.Added++
-		}
-		if hasAction(rc.Change.Actions, "update") {
-			res.Changed++
-		}
-		if hasAction(rc.Change.Actions, "delete") {
-			res.Destroyed++
-		}
-		if len(rc.Change.Actions) == 1 && rc.Change.Actions[0] == "no-op" {
+		actions := rc.Change.Actions
+		if len(actions) == 1 && (actions[0] == "no-op" || actions[0] == "read") {
 			continue
 		}
-		res.Summary = append(res.Summary, SummaryEntry{Address: rc.Address, Actions: rc.Change.Actions})
+		entry := SummaryEntry{Address: rc.Address, Actions: actions}
+		if attrs := changedAttrs(rc.Change); len(attrs) > 0 {
+			entry.Attrs = attrs
+		}
+		res.Summary = append(res.Summary, entry)
+		if hasAction(actions, "create") {
+			res.Added++
+		}
+		if hasAction(actions, "update") {
+			res.Changed++
+		}
+		if hasAction(actions, "delete") {
+			res.Destroyed++
+		}
 	}
 	return res
 }
@@ -100,6 +130,173 @@ func hasAction(actions []string, action string) bool {
 		}
 	}
 	return false
+}
+
+// changedAttrs returns the top-level attributes whose value differs between
+// before and after, but only when both are JSON objects (the in-place update /
+// replace case). Each value is masked to "(sensitive)" when before_sensitive /
+// after_sensitive marks it, otherwise formatted with fmtVal. Mirrors the loop
+// in drift_summary.py.
+func changedAttrs(ch Change) []AttrChange {
+	before, bok := asObject(ch.Before)
+	after, aok := asObject(ch.After)
+	if !bok || !aok {
+		return nil
+	}
+	attrs := []AttrChange{}
+	for _, k := range sortedUnion(before, after) {
+		if jsonEqual(before[k], after[k]) {
+			continue
+		}
+		attrs = append(attrs, AttrChange{
+			Name:   k,
+			Before: maskOrFmt(ch.BeforeSensitive, k, before[k]),
+			After:  maskOrFmt(ch.AfterSensitive, k, after[k]),
+		})
+	}
+	if len(attrs) == 0 {
+		return nil
+	}
+	return attrs
+}
+
+func maskOrFmt(sens json.RawMessage, key string, val json.RawMessage) *string {
+	if isSens(sens, key) {
+		s := "(sensitive)"
+		return &s
+	}
+	return fmtVal(val)
+}
+
+// asObject reports whether raw is a JSON object and, if so, returns its members.
+// JSON null (a pure create's before, a pure delete's after) is NOT an object —
+// unmarshaling null into a map succeeds with a nil map, so guard it explicitly.
+func asObject(raw json.RawMessage) (map[string]json.RawMessage, bool) {
+	if len(raw) == 0 || strings.TrimSpace(string(raw)) == "null" {
+		return nil, false
+	}
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return nil, false
+	}
+	return m, true
+}
+
+func sortedUnion(a, b map[string]json.RawMessage) []string {
+	seen := map[string]struct{}{}
+	for k := range a {
+		seen[k] = struct{}{}
+	}
+	for k := range b {
+		seen[k] = struct{}{}
+	}
+	keys := make([]string, 0, len(seen))
+	for k := range seen {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+// fmtVal is the Go port of drift_summary.py `fmt`: JSON null/absent → nil;
+// a JSON string passes through raw (unquoted); anything else is compact
+// canonical JSON (Go sorts map keys), truncated past 300 runes with U+2026.
+func fmtVal(raw json.RawMessage) *string {
+	if canon(raw) == "null" {
+		return nil
+	}
+	var v interface{}
+	if err := json.Unmarshal(raw, &v); err != nil {
+		s := truncate(string(raw))
+		return &s
+	}
+	if s, ok := v.(string); ok {
+		out := truncate(s)
+		return &out
+	}
+	b, _ := json.Marshal(v)
+	out := truncate(string(b))
+	return &out
+}
+
+func truncate(s string) string {
+	if utf8.RuneCountInString(s) <= 300 {
+		return s
+	}
+	return string([]rune(s)[:300]) + "…"
+}
+
+// isSens is the Go port of drift_summary.py `is_sens`: when the sensitivity map
+// is not a JSON object it is the whole-value flag (truthy → mask); otherwise the
+// key is masked when its entry is true or a non-empty nested object/array.
+func isSens(sens json.RawMessage, key string) bool {
+	if len(sens) == 0 {
+		return false
+	}
+	var v interface{}
+	if err := json.Unmarshal(sens, &v); err != nil {
+		return false
+	}
+	m, ok := v.(map[string]interface{})
+	if !ok {
+		return pyTruthy(v)
+	}
+	sv, exists := m[key]
+	if !exists {
+		return false
+	}
+	if b, ok := sv.(bool); ok {
+		return b
+	}
+	switch t := sv.(type) {
+	case map[string]interface{}:
+		return len(t) > 0
+	case []interface{}:
+		return len(t) > 0
+	default:
+		return false
+	}
+}
+
+// pyTruthy mirrors Python bool(): empty string/array/object and zero/false/None
+// are falsey.
+func pyTruthy(v interface{}) bool {
+	switch t := v.(type) {
+	case nil:
+		return false
+	case bool:
+		return t
+	case float64:
+		return t != 0
+	case string:
+		return t != ""
+	case []interface{}:
+		return len(t) > 0
+	case map[string]interface{}:
+		return len(t) > 0
+	default:
+		return false
+	}
+}
+
+// jsonEqual compares two raw JSON values structurally (key order independent),
+// treating absent and explicit null alike — matching Python's `==` on the
+// decoded values.
+func jsonEqual(a, b json.RawMessage) bool {
+	return canon(a) == canon(b)
+}
+
+func canon(raw json.RawMessage) string {
+	s := strings.TrimSpace(string(raw))
+	if s == "" || s == "null" {
+		return "null"
+	}
+	var v interface{}
+	if err := json.Unmarshal(raw, &v); err != nil {
+		return s
+	}
+	b, _ := json.Marshal(v)
+	return string(b)
 }
 
 // ModuleRef is one captured registry-module dependency of a state: the module's

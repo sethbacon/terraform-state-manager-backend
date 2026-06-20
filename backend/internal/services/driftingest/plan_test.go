@@ -5,10 +5,10 @@ import (
 	"testing"
 )
 
-func TestSummarize_CountsMatchWorkflowJQ(t *testing.T) {
-	// Semantics contract: counts are action MEMBERSHIP (a replacement counts as
-	// added AND destroyed), summary excludes exactly-["no-op"] entries — the
-	// same results the dispatched CI workflow computes with jq.
+func TestSummarize_CountsMatchDispatchSummarizer(t *testing.T) {
+	// Semantics contract (reconciled with drift_summary.py): counts are action
+	// MEMBERSHIP (a replacement counts as added AND destroyed); summary excludes
+	// changes whose actions are exactly ["no-op"] OR ["read"].
 	planJSON := `{
 		"format_version": "1.2",
 		"resource_changes": [
@@ -28,25 +28,37 @@ func TestSummarize_CountsMatchWorkflowJQ(t *testing.T) {
 	if res.Added != 2 || res.Changed != 1 || res.Destroyed != 2 {
 		t.Errorf("counts = +%d ~%d -%d, want +2 ~1 -2", res.Added, res.Changed, res.Destroyed)
 	}
-	if len(res.Summary) != 5 { // everything except the no-op
-		t.Errorf("summary entries = %d, want 5 (%+v)", len(res.Summary), res.Summary)
+	if len(res.Summary) != 4 { // everything except the no-op AND the read
+		t.Errorf("summary entries = %d, want 4 (%+v)", len(res.Summary), res.Summary)
 	}
-	if !res.Drifted() {
-		t.Error("plan with changes must report drifted")
-	}
-	// Replacement keeps its full action list for the UI.
 	for _, e := range res.Summary {
+		if e.Address == "data.aws_ami.x" || e.Address == "aws_instance.same" {
+			t.Errorf("read/no-op must be skipped, found %s", e.Address)
+		}
 		if e.Address == "aws_instance.replaced" && len(e.Actions) != 2 {
 			t.Errorf("replacement actions = %v", e.Actions)
 		}
 	}
+	if !res.Drifted() {
+		t.Error("plan with changes must report drifted")
+	}
 }
 
-func TestSummarize_NoOpAndNilPlans(t *testing.T) {
+func TestSummarize_DriftedIsCountBased(t *testing.T) {
+	// A pure replacement has Changed==0 but is still drift (Added+Destroyed>0).
+	res := Summarize(&Plan{ResourceChanges: []ResourceChange{
+		{Address: "aws_instance.r", Change: Change{Actions: []string{"delete", "create"}}},
+	}})
+	if res.Changed != 0 || !res.Drifted() {
+		t.Errorf("replace must be drifted with Changed==0: %+v", res)
+	}
+}
+
+func TestSummarize_NoOpReadAndNilPlans(t *testing.T) {
 	res := Summarize(&Plan{ResourceChanges: []ResourceChange{
 		{Address: "aws_instance.same", Change: Change{Actions: []string{"no-op"}}},
 	}})
-	if res.Drifted() || res.Added+res.Changed+res.Destroyed != 0 {
+	if res.Drifted() || len(res.Summary) != 0 {
 		t.Errorf("no-op plan must be clean: %+v", res)
 	}
 
@@ -54,13 +66,113 @@ func TestSummarize_NoOpAndNilPlans(t *testing.T) {
 		t.Errorf("nil plan must yield an empty, clean result: %+v", res)
 	}
 
-	// A read-only refresh appears in the summary (matching jq) and therefore
-	// reports drifted=true only via summary presence — counts stay zero.
+	// A read-only refresh is now skipped entirely (matching drift_summary.py):
+	// empty summary, not drifted.
 	res = Summarize(&Plan{ResourceChanges: []ResourceChange{
 		{Address: "data.aws_ami.x", Change: Change{Actions: []string{"read"}}},
 	}})
-	if res.Added+res.Changed+res.Destroyed != 0 || len(res.Summary) != 1 {
-		t.Errorf("read entry handling: %+v", res)
+	if res.Drifted() || len(res.Summary) != 0 {
+		t.Errorf("read-only must be skipped entirely: %+v", res)
+	}
+}
+
+func TestSummarize_AttrsAndSensitiveMasking(t *testing.T) {
+	// In-place update: a normal attribute is formatted, a sensitive one is
+	// masked, and an unchanged nested object is omitted (deep equality).
+	planJSON := `{
+		"resource_changes": [
+			{"address": "aws_db.x", "change": {
+				"actions": ["update"],
+				"before": {"size": "small", "tags": {"env": "dev"}, "password": "old"},
+				"after":  {"size": "large", "tags": {"env": "dev"}, "password": "new"},
+				"before_sensitive": {"password": true},
+				"after_sensitive":  {"password": true}
+			}},
+			{"address": "aws_x.created", "change": {"actions": ["create"], "before": null, "after": {"k": "v"}}}
+		]
+	}`
+	var plan Plan
+	if err := json.Unmarshal([]byte(planJSON), &plan); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	res := Summarize(&plan)
+
+	var upd *SummaryEntry
+	for i := range res.Summary {
+		if res.Summary[i].Address == "aws_db.x" {
+			upd = &res.Summary[i]
+		}
+		if res.Summary[i].Address == "aws_x.created" && res.Summary[i].Attrs != nil {
+			t.Error("pure create (before=null) must have no attrs")
+		}
+	}
+	if upd == nil {
+		t.Fatal("missing update entry")
+	}
+	if len(upd.Attrs) != 2 { // size + password; tags unchanged → omitted
+		t.Fatalf("attrs = %+v, want [size password]", upd.Attrs)
+	}
+	got := map[string][2]*string{}
+	for _, a := range upd.Attrs {
+		got[a.Name] = [2]*string{a.Before, a.After}
+	}
+	if got["size"][0] == nil || *got["size"][0] != "small" || *got["size"][1] != "large" {
+		t.Errorf("size attr = %v", got["size"])
+	}
+	if got["password"][0] == nil || *got["password"][0] != "(sensitive)" || *got["password"][1] != "(sensitive)" {
+		t.Errorf("password must be masked both sides: %v", got["password"])
+	}
+	if _, ok := got["tags"]; ok {
+		t.Error("unchanged nested object must be omitted from attrs")
+	}
+}
+
+func TestFmtVal_StringPassthroughTruncationAndNull(t *testing.T) {
+	if got := fmtVal(json.RawMessage(`"hello"`)); got == nil || *got != "hello" {
+		t.Errorf("string passthrough: %v", got)
+	}
+	if got := fmtVal(json.RawMessage(`null`)); got != nil {
+		t.Errorf("null must be nil: %v", got)
+	}
+	if got := fmtVal(json.RawMessage(`{"b":1,"a":2}`)); got == nil || *got != `{"a":2,"b":1}` {
+		t.Errorf("object must be sorted/compact: %v", got)
+	}
+	long, _ := json.Marshal(string(make([]byte, 0)) + string(bytesRepeat('x', 305)))
+	if got := fmtVal(long); got == nil || len([]rune(*got)) != 301 || (*got)[len(*got)-3:] != "…" {
+		t.Errorf("truncation: len=%d", len([]rune(*got)))
+	}
+}
+
+func bytesRepeat(b byte, n int) []byte {
+	s := make([]byte, n)
+	for i := range s {
+		s[i] = b
+	}
+	return s
+}
+
+func TestIsSens(t *testing.T) {
+	cases := []struct {
+		name string
+		sens string
+		key  string
+		want bool
+	}{
+		{"key true", `{"password": true}`, "password", true},
+		{"key false", `{"password": false}`, "password", false},
+		{"key missing", `{"other": true}`, "password", false},
+		{"nested non-empty dict", `{"block": {"secret": true}}`, "block", true},
+		{"nested empty dict", `{"block": {}}`, "block", false},
+		{"nested non-empty list", `{"items": [true]}`, "items", true},
+		{"nested empty list", `{"items": []}`, "items", false},
+		{"whole value sensitive (bool true)", `true`, "anything", true},
+		{"whole value not sensitive (bool false)", `false`, "anything", false},
+		{"empty mask", ``, "anything", false},
+	}
+	for _, c := range cases {
+		if got := isSens(json.RawMessage(c.sens), c.key); got != c.want {
+			t.Errorf("%s: isSens(%q,%q) = %v, want %v", c.name, c.sens, c.key, got, c.want)
+		}
 	}
 }
 
