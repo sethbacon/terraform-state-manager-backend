@@ -151,3 +151,147 @@ steps:
       PROVIDER_VERSIONS: ${{ parameters.provider_versions }}
       TF_VERSION: ${{ parameters.terraform_version }}
 `
+
+// Suite variants (profile="suite") use the published Terraform-suite components:
+// setup-terraform-hardened (verified install) and terraform-provider-mirror /
+// PipelineTerraformProviderMirror (the registry mirror), replacing the inline
+// installer and the hand-written .terraformrc. Version Lab has no dedicated
+// report action — its callback is just init/plan health — so the version
+// pinning, plan, and callback stay inline (jq is used only for the optional
+// provider-version override and the jq -n callback body). Dispatch inputs are
+// unchanged, so these are drop-in alternatives to the built-ins above.
+
+const githubHealthWorkflowSuite = `# .github/workflows/tsm-health.yml  (Terraform-suite actions)
+name: TSM Version Health
+on:
+  workflow_dispatch:
+    inputs:
+      callback_url:      { required: true,  type: string }
+      callback_token:    { required: true,  type: string }
+      working_dir:       { required: false, type: string, default: "." }
+      terraform_version: { required: false, type: string, default: "latest" }
+      provider_versions: { required: false, type: string, default: "{}" }  # JSON map: provider -> version
+      module_versions:   { required: false, type: string, default: "{}" }  # JSON map: module -> version (repo-specific; see note)
+      registry_host:     { required: false, type: string, default: "" }    # e.g. registry.example.com
+permissions:
+  id-token: write
+  contents: read
+jobs:
+  health:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: sethbacon/setup-terraform-hardened@v1
+        with:
+          binary: terraform
+          version: ${{ inputs.terraform_version }}
+      - name: Use the registry provider mirror
+        if: ${{ inputs.registry_host != '' }}
+        uses: sethbacon/terraform-provider-mirror@v1
+        with:
+          binary: terraform
+          mirror-url: https://${{ inputs.registry_host }}/terraform/providers
+      - name: Pin versions and plan
+        working-directory: ${{ inputs.working_dir }}
+        env:
+          CALLBACK_URL: ${{ inputs.callback_url }}
+          CALLBACK_TOKEN: ${{ inputs.callback_token }}
+          PROVIDER_VERSIONS: ${{ inputs.provider_versions }}
+          TF_VERSION: ${{ inputs.terraform_version }}
+        run: |
+          # Pin provider versions via an override (assumes hashicorp/ namespace; edit for others).
+          if [ "$PROVIDER_VERSIONS" != "{}" ] && [ -n "$PROVIDER_VERSIONS" ]; then
+            {
+              echo 'terraform {'
+              echo '  required_providers {'
+              echo "$PROVIDER_VERSIONS" | jq -r 'to_entries[] | "    \(.key) = { source = \"hashicorp/\(.key)\", version = \"\(.value)\" }"'
+              echo '  }'
+              echo '}'
+            } > tsm_versions_override.tf
+          fi
+          set +e
+          terraform init -input=false; INIT=$?
+          PLAN=1
+          if [ "$INIT" -eq 0 ]; then terraform plan -input=false; PLAN=$?; fi
+          INIT_OK=$( [ "$INIT" -eq 0 ] && echo true || echo false )
+          PLAN_OK=$( [ "$PLAN" -eq 0 ] && echo true || echo false )
+          SUCCESS=$( [ "$INIT" -eq 0 ] && [ "$PLAN" -eq 0 ] && echo true || echo false )
+          PAYLOAD=$(jq -n \
+            --argjson init_ok "$INIT_OK" --argjson plan_ok "$PLAN_OK" --argjson success "$SUCCESS" \
+            --arg detail "terraform $TF_VERSION run $GITHUB_RUN_ID" \
+            '{status:"completed", init_ok:$init_ok, plan_ok:$plan_ok, success:$success, detail:$detail}')
+          curl -sf -X POST "$CALLBACK_URL" \
+            -H "Content-Type: application/json" \
+            -H "X-TSM-Callback-Token: $CALLBACK_TOKEN" \
+            -d "$PAYLOAD"
+`
+
+const azureHealthPipelineSuite = `# azure-pipelines-tsm-health.yml  (Azure DevOps — Terraform-suite extension)
+parameters:
+  - name: callback_url
+    type: string
+  - name: callback_token
+    type: string
+  - name: working_dir
+    type: string
+    default: "."
+  - name: terraform_version
+    type: string
+    default: latest
+  - name: provider_versions
+    type: string
+    default: "{}"
+  - name: module_versions
+    type: string
+    default: "{}"
+  - name: registry_host
+    type: string
+    default: ""
+trigger: none
+pool:
+  vmImage: ubuntu-latest
+steps:
+  - checkout: self
+  - task: PipelineTerraformInstaller@1
+    displayName: Install Terraform
+    inputs:
+      terraformVersion: ${{ parameters.terraform_version }}
+  - ${{ if ne(parameters.registry_host, '') }}:
+    - task: PipelineTerraformProviderMirror@1
+      displayName: Use the registry provider mirror
+      inputs:
+        mirrorUrl: https://${{ parameters.registry_host }}/terraform/providers
+  - bash: |
+      cd "$WORKING_DIR"
+      if [ "$PROVIDER_VERSIONS" != "{}" ] && [ -n "$PROVIDER_VERSIONS" ]; then
+        {
+          echo 'terraform {'
+          echo '  required_providers {'
+          echo "$PROVIDER_VERSIONS" | jq -r 'to_entries[] | "    \(.key) = { source = \"hashicorp/\(.key)\", version = \"\(.value)\" }"'
+          echo '  }'
+          echo '}'
+        } > tsm_versions_override.tf
+      fi
+      set +e
+      terraform init -input=false; INIT=$?
+      PLAN=1
+      if [ "$INIT" -eq 0 ]; then terraform plan -input=false; PLAN=$?; fi
+      INIT_OK=$( [ "$INIT" -eq 0 ] && echo true || echo false )
+      PLAN_OK=$( [ "$PLAN" -eq 0 ] && echo true || echo false )
+      SUCCESS=$( [ "$INIT" -eq 0 ] && [ "$PLAN" -eq 0 ] && echo true || echo false )
+      PAYLOAD=$(jq -n \
+        --argjson init_ok "$INIT_OK" --argjson plan_ok "$PLAN_OK" --argjson success "$SUCCESS" \
+        --arg detail "terraform $TF_VERSION build $BUILD_BUILDID" \
+        '{status:"completed", init_ok:$init_ok, plan_ok:$plan_ok, success:$success, detail:$detail}')
+      curl -sf -X POST "$CALLBACK_URL" \
+        -H "Content-Type: application/json" \
+        -H "X-TSM-Callback-Token: $CALLBACK_TOKEN" \
+        -d "$PAYLOAD"
+    displayName: Pin versions and plan
+    env:
+      CALLBACK_URL: ${{ parameters.callback_url }}
+      CALLBACK_TOKEN: ${{ parameters.callback_token }}
+      WORKING_DIR: ${{ parameters.working_dir }}
+      PROVIDER_VERSIONS: ${{ parameters.provider_versions }}
+      TF_VERSION: ${{ parameters.terraform_version }}
+`

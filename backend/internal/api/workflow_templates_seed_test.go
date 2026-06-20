@@ -9,11 +9,11 @@ import (
 
 func TestBuiltinWorkflowSeeds(t *testing.T) {
 	seeds := builtinWorkflowSeeds()
-	if len(seeds) != 4 {
-		t.Fatalf("want 4 built-in seeds, got %d", len(seeds))
+	if len(seeds) != 8 { // 4 default + 4 suite (drift/versionlab × github/azure)
+		t.Fatalf("want 8 built-in seeds, got %d", len(seeds))
 	}
 	for _, s := range seeds {
-		if s.Content == "" || !s.IsBuiltin || s.Profile != "default" {
+		if s.Content == "" || !s.IsBuiltin || (s.Profile != "default" && s.Profile != "suite") {
 			t.Errorf("malformed seed: %+v", s)
 		}
 	}
