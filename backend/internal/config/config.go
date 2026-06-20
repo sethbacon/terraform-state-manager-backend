@@ -26,12 +26,35 @@ type Config struct {
 	// tokens) at a separate/shared database. Any unset field falls back to
 	// Database, so fully unset = the app database (standalone default). Set
 	// TSM_IDENTITY_DATABASE_* to share one identity store across the suite.
-	IdentityDatabase DatabaseConfig  `mapstructure:"identity_database"`
-	Logging          LoggingConfig   `mapstructure:"logging"`
-	Telemetry        TelemetryConfig `mapstructure:"telemetry"`
-	Auth             AuthConfig      `mapstructure:"auth"`
-	Workers          WorkersConfig   `mapstructure:"workers"`
-	Suite            SuiteConfig     `mapstructure:"suite"`
+	IdentityDatabase DatabaseConfig      `mapstructure:"identity_database"`
+	Logging          LoggingConfig       `mapstructure:"logging"`
+	Telemetry        TelemetryConfig     `mapstructure:"telemetry"`
+	Auth             AuthConfig          `mapstructure:"auth"`
+	Workers          WorkersConfig       `mapstructure:"workers"`
+	Suite            SuiteConfig         `mapstructure:"suite"`
+	Notifications    NotificationsConfig `mapstructure:"notifications"`
+}
+
+// NotificationsConfig configures outbound alert delivery. The webhook/Slack/Teams
+// channel types carry their own destination URL per channel and need nothing
+// here; the email channel type sends through one shared SMTP relay configured
+// below.
+type NotificationsConfig struct {
+	SMTP SMTPConfig `mapstructure:"smtp"`
+}
+
+// SMTPConfig is the shared outbound mail relay backing email notification
+// channels. Each email channel stores only its recipient address(es); they all
+// send through this relay. Host empty (default) disables the email channel type.
+// Auth is optional — an internal relay may accept unauthenticated mail — but when
+// Username is set the relay must offer STARTTLS so the password is never sent in
+// the clear. Env: TSM_NOTIFICATIONS_SMTP_*.
+type SMTPConfig struct {
+	Host     string `mapstructure:"host"`
+	Port     int    `mapstructure:"port"`
+	From     string `mapstructure:"from"`     // envelope + header From address
+	Username string `mapstructure:"username"` // optional SMTP AUTH user
+	Password string `mapstructure:"password"` // optional SMTP AUTH password
 }
 
 // WorkersConfig gates the periodic background workers (schedule runner +
@@ -424,6 +447,14 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("auth.ldap.group_filter", "")
 	v.SetDefault("auth.ldap.group_member_attr", "member")
 	v.SetDefault("auth.ldap.default_role", "")
+
+	// Notifications — shared outbound SMTP relay backing the "email" channel type.
+	// Empty host (default) leaves the email channel type disabled.
+	v.SetDefault("notifications.smtp.host", "")
+	v.SetDefault("notifications.smtp.port", 587)
+	v.SetDefault("notifications.smtp.from", "")
+	v.SetDefault("notifications.smtp.username", "")
+	v.SetDefault("notifications.smtp.password", "")
 
 	// Suite runtime discovery
 	v.SetDefault("suite.sibling_url", "")

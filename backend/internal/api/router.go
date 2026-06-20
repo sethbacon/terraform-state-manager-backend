@@ -270,7 +270,13 @@ func NewRouter(cfg *config.Config, database *sql.DB, identityDB *sql.DB) (*gin.E
 		// nil DB (unit tests) — the drift handler treats a nil notifier as a no-op.
 		var notifier *notify.Notifier
 		if database != nil {
-			notifier = notify.New(repositories.NewNotificationChannelRepository(database))
+			notifier = notify.New(repositories.NewNotificationChannelRepository(database), notify.SMTPConfig{
+				Host:     cfg.Notifications.SMTP.Host,
+				Port:     cfg.Notifications.SMTP.Port,
+				From:     cfg.Notifications.SMTP.From,
+				Username: cfg.Notifications.SMTP.Username,
+				Password: cfg.Notifications.SMTP.Password,
+			})
 		}
 
 		// Operator-managed workflow-template store backs the /workflow endpoints;

@@ -41,7 +41,7 @@ func newNotificationsEnv(t *testing.T) *sourcesEnv {
 	}
 	t.Cleanup(func() { db.Close() })
 
-	notifier := notify.New(repositories.NewNotificationChannelRepository(db))
+	notifier := notify.New(repositories.NewNotificationChannelRepository(db), notify.SMTPConfig{})
 	h := NewNotificationHandlers(db, nil, notifier)
 
 	r := gin.New()

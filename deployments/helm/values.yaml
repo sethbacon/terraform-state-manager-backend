@@ -240,6 +240,26 @@ suite:
   # security.existingSecret is set (add TSM_SUITE_SERVICE_TOKEN there instead).
   serviceToken: ""
 
+# -- Notification delivery. The webhook / Slack / Microsoft Teams channel types
+# need nothing here (each channel stores its own destination URL). The "email"
+# channel type sends through this one shared SMTP relay; leave host empty (the
+# default) to keep the email channel type disabled.
+notifications:
+  smtp:
+    # -- SMTP relay host, e.g. smtp.example.com. Empty disables the email channel.
+    host: ""
+    # -- Relay port. 587 (submission/STARTTLS) is assumed; 25 for an internal relay.
+    port: 587
+    # -- From address, e.g. "Terraform State Manager <tsm@example.com>". Required
+    # when host is set.
+    from: ""
+    # -- Optional SMTP AUTH username. When set, the relay must offer STARTTLS so
+    # the password is never sent in the clear (an internal relay may omit auth).
+    username: ""
+    # -- Optional SMTP AUTH password. Stored in the chart Secret; ignored if
+    # security.existingSecret is set (add TSM_NOTIFICATIONS_SMTP_PASSWORD there).
+    password: ""
+
 # -- First-run setup wizard. By default the backend GENERATES a one-time setup
 # token and prints it to the logs at first start (see NOTES). Set `token` to PIN
 # a known value instead (>= 16 chars) so GitOps deploys needn't scrape logs; it

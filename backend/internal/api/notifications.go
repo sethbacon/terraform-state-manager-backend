@@ -16,7 +16,7 @@ import (
 	"github.com/terraform-state-manager/terraform-state-manager/internal/services/notify"
 )
 
-var validChannelTypes = map[string]bool{"webhook": true, "slack": true, "teams": true}
+var validChannelTypes = map[string]bool{"webhook": true, "slack": true, "teams": true, "email": true}
 var validEvents = map[string]bool{notify.EventDriftDetected: true, notify.EventRunFailed: true}
 
 // NotificationHandlers serves the notification-channel endpoints.
@@ -47,7 +47,7 @@ type channelRequest struct {
 // validate checks the type, events, and (when present) the target URL.
 func (req *channelRequest) validate() error {
 	if !validChannelTypes[req.Type] {
-		return fmt.Errorf("type must be one of \"webhook\", \"slack\", \"teams\"")
+		return fmt.Errorf("type must be one of \"webhook\", \"slack\", \"teams\", \"email\"")
 	}
 	for _, e := range req.Events {
 		if !validEvents[e] {
@@ -55,9 +55,16 @@ func (req *channelRequest) validate() error {
 		}
 	}
 	if req.Target != "" {
-		u, err := url.Parse(req.Target)
-		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
-			return fmt.Errorf("target must be a valid http(s) URL")
+		if req.Type == "email" {
+			// Email targets are recipient address(es), not a URL.
+			if _, err := notify.ParseRecipients(req.Target); err != nil {
+				return err
+			}
+		} else {
+			u, err := url.Parse(req.Target)
+			if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+				return fmt.Errorf("target must be a valid http(s) URL")
+			}
 		}
 	}
 	return nil
