@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.12.0](https://github.com/sethbacon/terraform-state-manager-backend/compare/v1.11.0...v1.12.0) (2026-06-20)
+
+
+### Features
+
+* add suite-based drift + version-lab CI templates (profile=suite) ([#143](https://github.com/sethbacon/terraform-state-manager-backend/issues/143)) ([a186127](https://github.com/sethbacon/terraform-state-manager-backend/commit/a1861270ac0140f6ad17ac54bbae9946d088f640))
+
 ## [1.11.0](https://github.com/sethbacon/terraform-state-manager-backend/compare/v1.10.0...v1.11.0) (2026-06-20)
 
 
