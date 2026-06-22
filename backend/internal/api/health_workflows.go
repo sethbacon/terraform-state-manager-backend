@@ -78,6 +78,25 @@ jobs:
             -H "Content-Type: application/json" \
             -H "X-TSM-Callback-Token: $CALLBACK_TOKEN" \
             -d "$PAYLOAD"
+      - name: Report failure to TSM
+        if: failure()
+        env:
+          CALLBACK_URL: ${{ inputs.callback_url }}
+          CALLBACK_TOKEN: ${{ inputs.callback_token }}
+          TF_VERSION: ${{ inputs.terraform_version }}
+        run: |
+          # The run step failed before it could POST (e.g. a bad working_dir or the
+          # provider-override generation). Report the failed combo so the run does
+          # not sit at "dispatched" until the reconciler reaps it. status stays
+          # "completed" (status "failed" is reserved for reconciler expiry); HTTP
+          # 409 means the run step's own curl already reported.
+          PAYLOAD=$(jq -n --arg detail "terraform $TF_VERSION run $GITHUB_RUN_ID failed before reporting" \
+            '{status:"completed", init_ok:false, plan_ok:false, success:false, detail:$detail}')
+          CODE=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$CALLBACK_URL" \
+            -H "Content-Type: application/json" \
+            -H "X-TSM-Callback-Token: $CALLBACK_TOKEN" \
+            -d "$PAYLOAD")
+          echo "failure report -> HTTP $CODE (200=recorded, 409=already reported)"
 `
 
 const azureHealthPipeline = `# azure-pipelines-tsm-health.yml  (Azure DevOps)
@@ -149,6 +168,25 @@ steps:
       WORKING_DIR: ${{ parameters.working_dir }}
       REGISTRY_HOST: ${{ parameters.registry_host }}
       PROVIDER_VERSIONS: ${{ parameters.provider_versions }}
+      TF_VERSION: ${{ parameters.terraform_version }}
+  - bash: |
+      # The plan step failed before it could POST (e.g. a bad working_dir or the
+      # provider-override generation). Report the failed combo so the run does not
+      # sit at "dispatched" until the reconciler reaps it. status stays "completed"
+      # (status "failed" is reserved for reconciler expiry); HTTP 409 means the
+      # plan step's own curl already reported.
+      PAYLOAD=$(jq -n --arg detail "terraform $TF_VERSION build $BUILD_BUILDID failed before reporting" \
+        '{status:"completed", init_ok:false, plan_ok:false, success:false, detail:$detail}')
+      CODE=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$CALLBACK_URL" \
+        -H "Content-Type: application/json" \
+        -H "X-TSM-Callback-Token: $CALLBACK_TOKEN" \
+        -d "$PAYLOAD")
+      echo "failure report -> HTTP $CODE (200=recorded, 409=already reported)"
+    displayName: Report failure to TSM
+    condition: failed()
+    env:
+      CALLBACK_URL: ${{ parameters.callback_url }}
+      CALLBACK_TOKEN: ${{ parameters.callback_token }}
       TF_VERSION: ${{ parameters.terraform_version }}
 `
 
@@ -224,6 +262,25 @@ jobs:
             -H "Content-Type: application/json" \
             -H "X-TSM-Callback-Token: $CALLBACK_TOKEN" \
             -d "$PAYLOAD"
+      - name: Report failure to TSM
+        if: failure()
+        env:
+          CALLBACK_URL: ${{ inputs.callback_url }}
+          CALLBACK_TOKEN: ${{ inputs.callback_token }}
+          TF_VERSION: ${{ inputs.terraform_version }}
+        run: |
+          # The run step failed before it could POST (e.g. a bad working_dir or the
+          # provider-override generation). Report the failed combo so the run does
+          # not sit at "dispatched" until the reconciler reaps it. status stays
+          # "completed" (status "failed" is reserved for reconciler expiry); HTTP
+          # 409 means the run step's own curl already reported.
+          PAYLOAD=$(jq -n --arg detail "terraform $TF_VERSION run $GITHUB_RUN_ID failed before reporting" \
+            '{status:"completed", init_ok:false, plan_ok:false, success:false, detail:$detail}')
+          CODE=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$CALLBACK_URL" \
+            -H "Content-Type: application/json" \
+            -H "X-TSM-Callback-Token: $CALLBACK_TOKEN" \
+            -d "$PAYLOAD")
+          echo "failure report -> HTTP $CODE (200=recorded, 409=already reported)"
 `
 
 const azureHealthPipelineSuite = `# azure-pipelines-tsm-health.yml  (Azure DevOps — Terraform-suite extension)
@@ -293,5 +350,24 @@ steps:
       CALLBACK_TOKEN: ${{ parameters.callback_token }}
       WORKING_DIR: ${{ parameters.working_dir }}
       PROVIDER_VERSIONS: ${{ parameters.provider_versions }}
+      TF_VERSION: ${{ parameters.terraform_version }}
+  - bash: |
+      # The plan step failed before it could POST (e.g. a bad working_dir or the
+      # provider-override generation). Report the failed combo so the run does not
+      # sit at "dispatched" until the reconciler reaps it. status stays "completed"
+      # (status "failed" is reserved for reconciler expiry); HTTP 409 means the
+      # plan step's own curl already reported.
+      PAYLOAD=$(jq -n --arg detail "terraform $TF_VERSION build $BUILD_BUILDID failed before reporting" \
+        '{status:"completed", init_ok:false, plan_ok:false, success:false, detail:$detail}')
+      CODE=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$CALLBACK_URL" \
+        -H "Content-Type: application/json" \
+        -H "X-TSM-Callback-Token: $CALLBACK_TOKEN" \
+        -d "$PAYLOAD")
+      echo "failure report -> HTTP $CODE (200=recorded, 409=already reported)"
+    displayName: Report failure to TSM
+    condition: failed()
+    env:
+      CALLBACK_URL: ${{ parameters.callback_url }}
+      CALLBACK_TOKEN: ${{ parameters.callback_token }}
       TF_VERSION: ${{ parameters.terraform_version }}
 `
