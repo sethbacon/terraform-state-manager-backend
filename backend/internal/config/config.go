@@ -33,6 +33,23 @@ type Config struct {
 	Workers          WorkersConfig       `mapstructure:"workers"`
 	Suite            SuiteConfig         `mapstructure:"suite"`
 	Notifications    NotificationsConfig `mapstructure:"notifications"`
+	Drift            DriftConfig         `mapstructure:"drift"`
+}
+
+// DriftConfig tunes the background reconciler that expires drift runs stuck in
+// "dispatched" because their CI job never posted a result callback (build failed
+// at init/plan, the agent crashed, the pipeline was cancelled). RunTTL is how long
+// a run may sit dispatched before it is failed. The CI job posts its only callback
+// at the very end (there is no heartbeat), so RunTTL bounds the run's TOTAL
+// wall-clock — checkout + init + provider refresh + plan + callback — not idle
+// time; set it above the worst-case plan duration for your largest states so a
+// legitimately slow plan is not expired mid-flight. ReconcileInterval is how often
+// the sweep runs. Like the schedule runner and statesync, the sweep is a periodic
+// worker gated by Workers.Enabled so it runs on exactly one replica.
+// Env: TSM_DRIFT_RUN_TTL, TSM_DRIFT_RECONCILE_INTERVAL.
+type DriftConfig struct {
+	RunTTL            time.Duration `mapstructure:"run_ttl"`
+	ReconcileInterval time.Duration `mapstructure:"reconcile_interval"`
 }
 
 // NotificationsConfig configures outbound alert delivery. The webhook/Slack/Teams
@@ -417,6 +434,11 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("telemetry.metrics.prometheus_port", 9090)
 
 	v.SetDefault("workers.enabled", true)
+
+	// Drift-run reconciler: fail a dispatched run whose CI job never called back
+	// after run_ttl, sweeping every reconcile_interval.
+	v.SetDefault("drift.run_ttl", 2*time.Hour)
+	v.SetDefault("drift.reconcile_interval", 5*time.Minute)
 
 	v.SetDefault("auth.oidc.enabled", false)
 	v.SetDefault("auth.oidc.issuer_url", "")
