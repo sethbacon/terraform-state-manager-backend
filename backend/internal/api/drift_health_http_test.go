@@ -273,11 +273,16 @@ func TestWorkflowTemplates(t *testing.T) {
 func TestHealthRuns(t *testing.T) {
 	e := newDriftEnv(t)
 
-	e.mock.ExpectQuery("SELECT .+ FROM health_runs ORDER BY").WithArgs(50).
+	e.mock.ExpectQuery("SELECT .+ FROM health_runs ORDER BY").WithArgs(50, 0).
 		WillReturnRows(healthRow("secret"))
+	e.mock.ExpectQuery(`SELECT COUNT\(\*\) FROM health_runs`).
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(7))
 	w := e.do(http.MethodGet, "/api/v1/health-lab/runs", "")
 	if w.Code != http.StatusOK || strings.Contains(w.Body.String(), "secret") {
 		t.Fatalf("list: status = %d, token leaked = %v", w.Code, strings.Contains(w.Body.String(), "secret"))
+	}
+	if !strings.Contains(w.Body.String(), `"total":7`) {
+		t.Fatalf("list: missing total in %s", w.Body.String())
 	}
 
 	// Dispatch with incomplete ADO config: recorded then failed → 502.
@@ -310,6 +315,31 @@ func TestHealthRuns(t *testing.T) {
 		"X-TSM-Callback-Token", "nope")
 	if w.Code != http.StatusUnauthorized {
 		t.Errorf("wrong token: status = %d, want 401", w.Code)
+	}
+}
+
+// TestHealthRunsPagination covers the server-side window + status filter + the
+// total count used for "showing N of M".
+func TestHealthRunsPagination(t *testing.T) {
+	e := newDriftEnv(t)
+
+	// status + limit + offset reach the query as args; total reflects the filter.
+	e.mock.ExpectQuery("SELECT .+ FROM health_runs WHERE status = .+ ORDER BY").
+		WithArgs("failed", 25, 50).WillReturnRows(healthRow("secret"))
+	e.mock.ExpectQuery(`SELECT COUNT\(\*\) FROM health_runs WHERE status =`).
+		WithArgs("failed").WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(3))
+	w := e.do(http.MethodGet, "/api/v1/health-lab/runs?status=failed&limit=25&offset=50", "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("paged list: status = %d (%s)", w.Code, w.Body.String())
+	}
+	if strings.Contains(w.Body.String(), "secret") || !strings.Contains(w.Body.String(), `"total":3`) {
+		t.Fatalf("paged list: token leak or missing total: %s", w.Body.String())
+	}
+
+	// An unknown status filter is rejected before any query runs.
+	w = e.do(http.MethodGet, "/api/v1/health-lab/runs?status=bogus", "")
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("bad status: status = %d, want 400", w.Code)
 	}
 }
 

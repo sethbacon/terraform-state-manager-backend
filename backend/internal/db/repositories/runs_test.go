@@ -138,14 +138,28 @@ func TestHealthRepository_CreateListGet(t *testing.T) {
 		t.Errorf("fields not mapped: %+v", created)
 	}
 
-	mock.ExpectQuery("SELECT .+ FROM health_runs ORDER BY created_at DESC LIMIT").WithArgs(50).
+	mock.ExpectQuery("SELECT .+ FROM health_runs ORDER BY created_at DESC LIMIT").WithArgs(50, 0).
 		WillReturnRows(healthRow("secret"))
-	out, err := r.List(ctx, -1)
+	out, err := r.List(ctx, -1, 0, "")
 	if err != nil || len(out) != 1 {
 		t.Fatalf("List: %v %d", err, len(out))
 	}
 	if out[0].CallbackToken != "" {
 		t.Error("List leaked the callback token")
+	}
+
+	// Filtered + windowed list reaches the query as (status, limit, offset).
+	mock.ExpectQuery("SELECT .+ FROM health_runs WHERE status = .+ ORDER BY .+ LIMIT .+ OFFSET").
+		WithArgs("failed", 10, 20).WillReturnRows(healthRow("secret"))
+	if _, err := r.List(ctx, 10, 20, "failed"); err != nil {
+		t.Fatalf("filtered List: %v", err)
+	}
+
+	// CountRuns totals, optionally by status.
+	mock.ExpectQuery(`SELECT COUNT\(\*\) FROM health_runs WHERE status =`).WithArgs("failed").
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(4))
+	if n, err := r.CountRuns(ctx, "failed"); err != nil || n != 4 {
+		t.Fatalf("CountRuns: %v %d", err, n)
 	}
 
 	mock.ExpectQuery("SELECT .+ FROM health_runs WHERE id").WithArgs("nope").WillReturnError(sql.ErrNoRows)

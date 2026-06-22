@@ -112,11 +112,27 @@ func (r *HealthRepository) GetByID(ctx context.Context, id string) (*HealthRun, 
 	return h, nil
 }
 
-func (r *HealthRepository) List(ctx context.Context, limit int) ([]HealthRun, error) {
+// List returns health runs newest-first, optionally filtered by status, windowed
+// by limit/offset for server-side pagination. Use CountRuns with the same status
+// for the total.
+func (r *HealthRepository) List(ctx context.Context, limit, offset int, status string) ([]HealthRun, error) {
 	if limit <= 0 || limit > 200 {
 		limit = 50
 	}
-	rows, err := r.db.QueryContext(ctx, `SELECT `+healthColumns+` FROM health_runs ORDER BY created_at DESC LIMIT $1`, limit)
+	if offset < 0 {
+		offset = 0
+	}
+	var (
+		rows *sql.Rows
+		err  error
+	)
+	if status != "" {
+		rows, err = r.db.QueryContext(ctx, `SELECT `+healthColumns+`
+			FROM health_runs WHERE status = $1 ORDER BY created_at DESC LIMIT $2 OFFSET $3`, status, limit, offset)
+	} else {
+		rows, err = r.db.QueryContext(ctx, `SELECT `+healthColumns+`
+			FROM health_runs ORDER BY created_at DESC LIMIT $1 OFFSET $2`, limit, offset)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -131,6 +147,19 @@ func (r *HealthRepository) List(ctx context.Context, limit int) ([]HealthRun, er
 		out = append(out, *h)
 	}
 	return out, rows.Err()
+}
+
+// CountRuns returns the total number of health runs, optionally filtered by
+// status — the "M" in "showing N of M" for List's pagination.
+func (r *HealthRepository) CountRuns(ctx context.Context, status string) (int, error) {
+	var n int
+	var err error
+	if status != "" {
+		err = r.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM health_runs WHERE status = $1`, status).Scan(&n)
+	} else {
+		err = r.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM health_runs`).Scan(&n)
+	}
+	return n, err
 }
 
 func (r *HealthRepository) UpdateStatus(ctx context.Context, id, status, detail string) error {
