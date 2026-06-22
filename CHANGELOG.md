@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.14.1](https://github.com/sethbacon/terraform-state-manager-backend/compare/v1.14.0...v1.14.1) (2026-06-22)
+
+
+### Documentation
+
+* **deployment:** add in-cluster PostgreSQL (CloudNativePG) option for AKS ([#151](https://github.com/sethbacon/terraform-state-manager-backend/issues/151)) ([a1a547c](https://github.com/sethbacon/terraform-state-manager-backend/commit/a1a547c899fa9c193e5c738b10e46481a6357e2c))
+
 ## [1.14.0](https://github.com/sethbacon/terraform-state-manager-backend/compare/v1.13.0...v1.14.0) (2026-06-22)
 
 
