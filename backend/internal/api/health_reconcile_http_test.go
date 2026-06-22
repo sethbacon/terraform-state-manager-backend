@@ -5,6 +5,30 @@ import (
 	"testing"
 )
 
+// The version-lab runner always posts status="completed" and reports a broken
+// version combination via success=false (it never posts status="failed"). So the
+// real-callback alert must key on success, not the status string — otherwise a
+// genuine init/plan failure would never notify. The reconciler, by contrast,
+// sends an explicit failed status. healthResultFailed must alert on both.
+func TestHealthResultFailed(t *testing.T) {
+	cases := []struct {
+		name    string
+		status  string
+		success bool
+		want    bool
+	}{
+		{"runner success: no alert", "completed", true, false},
+		{"runner init/plan failure (status still completed)", "completed", false, true},
+		{"reconciler expiry (explicit failed status)", "failed", false, true},
+		{"explicit failed status with success flag", "failed", true, true},
+	}
+	for _, tc := range cases {
+		if got := healthResultFailed(tc.status, tc.success); got != tc.want {
+			t.Errorf("%s: healthResultFailed(%q, %v) = %v, want %v", tc.name, tc.status, tc.success, got, tc.want)
+		}
+	}
+}
+
 // Once the background reconciler expires a stuck health run it clears the stored
 // callback_token. A late callback from the CI job that finally came back must then
 // be rejected with the uniform 401 — the cleared token closes the late-callback

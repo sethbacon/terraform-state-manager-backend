@@ -249,17 +249,30 @@ func (h *HealthHandlers) RunResults() gin.HandlerFunc {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to record results"})
 			return
 		}
+
+		h.notifyHealthResult(run.ID, status, success, body.Detail)
 		c.JSON(http.StatusOK, gin.H{"status": "recorded"})
 	}
 }
 
-// notifyHealthResult fires an alert event when a health result reports a failure.
-// It runs detached (the caller must not block on webhook latency) with its own
-// timeout; a nil notifier (notifications disabled) is a no-op. A health run has no
-// "drift detected" outcome, so only the failed status alerts — this is the path
-// the background reconciler reuses when it expires a stuck run.
-func (h *HealthHandlers) notifyHealthResult(runID, status, detail string) {
-	if h.notifier == nil || status != "failed" {
+// healthResultFailed reports whether a health result warrants a run_failed alert.
+// A health run has no "drift detected" outcome — the only thing to alert on is
+// failure — but "failure" is not just status=="failed": the version-lab runner
+// always posts status="completed" and signals a broken version combination via
+// success=false (init/plan failed). So a result is a failure when it did not
+// succeed OR the status is an explicit "failed" (which is what the background
+// reconciler sends when it expires a stuck run).
+func healthResultFailed(status string, success bool) bool {
+	return status == "failed" || !success
+}
+
+// notifyHealthResult fires an alert event when a health result is a failure (see
+// healthResultFailed). It runs detached (the caller must not block on webhook
+// latency) with its own timeout; a nil notifier (notifications disabled) is a
+// no-op. Shared by the result callback and the background reconciler, so an
+// expiry fires the same run_failed alert a real failure callback would.
+func (h *HealthHandlers) notifyHealthResult(runID, status string, success bool, detail string) {
+	if h.notifier == nil || !healthResultFailed(status, success) {
 		return
 	}
 	ev := notify.Event{

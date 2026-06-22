@@ -8,9 +8,10 @@ import "github.com/terraform-state-manager/terraform-state-manager/internal/serv
 // produced, reusing notifyHealthResult (nil-notifier safe, detached send).
 type healthFailureNotifier struct{ health *HealthHandlers }
 
-// NotifyRunFailed implements healthreconcile.FailureNotifier.
+// NotifyRunFailed implements healthreconcile.FailureNotifier. An expired run did
+// not succeed, so it is reported as a failed status with success=false.
 func (n healthFailureNotifier) NotifyRunFailed(runID, detail string) {
-	n.health.notifyHealthResult(runID, "failed", detail)
+	n.health.notifyHealthResult(runID, "failed", false, detail)
 }
 
 var _ healthreconcile.FailureNotifier = healthFailureNotifier{}
