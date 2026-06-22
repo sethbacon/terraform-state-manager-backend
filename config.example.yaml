@@ -32,3 +32,17 @@ telemetry:
   metrics:
     enabled: true
     prometheus_port: 9090
+
+drift:
+  # A dispatched drift run whose CI job never posts a result callback (build
+  # failed at init/plan, the agent crashed, the pipeline was cancelled) is failed
+  # automatically once it has sat in "dispatched" for run_ttl. The reconciler
+  # sweeps every reconcile_interval. It is a periodic worker, so it runs only when
+  # workers.enabled is true (one replica). Override via TSM_DRIFT_RUN_TTL /
+  # TSM_DRIFT_RECONCILE_INTERVAL.
+  #
+  # The CI job calls back only at the very end (no heartbeat), so run_ttl caps the
+  # run's TOTAL wall-clock (checkout + init + plan + callback), not idle time —
+  # raise it above your worst-case plan duration for large states.
+  run_ttl: 2h
+  reconcile_interval: 5m

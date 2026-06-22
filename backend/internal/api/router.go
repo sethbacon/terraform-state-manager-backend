@@ -24,6 +24,7 @@ import (
 	"github.com/terraform-state-manager/terraform-state-manager/internal/crypto"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/db/repositories"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/middleware"
+	"github.com/terraform-state-manager/terraform-state-manager/internal/services/driftreconcile"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/services/notify"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/services/scheduler"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/services/statesync"
@@ -390,10 +391,21 @@ func NewRouter(cfg *config.Config, database *sql.DB, identityDB *sql.DB) (*gin.E
 				runner := scheduler.New(repositories.NewScheduleRepository(database), driftDisp)
 				runner.Start()
 				syncer.Start()
+				// Reap drift runs stuck in "dispatched" whose CI job never called
+				// back (build/agent died), firing the same failure alert a real
+				// callback would. A periodic worker — gated here so it runs on the
+				// single worker replica, like the runner and syncer above.
+				reconciler := driftreconcile.New(
+					repositories.NewDriftRepository(database),
+					driftFailureNotifier{drift: drift},
+					cfg.Drift.RunTTL, cfg.Drift.ReconcileInterval,
+				)
+				reconciler.Start()
 				runnerStop := runner.Stop
 				stop = func() {
 					runnerStop()
 					syncer.Stop()
+					reconciler.Stop()
 				}
 			} else {
 				slog.Info("background workers disabled on this replica (workers.enabled=false); " +

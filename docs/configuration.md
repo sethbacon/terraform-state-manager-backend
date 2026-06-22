@@ -85,7 +85,9 @@ they overwrite each other's role scopes on every restart.
 
 | Variable | Default | Required | Secret | Description |
 |---|---|---|---|---|
-| `TSM_WORKERS_ENABLED` | `true` | | | Gates the periodic schedule runner + state-sync loop. Multi-replica: `false` on API replicas, `true` on exactly ONE worker replica ([why](deployment/README.md#worker-topology)) |
+| `TSM_WORKERS_ENABLED` | `true` | | | Gates the periodic schedule runner + state-sync loop + drift-run reconciler. Multi-replica: `false` on API replicas, `true` on exactly ONE worker replica ([why](deployment/README.md#worker-topology)) |
+| `TSM_DRIFT_RUN_TTL` | `2h` | | | How long a drift run may sit in `dispatched` before the reconciler fails it (the CI job never posted a result callback). Anchored on dispatch time; since the job's only callback is its final step (no heartbeat) this bounds **total CI wall-clock**, not idle time — raise it above your worst-case plan duration for large states so slow plans aren't expired mid-flight |
+| `TSM_DRIFT_RECONCILE_INTERVAL` | `5m` | | | How often the reconciler sweeps for expired dispatched drift runs |
 
 ## Authentication — OIDC
 
