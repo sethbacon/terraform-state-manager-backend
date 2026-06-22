@@ -123,3 +123,42 @@ func TestRunResults_CapturesModuleProvenance(t *testing.T) {
 		t.Errorf("expected module provenance to be captured: %v", err)
 	}
 }
+
+// TestHealthWorkflowTemplates_FailureReportStep guards that every version-lab
+// (health) template carries a failure-report step. The happy-path callback runs
+// under `set +e` so a normal init/plan failure already posts success:false, but a
+// crash in the pre-`set +e` portion (a bad working_dir, the provider-override
+// generation) exits before the curl — leaving the run at "dispatched" until the
+// reconciler reaps it. The failure step closes that hole: it posts success:false
+// with status "completed" (status "failed" is reserved for reconciler expiry) and
+// tolerates a 409 (the happy-path curl may have already consumed the one-shot
+// token).
+func TestHealthWorkflowTemplates_FailureReportStep(t *testing.T) {
+	common := []string{
+		`success:false`,      // alerts via the !success arm of healthResultFailed
+		`status:"completed"`, // NOT "failed" — that is reserved for reconciler expiry
+		"409",                // tolerate the one-shot-token race with the happy-path curl
+	}
+	github := map[string]string{
+		"github versionlab":       githubHealthWorkflow,
+		"github versionlab suite": githubHealthWorkflowSuite,
+	}
+	azure := map[string]string{
+		"azure versionlab":       azureHealthPipeline,
+		"azure versionlab suite": azureHealthPipelineSuite,
+	}
+	for name, tmpl := range github {
+		for _, want := range append([]string{"if: failure()"}, common...) {
+			if !strings.Contains(tmpl, want) {
+				t.Errorf("%s template missing failure-step marker %q", name, want)
+			}
+		}
+	}
+	for name, tmpl := range azure {
+		for _, want := range append([]string{"condition: failed()"}, common...) {
+			if !strings.Contains(tmpl, want) {
+				t.Errorf("%s template missing failure-step marker %q", name, want)
+			}
+		}
+	}
+}
