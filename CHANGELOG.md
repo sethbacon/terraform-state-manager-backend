@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.14.0](https://github.com/sethbacon/terraform-state-manager-backend/compare/v1.13.0...v1.14.0) (2026-06-22)
+
+
+### Features
+
+* paginate version-lab runs list ([#149](https://github.com/sethbacon/terraform-state-manager-backend/issues/149)) ([8d8a3aa](https://github.com/sethbacon/terraform-state-manager-backend/commit/8d8a3aacfe9f0ab0b4c6cf4779836b8a9305e16d))
+* report version-lab failures before callback ([#148](https://github.com/sethbacon/terraform-state-manager-backend/issues/148)) ([18eea8a](https://github.com/sethbacon/terraform-state-manager-backend/commit/18eea8a5ddb2cec71f06f180edc45713063a893b))
+
 ## [1.13.0](https://github.com/sethbacon/terraform-state-manager-backend/compare/v1.12.0...v1.13.0) (2026-06-22)
 
 
