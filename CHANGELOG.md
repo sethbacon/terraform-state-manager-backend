@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.13.0](https://github.com/sethbacon/terraform-state-manager-backend/compare/v1.12.0...v1.13.0) (2026-06-22)
+
+
+### Features
+
+* **drift:** reconcile dispatched runs stuck without a callback ([#145](https://github.com/sethbacon/terraform-state-manager-backend/issues/145)) ([d1bd132](https://github.com/sethbacon/terraform-state-manager-backend/commit/d1bd132c1cf7ce47b70561c9b3f7adf0a70c8c8b))
+* **health:** reconcile dispatched version-lab runs stuck without a callback ([#147](https://github.com/sethbacon/terraform-state-manager-backend/issues/147)) ([1302f4e](https://github.com/sethbacon/terraform-state-manager-backend/commit/1302f4ef563e7c3c747029ab6e9743051c3fd9f9))
+
 ## [1.12.0](https://github.com/sethbacon/terraform-state-manager-backend/compare/v1.11.0...v1.12.0) (2026-06-20)
 
 
