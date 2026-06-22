@@ -44,5 +44,8 @@ drift:
   # The CI job calls back only at the very end (no heartbeat), so run_ttl caps the
   # run's TOTAL wall-clock (checkout + init + plan + callback), not idle time —
   # raise it above your worst-case plan duration for large states.
+  #
+  # Version-lab health runs share the identical stuck-dispatched failure mode and
+  # are reaped by their own reconciler using these same knobs.
   run_ttl: 2h
   reconcile_interval: 5m

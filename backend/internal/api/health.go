@@ -4,9 +4,11 @@
 package api
 
 import (
+	"context"
 	"crypto/subtle"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 
@@ -15,6 +17,7 @@ import (
 	"github.com/terraform-state-manager/terraform-state-manager/internal/config"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/db/repositories"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/pipelines"
+	"github.com/terraform-state-manager/terraform-state-manager/internal/services/notify"
 )
 
 // HealthHandlers serves version-lab (health run) endpoints.
@@ -24,17 +27,20 @@ type HealthHandlers struct {
 	ciSourceRepo *repositories.CISourceRepository
 	healthRepo   *repositories.HealthRepository
 	audit        auditor
+	notifier     *notify.Notifier // may be nil (notifications disabled / no DB)
 }
 
 // NewHealthHandlers constructs the handlers over the app (public) connection.
-// identityDB (may be nil) carries the shared audit log.
-func NewHealthHandlers(cfg *config.Config, database, identityDB *sql.DB) *HealthHandlers {
+// identityDB (may be nil) carries the shared audit log; the notifier (may be nil)
+// fires the run_failed alert when the background reconciler expires a stuck run.
+func NewHealthHandlers(cfg *config.Config, database, identityDB *sql.DB, notifier *notify.Notifier) *HealthHandlers {
 	return &HealthHandlers{
 		cfg:          cfg,
 		pipelineRepo: repositories.NewPipelineRepository(database),
 		ciSourceRepo: repositories.NewCISourceRepository(database),
 		healthRepo:   repositories.NewHealthRepository(database),
 		audit:        newAuditor(identityDB),
+		notifier:     notifier,
 	}
 }
 
@@ -243,8 +249,42 @@ func (h *HealthHandlers) RunResults() gin.HandlerFunc {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to record results"})
 			return
 		}
+
+		h.notifyHealthResult(run.ID, status, success, body.Detail)
 		c.JSON(http.StatusOK, gin.H{"status": "recorded"})
 	}
+}
+
+// healthResultFailed reports whether a health result warrants a run_failed alert.
+// A health run has no "drift detected" outcome — the only thing to alert on is
+// failure — but "failure" is not just status=="failed": the version-lab runner
+// always posts status="completed" and signals a broken version combination via
+// success=false (init/plan failed). So a result is a failure when it did not
+// succeed OR the status is an explicit "failed" (which is what the background
+// reconciler sends when it expires a stuck run).
+func healthResultFailed(status string, success bool) bool {
+	return status == "failed" || !success
+}
+
+// notifyHealthResult fires an alert event when a health result is a failure (see
+// healthResultFailed). It runs detached (the caller must not block on webhook
+// latency) with its own timeout; a nil notifier (notifications disabled) is a
+// no-op. Shared by the result callback and the background reconciler, so an
+// expiry fires the same run_failed alert a real failure callback would.
+func (h *HealthHandlers) notifyHealthResult(runID, status string, success bool, detail string) {
+	if h.notifier == nil || !healthResultFailed(status, success) {
+		return
+	}
+	ev := notify.Event{
+		Type:    notify.EventRunFailed,
+		Title:   "Health run failed",
+		Message: fmt.Sprintf("Health run %s failed: %s", runID, detail),
+	}
+	go func(ev notify.Event) {
+		ctx, cancel := context.WithTimeout(context.Background(), notifyTimeout)
+		defer cancel()
+		h.notifier.Notify(ctx, ev)
+	}(ev)
 }
 
 // WorkflowTemplate returns the runner-side health CI definition, served from the

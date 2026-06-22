@@ -26,7 +26,7 @@ func newDriftEnv(t *testing.T) *sourcesEnv {
 
 	cfg := &config.Config{}
 	h := NewDriftHandlers(cfg, db, nil, nil)
-	hh := NewHealthHandlers(cfg, db, nil)
+	hh := NewHealthHandlers(cfg, db, nil, nil)
 
 	r := gin.New()
 	v1 := r.Group("/api/v1")
