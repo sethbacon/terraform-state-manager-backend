@@ -56,6 +56,57 @@ az postgres flexible-server db create -s tsm-pg -g $RG -d terraform_state_manage
 # Networking: allow the AKS egress (or use VNet integration / private endpoint)
 ```
 
+### Alternative: in-cluster PostgreSQL with CloudNativePG
+
+The chart never bundles a database — it connects to whatever `externalDatabase.host`
+points at, so the database can live **outside or inside** the cluster. Managed Flexible
+Server (above) is the recommended, lowest-ops option. If you instead need PostgreSQL to
+**run inside AKS** (no managed service, in-cluster data residency, or cost control), run it
+with the [CloudNativePG](https://cloudnative-pg.io/) operator and point the chart at it.
+
+```bash
+# 1. Install the operator (mirror the image into your ACR for locked-down clusters)
+helm repo add cnpg https://cloudnative-pg.github.io/charts
+helm upgrade --install cnpg cnpg/cloudnative-pg \
+  --namespace cnpg-system --create-namespace
+
+# 2. Create a cluster (single instance shown; raise `instances` + add backups for production)
+kubectl apply -f - <<'EOF'
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: terraform-state-manager-pg
+  namespace: terraform-state-manager
+spec:
+  instances: 1
+  storage:
+    size: 64Gi
+    storageClass: managed-csi-premium   # block volume — do NOT use Azure Files for PGDATA
+  bootstrap:
+    initdb:
+      database: terraform_state_manager
+      owner: tsm
+EOF
+```
+
+Then point the chart at the CloudNativePG read-write Service instead of a Flexible Server FQDN:
+
+```yaml
+externalDatabase:
+  host: "terraform-state-manager-pg-rw.terraform-state-manager.svc.cluster.local"
+  port: 5432
+  name: "terraform_state_manager"
+  user: "tsm"
+  sslMode: "require"
+  existingSecret: "<db-secret>"   # wire in CloudNativePG's generated role password (its "-app" Secret)
+```
+
+**You take on what the managed service handled:** backups (configure CloudNativePG's
+Barman backup to Azure Blob for point-in-time recovery), minor/patch updates (bump the
+cluster `imageName`; the operator does a rolling update), and major-version upgrades
+(deliberate — never automatic). Always use a managed-disk (block) `storageClass`, never
+Azure Files, for `PGDATA`.
+
 ## 4. Key Vault + the three app secrets
 
 Secret NAMES are what the chart's SecretProviderClass expects.
