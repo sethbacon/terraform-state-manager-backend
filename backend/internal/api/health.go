@@ -4,9 +4,11 @@
 package api
 
 import (
+	"context"
 	"crypto/subtle"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 
@@ -15,6 +17,7 @@ import (
 	"github.com/terraform-state-manager/terraform-state-manager/internal/config"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/db/repositories"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/pipelines"
+	"github.com/terraform-state-manager/terraform-state-manager/internal/services/notify"
 )
 
 // HealthHandlers serves version-lab (health run) endpoints.
@@ -24,17 +27,20 @@ type HealthHandlers struct {
 	ciSourceRepo *repositories.CISourceRepository
 	healthRepo   *repositories.HealthRepository
 	audit        auditor
+	notifier     *notify.Notifier // may be nil (notifications disabled / no DB)
 }
 
 // NewHealthHandlers constructs the handlers over the app (public) connection.
-// identityDB (may be nil) carries the shared audit log.
-func NewHealthHandlers(cfg *config.Config, database, identityDB *sql.DB) *HealthHandlers {
+// identityDB (may be nil) carries the shared audit log; the notifier (may be nil)
+// fires the run_failed alert when the background reconciler expires a stuck run.
+func NewHealthHandlers(cfg *config.Config, database, identityDB *sql.DB, notifier *notify.Notifier) *HealthHandlers {
 	return &HealthHandlers{
 		cfg:          cfg,
 		pipelineRepo: repositories.NewPipelineRepository(database),
 		ciSourceRepo: repositories.NewCISourceRepository(database),
 		healthRepo:   repositories.NewHealthRepository(database),
 		audit:        newAuditor(identityDB),
+		notifier:     notifier,
 	}
 }
 
@@ -245,6 +251,27 @@ func (h *HealthHandlers) RunResults() gin.HandlerFunc {
 		}
 		c.JSON(http.StatusOK, gin.H{"status": "recorded"})
 	}
+}
+
+// notifyHealthResult fires an alert event when a health result reports a failure.
+// It runs detached (the caller must not block on webhook latency) with its own
+// timeout; a nil notifier (notifications disabled) is a no-op. A health run has no
+// "drift detected" outcome, so only the failed status alerts — this is the path
+// the background reconciler reuses when it expires a stuck run.
+func (h *HealthHandlers) notifyHealthResult(runID, status, detail string) {
+	if h.notifier == nil || status != "failed" {
+		return
+	}
+	ev := notify.Event{
+		Type:    notify.EventRunFailed,
+		Title:   "Health run failed",
+		Message: fmt.Sprintf("Health run %s failed: %s", runID, detail),
+	}
+	go func(ev notify.Event) {
+		ctx, cancel := context.WithTimeout(context.Background(), notifyTimeout)
+		defer cancel()
+		h.notifier.Notify(ctx, ev)
+	}(ev)
 }
 
 // WorkflowTemplate returns the runner-side health CI definition, served from the

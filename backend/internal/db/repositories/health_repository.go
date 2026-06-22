@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"time"
 )
 
 // HealthRun tracks a version-lab run: a terraform init/plan against pinned
@@ -167,6 +168,60 @@ func (r *HealthRepository) UpdateResult(ctx context.Context, id, status string, 
 		WHERE id=$1`,
 		id, status, initOK, planOK, success, summaryArg, detail)
 	return err
+}
+
+// ListExpiredDispatched returns dispatched health runs created before cutoff —
+// runs whose CI job never posted a result callback (build failed at init/plan,
+// the agent crashed, the pipeline was cancelled). created_at is the dispatch time
+// and never moves while a run is stuck in "dispatched", so it is the TTL anchor.
+// The callback_token is retained (not blanked like List does) because the
+// reconciler needs it to expire each run race-safely. Bounded by limit so one
+// sweep cannot load an unbounded backlog; a larger backlog drains over subsequent
+// sweeps.
+func (r *HealthRepository) ListExpiredDispatched(ctx context.Context, cutoff time.Time, limit int) ([]HealthRun, error) {
+	if limit <= 0 || limit > 500 {
+		limit = 100
+	}
+	rows, err := r.db.QueryContext(ctx, `SELECT `+healthColumns+`
+		FROM health_runs WHERE status='dispatched' AND created_at < $1
+		ORDER BY created_at ASC LIMIT $2`, cutoff, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []HealthRun{}
+	for rows.Next() {
+		h, err := scanHealth(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, *h)
+	}
+	return out, rows.Err()
+}
+
+// ExpireDispatched atomically fails a dispatched health run that never received a
+// callback: in one statement it flips status dispatched->failed, records detail,
+// and clears the callback token — but only if the run is STILL dispatched and
+// still holds the supplied token. This mirrors ConsumeCallbackToken's
+// compare-and-clear so expiry is race-safe against a real callback landing
+// concurrently: that callback consumes the token first, so this matches zero rows
+// and reports false (the caller then skips notifying). Clearing the token also
+// makes any later/replayed callback fail the run's uniform 401 token check.
+// Returns true only when this call performed the expiry.
+func (r *HealthRepository) ExpireDispatched(ctx context.Context, id, token, detail string) (bool, error) {
+	if token == "" {
+		return false, nil
+	}
+	res, err := r.db.ExecContext(ctx, `
+		UPDATE health_runs SET status='failed', detail=$3, callback_token='', updated_at=now()
+		WHERE id=$1 AND status='dispatched' AND callback_token=$2`,
+		id, token, detail)
+	if err != nil {
+		return false, err
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
 }
 
 func orEmptyStrMap(m map[string]string) map[string]string {

@@ -25,6 +25,7 @@ import (
 	"github.com/terraform-state-manager/terraform-state-manager/internal/db/repositories"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/middleware"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/services/driftreconcile"
+	"github.com/terraform-state-manager/terraform-state-manager/internal/services/healthreconcile"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/services/notify"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/services/scheduler"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/services/statesync"
@@ -337,7 +338,7 @@ func NewRouter(cfg *config.Config, database *sql.DB, identityDB *sql.DB) (*gin.E
 		v1.POST("/drift/runs/:id/results", drift.RunResults())
 
 		// Phase 4 version lab: dispatch plan against pinned versions + health.
-		health := NewHealthHandlers(cfg, database, identityDB)
+		health := NewHealthHandlers(cfg, database, identityDB, notifier)
 		hg := v1.Group("/health-lab", requireAuth)
 		{
 			hg.GET("/workflow", middleware.RequireScope(auth.ScopeStateRead), health.WorkflowTemplate(templateRepo))
@@ -401,11 +402,22 @@ func NewRouter(cfg *config.Config, database *sql.DB, identityDB *sql.DB) (*gin.E
 					cfg.Drift.RunTTL, cfg.Drift.ReconcileInterval,
 				)
 				reconciler.Start()
+				// Same backstop for version-lab health runs, which carry the
+				// identical stuck-dispatched failure mode in a separate table. It
+				// reuses the drift TTL/interval (the anchor and reasoning are the
+				// same: created_at, a single end-of-job callback, no heartbeat).
+				healthReconciler := healthreconcile.New(
+					repositories.NewHealthRepository(database),
+					healthFailureNotifier{health: health},
+					cfg.Drift.RunTTL, cfg.Drift.ReconcileInterval,
+				)
+				healthReconciler.Start()
 				runnerStop := runner.Stop
 				stop = func() {
 					runnerStop()
 					syncer.Stop()
 					reconciler.Stop()
+					healthReconciler.Stop()
 				}
 			} else {
 				slog.Info("background workers disabled on this replica (workers.enabled=false); " +
