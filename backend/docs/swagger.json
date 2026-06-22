@@ -2105,6 +2105,26 @@
                     "VersionLab"
                 ],
                 "summary": "List version-health runs",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "filter by status (dispatched|running|completed|failed)",
+                        "name": "status",
+                        "in": "query"
+                    },
+                    {
+                        "type": "integer",
+                        "description": "page size (default 50, max 200)",
+                        "name": "limit",
+                        "in": "query"
+                    },
+                    {
+                        "type": "integer",
+                        "description": "rows to skip",
+                        "name": "offset",
+                        "in": "query"
+                    }
+                ],
                 "responses": {
                     "200": {
                         "description": "OK",

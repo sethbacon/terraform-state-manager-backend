@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -156,22 +157,40 @@ func (h *HealthHandlers) CreateRun() gin.HandlerFunc {
 	}
 }
 
-// ListRuns returns recent health runs.
+// ListRuns returns health runs, newest first, with server-side pagination.
 // @Summary      List version-health runs
 // @Tags         VersionLab
 // @Produce      json
+// @Param        status  query  string  false  "filter by status (dispatched|running|completed|failed)"
+// @Param        limit   query  int     false  "page size (default 50, max 200)"
+// @Param        offset  query  int     false  "rows to skip"
 // @Success      200  {object}  map[string]interface{}
 // @Security     BearerAuth
 // @Security     CookieAuth
 // @Router       /health-lab/runs [get]
 func (h *HealthHandlers) ListRuns() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		runs, err := h.healthRepo.List(c.Request.Context(), 50)
+		ctx := c.Request.Context()
+		status := c.Query("status")
+		switch status {
+		case "", "dispatched", "running", "completed", "failed":
+		default:
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid status filter"})
+			return
+		}
+		limit, _ := strconv.Atoi(c.Query("limit"))   // 0 -> repo default (50)
+		offset, _ := strconv.Atoi(c.Query("offset")) // 0 -> first page
+		runs, err := h.healthRepo.List(ctx, limit, offset, status)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to list health runs"})
 			return
 		}
-		c.JSON(http.StatusOK, gin.H{"runs": runs})
+		total, err := h.healthRepo.CountRuns(ctx, status)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to count health runs"})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"runs": runs, "total": total})
 	}
 }
 
