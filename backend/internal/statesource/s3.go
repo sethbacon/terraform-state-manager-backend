@@ -113,3 +113,16 @@ func (s *s3conn) Write(ctx context.Context, key string, data []byte) error {
 	}
 	return nil
 }
+
+// Delete removes the object at key. S3's DeleteObject is idempotent (a missing
+// key still succeeds); the edit pipeline's pre-delete read enforces the
+// not-found case before this is called.
+func (s *s3conn) Delete(ctx context.Context, key string) error {
+	if _, err := s.client.DeleteObject(ctx, &s3.DeleteObjectInput{
+		Bucket: aws.String(s.bucket),
+		Key:    aws.String(key),
+	}); err != nil {
+		return fmt.Errorf("failed to delete s3://%s/%s: %w", s.bucket, key, err)
+	}
+	return nil
+}

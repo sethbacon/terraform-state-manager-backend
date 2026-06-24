@@ -67,6 +67,8 @@ func TestConsulListReadWrite(t *testing.T) {
 				t.Errorf("write must use cas=41, got %q", r.URL.Query().Get("cas"))
 			}
 			_, _ = w.Write([]byte("true"))
+		case r.Method == http.MethodDelete:
+			_, _ = w.Write([]byte("true"))
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}
@@ -102,6 +104,9 @@ func TestConsulListReadWrite(t *testing.T) {
 	// A missing key reads as ErrNotFound (guarded writes key off this).
 	if _, err := c.Read(context.Background(), "terraform/missing"); !IsNotFound(err) {
 		t.Errorf("missing key must be IsNotFound, got %v", err)
+	}
+	if err := c.Delete(context.Background(), "terraform/prod"); err != nil {
+		t.Errorf("Delete: %v", err)
 	}
 }
 
@@ -148,6 +153,21 @@ func TestConsulWriteCASConflict(t *testing.T) {
 	c2, _ := newConsul(map[string]any{"address": u2.Host}, nil)
 	if err := c2.Write(context.Background(), "terraform/new", []byte(`{"version":4}`)); err != nil {
 		t.Errorf("fresh-key write: %v", err)
+	}
+}
+
+func TestConsulDeleteError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+	u, _ := url.Parse(srv.URL)
+	c, err := newConsul(map[string]any{"address": u.Host}, nil)
+	if err != nil {
+		t.Fatalf("newConsul: %v", err)
+	}
+	if err := c.Delete(context.Background(), "terraform/x"); err == nil {
+		t.Error("non-200 delete must surface an error")
 	}
 }
 
@@ -225,6 +245,12 @@ func TestK8sListAndRead(t *testing.T) {
 	if _, err := c.Read(context.Background(), "no-slash"); err == nil {
 		t.Error("expected error for malformed key")
 	}
+	if err := c.Delete(context.Background(), "tf/tfstate-default-app"); err != nil {
+		t.Errorf("Delete: %v", err)
+	}
+	if err := c.Delete(context.Background(), "tf/gone"); !IsNotFound(err) {
+		t.Errorf("missing delete must be IsNotFound, got %v", err)
+	}
 }
 
 // --- http backend ---
@@ -279,6 +305,8 @@ func TestHTTPBackendReadWriteLock(t *testing.T) {
 			body, _ := io.ReadAll(r.Body)
 			wroteBody = string(body)
 			w.WriteHeader(http.StatusOK)
+		case r.Method == http.MethodDelete && r.URL.Path == "/state":
+			w.WriteHeader(http.StatusOK)
 		case r.Method == "LOCK" && r.URL.Path == "/lock":
 			w.WriteHeader(http.StatusOK)
 		case r.Method == "UNLOCK" && r.URL.Path == "/lock":
@@ -327,5 +355,22 @@ func TestHTTPBackendReadWriteLock(t *testing.T) {
 	}
 	if err := locker.Unlock(context.Background(), httpStateKey, id); err != nil {
 		t.Errorf("Unlock: %v", err)
+	}
+	if err := conn.Delete(context.Background(), httpStateKey); err != nil {
+		t.Errorf("Delete: %v", err)
+	}
+}
+
+func TestHTTPBackendDeleteNotFound(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+	conn, err := newHTTPBackend(map[string]any{"address": srv.URL + "/state"}, nil)
+	if err != nil {
+		t.Fatalf("newHTTPBackend: %v", err)
+	}
+	if err := conn.Delete(context.Background(), httpStateKey); !IsNotFound(err) {
+		t.Errorf("404 delete must be IsNotFound, got %v", err)
 	}
 }

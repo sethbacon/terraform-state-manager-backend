@@ -95,3 +95,14 @@ func (a *azureConn) Write(ctx context.Context, key string, data []byte) error {
 	}
 	return nil
 }
+
+// Delete removes the blob at key. A missing blob is reported as ErrNotFound.
+func (a *azureConn) Delete(ctx context.Context, key string) error {
+	if _, err := a.client.DeleteBlob(ctx, a.container, key, nil); err != nil {
+		if bloberror.HasCode(err, bloberror.BlobNotFound) {
+			return fmt.Errorf("blob %q %w", key, ErrNotFound)
+		}
+		return fmt.Errorf("failed to delete blob %q: %w", key, err)
+	}
+	return nil
+}

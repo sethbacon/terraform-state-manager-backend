@@ -203,6 +203,18 @@ func TestGit_NewValidation(t *testing.T) {
 	}
 }
 
+func TestHCP_DeleteUnsupported(t *testing.T) {
+	h, err := newHCP(map[string]any{"organization": "acme"}, map[string]any{"token": "tok"})
+	if err != nil {
+		t.Fatalf("newHCP: %v", err)
+	}
+	// HCP/TFC state versions are immutable: delete must report unsupported
+	// rather than silently no-op.
+	if err := h.Delete(context.Background(), "ws-1"); err == nil || !strings.Contains(err.Error(), "not supported") {
+		t.Errorf("HCP delete must report unsupported, got %v", err)
+	}
+}
+
 func TestGit_ListAndRead(t *testing.T) {
 	dir := seedGitRepo(t)
 
@@ -317,6 +329,22 @@ func TestGit_WriteCommitsAndPushes(t *testing.T) {
 	if err != nil || !strings.Contains(string(rs.Data), `"serial":1`) {
 		t.Fatalf("read-back: %v (%s)", err, rs.Data)
 	}
+
+	// Delete removes the file with a deletion commit pushed to the ref.
+	if err := g.Delete(context.Background(), "envs/dr/site.tfstate"); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	if _, err := g.Read(context.Background(), "envs/dr/site.tfstate"); err == nil {
+		t.Error("deleted state must not be readable")
+	}
+	// A second delete reports not-found rather than a generic failure.
+	if err := g.Delete(context.Background(), "envs/dr/site.tfstate"); !IsNotFound(err) {
+		t.Errorf("missing delete must be IsNotFound, got %v", err)
+	}
+	// Traversal keys are rejected before any clone.
+	if err := g.Delete(context.Background(), "../escape.tfstate"); err == nil {
+		t.Error("traversal delete must be rejected")
+	}
 }
 
 func TestGit_WriteGuards(t *testing.T) {
@@ -376,6 +404,14 @@ func newS3Fake(t *testing.T) (*s3conn, *map[string][]byte) {
 			_, _ = body.ReadFrom(r.Body)
 			objects[key] = body.Bytes()
 			w.WriteHeader(http.StatusOK)
+		case r.Method == http.MethodDelete:
+			key := strings.TrimPrefix(r.URL.Path, "/state-bucket/")
+			if key == "denied.tfstate" {
+				http.Error(w, "<Error><Code>AccessDenied</Code></Error>", http.StatusForbidden)
+				return
+			}
+			delete(objects, key)
+			w.WriteHeader(http.StatusNoContent)
 		default:
 			w.WriteHeader(http.StatusNotImplemented)
 		}
@@ -426,6 +462,15 @@ func TestS3_ListReadWrite(t *testing.T) {
 	}
 	if string((*objects)["envs/new.tfstate"]) != `{"version":4}` {
 		t.Error("Write did not store the object")
+	}
+	if err := conn.Delete(ctx, "envs/prod.tfstate"); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	if _, ok := (*objects)["envs/prod.tfstate"]; ok {
+		t.Error("Delete did not remove the object")
+	}
+	if err := conn.Delete(ctx, "denied.tfstate"); err == nil {
+		t.Error("a denied delete must surface an error")
 	}
 }
 

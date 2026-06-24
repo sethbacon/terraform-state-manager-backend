@@ -230,4 +230,10 @@ func TestStateEditRepository(t *testing.T) {
 	}); err != nil {
 		t.Errorf("RecordEdit: %v", err)
 	}
+
+	mock.ExpectExec("DELETE FROM state_backups").WithArgs("s1", "k").
+		WillReturnResult(sqlmock.NewResult(0, 3))
+	if n, err := r.DeleteBackups(ctx, "s1", "k"); err != nil || n != 3 {
+		t.Errorf("DeleteBackups: n=%d err=%v", n, err)
+	}
 }

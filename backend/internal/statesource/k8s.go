@@ -270,6 +270,30 @@ func (k *k8s) createSecret(ctx context.Context, key string, data []byte) error {
 	return nil
 }
 
+// Delete removes the Secret holding the state at key. A missing Secret is
+// reported as ErrNotFound.
+func (k *k8s) Delete(ctx context.Context, key string) error {
+	su, err := k.secretURL(key)
+	if err != nil {
+		return err
+	}
+	resp, err := k.do(ctx, http.MethodDelete, su, "", nil)
+	if err != nil {
+		return fmt.Errorf("kubernetes delete failed: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode == http.StatusNotFound {
+		return fmt.Errorf("state %q %w", key, ErrNotFound)
+	}
+	// Kubernetes returns 200 (Status) or 202 (Accepted, finalizers pending).
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusAccepted {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return fmt.Errorf("kubernetes delete returned status %d: %s", resp.StatusCode, string(body))
+	}
+	k8sLog.Info("deleted state secret", "key", key)
+	return nil
+}
+
 // --- kubeconfig fallback ---
 
 type kubeClusterInfo struct {

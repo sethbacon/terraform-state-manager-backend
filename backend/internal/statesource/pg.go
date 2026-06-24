@@ -128,3 +128,23 @@ func (p *pgSource) Write(ctx context.Context, key string, data []byte) error {
 	}
 	return nil
 }
+
+// Delete removes the state row. A missing row is reported as ErrNotFound.
+// coverage:skip:requires-database
+func (p *pgSource) Delete(ctx context.Context, key string) error {
+	db, err := p.open()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = db.Close() }()
+
+	res, err := db.ExecContext(ctx,
+		fmt.Sprintf("DELETE FROM %s WHERE name = $1", p.table()), key) // #nosec G201 -- schema validated as identifier in newPG
+	if err != nil {
+		return fmt.Errorf("pg delete failed: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return fmt.Errorf("state %q %w", key, ErrNotFound)
+	}
+	return nil
+}

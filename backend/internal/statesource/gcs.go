@@ -21,6 +21,8 @@ type gcsAPI interface {
 	// NewWriter returns a writer for the object with the given content type
 	// already applied; the upload commits on Close.
 	NewWriter(ctx context.Context, bucket, object, contentType string) io.WriteCloser
+	// Delete removes the named object; storage.ErrObjectNotExist when absent.
+	Delete(ctx context.Context, bucket, object string) error
 }
 
 // gcsObjectIterator is the iteration subset of *storage.ObjectIterator.
@@ -48,6 +50,11 @@ func (r *realGCSClient) NewWriter(ctx context.Context, bucket, object, contentTy
 	w := r.client.Bucket(bucket).Object(object).NewWriter(ctx)
 	w.ContentType = contentType
 	return w
+}
+
+// coverage:skip:trivial-delegation
+func (r *realGCSClient) Delete(ctx context.Context, bucket, object string) error {
+	return r.client.Bucket(bucket).Object(object).Delete(ctx)
 }
 
 // gcsConn reads/writes state in a Google Cloud Storage bucket. A service-account
@@ -123,6 +130,17 @@ func (g *gcsConn) Write(ctx context.Context, key string, data []byte) error {
 	}
 	if err := w.Close(); err != nil {
 		return fmt.Errorf("failed to finalize gs://%s/%s: %w", g.bucket, key, err)
+	}
+	return nil
+}
+
+// Delete removes the object at key. A missing object is reported as ErrNotFound.
+func (g *gcsConn) Delete(ctx context.Context, key string) error {
+	if err := g.client.Delete(ctx, g.bucket, key); err != nil {
+		if errors.Is(err, storage.ErrObjectNotExist) {
+			return fmt.Errorf("state gs://%s/%s %w", g.bucket, key, ErrNotFound)
+		}
+		return fmt.Errorf("failed to delete gs://%s/%s: %w", g.bucket, key, err)
 	}
 	return nil
 }

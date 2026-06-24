@@ -116,6 +116,31 @@ func TestLocalWriteRoundTrip(t *testing.T) {
 	}
 }
 
+func TestLocalDelete(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "prod.tfstate"), []byte(`{"version":4}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c, err := New("local", map[string]any{"base_path": dir}, nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := c.Delete(context.Background(), "prod.tfstate"); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "prod.tfstate")); !os.IsNotExist(err) {
+		t.Errorf("file should be gone, stat err = %v", err)
+	}
+	// A second delete reports not-found, not a generic backend failure.
+	if err := c.Delete(context.Background(), "prod.tfstate"); !IsNotFound(err) {
+		t.Errorf("missing delete must be IsNotFound, got %v", err)
+	}
+	// Traversal keys are rejected outright.
+	if err := c.Delete(context.Background(), "../escape.tfstate"); err == nil {
+		t.Error("traversal delete must be rejected")
+	}
+}
+
 func TestNewUnsupportedType(t *testing.T) {
 	if _, err := New("hcp", nil, nil); err == nil {
 		t.Error("expected hcp to require config/credentials")
