@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.15.1](https://github.com/sethbacon/terraform-state-manager-backend/compare/v1.15.0...v1.15.1) (2026-06-24)
+
+
+### Bug Fixes
+
+* **analyzer:** count resources in pre-v4 (Terraform 0.11) state files ([#157](https://github.com/sethbacon/terraform-state-manager-backend/issues/157)) ([aa7f97e](https://github.com/sethbacon/terraform-state-manager-backend/commit/aa7f97e8b7b8858f26afbfdca832fdeb1c2841cf))
+
 ## [1.15.0](https://github.com/sethbacon/terraform-state-manager-backend/compare/v1.14.1...v1.15.0) (2026-06-24)
 
 
