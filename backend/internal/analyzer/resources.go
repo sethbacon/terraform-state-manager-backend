@@ -24,6 +24,7 @@ func ListResources(raw []byte) ([]ResourceSummary, error) {
 	if err := json.Unmarshal(raw, &s); err != nil {
 		return nil, fmt.Errorf("invalid Terraform state JSON: %w", err)
 	}
+	s.normalizeLegacy()
 	out := make([]ResourceSummary, 0, len(s.Resources))
 	for _, r := range s.Resources {
 		out = append(out, ResourceSummary{

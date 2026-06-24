@@ -31,6 +31,7 @@ const minimalState = `{
 // returns an error or a well-formed Analysis.
 func FuzzAnalyze(f *testing.F) {
 	f.Add([]byte(minimalState))
+	f.Add([]byte(v3State))
 	f.Add([]byte{})
 	f.Add([]byte("not json"))
 	f.Add([]byte(`{"version": "four"}`))
@@ -57,6 +58,7 @@ func FuzzAnalyze(f *testing.F) {
 // FuzzListResources mirrors FuzzAnalyze for the resource-list view.
 func FuzzListResources(f *testing.F) {
 	f.Add([]byte(minimalState))
+	f.Add([]byte(v3State))
 	f.Add([]byte{})
 	f.Add([]byte(`{"resources": [{}]}`))
 
