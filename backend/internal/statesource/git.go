@@ -207,3 +207,63 @@ func (g *gitConn) Write(ctx context.Context, key string, data []byte) error {
 		"repo", g.repoURL, "ref", g.ref, "key", rel, "commit", commit.String(), "bytes", len(data))
 	return nil
 }
+
+// Delete removes the state file at key with a deletion commit pushed to the
+// configured ref (never forced). A missing file is reported as ErrNotFound.
+func (g *gitConn) Delete(ctx context.Context, key string) error {
+	for _, seg := range strings.Split(key, "/") {
+		if seg == ".." {
+			return fmt.Errorf("invalid state key %q (path traversal)", key)
+		}
+	}
+	rel := strings.TrimPrefix(path.Clean("/"+key), "/")
+	if rel == "" || rel == "." {
+		return fmt.Errorf("invalid state key %q", key)
+	}
+
+	fs := memfs.New()
+	opts := &git.CloneOptions{URL: g.repoURL, SingleBranch: true, Tags: git.NoTags}
+	if g.ref != "" {
+		opts.ReferenceName = plumbing.NewBranchReferenceName(g.ref)
+	}
+	if a := g.auth(); a != nil {
+		opts.Auth = a
+	}
+	repo, err := git.CloneContext(ctx, memory.NewStorage(), fs, opts)
+	if err != nil {
+		return fmt.Errorf("git clone failed: %w", err)
+	}
+	wt, err := repo.Worktree()
+	if err != nil {
+		return fmt.Errorf("git worktree failed: %w", err)
+	}
+	if _, err := fs.Stat(rel); err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("state %q %w", key, ErrNotFound)
+		}
+		return fmt.Errorf("failed to stat %q: %w", key, err)
+	}
+	if _, err := wt.Remove(rel); err != nil {
+		return fmt.Errorf("git rm failed: %w", err)
+	}
+	commit, err := wt.Commit(fmt.Sprintf("tsm: delete state %s", rel), &git.CommitOptions{
+		Author: &object.Signature{Name: g.authorName, Email: g.authorEmail, When: time.Now()},
+	})
+	if err != nil {
+		return fmt.Errorf("git commit failed: %w", err)
+	}
+	pushOpts := &git.PushOptions{}
+	if a := g.auth(); a != nil {
+		pushOpts.Auth = a
+	}
+	if g.ref != "" {
+		ref := plumbing.NewBranchReferenceName(g.ref)
+		pushOpts.RefSpecs = []config.RefSpec{config.RefSpec(ref + ":" + ref)}
+	}
+	if err := repo.PushContext(ctx, pushOpts); err != nil {
+		return fmt.Errorf("git push failed (the branch may be protected or have advanced — retry): %w", err)
+	}
+	gitLog.Info("state deleted and pushed",
+		"repo", g.repoURL, "ref", g.ref, "key", rel, "commit", commit.String())
+	return nil
+}

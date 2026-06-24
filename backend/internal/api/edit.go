@@ -116,16 +116,20 @@ func (h *SourcesHandlers) EditState() gin.HandlerFunc {
 	}
 }
 
-// StateOperation applies a structured edit (rm / mv) to the state at ?key=,
-// running it through the same backup → write → audit pipeline.
-// @Summary      State operation (rm/mv)
-// @Description  Apply an rm or mv operation through the backup -> write -> audit pipeline. Requires state:write.
+// StateOperation applies a structured edit (rm / mv) or an admin delete to the
+// state at ?key=, running it through the same backup → write/delete → audit
+// pipeline.
+// @Summary      State operation (rm/mv/delete)
+// @Description  Apply an rm or mv operation (state:write), or delete the state object outright (admin only), through the backup -> mutate -> audit pipeline. delete creates a final recoverable backup first and refuses while the state is locked; pass purge=true to also drop saved backups.
 // @Tags         Edit
 // @Accept       json
 // @Produce      json
 // @Param        id   path   string  true  "Source ID"
 // @Param        key  query  string  true  "State file key"
 // @Success      200  {object}  map[string]interface{}
+// @Failure      403  {object}  map[string]interface{}  "delete requires the admin role"
+// @Failure      404  {object}  map[string]interface{}  "state not found"
+// @Failure      409  {object}  map[string]interface{}  "state is locked"
 // @Security     BearerAuth
 // @Security     CookieAuth
 // @Router       /sources/{id}/state/operations [post]
@@ -137,12 +141,34 @@ func (h *SourcesHandlers) StateOperation() gin.HandlerFunc {
 			return
 		}
 		var req struct {
-			Op      string `json:"op" binding:"required"` // rm | mv
-			Address string `json:"address" binding:"required"`
+			Op      string `json:"op" binding:"required"` // rm | mv | delete
+			Address string `json:"address"`
 			To      string `json:"to"`
+			Key     string `json:"key"`   // delete: must echo ?key= (defense in depth)
+			Purge   bool   `json:"purge"` // delete: also drop saved backups
 		}
 		if err := c.ShouldBindJSON(&req); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "op and address are required"})
+			c.JSON(http.StatusBadRequest, gin.H{"error": "op is required"})
+			return
+		}
+
+		// delete is gated in-handler: the /state/operations route is granted to
+		// state:write (editors), but removing a state object outright is reserved
+		// for admins. Check (and require the key echo) before loading the source so
+		// a non-admin never triggers a backend lookup.
+		if req.Op == "delete" {
+			if !isAdmin(c) {
+				c.JSON(http.StatusForbidden, gin.H{"error": "deleting a state file requires the admin role"})
+				return
+			}
+			if req.Key != key {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "request body must echo the exact state key to delete"})
+				return
+			}
+		} else if req.Address == "" {
+			// rm/mv need a resource address; reject before the source lookup so the
+			// 400 matches the binding behaviour callers already rely on.
+			c.JSON(http.StatusBadRequest, gin.H{"error": "address is required"})
 			return
 		}
 
@@ -158,6 +184,11 @@ func (h *SourcesHandlers) StateOperation() gin.HandlerFunc {
 			return
 		}
 		defer release()
+
+		if req.Op == "delete" {
+			h.deleteState(c, src, conn, key, req.Purge, actor)
+			return
+		}
 
 		cur, err := conn.Read(ctx, key)
 		if err != nil {
@@ -216,6 +247,77 @@ func (h *SourcesHandlers) StateOperation() gin.HandlerFunc {
 		h.refreshAnalysisAsync(src, key)
 		c.JSON(http.StatusOK, gin.H{"status": "applied", "op": req.Op, "backup_id": backupID, "serial": after})
 	}
+}
+
+// deleteState removes the state object at key (the admin "delete" operation).
+// The lock is already held by the caller. A final backup is always taken before
+// the destructive delete so a connector failure — or a change of heart — stays
+// recoverable, exactly as rm/mv/decommission do. With purge=true the saved
+// backups (including that final one) are dropped after the object is gone; the
+// edit audit trail is kept regardless so the deletion stays accountable.
+func (h *SourcesHandlers) deleteState(c *gin.Context, src *repositories.Source, conn statesource.Connector, key string, purge bool, actor string) {
+	ctx := c.Request.Context()
+
+	cur, err := conn.Read(ctx, key)
+	if err != nil {
+		if statesource.IsNotFound(err) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "state not found"})
+			return
+		}
+		c.JSON(http.StatusBadGateway, gin.H{"error": "failed to read current state: " + err.Error()})
+		return
+	}
+
+	var beforeSerial *int64
+	if curA, e := analyzer.Analyze(cur.Data); e == nil {
+		bs := curA.Serial
+		beforeSerial = &bs
+	}
+
+	backupID, bErr := h.editRepo.CreateBackup(ctx, src.ID, key, cur.Data, beforeSerial, actor)
+	if bErr != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to back up current state before delete"})
+		return
+	}
+
+	if err := conn.Delete(ctx, key); err != nil {
+		if statesource.IsNotFound(err) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "state not found"})
+			return
+		}
+		h.recordEdit(ctx, src.ID, key, "delete", actor, &backupID, beforeSerial, nil, "failed", err.Error())
+		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+		return
+	}
+
+	purged := false
+	detail := "deleted state object (backup retained)"
+	recBackupID := &backupID
+	if purge {
+		if _, pErr := h.editRepo.DeleteBackups(ctx, src.ID, key); pErr != nil {
+			// The object is already gone; report success but flag the purge failure
+			// so the operator knows backups may still linger.
+			h.recordEdit(ctx, src.ID, key, "delete", actor, nil, beforeSerial, nil, "success",
+				"deleted state object; purge of backups failed: "+pErr.Error())
+			h.audit.write(c, "state.delete", "state", src.ID,
+				map[string]interface{}{"key": key, "purged": false, "purge_error": pErr.Error()})
+			c.JSON(http.StatusOK, gin.H{"status": "deleted", "key": key, "purged": false,
+				"warning": "state deleted but its backups could not be purged"})
+			return
+		}
+		purged = true
+		detail = "deleted state object and purged all backups"
+		recBackupID = nil // the backup row was just removed; don't dangle a reference
+	}
+
+	h.recordEdit(ctx, src.ID, key, "delete", actor, recBackupID, beforeSerial, nil, "success", detail)
+	h.audit.write(c, "state.delete", "state", src.ID,
+		map[string]interface{}{"key": key, "purged": purged})
+	resp := gin.H{"status": "deleted", "key": key, "purged": purged}
+	if !purged {
+		resp["backup_id"] = backupID
+	}
+	c.JSON(http.StatusOK, resp)
 }
 
 // ListBackups returns the backup history for a state file (?key=).

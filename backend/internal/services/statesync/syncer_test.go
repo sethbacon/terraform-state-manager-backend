@@ -124,6 +124,7 @@ func (f *fakeConn) Read(_ context.Context, key string) (*statesource.RawState, e
 	return &statesource.RawState{Key: key, Data: []byte(f.data[key])}, nil
 }
 func (f *fakeConn) Write(context.Context, string, []byte) error { return nil }
+func (f *fakeConn) Delete(context.Context, string) error        { return nil }
 
 func sourceRows(dir string) *sqlmock.Rows {
 	cfg, _ := json.Marshal(map[string]any{"base_path": dir})

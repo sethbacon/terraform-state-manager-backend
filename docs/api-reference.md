@@ -98,25 +98,25 @@ Authorization is scope-based. A user or key holds scopes (via role templates);
 each endpoint requires one. Holding `state:write` implicitly satisfies
 `state:read`. `admin` is the wildcard — it satisfies every scope.
 
-| Scope | Grants |
-| --- | --- |
-| `state:read` | Read sources, states, analysis, history, reports, drift/health runs, dashboard |
-| `state:write` | Edit/restore state, state operations (implies `state:read`) |
-| `state:transfer` | Cross-source backup (copy) and migrate (move) |
-| `state:drift` | Create drift runs, push drift ingest, acknowledge/resolve records |
-| `state:execute` | Create Version Lab (health) runs |
-| `sources:manage` | Create/update/delete sources, pipelines, CI sources, schedules |
-| `scim:provision` | SCIM provisioning endpoints (when enabled) |
-| `admin` | Everything, incl. identity admin, notifications, force-unlock |
+| Scope            | Grants                                                                         |
+| ---------------- | ------------------------------------------------------------------------------ |
+| `state:read`     | Read sources, states, analysis, history, reports, drift/health runs, dashboard |
+| `state:write`    | Edit/restore state, state operations (implies `state:read`)                    |
+| `state:transfer` | Cross-source backup (copy) and migrate (move)                                  |
+| `state:drift`    | Create drift runs, push drift ingest, acknowledge/resolve records              |
+| `state:execute`  | Create Version Lab (health) runs                                               |
+| `sources:manage` | Create/update/delete sources, pipelines, CI sources, schedules                 |
+| `scim:provision` | SCIM provisioning endpoints (when enabled)                                     |
+| `admin`          | Everything, incl. identity admin, notifications, force-unlock                  |
 
 The bundled role templates map to these scopes:
 
-| Role | Scopes |
-| --- | --- |
-| `admin` | `admin` (all) |
-| `editor` | `state:read`, `state:write`, `state:transfer`, `state:drift`, `state:execute`, `sources:manage` |
-| `operator` | `state:read`, `state:drift`, `state:execute` |
-| `viewer` | `state:read` |
+| Role       | Scopes                                                                                          |
+| ---------- | ----------------------------------------------------------------------------------------------- |
+| `admin`    | `admin` (all)                                                                                   |
+| `editor`   | `state:read`, `state:write`, `state:transfer`, `state:drift`, `state:execute`, `sources:manage` |
+| `operator` | `state:read`, `state:drift`, `state:execute`                                                    |
+| `viewer`   | `state:read`                                                                                    |
 
 When creating an API key, request the minimum scopes it needs — a key with only
 `state:drift` cannot read users or manage sources, which limits blast radius if
@@ -131,13 +131,13 @@ under `/api/v1` unless noted.
 
 ### Auth & session
 
-| Path | Auth | Purpose |
-| --- | --- | --- |
-| `/auth/providers` | none | List configured providers for the login picker |
-| `/auth/login`, `/auth/callback` | none | OIDC/SAML browser flows |
-| `/auth/ldap/login` | none | LDAP username/password login |
-| `/auth/saml/metadata`, `/auth/saml/acs` | none | SAML SP metadata + assertion consumer |
-| `/auth/me`, `/auth/refresh`, `/auth/logout` | session | Current user, refresh, logout |
+| Path                                        | Auth    | Purpose                                        |
+| ------------------------------------------- | ------- | ---------------------------------------------- |
+| `/auth/providers`                           | none    | List configured providers for the login picker |
+| `/auth/login`, `/auth/callback`             | none    | OIDC/SAML browser flows                        |
+| `/auth/ldap/login`                          | none    | LDAP username/password login                   |
+| `/auth/saml/metadata`, `/auth/saml/acs`     | none    | SAML SP metadata + assertion consumer          |
+| `/auth/me`, `/auth/refresh`, `/auth/logout` | session | Current user, refresh, logout                  |
 
 ### First-run setup wizard
 
@@ -147,67 +147,67 @@ Covers admin bootstrap, OIDC test/save, and source test/save.
 
 ### Sources, state & analysis
 
-| Path | Scope | Purpose |
-| --- | --- | --- |
-| `GET /sources` · `POST /sources` | `state:read` · `sources:manage` | List / create state sources |
-| `GET/PUT/DELETE /sources/{id}` | `state:read` · `sources:manage` | Source CRUD |
-| `POST /sources/{id}/test` | `state:read` | Test connectivity |
-| `GET /sources/{id}/states` | `state:read` | List state files in the source |
-| `GET /sources/{id}/state/analysis` | `state:read` | Per-state resource/provider/module breakdown |
-| `GET /sources/{id}/state/raw` · `…/resources` · `…/outputs` · `…/history` · `…/report` | `state:read` | Raw state, resources, outputs, history, downloadable report |
-| `GET /sources/{id}/modules` | `state:read` | Captured module provenance |
-| `GET /sources/{id}/modules/freshness` | `state:read` | Locked module versions vs the sibling registry's latest |
-| `POST /analyze` | `state:read` | Ad-hoc analysis of an uploaded state (no stored source) |
-| `GET /dashboard/overview` | `state:read` | Cross-source aggregated overview |
+| Path                                                                                   | Scope                           | Purpose                                                     |
+| -------------------------------------------------------------------------------------- | ------------------------------- | ----------------------------------------------------------- |
+| `GET /sources` · `POST /sources`                                                       | `state:read` · `sources:manage` | List / create state sources                                 |
+| `GET/PUT/DELETE /sources/{id}`                                                         | `state:read` · `sources:manage` | Source CRUD                                                 |
+| `POST /sources/{id}/test`                                                              | `state:read`                    | Test connectivity                                           |
+| `GET /sources/{id}/states`                                                             | `state:read`                    | List state files in the source                              |
+| `GET /sources/{id}/state/analysis`                                                     | `state:read`                    | Per-state resource/provider/module breakdown                |
+| `GET /sources/{id}/state/raw` · `…/resources` · `…/outputs` · `…/history` · `…/report` | `state:read`                    | Raw state, resources, outputs, history, downloadable report |
+| `GET /sources/{id}/modules`                                                            | `state:read`                    | Captured module provenance                                  |
+| `GET /sources/{id}/modules/freshness`                                                  | `state:read`                    | Locked module versions vs the sibling registry's latest     |
+| `POST /analyze`                                                                        | `state:read`                    | Ad-hoc analysis of an uploaded state (no stored source)     |
+| `GET /dashboard/overview`                                                              | `state:read`                    | Cross-source aggregated overview                            |
 
 ### State manipulation (edit plane)
 
-| Path | Scope | Purpose |
-| --- | --- | --- |
-| `PUT /sources/{id}/state/raw` | `state:write` | Guided state edit (validate → backup → write → audit) |
-| `POST /sources/{id}/state/operations` | `state:write` | State operations |
-| `GET /sources/{id}/state/backups` | `state:read` | List backups |
-| `POST /sources/{id}/state/backups/{backupId}/restore` | `state:write` | Restore a backup |
-| `DELETE /sources/{id}/state/lock` | `admin` | Admin force-unlock |
-| `POST /sources/{id}/state/backup` · `…/migrate` | `state:transfer` | Cross-source copy / move |
-| `GET /transfers/{id}` | `state:read` | Transfer status |
+| Path                                                  | Scope                   | Purpose                                                                                                                                                              |
+| ----------------------------------------------------- | ----------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `PUT /sources/{id}/state/raw`                         | `state:write`           | Guided state edit (validate → backup → write → audit)                                                                                                                |
+| `POST /sources/{id}/state/operations`                 | `state:write` · `admin` | State operations: `rm`/`mv` (`state:write`); `delete` removes the state object (`admin` only, lock → final backup → delete → audit; `purge=true` also drops backups) |
+| `GET /sources/{id}/state/backups`                     | `state:read`            | List backups                                                                                                                                                         |
+| `POST /sources/{id}/state/backups/{backupId}/restore` | `state:write`           | Restore a backup                                                                                                                                                     |
+| `DELETE /sources/{id}/state/lock`                     | `admin`                 | Admin force-unlock                                                                                                                                                   |
+| `POST /sources/{id}/state/backup` · `…/migrate`       | `state:transfer`        | Cross-source copy / move                                                                                                                                             |
+| `GET /transfers/{id}`                                 | `state:read`            | Transfer status                                                                                                                                                      |
 
 > Writes are **fail-closed**: a write is refused unless the target's existence
 > can be positively verified.
 
 ### Drift detection
 
-| Path | Scope | Purpose |
-| --- | --- | --- |
-| `GET/POST/DELETE /pipelines` | `sources:manage` | CI pipeline connections (+ callback preflight) |
-| `GET/POST/DELETE /ci-sources/...` | `sources:manage` | Org-level CI credentials + repo/workflow discovery + repo-setup wizard |
-| `POST /drift/runs` · `GET /drift/runs` · `GET /drift/runs/{id}` | `state:drift` · `state:read` | Dispatch and read drift runs |
-| `POST /drift/ingest` | `state:drift` | Idempotent push-style CI drift intake (parses Terraform plan JSON) |
-| `GET /drift/records` · `…/{id}` | `state:read` | Durable, acknowledgeable drift records |
-| `POST /drift/records/{id}/acknowledge` · `…/resolve` | `state:drift` | Record workflow |
-| `POST /drift/runs/{id}/results` | one-shot run token | CI machine callback |
+| Path                                                            | Scope                        | Purpose                                                                |
+| --------------------------------------------------------------- | ---------------------------- | ---------------------------------------------------------------------- |
+| `GET/POST/DELETE /pipelines`                                    | `sources:manage`             | CI pipeline connections (+ callback preflight)                         |
+| `GET/POST/DELETE /ci-sources/...`                               | `sources:manage`             | Org-level CI credentials + repo/workflow discovery + repo-setup wizard |
+| `POST /drift/runs` · `GET /drift/runs` · `GET /drift/runs/{id}` | `state:drift` · `state:read` | Dispatch and read drift runs                                           |
+| `POST /drift/ingest`                                            | `state:drift`                | Idempotent push-style CI drift intake (parses Terraform plan JSON)     |
+| `GET /drift/records` · `…/{id}`                                 | `state:read`                 | Durable, acknowledgeable drift records                                 |
+| `POST /drift/records/{id}/acknowledge` · `…/resolve`            | `state:drift`                | Record workflow                                                        |
+| `POST /drift/runs/{id}/results`                                 | one-shot run token           | CI machine callback                                                    |
 
 ### Version Lab (health)
 
-| Path | Scope | Purpose |
-| --- | --- | --- |
-| `GET /health-lab/workflow` | `state:read` | Workflow template |
+| Path                                                       | Scope                          | Purpose                               |
+| ---------------------------------------------------------- | ------------------------------ | ------------------------------------- |
+| `GET /health-lab/workflow`                                 | `state:read`                   | Workflow template                     |
 | `POST /health-lab/runs` · `GET …/runs` · `GET …/runs/{id}` | `state:execute` · `state:read` | Dispatch and read version-health runs |
-| `POST /health-lab/runs/{id}/results` | one-shot run token | CI machine callback |
+| `POST /health-lab/runs/{id}/results`                       | one-shot run token             | CI machine callback                   |
 
 ### Scheduling & notifications
 
-| Path | Scope | Purpose |
-| --- | --- | --- |
-| `GET/POST/PUT/DELETE /schedules` · `POST /schedules/{id}/run` | `state:read` / `sources:manage` | Cron-style schedules that dispatch drift runs |
-| `/notifications/channels/...` | `admin` | Alert destinations (target URLs are secrets, so admin-only) |
+| Path                                                          | Scope                           | Purpose                                                     |
+| ------------------------------------------------------------- | ------------------------------- | ----------------------------------------------------------- |
+| `GET/POST/PUT/DELETE /schedules` · `POST /schedules/{id}/run` | `state:read` / `sources:manage` | Cron-style schedules that dispatch drift runs               |
+| `/notifications/channels/...`                                 | `admin`                         | Alert destinations (target URLs are secrets, so admin-only) |
 
 ### Identity administration
 
-| Path | Scope | Purpose |
-| --- | --- | --- |
-| `/admin/users`, `/admin/organizations` | `admin` | User & org CRUD, memberships, GDPR export/erase |
-| `/admin/roles`, `/admin/audit-logs`, `/admin/stats` | `admin` | Role templates, audit trail, stats |
+| Path                                                                                                             | Scope   | Purpose                                                          |
+| ---------------------------------------------------------------------------------------------------------------- | ------- | ---------------------------------------------------------------- |
+| `/admin/users`, `/admin/organizations`                                                                           | `admin` | User & org CRUD, memberships, GDPR export/erase                  |
+| `/admin/roles`, `/admin/audit-logs`, `/admin/stats`                                                              | `admin` | Role templates, audit trail, stats                               |
 | `/admin/sso`, `/admin/oidc/config`, `/admin/oidc/group-mapping`, `/admin/identity-group-mappings`, `/admin/mtls` | `admin` | Read configured providers; manage the OIDC group-mapping overlay |
 
 ### API keys
@@ -218,12 +218,12 @@ in the handlers (no separate scope gate).
 
 ### Suite (cross-app)
 
-| Path | Auth | Purpose |
-| --- | --- | --- |
-| `GET /suite/manifest` | none | Capability manifest for sibling discovery |
-| `GET /ui/config` | none (SPA) | Live coupling state for the frontend |
-| `GET /consumers` | `X-Suite-Service-Token` | States consuming a registry module ("Consumed by") |
-| `POST /audit/ingest` | `X-Suite-Service-Token` | Receive a sibling's federated audit entry |
+| Path                  | Auth                    | Purpose                                            |
+| --------------------- | ----------------------- | -------------------------------------------------- |
+| `GET /suite/manifest` | none                    | Capability manifest for sibling discovery          |
+| `GET /ui/config`      | none (SPA)              | Live coupling state for the frontend               |
+| `GET /consumers`      | `X-Suite-Service-Token` | States consuming a registry module ("Consumed by") |
+| `POST /audit/ingest`  | `X-Suite-Service-Token` | Receive a sibling's federated audit entry          |
 
 See [suite-coupling.md](suite-coupling.md) for the full coupling model.
 
@@ -241,12 +241,12 @@ These are unversioned and **not** part of `/api/v1`. The metrics endpoint is
 served on a **separate port** and is not in the OpenAPI spec — bind it to an
 internal interface only.
 
-| Endpoint | Port | Auth | Purpose |
-| --- | --- | --- | --- |
-| `GET /health` | API | none | Liveness — does **not** touch the database |
-| `GET /ready` | API | none | Readiness — pings the DB; `503` when unreachable |
-| `GET /api/v1/version` | API | none | Build metadata (`name`, `version`, `build_date`) |
-| `GET /metrics` | `9090` | none | Prometheus exposition format |
+| Endpoint              | Port   | Auth | Purpose                                          |
+| --------------------- | ------ | ---- | ------------------------------------------------ |
+| `GET /health`         | API    | none | Liveness — does **not** touch the database       |
+| `GET /ready`          | API    | none | Readiness — pings the DB; `503` when unreachable |
+| `GET /api/v1/version` | API    | none | Build metadata (`name`, `version`, `build_date`) |
+| `GET /metrics`        | `9090` | none | Prometheus exposition format                     |
 
 ```bash
 curl -s http://localhost:9090/metrics | grep '^http_requests_total'

@@ -36,9 +36,10 @@ func minState(serial int64, lineage string, resources ...string) string {
 // sourcesEnv is a SourcesHandlers test rig: sqlmock app DB + a REAL local
 // connector rooted at a temp dir, wired through the real route shapes.
 type sourcesEnv struct {
-	r    *gin.Engine
-	mock sqlmock.Sqlmock
-	dir  string
+	r      *gin.Engine
+	mock   sqlmock.Sqlmock
+	dir    string
+	scopes []string // caller scopes injected into the gin context (nil = none)
 }
 
 func newSourcesEnv(t *testing.T) *sourcesEnv {
@@ -52,7 +53,16 @@ func newSourcesEnv(t *testing.T) *sourcesEnv {
 
 	h := NewSourcesHandlers(db, nil) // nil identity DB: auditor is nil-safe
 
+	env := &sourcesEnv{mock: mock, dir: t.TempDir()}
 	r := gin.New()
+	// Inject caller scopes (set by the auth middleware in production) so handlers
+	// that branch on scope — e.g. the admin-only state delete — are testable.
+	r.Use(func(c *gin.Context) {
+		if env.scopes != nil {
+			c.Set("scopes", env.scopes)
+		}
+		c.Next()
+	})
 	v1 := r.Group("/api/v1")
 	v1.GET("/sources", h.ListSources())
 	v1.POST("/sources", h.CreateSource())
@@ -75,7 +85,8 @@ func newSourcesEnv(t *testing.T) *sourcesEnv {
 	v1.POST("/sources/:id/state/backup", h.BackupToSource())
 	v1.POST("/sources/:id/state/migrate", h.MigrateToSource())
 
-	return &sourcesEnv{r: r, mock: mock, dir: t.TempDir()}
+	env.r = r
+	return env
 }
 
 func (e *sourcesEnv) seed(t *testing.T, name, content string) {
@@ -597,6 +608,104 @@ func TestStateOperation_Validation(t *testing.T) {
 	if w := e.do(http.MethodPost, "/api/v1/sources/s1/state/operations?key=app.tfstate",
 		`{"op":"rm","address":"aws_db.none"}`); w.Code != http.StatusUnprocessableEntity {
 		t.Errorf("unknown address: status = %d, want 422", w.Code)
+	}
+}
+
+func TestStateOperation_Delete_AdminAllowed(t *testing.T) {
+	e := newSourcesEnv(t)
+	e.scopes = []string{"admin"}
+	e.seed(t, "app.tfstate", minState(7, "lin-1", "aws_instance.web"))
+
+	e.expectSource("s1", e.dir)
+	e.mock.ExpectQuery("INSERT INTO state_backups").
+		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("b1"))
+	e.mock.ExpectExec("INSERT INTO state_edits").WillReturnResult(sqlmock.NewResult(0, 1))
+
+	w := e.do(http.MethodPost, "/api/v1/sources/s1/state/operations?key=app.tfstate",
+		`{"op":"delete","key":"app.tfstate"}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("delete: status = %d (%s)", w.Code, w.Body.String())
+	}
+	// A final backup is recorded and referenced, and the live object is gone.
+	if !strings.Contains(w.Body.String(), `"deleted"`) || !strings.Contains(w.Body.String(), `"backup_id":"b1"`) {
+		t.Errorf("unexpected body: %s", w.Body.String())
+	}
+	if _, err := os.Stat(filepath.Join(e.dir, "app.tfstate")); !os.IsNotExist(err) {
+		t.Errorf("state file should be gone, stat err = %v", err)
+	}
+}
+
+func TestStateOperation_Delete_Purge(t *testing.T) {
+	e := newSourcesEnv(t)
+	e.scopes = []string{"admin"}
+	e.seed(t, "app.tfstate", minState(7, "lin-1", "aws_instance.web"))
+
+	e.expectSource("s1", e.dir)
+	e.mock.ExpectQuery("INSERT INTO state_backups").
+		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("b1"))
+	e.mock.ExpectExec("DELETE FROM state_backups").WillReturnResult(sqlmock.NewResult(0, 3))
+	e.mock.ExpectExec("INSERT INTO state_edits").WillReturnResult(sqlmock.NewResult(0, 1))
+
+	w := e.do(http.MethodPost, "/api/v1/sources/s1/state/operations?key=app.tfstate",
+		`{"op":"delete","key":"app.tfstate","purge":true}`)
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"purged":true`) {
+		t.Fatalf("purge delete: status = %d (%s)", w.Code, w.Body.String())
+	}
+	// The just-created backup is included in the purge, so no id is surfaced.
+	if strings.Contains(w.Body.String(), "backup_id") {
+		t.Errorf("purge response must not reference a backup id: %s", w.Body.String())
+	}
+}
+
+func TestStateOperation_Delete_NonAdminForbidden(t *testing.T) {
+	e := newSourcesEnv(t)
+	e.scopes = []string{"state:write"} // editor, not admin
+	// No expectSource: the admin gate must reject before any backend lookup.
+	w := e.do(http.MethodPost, "/api/v1/sources/s1/state/operations?key=app.tfstate",
+		`{"op":"delete","key":"app.tfstate"}`)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("non-admin delete: status = %d, want 403 (%s)", w.Code, w.Body.String())
+	}
+}
+
+func TestStateOperation_Delete_KeyEchoRequired(t *testing.T) {
+	e := newSourcesEnv(t)
+	e.scopes = []string{"admin"}
+	// No expectSource: the key-echo check must reject before any backend lookup.
+	w := e.do(http.MethodPost, "/api/v1/sources/s1/state/operations?key=app.tfstate",
+		`{"op":"delete","key":"wrong.tfstate"}`)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("key echo mismatch: status = %d, want 400 (%s)", w.Code, w.Body.String())
+	}
+}
+
+func TestStateOperation_Delete_MissingKey(t *testing.T) {
+	e := newSourcesEnv(t)
+	e.scopes = []string{"admin"}
+	e.expectSource("s1", e.dir)
+	w := e.do(http.MethodPost, "/api/v1/sources/s1/state/operations?key=ghost.tfstate",
+		`{"op":"delete","key":"ghost.tfstate"}`)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("missing key delete: status = %d, want 404 (%s)", w.Code, w.Body.String())
+	}
+}
+
+func TestStateOperation_Delete_LockedRefused(t *testing.T) {
+	e := newSourcesEnv(t)
+	e.scopes = []string{"admin"}
+	e.seed(t, "app.tfstate", minState(7, "lin-1", "aws_instance.web"))
+	// Pre-create the native lock file so the connector reports the key as locked.
+	if err := os.WriteFile(filepath.Join(e.dir, "app.tfstate.tsmlock"), []byte("held"), 0o600); err != nil {
+		t.Fatalf("seed lock: %v", err)
+	}
+	e.expectSource("s1", e.dir)
+	w := e.do(http.MethodPost, "/api/v1/sources/s1/state/operations?key=app.tfstate",
+		`{"op":"delete","key":"app.tfstate"}`)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("locked delete: status = %d, want 409 (%s)", w.Code, w.Body.String())
+	}
+	if _, err := os.Stat(filepath.Join(e.dir, "app.tfstate")); err != nil {
+		t.Errorf("state file must survive a refused delete: %v", err)
 	}
 }
 

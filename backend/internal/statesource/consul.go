@@ -165,6 +165,21 @@ func (c *consul) Write(ctx context.Context, key string, data []byte) error {
 	return nil
 }
 
+// Delete removes the KV entry at key. Consul's delete is idempotent (a missing
+// key still returns 200); the edit pipeline's pre-delete read enforces the
+// not-found case before this is called.
+func (c *consul) Delete(ctx context.Context, key string) error {
+	resp, err := c.do(ctx, http.MethodDelete, c.kvURL(key, url.Values{}), nil)
+	if err != nil {
+		return fmt.Errorf("consul delete failed: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("consul delete returned status %d", resp.StatusCode)
+	}
+	return nil
+}
+
 // modifyIndex returns the key's current ModifyIndex for check-and-set writes,
 // or 0 (create-only) when the key does not exist.
 func (c *consul) modifyIndex(ctx context.Context, key string) (int64, error) {

@@ -304,6 +304,15 @@ func (h *hcp) currentStateMeta(ctx context.Context, wsID string) (*hcpStateMeta,
 	return &hcpStateMeta{Serial: sv.Data.Attributes.Serial, Lineage: sv.Data.Attributes.Lineage}, nil
 }
 
+// Delete is not supported for HCP Terraform / Terraform Enterprise: state
+// versions are immutable and retained for audit and recovery, and there is no
+// API to remove a workspace's state in place — removing state means deleting the
+// workspace itself, which is well outside the scope of a per-state delete. The
+// admin delete operation surfaces this error rather than silently doing nothing.
+func (h *hcp) Delete(_ context.Context, key string) error {
+	return fmt.Errorf("deleting state is not supported for HCP/TFC workspaces (state versions are immutable; delete the workspace %q in HCP Terraform instead)", key)
+}
+
 func (h *hcp) lockWorkspace(ctx context.Context, wsID string) error {
 	body, _ := json.Marshal(map[string]any{"reason": "terraform-state-manager state write"})
 	u := fmt.Sprintf("%s/api/v2/workspaces/%s/actions/lock", h.baseURL, url.PathEscape(wsID))

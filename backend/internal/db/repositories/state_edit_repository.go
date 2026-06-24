@@ -96,6 +96,20 @@ func (r *StateEditRepository) GetBackup(ctx context.Context, id string) (*Backup
 	return &b, nil
 }
 
+// DeleteBackups removes every stored backup for a source+key — the purge path of
+// an admin state delete. It returns the number of backups removed. The edit
+// audit trail (state_edits) is intentionally left intact so the deletion stays
+// accountable even after a purge.
+func (r *StateEditRepository) DeleteBackups(ctx context.Context, sourceID, key string) (int64, error) {
+	res, err := r.db.ExecContext(ctx,
+		`DELETE FROM state_backups WHERE source_id = $1 AND state_key = $2`, sourceID, key)
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
+}
+
 // RecordEdit appends to the edit audit trail.
 func (r *StateEditRepository) RecordEdit(ctx context.Context, e *Edit) error {
 	_, err := r.db.ExecContext(ctx, `

@@ -21,6 +21,7 @@ type mockGCS struct {
 	writeErr  error
 	closeErr  error
 	listErr   error
+	deleteErr error
 	written   map[string]string // object → content type
 }
 
@@ -65,6 +66,17 @@ func (m *mockGCS) NewReader(_ context.Context, _, object string) (io.ReadCloser,
 		return nil, fmt.Errorf("object %q does not exist", object)
 	}
 	return io.NopCloser(bytes.NewReader(data)), nil
+}
+
+func (m *mockGCS) Delete(_ context.Context, _, object string) error {
+	if m.deleteErr != nil {
+		return m.deleteErr
+	}
+	if _, ok := m.objects[object]; !ok {
+		return storage.ErrObjectNotExist
+	}
+	delete(m.objects, object)
+	return nil
 }
 
 type mockWriter struct {
@@ -164,5 +176,23 @@ func TestGCS_Write(t *testing.T) {
 	m.closeErr = errors.New("commit failed")
 	if err := conn.Write(context.Background(), "k", nil); err == nil || !strings.Contains(err.Error(), "finalize") {
 		t.Errorf("close errors must surface as finalize failures: %v", err)
+	}
+}
+
+func TestGCS_Delete(t *testing.T) {
+	conn, m := newMockGCSConn("")
+	if err := conn.Delete(context.Background(), "envs/prod.tfstate"); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	if _, ok := m.objects["envs/prod.tfstate"]; ok {
+		t.Error("Delete did not remove the object")
+	}
+	// A missing object maps to ErrNotFound so the edit pipeline can 404.
+	if err := conn.Delete(context.Background(), "missing.tfstate"); !IsNotFound(err) {
+		t.Errorf("missing delete must be IsNotFound, got %v", err)
+	}
+	m.deleteErr = errors.New("perm denied")
+	if err := conn.Delete(context.Background(), "envs/notes.txt"); err == nil || !strings.Contains(err.Error(), "gs://state-bucket") {
+		t.Errorf("delete errors must surface with the gs:// path: %v", err)
 	}
 }

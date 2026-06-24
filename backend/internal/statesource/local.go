@@ -109,6 +109,22 @@ func (l *local) Write(_ context.Context, key string, data []byte) error {
 	return nil
 }
 
+// Delete removes the state file at key. A missing file is reported as ErrNotFound
+// so callers can distinguish it from a backend failure.
+func (l *local) Delete(_ context.Context, key string) error {
+	full, err := l.resolve(key)
+	if err != nil {
+		return err
+	}
+	if err := os.Remove(full); err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("state %q %w", key, ErrNotFound)
+		}
+		return fmt.Errorf("failed to delete state %q: %w", key, err)
+	}
+	return nil
+}
+
 // Lock creates an exclusive lock file next to the state; it fails if one already
 // exists. Returns a lock id that must be presented to Unlock.
 func (l *local) Lock(_ context.Context, key string) (string, error) {

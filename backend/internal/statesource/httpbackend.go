@@ -171,6 +171,24 @@ func (h *httpBackend) Write(ctx context.Context, _ string, data []byte) error {
 	return nil
 }
 
+// Delete removes the state via the http backend's DELETE verb (which Terraform's
+// http backend supports). A 404/204 is reported as ErrNotFound.
+func (h *httpBackend) Delete(ctx context.Context, key string) error {
+	resp, err := h.do(ctx, http.MethodDelete, h.address, nil)
+	if err != nil {
+		return fmt.Errorf("http backend delete failed: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusNoContent {
+		return fmt.Errorf("state %q %w", key, ErrNotFound)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return fmt.Errorf("http backend delete returned status %d: %s", resp.StatusCode, string(body))
+	}
+	return nil
+}
+
 // Lock acquires the backend's advisory lock with Terraform's LOCK verb, sending
 // a lock-info body whose ID is returned for Unlock. Only the wrapper type
 // implements Locker, so connectors without a lock_address fall back to the

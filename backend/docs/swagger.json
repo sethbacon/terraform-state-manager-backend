@@ -3522,7 +3522,7 @@
                         "CookieAuth": []
                     }
                 ],
-                "description": "Apply an rm or mv operation through the backup -\u003e write -\u003e audit pipeline. Requires state:write.",
+                "description": "Apply an rm or mv operation (state:write), or delete the state object outright (admin only), through the backup -\u003e mutate -\u003e audit pipeline. delete creates a final recoverable backup first and refuses while the state is locked; pass purge=true to also drop saved backups.",
                 "consumes": [
                     "application/json"
                 ],
@@ -3532,7 +3532,7 @@
                 "tags": [
                     "Edit"
                 ],
-                "summary": "State operation (rm/mv)",
+                "summary": "State operation (rm/mv/delete)",
                 "parameters": [
                     {
                         "type": "string",
@@ -3552,6 +3552,27 @@
                 "responses": {
                     "200": {
                         "description": "OK",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "403": {
+                        "description": "delete requires the admin role",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "404": {
+                        "description": "state not found",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "409": {
+                        "description": "state is locked",
                         "schema": {
                             "type": "object",
                             "additionalProperties": true

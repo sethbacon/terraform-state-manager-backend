@@ -56,6 +56,11 @@ type Connector interface {
 	// Write replaces the state identified by key with data. Backends that do not
 	// support writes return an error (callers must back up before writing).
 	Write(ctx context.Context, key string, data []byte) error
+	// Delete removes the state object identified by key. A missing object is
+	// reported as ErrNotFound. Backends that cannot remove state in place (e.g.
+	// HCP/TFC, whose state versions are immutable) return an error; callers must
+	// back up before deleting.
+	Delete(ctx context.Context, key string) error
 }
 
 // Locker is optionally implemented by connectors that support advisory locking of
