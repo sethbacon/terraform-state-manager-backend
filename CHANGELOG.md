@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.15.0](https://github.com/sethbacon/terraform-state-manager-backend/compare/v1.14.1...v1.15.0) (2026-06-24)
+
+
+### Features
+
+* **api:** add admin-only delete state operation ([#154](https://github.com/sethbacon/terraform-state-manager-backend/issues/154)) ([b89fbc7](https://github.com/sethbacon/terraform-state-manager-backend/commit/b89fbc72cf12dc2298a9b24517c06fb5335e7b73)), closes [#153](https://github.com/sethbacon/terraform-state-manager-backend/issues/153)
+
 ## [1.14.1](https://github.com/sethbacon/terraform-state-manager-backend/compare/v1.14.0...v1.14.1) (2026-06-22)
 
 
