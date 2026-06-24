@@ -16,13 +16,17 @@ import (
 	"strings"
 )
 
-// state mirrors the subset of the Terraform state (format v4) we read.
+// state mirrors the subset of the Terraform state we read. The top-level
+// resources[]/instances[] shape is format v4 (Terraform 0.12+); the modules[]
+// field captures the pre-v4 (Terraform 0.11.x) layout, which normalizeLegacy
+// folds into Resources so the rest of the analyzer treats both uniformly.
 type state struct {
 	Version          int        `json:"version"`
 	TerraformVersion string     `json:"terraform_version"`
 	Serial           int64      `json:"serial"`
 	Lineage          string     `json:"lineage"`
 	Resources        []resource `json:"resources"`
+	Modules          []v3Module `json:"modules"`
 }
 
 type resource struct {
@@ -32,6 +36,22 @@ type resource struct {
 	Name      string            `json:"name"`
 	Provider  string            `json:"provider"`
 	Instances []json.RawMessage `json:"instances"`
+}
+
+// v3Module and v3Resource model the pre-v4 (Terraform 0.11.x) state layout, where
+// resources live under modules[].resources as a map keyed by resource address and
+// each entry carries a single primary instance plus any deposed instances, rather
+// than v4's top-level resources[].instances[].
+type v3Module struct {
+	Path      []string              `json:"path"`
+	Resources map[string]v3Resource `json:"resources"`
+}
+
+type v3Resource struct {
+	Type     string            `json:"type"`
+	Provider string            `json:"provider"`
+	Primary  json.RawMessage   `json:"primary"`
+	Deposed  []json.RawMessage `json:"deposed"`
 }
 
 // Count is a label/value pair used for sorted breakdowns in the API/UI.
@@ -64,6 +84,7 @@ func Analyze(raw []byte) (*Analysis, error) {
 	if err := json.Unmarshal(raw, &s); err != nil {
 		return nil, fmt.Errorf("invalid Terraform state JSON: %w", err)
 	}
+	s.normalizeLegacy()
 	if s.Version == 0 && s.Lineage == "" && len(s.Resources) == 0 {
 		return nil, fmt.Errorf("input does not look like a Terraform state file")
 	}
@@ -139,6 +160,86 @@ func moduleLabel(module string) string {
 		return "root"
 	}
 	return module
+}
+
+// normalizeLegacy folds a pre-v4 (Terraform 0.11.x) state's modules[].resources
+// layout into the v4 resources[] shape so Analyze and ListResources can treat both
+// formats uniformly. It is a no-op for v4 states, which already carry resources[]
+// and no modules[].
+func (s *state) normalizeLegacy() {
+	if len(s.Resources) > 0 || len(s.Modules) == 0 {
+		return
+	}
+	for _, m := range s.Modules {
+		module := legacyModuleField(m.Path)
+		// Map iteration order is non-deterministic; sort keys so the synthesized
+		// resource order (and any tests over it) stays stable.
+		keys := make([]string, 0, len(m.Resources))
+		for k := range m.Resources {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, key := range keys {
+			rv := m.Resources[key]
+			rtype := rv.Type
+			if rtype == "" {
+				rtype = legacyTypeFromKey(key)
+			}
+			mode := "managed"
+			if strings.HasPrefix(key, "data.") {
+				mode = "data"
+			}
+			// Each v3 entry is one resource instance (count/for_each expansion uses
+			// separate keys); deposed instances are still under management, so count
+			// them alongside the primary.
+			instances := make([]json.RawMessage, 0, 1+len(rv.Deposed))
+			if len(rv.Primary) > 0 && string(rv.Primary) != "null" {
+				instances = append(instances, rv.Primary)
+			}
+			instances = append(instances, rv.Deposed...)
+			s.Resources = append(s.Resources, resource{
+				Module:    module,
+				Mode:      mode,
+				Type:      rtype,
+				Name:      legacyResourceName(key, rtype),
+				Provider:  rv.Provider,
+				Instances: instances,
+			})
+		}
+	}
+}
+
+// legacyModuleField renders a pre-v4 module path (e.g. ["root","vpc"]) as the
+// v4-style module address ("module.vpc"). The root module maps to "" to match the
+// v4 convention that moduleLabel turns into "root".
+func legacyModuleField(path []string) string {
+	if len(path) <= 1 {
+		return ""
+	}
+	parts := make([]string, 0, len(path)-1)
+	for _, p := range path[1:] {
+		parts = append(parts, "module."+p)
+	}
+	return strings.Join(parts, ".")
+}
+
+// legacyTypeFromKey extracts the resource type from a pre-v4 resource key such as
+// "aws_instance.web", "aws_instance.web.0", or "data.aws_ami.ubuntu". Used only
+// when the entry omits an explicit "type" field.
+func legacyTypeFromKey(key string) string {
+	key = strings.TrimPrefix(key, "data.")
+	if i := strings.Index(key, "."); i > 0 {
+		return key[:i]
+	}
+	return key
+}
+
+// legacyResourceName extracts the resource name (including any count index) from a
+// pre-v4 resource key by stripping the optional "data." prefix and the leading
+// "<type>." segment.
+func legacyResourceName(key, rtype string) string {
+	key = strings.TrimPrefix(key, "data.")
+	return strings.TrimPrefix(key, rtype+".")
 }
 
 // sortedCounts returns counts sorted by descending count, then key ascending.

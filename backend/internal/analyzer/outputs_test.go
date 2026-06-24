@@ -57,6 +57,63 @@ func TestListOutputs_EmptyAndInvalid(t *testing.T) {
 	}
 }
 
+// TestListOutputsV3 covers Terraform 0.11.x (format v3) states, where outputs
+// live under the root module's modules[].outputs rather than at the top level.
+func TestListOutputsV3(t *testing.T) {
+	raw := `{
+		"version": 3,
+		"terraform_version": "0.11.11",
+		"lineage": "lin-v3",
+		"modules": [
+			{
+				"path": ["root"],
+				"outputs": {
+					"vpc_id": {"sensitive": false, "type": "string", "value": "vpc-9"},
+					"subnet_ids": {"sensitive": false, "type": "list", "value": ["a","b"]},
+					"db_password": {"sensitive": true, "type": "string", "value": "hunter2"}
+				},
+				"resources": {}
+			},
+			{
+				"path": ["root", "vpc"],
+				"outputs": {
+					"internal_only": {"sensitive": false, "type": "string", "value": "x"}
+				},
+				"resources": {}
+			}
+		]
+	}`
+	outputs, err := ListOutputs([]byte(raw))
+	if err != nil {
+		t.Fatalf("ListOutputs: %v", err)
+	}
+	// Only the root module's 3 outputs; the child module's output is excluded.
+	if len(outputs) != 3 {
+		t.Fatalf("outputs = %d, want 3", len(outputs))
+	}
+	// Sorted by name: db_password, subnet_ids, vpc_id.
+	if outputs[2].Name != "vpc_id" || outputs[2].Type != "string" || string(outputs[2].Value) != `"vpc-9"` {
+		t.Errorf("vpc_id: %+v", outputs[2])
+	}
+	// v3 plain "list" type label flows through ctyTypeLabel unchanged.
+	if outputs[1].Name != "subnet_ids" || outputs[1].Type != "list" {
+		t.Errorf("subnet_ids: %+v", outputs[1])
+	}
+	// Sensitive v3 output: flagged, value redacted.
+	sens := outputs[0]
+	if sens.Name != "db_password" || !sens.Sensitive {
+		t.Fatalf("db_password: %+v", sens)
+	}
+	if len(sens.Value) != 0 || strings.Contains(string(sens.Value), "hunter2") {
+		t.Errorf("sensitive value leaked: %q", string(sens.Value))
+	}
+	for _, o := range outputs {
+		if o.Name == "internal_only" {
+			t.Error("child-module output leaked into root outputs")
+		}
+	}
+}
+
 func TestCtyTypeLabel(t *testing.T) {
 	cases := map[string]string{
 		`"string"`:                  "string",
