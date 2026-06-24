@@ -54,6 +54,14 @@ func fakeAzureBlob(t *testing.T) (*azureConn, map[string][]byte) {
 			body, _ := io.ReadAll(r.Body)
 			blobs[key] = body
 			w.WriteHeader(http.StatusCreated)
+		case r.Method == http.MethodDelete:
+			if _, ok := blobs[key]; !ok {
+				w.Header().Set("x-ms-error-code", "BlobNotFound")
+				w.WriteHeader(http.StatusNotFound)
+				return
+			}
+			delete(blobs, key)
+			w.WriteHeader(http.StatusAccepted)
 		default:
 			w.WriteHeader(http.StatusNotImplemented)
 		}
@@ -122,5 +130,14 @@ func TestAzure_ListReadWrite(t *testing.T) {
 	}
 	if string(blobs["envs/new.tfstate"]) != `{"version":4}` {
 		t.Error("Write did not store the blob")
+	}
+	if err := conn.Delete(ctx, "envs/prod.tfstate"); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	if _, ok := blobs["envs/prod.tfstate"]; ok {
+		t.Error("Delete did not remove the blob")
+	}
+	if err := conn.Delete(ctx, "missing.tfstate"); !IsNotFound(err) {
+		t.Errorf("missing delete must be IsNotFound, got %v", err)
 	}
 }

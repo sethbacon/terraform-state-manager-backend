@@ -657,6 +657,51 @@ func TestStateOperation_Delete_Purge(t *testing.T) {
 	}
 }
 
+func TestStateOperation_Delete_BackupFailureAborts(t *testing.T) {
+	e := newSourcesEnv(t)
+	e.scopes = []string{"admin"}
+	e.seed(t, "app.tfstate", minState(7, "lin-1", "aws_instance.web"))
+
+	e.expectSource("s1", e.dir)
+	// The pre-delete backup fails: the object must NOT be deleted.
+	e.mock.ExpectQuery("INSERT INTO state_backups").WillReturnError(errDBForTest())
+
+	w := e.do(http.MethodPost, "/api/v1/sources/s1/state/operations?key=app.tfstate",
+		`{"op":"delete","key":"app.tfstate"}`)
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("backup failure: status = %d, want 500 (%s)", w.Code, w.Body.String())
+	}
+	if _, err := os.Stat(filepath.Join(e.dir, "app.tfstate")); err != nil {
+		t.Errorf("state must survive a failed pre-delete backup: %v", err)
+	}
+}
+
+func TestStateOperation_Delete_PurgeFailureWarns(t *testing.T) {
+	e := newSourcesEnv(t)
+	e.scopes = []string{"admin"}
+	e.seed(t, "app.tfstate", minState(7, "lin-1", "aws_instance.web"))
+
+	e.expectSource("s1", e.dir)
+	e.mock.ExpectQuery("INSERT INTO state_backups").
+		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("b1"))
+	// The object delete succeeds, but dropping the backups fails: the response
+	// reports success with a warning and records purged=false.
+	e.mock.ExpectExec("DELETE FROM state_backups").WillReturnError(errDBForTest())
+	e.mock.ExpectExec("INSERT INTO state_edits").WillReturnResult(sqlmock.NewResult(0, 1))
+
+	w := e.do(http.MethodPost, "/api/v1/sources/s1/state/operations?key=app.tfstate",
+		`{"op":"delete","key":"app.tfstate","purge":true}`)
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"purged":false`) {
+		t.Fatalf("purge failure: status = %d (%s)", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "could not be purged") {
+		t.Errorf("expected a purge warning: %s", w.Body.String())
+	}
+	if _, err := os.Stat(filepath.Join(e.dir, "app.tfstate")); !os.IsNotExist(err) {
+		t.Errorf("state object should be deleted even when purge fails")
+	}
+}
+
 func TestStateOperation_Delete_NonAdminForbidden(t *testing.T) {
 	e := newSourcesEnv(t)
 	e.scopes = []string{"state:write"} // editor, not admin
