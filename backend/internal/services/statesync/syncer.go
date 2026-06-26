@@ -16,6 +16,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"sync"
 	"time"
 
@@ -159,9 +160,11 @@ func (s *Syncer) syncSource(ctx context.Context, src *repositories.Source) {
 	var changed []statesource.StateRef
 	for _, ref := range refs {
 		keep = append(keep, ref.Key)
-		m := marker(ref)
+		m := analysisMarker(ref)
 		// Re-read when the marker moved, or when the listing carries no
-		// metadata to compare (m == "").
+		// metadata to compare (m == ""). The marker folds in the analyzer
+		// logic version, so a bump also re-reads byte-unchanged states whose
+		// stored counts were computed by an older analyzer.
 		if m == "" || markers[ref.Key] != m {
 			changed = append(changed, ref)
 		}
@@ -307,6 +310,23 @@ func marker(ref statesource.StateRef) string {
 	return fmt.Sprintf("%d|%s", ref.Size, lm)
 }
 
+// analysisMarker folds the analyzer logic version into the change-detection
+// token, so a stored analysis is treated as current only when BOTH the state
+// bytes and the analyzer revision are unchanged. Bumping analyzer.AnalysisVersion
+// therefore forces a one-time re-analysis of every stored state whose bytes
+// never moved (e.g. long-static 0.11.x states whose counts were computed before
+// legacy support existed).
+//
+// Marker-less backends (empty token — no listing metadata to compare) keep the
+// "" sentinel so they continue to be re-read every cycle, version regardless.
+func analysisMarker(ref statesource.StateRef) string {
+	m := marker(ref)
+	if m == "" {
+		return ""
+	}
+	return m + "|a" + strconv.Itoa(analyzer.AnalysisVersion)
+}
+
 func analysisRow(sourceID string, ref statesource.StateRef, a *analyzer.Analysis, size int64) *repositories.StateAnalysis {
 	providers := map[string]int{}
 	for _, c := range a.Providers {
@@ -319,7 +339,7 @@ func analysisRow(sourceID string, ref statesource.StateRef, a *analyzer.Analysis
 	return &repositories.StateAnalysis{
 		SourceID:         sourceID,
 		StateKey:         ref.Key,
-		VersionMarker:    marker(ref),
+		VersionMarker:    analysisMarker(ref),
 		Size:             size,
 		TerraformVersion: a.TerraformVersion,
 		Serial:           a.Serial,
