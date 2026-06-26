@@ -144,6 +144,14 @@ func sourceRows(dir string) *sqlmock.Rows {
 		AddRow("s1", "demo", "local", "", cfg, []byte(`{}`), nil, "2026-06-10", "2026-06-10")
 }
 
+func twoSourceRows(dir1, dir2 string) *sqlmock.Rows {
+	cfg1, _ := json.Marshal(map[string]any{"base_path": dir1})
+	cfg2, _ := json.Marshal(map[string]any{"base_path": dir2})
+	return sqlmock.NewRows([]string{"id", "name", "type", "endpoint", "config", "scope", "encrypted_credentials", "created_at", "updated_at"}).
+		AddRow("s1", "demo", "local", "", cfg1, []byte(`{}`), nil, "2026-06-10", "2026-06-10").
+		AddRow("s2", "other", "local", "", cfg2, []byte(`{}`), nil, "2026-06-10", "2026-06-10")
+}
+
 func TestSyncAll_FirstBackfillReadsEverything(t *testing.T) {
 	db, mock := newMock(t)
 	dir := t.TempDir()
@@ -338,6 +346,73 @@ func TestSyncAll_SourcesListError(t *testing.T) {
 	mock.ExpectQuery("SELECT .+ FROM state_sources ORDER BY").WillReturnError(errors.New("db down"))
 	if err := newSyncer(db, connectLocal).SyncAll(ctx); err == nil {
 		t.Error("SyncAll: expected error when sources cannot be listed")
+	}
+}
+
+func TestSyncSources_ScopesToNamedSource(t *testing.T) {
+	db, mock := newMock(t)
+	dir1, dir2 := t.TempDir(), t.TempDir()
+	seed(t, dir1, "app.tfstate", minState(7, "aws_instance"))
+
+	// Two sources are configured but only s1 is requested. Assert at the connect
+	// boundary that s2 is never touched, so a filtered Reports refresh reconciles
+	// just its own source instead of the whole fleet.
+	var mu sync.Mutex
+	connected := map[string]bool{}
+	connect := func(s *repositories.Source) (statesource.Connector, error) {
+		mu.Lock()
+		connected[s.ID] = true
+		mu.Unlock()
+		return connectLocal(s)
+	}
+
+	mock.ExpectQuery("SELECT .+ FROM state_sources ORDER BY").WillReturnRows(twoSourceRows(dir1, dir2))
+	mock.ExpectQuery("SELECT state_key, version_marker FROM state_analyses").WithArgs("s1").
+		WillReturnRows(sqlmock.NewRows([]string{"state_key", "version_marker"}))
+	mock.ExpectExec("INSERT INTO state_analyses").WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("INSERT INTO state_analysis_history").WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("DELETE FROM state_analyses WHERE source_id").WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec("INSERT INTO source_sync_status").WithArgs("s1", 1, 0, "").
+		WillReturnResult(sqlmock.NewResult(0, 1))
+
+	if err := newSyncer(db, connect).SyncSources(ctx, []string{"s1"}); err != nil {
+		t.Fatalf("SyncSources: %v", err)
+	}
+	if !connected["s1"] {
+		t.Error("s1 should have been reconciled")
+	}
+	if connected["s2"] {
+		t.Error("s2 was reconciled but was not in the requested id set")
+	}
+	// SyncSources leaves history pruning to the full cycle: no DELETE history.
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Error(err)
+	}
+}
+
+func TestSyncSources_EmptyIsNoop(t *testing.T) {
+	db, _ := newMock(t)
+	// No expectations: an empty id list must not even list sources.
+	if err := newSyncer(db, connectLocal).SyncSources(ctx, nil); err != nil {
+		t.Fatalf("SyncSources(nil): %v", err)
+	}
+}
+
+func TestSyncSources_Serialization(t *testing.T) {
+	db, _ := newMock(t)
+	s := newSyncer(db, connectLocal)
+	s.runMu.Lock()
+	defer s.runMu.Unlock()
+	if err := s.SyncSources(ctx, []string{"s1"}); err != ErrSyncInProgress {
+		t.Errorf("SyncSources while locked = %v, want ErrSyncInProgress", err)
+	}
+}
+
+func TestSyncSources_SourcesListError(t *testing.T) {
+	db, mock := newMock(t)
+	mock.ExpectQuery("SELECT .+ FROM state_sources ORDER BY").WillReturnError(errors.New("db down"))
+	if err := newSyncer(db, connectLocal).SyncSources(ctx, []string{"s1"}); err == nil {
+		t.Error("SyncSources: expected error when sources cannot be listed")
 	}
 }
 

@@ -41,9 +41,9 @@ const (
 // does not import crypto or the api package.
 type Connect func(s *repositories.Source) (statesource.Connector, error)
 
-// ErrSyncInProgress is returned by SyncAll when a cycle is already running;
-// callers (e.g. ?refresh=true) should serve the current store instead of
-// waiting.
+// ErrSyncInProgress is returned by SyncAll/SyncSources when a cycle is already
+// running; callers (e.g. ?refresh=true) should serve the current store instead
+// of waiting.
 var ErrSyncInProgress = fmt.Errorf("a sync cycle is already running")
 
 // Syncer reconciles the analysis store on an interval.
@@ -121,6 +121,43 @@ func (s *Syncer) SyncAll(ctx context.Context) error {
 	// Bound the history table: one cheap DELETE per cycle.
 	if err := s.store.PruneHistory(ctx); err != nil {
 		s.logger.Error("failed to prune analysis history", "error", err)
+	}
+	return nil
+}
+
+// SyncSources reconciles only the named sources, so a filtered view (e.g. the
+// Reports page scoped to one source) can refresh just its own data instead of
+// reconciling the whole fleet — which matters for cost and backend rate limits
+// (HCP allows ~30 req/30s per token). Shares runMu with SyncAll, so it returns
+// ErrSyncInProgress when a background or full cycle is already running; an empty
+// id list is a no-op. Unknown ids are silently skipped. History pruning is left
+// to SyncAll's full cycle.
+func (s *Syncer) SyncSources(ctx context.Context, ids []string) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	if !s.runMu.TryLock() {
+		return ErrSyncInProgress
+	}
+	defer s.runMu.Unlock()
+
+	want := make(map[string]struct{}, len(ids))
+	for _, id := range ids {
+		want[id] = struct{}{}
+	}
+
+	sources, err := s.sources.List(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to list sources: %w", err)
+	}
+	for i := range sources {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if _, ok := want[sources[i].ID]; !ok {
+			continue
+		}
+		s.syncSource(ctx, &sources[i])
 	}
 	return nil
 }

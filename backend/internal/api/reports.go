@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"fmt"
 	"math"
 	"net/http"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/terraform-state-manager/terraform-state-manager/internal/db/repositories"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/reporting"
+	"github.com/terraform-state-manager/terraform-state-manager/internal/services/statesync"
 )
 
 // reportPreviewCap bounds the rows returned to the live Reports table; the
@@ -201,9 +203,10 @@ type reportPreviewRow struct {
 
 // ReportStates lists the analyzed state files matching the filter query, with a
 // summary over the full match and a capped row slice for the live table.
-// Requires state:read.
+// ?refresh=true reconciles first, scoped to the selected source(s) when the
+// filter names any (else a full cycle). Requires state:read.
 // @Summary      Query state files for reporting
-// @Description  Lists analyzed state files matching optional filters (source_id[], q, version+op, provider, resource_type, and rum/managed/data/total/size min-max). Returns a summary over the full match plus up to 500 rows for the table. Requires state:read.
+// @Description  Lists analyzed state files matching optional filters (source_id[], q, version+op, provider, resource_type, and rum/managed/data/total/size min-max). Returns a summary over the full match plus up to 500 rows for the table. ?refresh=true reconciles first, scoped to the selected source(s). Requires state:read.
 // @Tags         Reports
 // @Produce      json
 // @Success      200  {object}  map[string]interface{}
@@ -213,12 +216,16 @@ type reportPreviewRow struct {
 // @Router       /reports/states [get]
 func (h *SourcesHandlers) ReportStates() gin.HandlerFunc {
 	return func(c *gin.Context) {
+		ctx := c.Request.Context()
 		f, err := parseReportFilters(c)
 		if err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
-		rows, err := h.analysisRepo.AllStates(c.Request.Context())
+		if c.Query("refresh") == "true" && h.syncer != nil {
+			h.refreshForReport(ctx, f.sourceIDs)
+		}
+		rows, err := h.analysisRepo.AllStates(ctx)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load states"})
 			return
@@ -238,6 +245,24 @@ func (h *SourcesHandlers) ReportStates() gin.HandlerFunc {
 			"summary":   summary,
 			"states":    toPreviewRows(capped),
 		})
+	}
+}
+
+// refreshForReport reconciles the analysis store before a report read so the
+// table reflects current state. It scopes the reconcile to the selected
+// source(s) when the filter names any, so a filtered view refreshes only its own
+// data instead of the whole fleet (which matters for backend rate limits); an
+// unscoped report falls back to a full cycle. Best-effort: a cycle already in
+// progress (ErrSyncInProgress) or any error leaves the existing store served.
+func (h *SourcesHandlers) refreshForReport(ctx context.Context, sourceIDs []string) {
+	var err error
+	if len(sourceIDs) > 0 {
+		err = h.syncer.SyncSources(ctx, sourceIDs)
+	} else {
+		err = h.syncer.SyncAll(ctx)
+	}
+	if err != nil && err != statesync.ErrSyncInProgress {
+		_ = err
 	}
 }
 
