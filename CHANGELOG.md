@@ -1,5 +1,25 @@
 # Changelog
 
+## [1.16.0](https://github.com/sethbacon/terraform-state-manager-backend/compare/v1.15.1...v1.16.0) (2026-06-26)
+
+
+### Features
+
+* **reports:** scope the Reports refresh to the selected source(s) ([d4ff1a4](https://github.com/sethbacon/terraform-state-manager-backend/commit/d4ff1a440dd27247a2ead084dfb6eeb4878488bf))
+* **reports:** scope the Reports refresh to the selected source(s) ([593c711](https://github.com/sethbacon/terraform-state-manager-backend/commit/593c711901154f10a6665fb59b68189d5676abc5))
+
+
+### Bug Fixes
+
+* **analyzer:** aggregate aliased providers in pre-v4 (0.11.x) state ([04ccfb4](https://github.com/sethbacon/terraform-state-manager-backend/commit/04ccfb4c4e22c0edf964c39e70042ad3e0b0d2fb))
+* correct resource counts for pre-v4 (0.11.x) state on Reports & Dashboard ([604bf7d](https://github.com/sethbacon/terraform-state-manager-backend/commit/604bf7dca160d85a916cf568dd79c1577b472dd1))
+* **statesync:** re-analyze stored states when the analyzer logic changes ([c17478b](https://github.com/sethbacon/terraform-state-manager-backend/commit/c17478b84ba4fea0c304f5f0de2e263b1a858b05))
+
+
+### Documentation
+
+* **swagger:** regenerate swagger.json for the reports refresh annotation ([a76618d](https://github.com/sethbacon/terraform-state-manager-backend/commit/a76618d6fcb246ea0dfd49311dd5813c22007d04))
+
 ## [1.15.1](https://github.com/sethbacon/terraform-state-manager-backend/compare/v1.15.0...v1.15.1) (2026-06-24)
 
 
