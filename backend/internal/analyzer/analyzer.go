@@ -16,6 +16,18 @@ import (
 	"strings"
 )
 
+// AnalysisVersion is the revision of the analyzer's counting/normalization
+// logic. Bump it whenever that logic changes so persisted analyses computed by
+// an older revision are recognized as stale and recomputed — even when the
+// underlying state bytes never changed. statesync folds this into its change
+// marker, so a bump forces a one-time re-analysis of every stored state.
+//
+// History:
+//
+//	1: baseline — managed/data/RUM over the v4 resources[] shape only.
+//	2: pre-v4 (0.11.x) legacy normalization + aliased-provider aggregation.
+const AnalysisVersion = 2
+
 // state mirrors the subset of the Terraform state we read. The top-level
 // resources[]/instances[] shape is format v4 (Terraform 0.12+); the modules[]
 // field captures the pre-v4 (Terraform 0.11.x) layout, which normalizeLegacy
@@ -146,6 +158,15 @@ func normalizeProvider(provider, resourceType string) string {
 			return strings.Join(parts[len(parts)-2:], "/")
 		}
 		if ref != "" {
+			// A pre-v4 (0.11.x) ref is "<type>[.<alias>]" with no registry path;
+			// drop the alias so aliased instances aggregate with the base provider.
+			// (v4 refs carry a slash-bearing "<host>/<ns>/<name>" path, handled
+			// above or left intact as "<ns>/<name>".)
+			if !strings.Contains(ref, "/") {
+				if i := strings.Index(ref, "."); i >= 0 {
+					ref = ref[:i]
+				}
+			}
 			return ref
 		}
 	}

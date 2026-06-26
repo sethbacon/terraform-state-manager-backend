@@ -335,3 +335,39 @@ func TestAnalyzeV3TypeFallback(t *testing.T) {
 		t.Errorf("aws_s3_bucket = %d, want 1 (type derived from key)", types["aws_s3_bucket"])
 	}
 }
+
+// TestAnalyzeV3AliasedProvider covers a pre-v4 (0.11.x) aliased provider ref
+// ("provider.<type>.<alias>"). The alias must be dropped so aliased instances
+// aggregate with the base provider rather than splitting into a separate bucket.
+// v4 carries the alias outside the bracketed ref, so only the legacy dotted form
+// needs this normalization.
+func TestAnalyzeV3AliasedProvider(t *testing.T) {
+	const s = `{
+  "version": 3,
+  "terraform_version": "0.11.14",
+  "lineage": "alias",
+  "modules": [
+    {
+      "path": ["root"],
+      "resources": {
+        "aws_instance.east": {"type": "aws_instance", "primary": {"id": "i-e"}, "provider": "provider.aws"},
+        "aws_instance.west": {"type": "aws_instance", "primary": {"id": "i-w"}, "provider": "provider.aws.west"}
+      }
+    }
+  ]
+}`
+	a, err := Analyze([]byte(s))
+	if err != nil {
+		t.Fatalf("Analyze: %v", err)
+	}
+	providers := map[string]int{}
+	for _, c := range a.Providers {
+		providers[c.Key] = c.Count
+	}
+	if providers["aws"] != 2 {
+		t.Errorf("aws provider = %d, want 2 (base + aliased aggregate); got breakdown %v", providers["aws"], a.Providers)
+	}
+	if _, split := providers["aws.west"]; split {
+		t.Errorf("aliased provider leaked a separate %q bucket: %v", "aws.west", a.Providers)
+	}
+}
