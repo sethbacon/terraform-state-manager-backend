@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.16.1](https://github.com/sethbacon/terraform-state-manager-backend/compare/v1.16.0...v1.16.1) (2026-07-01)
+
+
+### Bug Fixes
+
+* **stateops:** honor for_each/count instance index in state rm/mv ([#163](https://github.com/sethbacon/terraform-state-manager-backend/issues/163)) ([403b669](https://github.com/sethbacon/terraform-state-manager-backend/commit/403b6697042b543b6e0dfa6bfb6c3095dfbc2643)), closes [#162](https://github.com/sethbacon/terraform-state-manager-backend/issues/162)
+
 ## [1.16.0](https://github.com/sethbacon/terraform-state-manager-backend/compare/v1.15.1...v1.16.0) (2026-06-26)
 
 
