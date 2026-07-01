@@ -584,6 +584,39 @@ func TestStateOperation_RemoveResource(t *testing.T) {
 	}
 }
 
+func TestStateOperation_RemoveInstance(t *testing.T) {
+	e := newSourcesEnv(t)
+	// A for_each resource with three instances keyed a/b/c.
+	forEach := `{"version":4,"terraform_version":"1.9.5","serial":3,"lineage":"lin-1","resources":[
+		{"module":"","mode":"managed","type":"aws_prefix_list","name":"this",
+		 "provider":"provider[\"registry.terraform.io/hashicorp/aws\"]","each":"map",
+		 "instances":[{"index_key":"a"},{"index_key":"b"},{"index_key":"c"}]}
+	]}`
+	e.seed(t, "app.tfstate", forEach)
+
+	e.expectSource("s1", e.dir)
+	e.mock.ExpectQuery("INSERT INTO state_backups").
+		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("b1"))
+	e.mock.ExpectExec("INSERT INTO state_edits").WillReturnResult(sqlmock.NewResult(0, 1))
+
+	w := e.do(http.MethodPost, "/api/v1/sources/s1/state/operations?key=app.tfstate",
+		`{"op":"rm","address":"aws_prefix_list.this[\"a\"]"}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("rm instance: status = %d (%s)", w.Code, w.Body.String())
+	}
+	// Only instance "a" is removed; the resource block and instances b/c remain.
+	after := e.read(t, "app.tfstate")
+	if strings.Contains(after, `"index_key":"a"`) {
+		t.Errorf("instance [\"a\"] should have been removed: %s", after)
+	}
+	if !strings.Contains(after, `"index_key":"b"`) || !strings.Contains(after, `"index_key":"c"`) {
+		t.Errorf("instances [\"b\"] and [\"c\"] should remain: %s", after)
+	}
+	if !strings.Contains(after, "aws_prefix_list") {
+		t.Errorf("resource block should remain: %s", after)
+	}
+}
+
 func TestStateOperation_Validation(t *testing.T) {
 	e := newSourcesEnv(t)
 	e.seed(t, "app.tfstate", minState(7, "lin-1", "aws_instance.web"))
