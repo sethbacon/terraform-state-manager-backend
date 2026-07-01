@@ -16,6 +16,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"sync"
 	"time"
 
@@ -40,9 +41,9 @@ const (
 // does not import crypto or the api package.
 type Connect func(s *repositories.Source) (statesource.Connector, error)
 
-// ErrSyncInProgress is returned by SyncAll when a cycle is already running;
-// callers (e.g. ?refresh=true) should serve the current store instead of
-// waiting.
+// ErrSyncInProgress is returned by SyncAll/SyncSources when a cycle is already
+// running; callers (e.g. ?refresh=true) should serve the current store instead
+// of waiting.
 var ErrSyncInProgress = fmt.Errorf("a sync cycle is already running")
 
 // Syncer reconciles the analysis store on an interval.
@@ -124,6 +125,43 @@ func (s *Syncer) SyncAll(ctx context.Context) error {
 	return nil
 }
 
+// SyncSources reconciles only the named sources, so a filtered view (e.g. the
+// Reports page scoped to one source) can refresh just its own data instead of
+// reconciling the whole fleet — which matters for cost and backend rate limits
+// (HCP allows ~30 req/30s per token). Shares runMu with SyncAll, so it returns
+// ErrSyncInProgress when a background or full cycle is already running; an empty
+// id list is a no-op. Unknown ids are silently skipped. History pruning is left
+// to SyncAll's full cycle.
+func (s *Syncer) SyncSources(ctx context.Context, ids []string) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	if !s.runMu.TryLock() {
+		return ErrSyncInProgress
+	}
+	defer s.runMu.Unlock()
+
+	want := make(map[string]struct{}, len(ids))
+	for _, id := range ids {
+		want[id] = struct{}{}
+	}
+
+	sources, err := s.sources.List(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to list sources: %w", err)
+	}
+	for i := range sources {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if _, ok := want[sources[i].ID]; !ok {
+			continue
+		}
+		s.syncSource(ctx, &sources[i])
+	}
+	return nil
+}
+
 // syncSource reconciles one source and records its sync status. Failures are
 // recorded, never returned: one bad source must not stop the others.
 func (s *Syncer) syncSource(ctx context.Context, src *repositories.Source) {
@@ -159,9 +197,11 @@ func (s *Syncer) syncSource(ctx context.Context, src *repositories.Source) {
 	var changed []statesource.StateRef
 	for _, ref := range refs {
 		keep = append(keep, ref.Key)
-		m := marker(ref)
+		m := analysisMarker(ref)
 		// Re-read when the marker moved, or when the listing carries no
-		// metadata to compare (m == "").
+		// metadata to compare (m == ""). The marker folds in the analyzer
+		// logic version, so a bump also re-reads byte-unchanged states whose
+		// stored counts were computed by an older analyzer.
 		if m == "" || markers[ref.Key] != m {
 			changed = append(changed, ref)
 		}
@@ -307,6 +347,23 @@ func marker(ref statesource.StateRef) string {
 	return fmt.Sprintf("%d|%s", ref.Size, lm)
 }
 
+// analysisMarker folds the analyzer logic version into the change-detection
+// token, so a stored analysis is treated as current only when BOTH the state
+// bytes and the analyzer revision are unchanged. Bumping analyzer.AnalysisVersion
+// therefore forces a one-time re-analysis of every stored state whose bytes
+// never moved (e.g. long-static 0.11.x states whose counts were computed before
+// legacy support existed).
+//
+// Marker-less backends (empty token — no listing metadata to compare) keep the
+// "" sentinel so they continue to be re-read every cycle, version regardless.
+func analysisMarker(ref statesource.StateRef) string {
+	m := marker(ref)
+	if m == "" {
+		return ""
+	}
+	return m + "|a" + strconv.Itoa(analyzer.AnalysisVersion)
+}
+
 func analysisRow(sourceID string, ref statesource.StateRef, a *analyzer.Analysis, size int64) *repositories.StateAnalysis {
 	providers := map[string]int{}
 	for _, c := range a.Providers {
@@ -319,7 +376,7 @@ func analysisRow(sourceID string, ref statesource.StateRef, a *analyzer.Analysis
 	return &repositories.StateAnalysis{
 		SourceID:         sourceID,
 		StateKey:         ref.Key,
-		VersionMarker:    marker(ref),
+		VersionMarker:    analysisMarker(ref),
 		Size:             size,
 		TerraformVersion: a.TerraformVersion,
 		Serial:           a.Serial,

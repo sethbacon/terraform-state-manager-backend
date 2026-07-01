@@ -8,12 +8,14 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
 
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
 
+	"github.com/terraform-state-manager/terraform-state-manager/internal/analyzer"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/db/repositories"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/statesource"
 )
@@ -65,15 +67,25 @@ func seed(t *testing.T, dir, name, content string) {
 	}
 }
 
-// fileMarker computes the marker the syncer derives from the local connector's
-// listing metadata, so tests can pre-load "unchanged" markers.
-func fileMarker(t *testing.T, dir, name string) string {
+// bareFileMarker is the pre-version stored marker: the raw size|last-modified
+// change token with no analyzer-version suffix, as written by builds from before
+// the version fold-in existed. Used to model byte-unchanged states whose counts
+// were computed by an older analyzer.
+func bareFileMarker(t *testing.T, dir, name string) string {
 	t.Helper()
 	info, err := os.Stat(filepath.Join(dir, name))
 	if err != nil {
 		t.Fatalf("stat %s: %v", name, err)
 	}
 	return fmt.Sprintf("%d|%s", info.Size(), info.ModTime().UTC().Format(time.RFC3339Nano))
+}
+
+// fileMarker computes the marker the syncer now derives for a local state: the
+// byte change token with the current analyzer version folded in, so tests can
+// pre-load "unchanged" (current-version) markers.
+func fileMarker(t *testing.T, dir, name string) string {
+	t.Helper()
+	return bareFileMarker(t, dir, name) + "|a" + strconv.Itoa(analyzer.AnalysisVersion)
 }
 
 func localSource(dir string) *repositories.Source {
@@ -132,6 +144,14 @@ func sourceRows(dir string) *sqlmock.Rows {
 		AddRow("s1", "demo", "local", "", cfg, []byte(`{}`), nil, "2026-06-10", "2026-06-10")
 }
 
+func twoSourceRows(dir1, dir2 string) *sqlmock.Rows {
+	cfg1, _ := json.Marshal(map[string]any{"base_path": dir1})
+	cfg2, _ := json.Marshal(map[string]any{"base_path": dir2})
+	return sqlmock.NewRows([]string{"id", "name", "type", "endpoint", "config", "scope", "encrypted_credentials", "created_at", "updated_at"}).
+		AddRow("s1", "demo", "local", "", cfg1, []byte(`{}`), nil, "2026-06-10", "2026-06-10").
+		AddRow("s2", "other", "local", "", cfg2, []byte(`{}`), nil, "2026-06-10", "2026-06-10")
+}
+
 func TestSyncAll_FirstBackfillReadsEverything(t *testing.T) {
 	db, mock := newMock(t)
 	dir := t.TempDir()
@@ -177,6 +197,35 @@ func TestSyncAll_UnchangedStatesAreNotReRead(t *testing.T) {
 	mock.ExpectExec("DELETE FROM state_analyses WHERE source_id").WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec("DELETE FROM state_analysis_history").WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectExec("INSERT INTO source_sync_status").WithArgs("s1", 2, 0, "").
+		WillReturnResult(sqlmock.NewResult(0, 1))
+
+	if err := newSyncer(db, connectLocal).SyncAll(ctx); err != nil {
+		t.Fatalf("SyncAll: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Error(err)
+	}
+}
+
+func TestSyncAll_AnalyzerVersionBumpForcesReanalyze(t *testing.T) {
+	db, mock := newMock(t)
+	dir := t.TempDir()
+	seed(t, dir, "legacy.tfstate", minState(1, "aws_instance"))
+
+	// The state's bytes never changed, but its stored marker is the pre-version
+	// (bare) format: it was last analyzed before AnalysisVersion existed. The
+	// folded-in version must no longer match, forcing exactly one re-read +
+	// re-analysis so its stale counts refresh. This is the persisted-Reports
+	// staleness fix for long-static 0.11.x states.
+	mock.ExpectQuery("SELECT .+ FROM state_sources ORDER BY").WillReturnRows(sourceRows(dir))
+	mock.ExpectQuery("SELECT state_key, version_marker FROM state_analyses").WithArgs("s1").
+		WillReturnRows(sqlmock.NewRows([]string{"state_key", "version_marker"}).
+			AddRow("legacy.tfstate", bareFileMarker(t, dir, "legacy.tfstate")))
+	mock.ExpectExec("INSERT INTO state_analyses").WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("INSERT INTO state_analysis_history").WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("DELETE FROM state_analyses WHERE source_id").WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec("DELETE FROM state_analysis_history").WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec("INSERT INTO source_sync_status").WithArgs("s1", 1, 0, "").
 		WillReturnResult(sqlmock.NewResult(0, 1))
 
 	if err := newSyncer(db, connectLocal).SyncAll(ctx); err != nil {
@@ -300,6 +349,73 @@ func TestSyncAll_SourcesListError(t *testing.T) {
 	}
 }
 
+func TestSyncSources_ScopesToNamedSource(t *testing.T) {
+	db, mock := newMock(t)
+	dir1, dir2 := t.TempDir(), t.TempDir()
+	seed(t, dir1, "app.tfstate", minState(7, "aws_instance"))
+
+	// Two sources are configured but only s1 is requested. Assert at the connect
+	// boundary that s2 is never touched, so a filtered Reports refresh reconciles
+	// just its own source instead of the whole fleet.
+	var mu sync.Mutex
+	connected := map[string]bool{}
+	connect := func(s *repositories.Source) (statesource.Connector, error) {
+		mu.Lock()
+		connected[s.ID] = true
+		mu.Unlock()
+		return connectLocal(s)
+	}
+
+	mock.ExpectQuery("SELECT .+ FROM state_sources ORDER BY").WillReturnRows(twoSourceRows(dir1, dir2))
+	mock.ExpectQuery("SELECT state_key, version_marker FROM state_analyses").WithArgs("s1").
+		WillReturnRows(sqlmock.NewRows([]string{"state_key", "version_marker"}))
+	mock.ExpectExec("INSERT INTO state_analyses").WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("INSERT INTO state_analysis_history").WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("DELETE FROM state_analyses WHERE source_id").WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec("INSERT INTO source_sync_status").WithArgs("s1", 1, 0, "").
+		WillReturnResult(sqlmock.NewResult(0, 1))
+
+	if err := newSyncer(db, connect).SyncSources(ctx, []string{"s1"}); err != nil {
+		t.Fatalf("SyncSources: %v", err)
+	}
+	if !connected["s1"] {
+		t.Error("s1 should have been reconciled")
+	}
+	if connected["s2"] {
+		t.Error("s2 was reconciled but was not in the requested id set")
+	}
+	// SyncSources leaves history pruning to the full cycle: no DELETE history.
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Error(err)
+	}
+}
+
+func TestSyncSources_EmptyIsNoop(t *testing.T) {
+	db, _ := newMock(t)
+	// No expectations: an empty id list must not even list sources.
+	if err := newSyncer(db, connectLocal).SyncSources(ctx, nil); err != nil {
+		t.Fatalf("SyncSources(nil): %v", err)
+	}
+}
+
+func TestSyncSources_Serialization(t *testing.T) {
+	db, _ := newMock(t)
+	s := newSyncer(db, connectLocal)
+	s.runMu.Lock()
+	defer s.runMu.Unlock()
+	if err := s.SyncSources(ctx, []string{"s1"}); err != ErrSyncInProgress {
+		t.Errorf("SyncSources while locked = %v, want ErrSyncInProgress", err)
+	}
+}
+
+func TestSyncSources_SourcesListError(t *testing.T) {
+	db, mock := newMock(t)
+	mock.ExpectQuery("SELECT .+ FROM state_sources ORDER BY").WillReturnError(errors.New("db down"))
+	if err := newSyncer(db, connectLocal).SyncSources(ctx, []string{"s1"}); err == nil {
+		t.Error("SyncSources: expected error when sources cannot be listed")
+	}
+}
+
 func TestSyncKeyAndDropKey(t *testing.T) {
 	db, mock := newMock(t)
 	dir := t.TempDir()
@@ -356,5 +472,20 @@ func TestMarker(t *testing.T) {
 		if got := marker(c.ref); got != c.want {
 			t.Errorf("case %d: marker = %q, want %q", i, got, c.want)
 		}
+	}
+}
+
+func TestAnalysisMarker(t *testing.T) {
+	now := time.Date(2026, 6, 11, 9, 0, 0, 0, time.UTC)
+	suffix := "|a" + strconv.Itoa(analyzer.AnalysisVersion)
+
+	// A real change token gets the analyzer version folded in.
+	if got, want := analysisMarker(statesource.StateRef{Size: 2048, LastModified: &now}), "2048|2026-06-11T09:00:00Z"+suffix; got != want {
+		t.Errorf("analysisMarker(metadata) = %q, want %q", got, want)
+	}
+	// Marker-less backends keep the empty sentinel (always re-read), regardless
+	// of the analyzer version.
+	if got := analysisMarker(statesource.StateRef{}); got != "" {
+		t.Errorf("analysisMarker(no metadata) = %q, want \"\"", got)
 	}
 }

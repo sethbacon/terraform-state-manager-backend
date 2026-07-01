@@ -2362,7 +2362,7 @@
                         "CookieAuth": []
                     }
                 ],
-                "description": "Lists analyzed state files matching optional filters (source_id[], q, version+op, provider, resource_type, and rum/managed/data/total/size min-max). Returns a summary over the full match plus up to 500 rows for the table. Requires state:read.",
+                "description": "Lists analyzed state files matching optional filters (source_id[], q, version+op, provider, resource_type, and rum/managed/data/total/size min-max). Returns a summary over the full match plus up to 500 rows for the table. ?refresh=true reconciles first, scoped to the selected source(s). Requires state:read.",
                 "produces": [
                     "application/json"
                 ],
