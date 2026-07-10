@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -95,7 +96,10 @@ func (g *gitConn) List(ctx context.Context) ([]StateRef, error) {
 		if err != nil || info == nil || info.IsDir() {
 			return nil
 		}
-		rel := strings.TrimPrefix(p, "/")
+		// billyutil.Walk joins path segments with filepath.Join, which uses
+		// OS-native separators even for this in-memory filesystem; normalize
+		// to "/" so prefix/suffix matching below is platform-independent.
+		rel := strings.TrimPrefix(filepath.ToSlash(p), "/")
 		if prefix != "" && !strings.HasPrefix(rel, prefix) {
 			return nil
 		}

@@ -80,13 +80,15 @@ func TestMigrate_WriteToTargetFails(t *testing.T) {
 	e.seed(t, "app.tfstate", minState(7, "lin-1", "aws_instance.web"))
 
 	e.expectSource("s1", e.dir)
-	// Target dir exists (so the connector constructs) but is read-only, so
-	// the write itself fails.
-	blocked := filepath.Join(t.TempDir(), "blocked")
-	if err := os.Mkdir(blocked, 0o500); err != nil {
+	// Target dir exists (so the connector constructs), but the connector's
+	// atomic-write temp file ("<key>.tmp") is pre-occupied by a directory, so
+	// the write itself fails. A read-only target dir would work on Linux but
+	// not Windows, where os.Chmod doesn't enforce Unix write-permission bits
+	// on directories; this collision fails open() identically on both.
+	blocked := t.TempDir()
+	if err := os.Mkdir(filepath.Join(blocked, "copy.tfstate.tmp"), 0o750); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = os.Chmod(blocked, 0o700) })
 	e.expectSource("s2", blocked)
 	e.mock.ExpectQuery("INSERT INTO state_transfers").
 		WillReturnRows(transferReturn("backup", "failed", nil, false))
