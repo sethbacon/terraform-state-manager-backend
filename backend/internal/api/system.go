@@ -19,12 +19,23 @@ func health(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"status": "ok"})
 }
 
-// ready reports readiness, verifying the database is reachable.
-func ready(database *sql.DB) gin.HandlerFunc {
+// ready reports readiness, verifying both the app and identity databases are
+// reachable — they are separate pools even in the default single-database
+// topology (see main), so a down identity store must fail readiness too. Nil
+// pools are skipped so the nil-DB test router stays usable.
+func ready(database, identityDB *sql.DB) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		if err := database.PingContext(c.Request.Context()); err != nil {
-			c.JSON(http.StatusServiceUnavailable, gin.H{"status": "unavailable", "error": "database unreachable"})
-			return
+		if database != nil {
+			if err := database.PingContext(c.Request.Context()); err != nil {
+				c.JSON(http.StatusServiceUnavailable, gin.H{"status": "unavailable", "error": "database unreachable"})
+				return
+			}
+		}
+		if identityDB != nil {
+			if err := identityDB.PingContext(c.Request.Context()); err != nil {
+				c.JSON(http.StatusServiceUnavailable, gin.H{"status": "unavailable", "error": "identity database unreachable"})
+				return
+			}
 		}
 		c.JSON(http.StatusOK, gin.H{"status": "ready"})
 	}

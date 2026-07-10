@@ -170,6 +170,7 @@ Covers admin bootstrap, OIDC test/save, and source test/save.
 | `GET /sources/{id}/state/backups/{backupId}`          | `state:read`            | Backup content (full state JSON)                                                                                                                                     |
 | `GET /sources/{id}/state/backups/{backupId}/diff`     | `state:read`            | Restore preview: resources a restore would add/remove/change vs the current state                                                                                    |
 | `POST /sources/{id}/state/backups/{backupId}/restore` | `state:write`           | Restore a backup                                                                                                                                                     |
+| `GET /sources/{id}/state/locks`                       | `state:read`            | List active advisory locks (app-level only)                                                                                                                          |
 | `DELETE /sources/{id}/state/lock`                     | `admin`                 | Admin force-unlock                                                                                                                                                   |
 | `POST /sources/{id}/state/backup` · `…/migrate`       | `state:transfer`        | Cross-source copy / move                                                                                                                                             |
 | `GET /transfers/{id}`                                 | `state:read`            | Transfer status                                                                                                                                                      |
@@ -210,6 +211,7 @@ Covers admin bootstrap, OIDC test/save, and source test/save.
 | ---------------------------------------------------------------------------------------------------------------- | ------- | ---------------------------------------------------------------- |
 | `/admin/users`, `/admin/organizations`                                                                           | `admin` | User & org CRUD, memberships, GDPR export/erase                  |
 | `/admin/roles`, `/admin/audit-logs`, `/admin/stats`                                                              | `admin` | Role templates, audit trail, stats                               |
+| `GET /admin/audit-logs/export`                                                                                   | `admin` | Full filtered audit trail as CSV/JSON (capped at 10000 rows)     |
 | `/admin/sso`, `/admin/oidc/config`, `/admin/oidc/group-mapping`, `/admin/identity-group-mappings`, `/admin/mtls` | `admin` | Read configured providers; manage the OIDC group-mapping overlay |
 
 ### API keys

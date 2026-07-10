@@ -606,6 +606,32 @@ func (h *SourcesHandlers) acquireLock(c *gin.Context, sourceID string, conn stat
 	return func() { _ = h.lockRepo.Release(context.Background(), sourceID, key, lockID) }, true
 }
 
+// ListLocks returns the app-level advisory locks currently held for a source,
+// so operators can see who holds what (and how stale it is) before reaching
+// for the force-unlock escape hatch. Native backend locks (local lock files,
+// consul/http, HCP workspace locks) are not visible here — they are owned by
+// the backend itself (see ADR 003). An unknown source id yields an empty list,
+// matching ListBackups.
+// @Summary      List active state locks
+// @Description  App-level advisory locks currently held for the source, newest first. Native backend locks are not included.
+// @Tags         Edit
+// @Produce      json
+// @Param        id  path  string  true  "Source ID"
+// @Success      200  {object}  map[string]interface{}
+// @Security     BearerAuth
+// @Security     CookieAuth
+// @Router       /sources/{id}/state/locks [get]
+func (h *SourcesHandlers) ListLocks() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		locks, err := h.lockRepo.List(c.Request.Context(), c.Param("id"))
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to list locks"})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"locks": locks})
+	}
+}
+
 // ForceUnlock releases the app-level advisory lock on ?key= regardless of
 // holder — the admin escape hatch for a lock orphaned by a crash that has not
 // yet aged past the repository's stale-lock TTL. It does NOT touch native

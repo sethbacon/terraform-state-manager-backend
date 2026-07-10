@@ -83,6 +83,7 @@ func newSourcesEnv(t *testing.T) *sourcesEnv {
 	v1.GET("/sources/:id/state/backups/:backupId", h.GetBackupContent())
 	v1.GET("/sources/:id/state/backups/:backupId/diff", h.DiffBackup())
 	v1.POST("/sources/:id/state/backups/:backupId/restore", h.RestoreBackup())
+	v1.GET("/sources/:id/state/locks", h.ListLocks())
 	v1.DELETE("/sources/:id/state/lock", h.ForceUnlock())
 	v1.POST("/sources/:id/state/backup", h.BackupToSource())
 	v1.POST("/sources/:id/state/migrate", h.MigrateToSource())
@@ -563,6 +564,43 @@ func TestForceUnlock(t *testing.T) {
 
 	if w := e.do(http.MethodDelete, "/api/v1/sources/s1/state/lock", ""); w.Code != http.StatusBadRequest {
 		t.Errorf("missing key: status = %d, want 400", w.Code)
+	}
+}
+
+func TestListLocks(t *testing.T) {
+	e := newSourcesEnv(t)
+
+	e.mock.ExpectQuery("SELECT .+ FROM state_locks WHERE source_id").WithArgs("s1").
+		WillReturnRows(sqlmock.NewRows([]string{"id", "source_id", "state_key", "actor", "acquired_at"}).
+			AddRow("l1", "s1", "app.tfstate", "user-1", "2026-07-10T08:00:00Z").
+			AddRow("l2", "s1", "net.tfstate", "", "2026-07-10T07:00:00Z"))
+
+	w := e.do(http.MethodGet, "/api/v1/sources/s1/state/locks", "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("list locks: status = %d (%s)", w.Code, w.Body.String())
+	}
+	body := w.Body.String()
+	for _, want := range []string{`"app.tfstate"`, `"net.tfstate"`, `"user-1"`, `"acquired_at"`} {
+		if !strings.Contains(body, want) {
+			t.Errorf("response missing %s: %s", want, body)
+		}
+	}
+}
+
+func TestListLocks_Empty(t *testing.T) {
+	e := newSourcesEnv(t)
+
+	e.mock.ExpectQuery("SELECT .+ FROM state_locks WHERE source_id").WithArgs("s1").
+		WillReturnRows(sqlmock.NewRows([]string{"id", "source_id", "state_key", "actor", "acquired_at"}))
+
+	w := e.do(http.MethodGet, "/api/v1/sources/s1/state/locks", "")
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"locks":[]`) {
+		t.Fatalf("empty list must be [], not null: %d (%s)", w.Code, w.Body.String())
+	}
+
+	// Unexpected query → repo error → 500.
+	if w := e.do(http.MethodGet, "/api/v1/sources/s1/state/locks", ""); w.Code != http.StatusInternalServerError {
+		t.Errorf("DB failure: status = %d, want 500", w.Code)
 	}
 }
 
