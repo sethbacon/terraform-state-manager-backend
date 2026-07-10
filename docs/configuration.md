@@ -205,7 +205,7 @@ features (module freshness, the "Consumed by" join, audit federation).
 | Endpoint | Auth | Use |
 |---|---|---|
 | `GET /health` | none | Liveness (no DB touch) |
-| `GET /ready` | none | Readiness (DB ping; 503 when unreachable) |
+| `GET /ready` | none | Readiness (pings app + identity DBs; 503 when either unreachable) |
 | `GET /metrics` (`:9090`) | none | Prometheus |
 | `GET /api/v1/version` | none | Build info |
 | `POST /api/v1/drift/runs/{id}/results` | one-shot run token | CI drift callback |

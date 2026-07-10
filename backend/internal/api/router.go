@@ -46,6 +46,7 @@ func NewRouter(cfg *config.Config, database *sql.DB, identityDB *sql.DB) (*gin.E
 	r.Use(middleware.RequestID())
 	r.Use(middleware.SecurityHeaders())
 	r.Use(middleware.Metrics())
+	r.Use(middleware.AccessLog())
 
 	// mTLS: when enabled, a verified client cert (against the configured client CA)
 	// authenticates the request additively, before JWT auth. No-op if not enabled
@@ -60,7 +61,7 @@ func NewRouter(cfg *config.Config, database *sql.DB, identityDB *sql.DB) (*gin.E
 
 	// System endpoints (unversioned; used by orchestrators and probes).
 	r.GET("/health", health)
-	r.GET("/ready", ready(database))
+	r.GET("/ready", ready(database, identityDB))
 
 	// OpenAPI spec (unauthenticated, read-only) — generated from handler swag
 	// annotations (see docs package). Rendered by the frontend's API docs page.
