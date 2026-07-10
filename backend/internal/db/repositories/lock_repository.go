@@ -30,6 +30,38 @@ func NewStateLockRepository(db *sql.DB) *StateLockRepository {
 	return &StateLockRepository{db: db}
 }
 
+// StateLock is a currently-held advisory lock row. Age judgement (vs
+// staleLockTTL) is left to the caller — the row carries the raw acquisition
+// time, not a computed status.
+type StateLock struct {
+	ID         string `json:"id"`
+	SourceID   string `json:"source_id"`
+	StateKey   string `json:"state_key"`
+	Actor      string `json:"actor"`
+	AcquiredAt string `json:"acquired_at"`
+}
+
+// List returns the advisory locks currently held for a source, newest first.
+func (r *StateLockRepository) List(ctx context.Context, sourceID string) ([]StateLock, error) {
+	rows, err := r.db.QueryContext(ctx,
+		`SELECT id, source_id, state_key, COALESCE(actor, ''), acquired_at::text
+		 FROM state_locks WHERE source_id = $1 ORDER BY acquired_at DESC`,
+		sourceID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	locks := []StateLock{}
+	for rows.Next() {
+		var l StateLock
+		if err := rows.Scan(&l.ID, &l.SourceID, &l.StateKey, &l.Actor, &l.AcquiredAt); err != nil {
+			return nil, err
+		}
+		locks = append(locks, l)
+	}
+	return locks, rows.Err()
+}
+
 // Acquire inserts a lock row, returning its id. If the (source_id, state_key) is
 // already held, the UNIQUE constraint rejects the insert and Acquire returns
 // ErrLocked (annotated with the holder when known). This is atomic at the
