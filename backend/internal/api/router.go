@@ -46,6 +46,7 @@ func NewRouter(cfg *config.Config, database *sql.DB, identityDB *sql.DB) (*gin.E
 	r.Use(middleware.RequestID())
 	r.Use(middleware.SecurityHeaders())
 	r.Use(middleware.Metrics())
+	r.Use(middleware.AccessLog())
 
 	// mTLS: when enabled, a verified client cert (against the configured client CA)
 	// authenticates the request additively, before JWT auth. No-op if not enabled
@@ -60,7 +61,7 @@ func NewRouter(cfg *config.Config, database *sql.DB, identityDB *sql.DB) (*gin.E
 
 	// System endpoints (unversioned; used by orchestrators and probes).
 	r.GET("/health", health)
-	r.GET("/ready", ready(database))
+	r.GET("/ready", ready(database, identityDB))
 
 	// OpenAPI spec (unauthenticated, read-only) — generated from handler swag
 	// annotations (see docs package). Rendered by the frontend's API docs page.
@@ -194,7 +195,10 @@ func NewRouter(cfg *config.Config, database *sql.DB, identityDB *sql.DB) (*gin.E
 			s.PUT("/:id/state/raw", middleware.RequireScope(auth.ScopeStateWrite), sources.EditState())
 			s.POST("/:id/state/operations", middleware.RequireScope(auth.ScopeStateWrite), sources.StateOperation())
 			s.GET("/:id/state/backups", middleware.RequireScope(auth.ScopeStateRead), sources.ListBackups())
+			s.GET("/:id/state/backups/:backupId", middleware.RequireScope(auth.ScopeStateRead), sources.GetBackupContent())
+			s.GET("/:id/state/backups/:backupId/diff", middleware.RequireScope(auth.ScopeStateRead), sources.DiffBackup())
 			s.POST("/:id/state/backups/:backupId/restore", middleware.RequireScope(auth.ScopeStateWrite), sources.RestoreBackup())
+			s.GET("/:id/state/locks", middleware.RequireScope(auth.ScopeStateRead), sources.ListLocks())
 			s.DELETE("/:id/state/lock", middleware.RequireScope(auth.ScopeAdmin), sources.ForceUnlock())
 
 			// Phase 2 transfer plane: cross-source backup (copy) and migrate (move).
@@ -248,6 +252,7 @@ func NewRouter(cfg *config.Config, database *sql.DB, identityDB *sql.DB) (*gin.E
 
 			ag.GET("/roles", admin.ListRoles())
 			ag.GET("/audit-logs", admin.ListAuditLogs())
+			ag.GET("/audit-logs/export", admin.ExportAuditLogs())
 
 			// CI workflow templates: operator edit/add/replace of the drift /
 			// version-lab YAML per (provider, kind, profile).

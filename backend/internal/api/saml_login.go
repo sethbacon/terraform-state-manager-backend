@@ -214,6 +214,11 @@ func (h *AuthHandlers) SAMLACSHandler() gin.HandlerFunc {
 			fail("jwt_failed", "Failed to generate an authentication token.")
 			return
 		}
+		// Attribute the entry to the just-authenticated user: the ACS is an
+		// unauthenticated route, so the auth middleware has not set user_id.
+		c.Set("user_id", user.ID)
+		h.audit.write(c, "auth.login", "user", user.ID,
+			map[string]interface{}{"provider": "saml", "idp": idpName, "email": user.Email})
 		h.setSessionCookies(c, token)
 		c.Redirect(http.StatusFound, frontendBase+"/auth/callback")
 	}

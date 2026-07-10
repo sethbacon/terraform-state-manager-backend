@@ -337,6 +337,161 @@ func (h *SourcesHandlers) ListBackups() gin.HandlerFunc {
 	}
 }
 
+// GetBackupContent streams a stored backup's full state JSON, so operators can
+// inspect what a restore would write. Backup.Data is excluded from JSON
+// marshalling (json:"-"), hence the raw c.Data response. Unlike RestoreBackup's
+// 400, cross-source access reads as 404 — reads must not leak that a backup id
+// exists under another source.
+// @Summary      Get backup content
+// @Description  The full state JSON stored in a backup.
+// @Tags         Edit
+// @Produce      json
+// @Param        id        path  string  true  "Source ID"
+// @Param        backupId  path  string  true  "Backup ID"
+// @Success      200  {string}  string  "state JSON"
+// @Failure      404  {object}  map[string]interface{}
+// @Security     BearerAuth
+// @Security     CookieAuth
+// @Router       /sources/{id}/state/backups/{backupId} [get]
+func (h *SourcesHandlers) GetBackupContent() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		backup, ok := h.loadOwnedBackup(c)
+		if !ok {
+			return
+		}
+		c.Data(http.StatusOK, "application/json; charset=utf-8", backup.Data)
+	}
+}
+
+// DiffBackup previews a restore: which resources restoring the backup would
+// re-create (added), drop (removed), or alter (changed) relative to the current
+// state. "Changed" is an instance-level approximation — the analyzer summarises
+// instance counts and keys, not attribute values — flagged by
+// approximate_changed in the response.
+// @Summary      Preview a backup restore
+// @Description  Resource-level diff of the backup against the current state, phrased as what restoring would do. The changed bucket is an instance-count/key approximation, not an attribute diff.
+// @Tags         Edit
+// @Produce      json
+// @Param        id        path  string  true  "Source ID"
+// @Param        backupId  path  string  true  "Backup ID"
+// @Success      200  {object}  map[string]interface{}
+// @Failure      404  {object}  map[string]interface{}
+// @Security     BearerAuth
+// @Security     CookieAuth
+// @Router       /sources/{id}/state/backups/{backupId}/diff [get]
+func (h *SourcesHandlers) DiffBackup() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		backup, err := h.editRepo.GetBackup(c.Request.Context(), c.Param("backupId"))
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load backup"})
+			return
+		}
+		if backup == nil {
+			c.JSON(http.StatusNotFound, gin.H{"error": "backup not found"})
+			return
+		}
+		src, conn, ok := h.sourceAndConnector(c)
+		if !ok {
+			return
+		}
+		if backup.SourceID != src.ID {
+			// 404, not 400: reads must not leak that the id exists elsewhere.
+			c.JSON(http.StatusNotFound, gin.H{"error": "backup not found"})
+			return
+		}
+		ctx := c.Request.Context()
+
+		backupRes, err := analyzer.ListResources(backup.Data)
+		if err != nil {
+			c.JSON(http.StatusUnprocessableEntity, gin.H{"error": "backup is not valid state JSON: " + err.Error()})
+			return
+		}
+
+		// Same fail-closed rule as RestoreBackup: a transient read failure means
+		// the current state is unknown; only a genuine not-found diffs against
+		// an empty state (restore would re-create everything).
+		var currentRes []analyzer.ResourceSummary
+		var currentSerial *int64
+		cur, readErr := conn.Read(ctx, backup.StateKey)
+		if readErr != nil && !statesource.IsNotFound(readErr) {
+			c.JSON(http.StatusBadGateway, gin.H{"error": "cannot read current state: " + readErr.Error()})
+			return
+		}
+		if readErr == nil && cur != nil {
+			if currentRes, err = analyzer.ListResources(cur.Data); err != nil {
+				c.JSON(http.StatusUnprocessableEntity, gin.H{"error": "current state is not valid state JSON: " + err.Error()})
+				return
+			}
+			if curA, aErr := analyzer.Analyze(cur.Data); aErr == nil {
+				s := curA.Serial
+				currentSerial = &s
+			}
+		}
+
+		// Identity is module+mode+type+name (ResourceSummary carries no address).
+		key := func(r analyzer.ResourceSummary) string {
+			return r.Module + "\x00" + r.Mode + "\x00" + r.Type + "\x00" + r.Name
+		}
+		currentBy := make(map[string]analyzer.ResourceSummary, len(currentRes))
+		for _, r := range currentRes {
+			currentBy[key(r)] = r
+		}
+		added := make([]analyzer.ResourceSummary, 0)
+		changed := make([]analyzer.ResourceSummary, 0)
+		removed := make([]analyzer.ResourceSummary, 0)
+		inBackup := make(map[string]struct{}, len(backupRes))
+		for _, b := range backupRes {
+			inBackup[key(b)] = struct{}{}
+			cr, exists := currentBy[key(b)]
+			switch {
+			case !exists:
+				added = append(added, b)
+			case cr.Instances != b.Instances || fmt.Sprint(cr.InstanceKeys) != fmt.Sprint(b.InstanceKeys):
+				changed = append(changed, b) // reported as the post-restore shape
+			}
+		}
+		for _, r := range currentRes {
+			if _, exists := inBackup[key(r)]; !exists {
+				removed = append(removed, r)
+			}
+		}
+
+		c.JSON(http.StatusOK, gin.H{
+			"key":                 backup.StateKey,
+			"backup_serial":       backup.Serial,
+			"current_serial":      currentSerial,
+			"added":               added,
+			"removed":             removed,
+			"changed":             changed,
+			"approximate_changed": true,
+		})
+	}
+}
+
+// loadOwnedBackup fetches :backupId and enforces that it belongs to :id,
+// answering 404 on missing or cross-source access (see GetBackupContent).
+func (h *SourcesHandlers) loadOwnedBackup(c *gin.Context) (*repositories.Backup, bool) {
+	backup, err := h.editRepo.GetBackup(c.Request.Context(), c.Param("backupId"))
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load backup"})
+		return nil, false
+	}
+	if backup == nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "backup not found"})
+		return nil, false
+	}
+	src, err := h.repo.GetByID(c.Request.Context(), c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load source"})
+		return nil, false
+	}
+	if src == nil || backup.SourceID != src.ID {
+		c.JSON(http.StatusNotFound, gin.H{"error": "backup not found"})
+		return nil, false
+	}
+	return backup, true
+}
+
 // RestoreBackup writes a stored backup back to its source/key (after backing up
 // the current version first).
 func (h *SourcesHandlers) RestoreBackup() gin.HandlerFunc {
@@ -449,6 +604,32 @@ func (h *SourcesHandlers) acquireLock(c *gin.Context, sourceID string, conn stat
 		return nil, false
 	}
 	return func() { _ = h.lockRepo.Release(context.Background(), sourceID, key, lockID) }, true
+}
+
+// ListLocks returns the app-level advisory locks currently held for a source,
+// so operators can see who holds what (and how stale it is) before reaching
+// for the force-unlock escape hatch. Native backend locks (local lock files,
+// consul/http, HCP workspace locks) are not visible here — they are owned by
+// the backend itself (see ADR 003). An unknown source id yields an empty list,
+// matching ListBackups.
+// @Summary      List active state locks
+// @Description  App-level advisory locks currently held for the source, newest first. Native backend locks are not included.
+// @Tags         Edit
+// @Produce      json
+// @Param        id  path  string  true  "Source ID"
+// @Success      200  {object}  map[string]interface{}
+// @Security     BearerAuth
+// @Security     CookieAuth
+// @Router       /sources/{id}/state/locks [get]
+func (h *SourcesHandlers) ListLocks() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		locks, err := h.lockRepo.List(c.Request.Context(), c.Param("id"))
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to list locks"})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"locks": locks})
+	}
 }
 
 // ForceUnlock releases the app-level advisory lock on ?key= regardless of
