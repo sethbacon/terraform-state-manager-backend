@@ -3440,6 +3440,109 @@
                 }
             }
         },
+        "/sources/{id}/state/backups/{backupId}": {
+            "get": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    },
+                    {
+                        "CookieAuth": []
+                    }
+                ],
+                "description": "The full state JSON stored in a backup.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Edit"
+                ],
+                "summary": "Get backup content",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Source ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "Backup ID",
+                        "name": "backupId",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "state JSON",
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    }
+                }
+            }
+        },
+        "/sources/{id}/state/backups/{backupId}/diff": {
+            "get": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    },
+                    {
+                        "CookieAuth": []
+                    }
+                ],
+                "description": "Resource-level diff of the backup against the current state, phrased as what restoring would do. The changed bucket is an instance-count/key approximation, not an attribute diff.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Edit"
+                ],
+                "summary": "Preview a backup restore",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Source ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "Backup ID",
+                        "name": "backupId",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    }
+                }
+            }
+        },
         "/sources/{id}/state/history": {
             "get": {
                 "security": [

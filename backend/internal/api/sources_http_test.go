@@ -80,6 +80,8 @@ func newSourcesEnv(t *testing.T) *sourcesEnv {
 	v1.GET("/sources/:id/state/report", h.StateReport())
 	v1.POST("/sources/:id/state/operations", h.StateOperation())
 	v1.GET("/sources/:id/state/backups", h.ListBackups())
+	v1.GET("/sources/:id/state/backups/:backupId", h.GetBackupContent())
+	v1.GET("/sources/:id/state/backups/:backupId/diff", h.DiffBackup())
 	v1.POST("/sources/:id/state/backups/:backupId/restore", h.RestoreBackup())
 	v1.GET("/sources/:id/state/locks", h.ListLocks())
 	v1.DELETE("/sources/:id/state/lock", h.ForceUnlock())
@@ -867,6 +869,131 @@ func TestListAndRestoreBackups(t *testing.T) {
 	e.mock.ExpectQuery("FROM state_backups WHERE id").WithArgs("ghost").WillReturnError(sql.ErrNoRows)
 	if w := e.do(http.MethodPost, "/api/v1/sources/s1/state/backups/ghost/restore", ""); w.Code != http.StatusNotFound {
 		t.Errorf("missing backup: status = %d, want 404", w.Code)
+	}
+}
+
+// expectBackupRow queues a GetBackup row carrying full state data.
+func (e *sourcesEnv) expectBackupRow(backupID, sourceID, key, data string, serial int64) {
+	e.mock.ExpectQuery("FROM state_backups WHERE id").WithArgs(backupID).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "source_id", "state_key", "data", "serial", "created_by", "created_at"}).
+			AddRow(backupID, sourceID, key, []byte(data), serial, "alice", "2026-06-10"))
+}
+
+func TestGetBackupContent(t *testing.T) {
+	e := newSourcesEnv(t)
+	backupData := minState(7, "lin-1", "aws_instance.web")
+
+	e.expectBackupRow("b1", "s1", "app.tfstate", backupData, 7)
+	e.expectSource("s1", e.dir)
+	w := e.do(http.MethodGet, "/api/v1/sources/s1/state/backups/b1", "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("get backup: status = %d (%s)", w.Code, w.Body.String())
+	}
+	if w.Body.String() != backupData {
+		t.Errorf("body must be the exact stored bytes, got %s", w.Body.String())
+	}
+	if ct := w.Header().Get("Content-Type"); !strings.Contains(ct, "application/json") {
+		t.Errorf("Content-Type = %q", ct)
+	}
+
+	// Cross-source access reads as not-found (no existence leak).
+	e.expectBackupRow("b9", "OTHER", "app.tfstate", backupData, 7)
+	e.expectSource("s1", e.dir)
+	if w := e.do(http.MethodGet, "/api/v1/sources/s1/state/backups/b9", ""); w.Code != http.StatusNotFound {
+		t.Errorf("cross-source read: status = %d, want 404", w.Code)
+	}
+
+	e.mock.ExpectQuery("FROM state_backups WHERE id").WithArgs("ghost").WillReturnError(sql.ErrNoRows)
+	if w := e.do(http.MethodGet, "/api/v1/sources/s1/state/backups/ghost", ""); w.Code != http.StatusNotFound {
+		t.Errorf("missing backup: status = %d, want 404", w.Code)
+	}
+}
+
+func TestBackupDiff(t *testing.T) {
+	e := newSourcesEnv(t)
+	// Current state: web (2 instances) + vpc. Backup: web (1 instance) + s3.
+	// From the restore perspective: s3 comes back (added), vpc is dropped
+	// (removed), web's instance count differs (changed).
+	current := `{"version":4,"terraform_version":"1.9.5","serial":9,"lineage":"lin-1","resources":[
+		{"module":"","mode":"managed","type":"aws_instance","name":"web",
+		 "provider":"provider[\"registry.terraform.io/hashicorp/aws\"]",
+		 "instances":[{"index_key":0},{"index_key":1}]},
+		{"module":"","mode":"managed","type":"aws_vpc","name":"main",
+		 "provider":"provider[\"registry.terraform.io/hashicorp/aws\"]","instances":[{}]}
+	]}`
+	backupData := minState(7, "lin-1", "aws_instance.web", "aws_s3_bucket.logs")
+	e.seed(t, "app.tfstate", current)
+
+	e.expectBackupRow("b1", "s1", "app.tfstate", backupData, 7)
+	e.expectSource("s1", e.dir)
+	w := e.do(http.MethodGet, "/api/v1/sources/s1/state/backups/b1/diff", "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("diff: status = %d (%s)", w.Code, w.Body.String())
+	}
+	var diff struct {
+		BackupSerial  *int64 `json:"backup_serial"`
+		CurrentSerial *int64 `json:"current_serial"`
+		Added         []struct {
+			Type string `json:"type"`
+			Name string `json:"name"`
+		} `json:"added"`
+		Removed []struct {
+			Type string `json:"type"`
+		} `json:"removed"`
+		Changed []struct {
+			Type      string `json:"type"`
+			Instances int    `json:"instances"`
+		} `json:"changed"`
+		ApproximateChanged bool `json:"approximate_changed"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &diff); err != nil {
+		t.Fatalf("invalid diff json: %v (%s)", err, w.Body.String())
+	}
+	if diff.BackupSerial == nil || *diff.BackupSerial != 7 || diff.CurrentSerial == nil || *diff.CurrentSerial != 9 {
+		t.Errorf("serials = %v/%v, want 7/9", diff.BackupSerial, diff.CurrentSerial)
+	}
+	if len(diff.Added) != 1 || diff.Added[0].Type != "aws_s3_bucket" {
+		t.Errorf("added = %+v, want the backup-only aws_s3_bucket", diff.Added)
+	}
+	if len(diff.Removed) != 1 || diff.Removed[0].Type != "aws_vpc" {
+		t.Errorf("removed = %+v, want the current-only aws_vpc", diff.Removed)
+	}
+	if len(diff.Changed) != 1 || diff.Changed[0].Type != "aws_instance" {
+		t.Errorf("changed = %+v, want aws_instance (instance-count delta)", diff.Changed)
+	}
+	if !diff.ApproximateChanged {
+		t.Error("approximate_changed must be true (instance-level heuristic)")
+	}
+}
+
+func TestBackupDiff_CurrentMissing(t *testing.T) {
+	e := newSourcesEnv(t)
+	// No seeded file: the connector reports not-found, so restoring would
+	// re-create everything - the whole backup lands in "added".
+	backupData := minState(7, "lin-1", "aws_instance.web")
+	e.expectBackupRow("b1", "s1", "ghost.tfstate", backupData, 7)
+	e.expectSource("s1", e.dir)
+
+	w := e.do(http.MethodGet, "/api/v1/sources/s1/state/backups/b1/diff", "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("diff vs missing current: status = %d (%s)", w.Code, w.Body.String())
+	}
+	body := w.Body.String()
+	if !strings.Contains(body, `"current_serial":null`) {
+		t.Errorf("current_serial must be null when the state object is gone: %s", body)
+	}
+	if !strings.Contains(body, "aws_instance") || !strings.Contains(body, `"removed":[]`) {
+		t.Errorf("expected everything added, nothing removed: %s", body)
+	}
+}
+
+func TestBackupDiff_Ownership(t *testing.T) {
+	e := newSourcesEnv(t)
+	backupData := minState(7, "lin-1", "aws_instance.web")
+	e.expectBackupRow("b9", "OTHER", "app.tfstate", backupData, 7)
+	e.expectSource("s1", e.dir)
+	if w := e.do(http.MethodGet, "/api/v1/sources/s1/state/backups/b9/diff", ""); w.Code != http.StatusNotFound {
+		t.Errorf("cross-source diff: status = %d, want 404", w.Code)
 	}
 }
 
