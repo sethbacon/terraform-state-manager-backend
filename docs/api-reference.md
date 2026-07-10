@@ -208,6 +208,7 @@ Covers admin bootstrap, OIDC test/save, and source test/save.
 | ---------------------------------------------------------------------------------------------------------------- | ------- | ---------------------------------------------------------------- |
 | `/admin/users`, `/admin/organizations`                                                                           | `admin` | User & org CRUD, memberships, GDPR export/erase                  |
 | `/admin/roles`, `/admin/audit-logs`, `/admin/stats`                                                              | `admin` | Role templates, audit trail, stats                               |
+| `GET /admin/audit-logs/export`                                                                                   | `admin` | Full filtered audit trail as CSV/JSON (capped at 10000 rows)     |
 | `/admin/sso`, `/admin/oidc/config`, `/admin/oidc/group-mapping`, `/admin/identity-group-mappings`, `/admin/mtls` | `admin` | Read configured providers; manage the OIDC group-mapping overlay |
 
 ### API keys
