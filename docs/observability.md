@@ -37,6 +37,13 @@ the worker-gate notice) — drop to `info` when diagnosing. Useful components:
 `statesync` (per-source sync results), scheduler dispatches,
 `statesource.hcp`/`drift` mutation logs, auth provider initialization.
 
+Every request emits one `http_request` access-log line (info level, so hidden
+at `warn`) with `method`, `path` (route template), `status`, `latency_ms`,
+`client_ip`, `user_id` when authenticated, and `request_id` — the same value
+echoed in the `X-Request-ID` response header, so a client-reported ID can be
+correlated with server logs. Probe paths (`/health`, `/ready`, `/metrics`)
+are excluded.
+
 No profiling endpoint (`pprof`) is exposed — there is no `TSM_TELEMETRY_PROFILING_*`
 setting; the only side-channel port is `/metrics`.
 
