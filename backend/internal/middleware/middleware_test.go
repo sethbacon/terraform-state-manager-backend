@@ -1,6 +1,9 @@
 package middleware
 
 import (
+	"bytes"
+	"encoding/json"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"regexp"
@@ -104,5 +107,78 @@ func TestMetrics_UnmatchedRoute(t *testing.T) {
 
 	if got := testutil.ToFloat64(counter) - before; got != 1 {
 		t.Errorf("unmatched-route counter delta = %v, want 1", got)
+	}
+}
+
+// accessLogRecords runs a request through RequestID()+AccessLog()+handler and
+// returns the decoded JSON log records captured from slog's default logger.
+func accessLogRecords(t *testing.T, target string, handler gin.HandlerFunc) []map[string]any {
+	t.Helper()
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	r := gin.New()
+	r.Use(RequestID())
+	r.Use(AccessLog())
+	r.GET("/api/v1/things/:id", handler)
+	r.GET("/health", handler)
+
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, httptest.NewRequest(http.MethodGet, target, nil))
+
+	var records []map[string]any
+	for _, line := range bytes.Split(bytes.TrimSpace(buf.Bytes()), []byte("\n")) {
+		if len(line) == 0 {
+			continue
+		}
+		var rec map[string]any
+		if err := json.Unmarshal(line, &rec); err != nil {
+			t.Fatalf("invalid log line %q: %v", line, err)
+		}
+		records = append(records, rec)
+	}
+	return records
+}
+
+func TestAccessLog_RecordsRequest(t *testing.T) {
+	records := accessLogRecords(t, "/api/v1/things/abc-123", func(c *gin.Context) {
+		c.Set("user_id", "u1") // what the auth middleware does during c.Next()
+		c.Status(http.StatusTeapot)
+	})
+
+	if len(records) != 1 {
+		t.Fatalf("expected exactly 1 access-log record, got %d", len(records))
+	}
+	rec := records[0]
+	if rec["msg"] != "http_request" {
+		t.Errorf("msg = %v, want http_request", rec["msg"])
+	}
+	if rec["method"] != "GET" {
+		t.Errorf("method = %v, want GET", rec["method"])
+	}
+	if rec["path"] != "/api/v1/things/:id" {
+		t.Errorf("path = %v, want the route template /api/v1/things/:id", rec["path"])
+	}
+	if rec["status"] != float64(http.StatusTeapot) {
+		t.Errorf("status = %v, want 418", rec["status"])
+	}
+	if _, ok := rec["latency_ms"]; !ok {
+		t.Error("latency_ms missing")
+	}
+	id, _ := rec["request_id"].(string)
+	if !regexp.MustCompile(`^[0-9a-f]{32}$`).MatchString(id) {
+		t.Errorf("request_id = %q, want the 32-hex id set by RequestID()", id)
+	}
+	if rec["user_id"] != "u1" {
+		t.Errorf("user_id = %v, want u1 (set during handler)", rec["user_id"])
+	}
+}
+
+func TestAccessLog_SkipsProbePaths(t *testing.T) {
+	records := accessLogRecords(t, "/health", func(c *gin.Context) { c.Status(http.StatusOK) })
+	if len(records) != 0 {
+		t.Fatalf("expected no access-log records for /health, got %d", len(records))
 	}
 }
