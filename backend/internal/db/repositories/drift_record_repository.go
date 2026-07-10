@@ -222,7 +222,7 @@ func (r *DriftRecordRepository) List(ctx context.Context, statuses []string, sou
 		offset = 0
 	}
 	clause, args := driftRecordFilter(statuses, sourceID, severity, start, end)
-	q := `SELECT ` + driftRecordColumns + ` FROM drift_records WHERE 1=1` + clause
+	q := `SELECT ` + driftRecordColumns + ` FROM drift_records WHERE 1=1` + clause // #nosec G202 -- fixed SQL + placeholder-only clause from driftRecordFilter; no interpolated values
 	args = append(args, limit, offset)
 	q += fmt.Sprintf(" ORDER BY last_detected_at DESC LIMIT $%d OFFSET $%d", len(args)-1, len(args)) // #nosec G202 -- placeholder only
 
