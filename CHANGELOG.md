@@ -1,5 +1,21 @@
 # Changelog
 
+## [1.17.0](https://github.com/sethbacon/terraform-state-manager-backend/compare/v1.16.1...v1.17.0) (2026-07-10)
+
+
+### Features
+
+* audit auth events and add server-side audit-log export ([#167](https://github.com/sethbacon/terraform-state-manager-backend/issues/167)) ([eca1b05](https://github.com/sethbacon/terraform-state-manager-backend/commit/eca1b05b526007b124099eef68439ad81964b9eb))
+* backup content viewer and restore-preview diff endpoints ([#168](https://github.com/sethbacon/terraform-state-manager-backend/issues/168)) ([c6ac9fc](https://github.com/sethbacon/terraform-state-manager-backend/commit/c6ac9fcdf9c5ce7d5800265bbace53366e868369))
+* list active state locks ([#166](https://github.com/sethbacon/terraform-state-manager-backend/issues/166)) ([5ceff02](https://github.com/sethbacon/terraform-state-manager-backend/commit/5ceff02c0c4e4ff8da92f100e0e2b55559d664ca))
+* request access logging with request IDs and identity-DB readiness check ([#165](https://github.com/sethbacon/terraform-state-manager-backend/issues/165)) ([9e89e66](https://github.com/sethbacon/terraform-state-manager-backend/commit/9e89e66653f034e2ba3d46c06ed8f0a084057c0f))
+* server-side pagination and filtering for drift runs and records ([#170](https://github.com/sethbacon/terraform-state-manager-backend/issues/170)) ([27f7984](https://github.com/sethbacon/terraform-state-manager-backend/commit/27f7984e8a71e67a21986d9b24346bfcfcbbd937))
+
+
+### Bug Fixes
+
+* fix Windows-incompatible git path handling and flaky transfer test ([#169](https://github.com/sethbacon/terraform-state-manager-backend/issues/169)) ([58285be](https://github.com/sethbacon/terraform-state-manager-backend/commit/58285be7ee0ad5bd2150ac8fdeb4c51b5b132e5e))
+
 ## [1.16.1](https://github.com/sethbacon/terraform-state-manager-backend/compare/v1.16.0...v1.16.1) (2026-07-01)
 
 
