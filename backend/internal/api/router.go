@@ -195,6 +195,7 @@ func NewRouter(cfg *config.Config, database *sql.DB, identityDB *sql.DB) (*gin.E
 			s.POST("/:id/state/operations", middleware.RequireScope(auth.ScopeStateWrite), sources.StateOperation())
 			s.GET("/:id/state/backups", middleware.RequireScope(auth.ScopeStateRead), sources.ListBackups())
 			s.POST("/:id/state/backups/:backupId/restore", middleware.RequireScope(auth.ScopeStateWrite), sources.RestoreBackup())
+			s.GET("/:id/state/locks", middleware.RequireScope(auth.ScopeStateRead), sources.ListLocks())
 			s.DELETE("/:id/state/lock", middleware.RequireScope(auth.ScopeAdmin), sources.ForceUnlock())
 
 			// Phase 2 transfer plane: cross-source backup (copy) and migrate (move).
