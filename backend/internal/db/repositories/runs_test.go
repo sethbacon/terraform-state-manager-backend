@@ -46,9 +46,9 @@ func TestDriftRepository_ListHidesCallbackToken(t *testing.T) {
 	db, mock := newMock(t)
 	r := NewDriftRepository(db)
 
-	mock.ExpectQuery("SELECT .+ FROM drift_runs ORDER BY created_at DESC LIMIT").WithArgs(50).
+	mock.ExpectQuery("SELECT .+ FROM drift_runs ORDER BY created_at DESC LIMIT").WithArgs(50, 0).
 		WillReturnRows(driftRow("secret-token"))
-	out, err := r.List(ctx, 0) // 0 → default limit 50
+	out, err := r.List(ctx, 0, 0, "") // 0 → default limit 50
 	if err != nil || len(out) != 1 {
 		t.Fatalf("List: %v %d", err, len(out))
 	}
@@ -56,11 +56,23 @@ func TestDriftRepository_ListHidesCallbackToken(t *testing.T) {
 		t.Error("List leaked the callback token")
 	}
 
-	// Out-of-range limits clamp to the default.
-	mock.ExpectQuery("SELECT .+ FROM drift_runs ORDER BY created_at DESC LIMIT").WithArgs(50).
+	// Out-of-range limits clamp to the default; negative offsets clamp to 0.
+	mock.ExpectQuery("SELECT .+ FROM drift_runs ORDER BY created_at DESC LIMIT").WithArgs(50, 0).
 		WillReturnRows(driftRow(""))
-	if _, err := r.List(ctx, 9999); err != nil {
+	if _, err := r.List(ctx, 9999, -3, ""); err != nil {
 		t.Fatalf("List clamp: %v", err)
+	}
+
+	// A status filter binds ahead of the window; CountRuns shares it.
+	mock.ExpectQuery("SELECT .+ FROM drift_runs WHERE status = .+ ORDER BY created_at DESC LIMIT").
+		WithArgs("failed", 25, 50).WillReturnRows(driftRow(""))
+	if _, err := r.List(ctx, 25, 50, "failed"); err != nil {
+		t.Fatalf("filtered List: %v", err)
+	}
+	mock.ExpectQuery(`SELECT COUNT\(\*\) FROM drift_runs WHERE status =`).WithArgs("failed").
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(7))
+	if n, err := r.CountRuns(ctx, "failed"); err != nil || n != 7 {
+		t.Fatalf("CountRuns: %v n=%d", err, n)
 	}
 }
 

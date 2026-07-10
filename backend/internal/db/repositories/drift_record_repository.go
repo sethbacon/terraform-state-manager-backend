@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/lib/pq"
 )
@@ -181,30 +182,49 @@ func (r *DriftRecordRepository) ResolveClean(ctx context.Context, sourceID, stat
 	return n > 0, nil
 }
 
-// List returns records newest-detection-first. Empty filter values mean "any";
-// statuses filters to the given set.
-func (r *DriftRecordRepository) List(ctx context.Context, statuses []string, sourceID, severity string, limit int) ([]DriftRecord, error) {
-	if limit <= 0 || limit > 500 {
-		limit = 100
-	}
-	// The query text only ever gains fixed SQL with positional placeholders;
-	// all caller-supplied values bind through args.
-	q := `SELECT ` + driftRecordColumns + ` FROM drift_records WHERE 1=1`
+// driftRecordFilter renders the shared WHERE tail for List/CountRecords. The
+// clause only ever gains fixed SQL with positional placeholders; all
+// caller-supplied values bind through the returned args.
+func driftRecordFilter(statuses []string, sourceID, severity string, start, end *time.Time) (string, []any) {
+	clause := ""
 	args := []any{}
 	if len(statuses) > 0 {
 		args = append(args, pq.Array(statuses))
-		q += fmt.Sprintf(" AND status = ANY($%d)", len(args)) // #nosec G202 -- placeholder only; value bound via args
+		clause += fmt.Sprintf(" AND status = ANY($%d)", len(args)) // #nosec G202 -- placeholder only; value bound via args
 	}
 	if sourceID != "" {
 		args = append(args, sourceID)
-		q += fmt.Sprintf(" AND source_id = $%d", len(args)) // #nosec G202 -- placeholder only; value bound via args
+		clause += fmt.Sprintf(" AND source_id = $%d", len(args)) // #nosec G202 -- placeholder only; value bound via args
 	}
 	if severity != "" {
 		args = append(args, severity)
-		q += fmt.Sprintf(" AND severity = $%d", len(args)) // #nosec G202 -- placeholder only; value bound via args
+		clause += fmt.Sprintf(" AND severity = $%d", len(args)) // #nosec G202 -- placeholder only; value bound via args
 	}
-	args = append(args, limit)
-	q += fmt.Sprintf(" ORDER BY last_detected_at DESC LIMIT $%d", len(args)) // #nosec G202 -- placeholder only
+	if start != nil {
+		args = append(args, *start)
+		clause += fmt.Sprintf(" AND last_detected_at >= $%d", len(args)) // #nosec G202 -- placeholder only; value bound via args
+	}
+	if end != nil {
+		args = append(args, *end)
+		clause += fmt.Sprintf(" AND last_detected_at <= $%d", len(args)) // #nosec G202 -- placeholder only; value bound via args
+	}
+	return clause, args
+}
+
+// List returns records newest-detection-first, windowed by limit/offset. Empty
+// filter values mean "any"; statuses filters to the given set; start/end bound
+// last_detected_at. Use CountRecords with the same filters for the total.
+func (r *DriftRecordRepository) List(ctx context.Context, statuses []string, sourceID, severity string, limit, offset int, start, end *time.Time) ([]DriftRecord, error) {
+	if limit <= 0 || limit > 500 {
+		limit = 100
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	clause, args := driftRecordFilter(statuses, sourceID, severity, start, end)
+	q := `SELECT ` + driftRecordColumns + ` FROM drift_records WHERE 1=1` + clause
+	args = append(args, limit, offset)
+	q += fmt.Sprintf(" ORDER BY last_detected_at DESC LIMIT $%d OFFSET $%d", len(args)-1, len(args)) // #nosec G202 -- placeholder only
 
 	rows, err := r.db.QueryContext(ctx, q, args...) // #nosec G202 -- q is built from fixed SQL + placeholders above
 	if err != nil {
@@ -220,6 +240,15 @@ func (r *DriftRecordRepository) List(ctx context.Context, statuses []string, sou
 		out = append(out, *rec)
 	}
 	return out, rows.Err()
+}
+
+// CountRecords returns the record total for the same filters as List.
+func (r *DriftRecordRepository) CountRecords(ctx context.Context, statuses []string, sourceID, severity string, start, end *time.Time) (int, error) {
+	clause, args := driftRecordFilter(statuses, sourceID, severity, start, end)
+	var n int
+	// #nosec G202 -- clause is fixed SQL with positional placeholders; values bound via args
+	err := r.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM drift_records WHERE 1=1`+clause, args...).Scan(&n)
+	return n, err
 }
 
 // GetByID returns one record, or (nil, nil) when absent.

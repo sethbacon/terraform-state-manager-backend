@@ -103,11 +103,27 @@ func (r *DriftRepository) GetByID(ctx context.Context, id string) (*DriftRun, er
 	return d, nil
 }
 
-func (r *DriftRepository) List(ctx context.Context, limit int) ([]DriftRun, error) {
+// List returns drift runs newest-first, optionally filtered by status, windowed
+// by limit/offset for server-side pagination. Use CountRuns with the same status
+// for the total.
+func (r *DriftRepository) List(ctx context.Context, limit, offset int, status string) ([]DriftRun, error) {
 	if limit <= 0 || limit > 200 {
 		limit = 50
 	}
-	rows, err := r.db.QueryContext(ctx, `SELECT `+driftColumns+` FROM drift_runs ORDER BY created_at DESC LIMIT $1`, limit)
+	if offset < 0 {
+		offset = 0
+	}
+	var (
+		rows *sql.Rows
+		err  error
+	)
+	if status != "" {
+		rows, err = r.db.QueryContext(ctx, `SELECT `+driftColumns+`
+			FROM drift_runs WHERE status = $1 ORDER BY created_at DESC LIMIT $2 OFFSET $3`, status, limit, offset)
+	} else {
+		rows, err = r.db.QueryContext(ctx, `SELECT `+driftColumns+`
+			FROM drift_runs ORDER BY created_at DESC LIMIT $1 OFFSET $2`, limit, offset)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -122,6 +138,18 @@ func (r *DriftRepository) List(ctx context.Context, limit int) ([]DriftRun, erro
 		out = append(out, *d)
 	}
 	return out, rows.Err()
+}
+
+// CountRuns returns the run total for the same optional status filter as List.
+func (r *DriftRepository) CountRuns(ctx context.Context, status string) (int, error) {
+	var n int
+	var err error
+	if status != "" {
+		err = r.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM drift_runs WHERE status = $1`, status).Scan(&n)
+	} else {
+		err = r.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM drift_runs`).Scan(&n)
+	}
+	return n, err
 }
 
 // UpdateStatus sets the run status and optional detail.

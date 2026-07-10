@@ -184,9 +184,9 @@ Covers admin bootstrap, OIDC test/save, and source test/save.
 | --------------------------------------------------------------- | ---------------------------- | ---------------------------------------------------------------------- |
 | `GET/POST/DELETE /pipelines`                                    | `sources:manage`             | CI pipeline connections (+ callback preflight)                         |
 | `GET/POST/DELETE /ci-sources/...`                               | `sources:manage`             | Org-level CI credentials + repo/workflow discovery + repo-setup wizard |
-| `POST /drift/runs` · `GET /drift/runs` · `GET /drift/runs/{id}` | `state:drift` · `state:read` | Dispatch and read drift runs                                           |
+| `POST /drift/runs` · `GET /drift/runs` · `GET /drift/runs/{id}` | `state:drift` · `state:read` | Dispatch and read drift runs. `GET /drift/runs` supports `status`/`limit`/`offset` and returns `total` |
 | `POST /drift/ingest`                                            | `state:drift`                | Idempotent push-style CI drift intake (parses Terraform plan JSON)     |
-| `GET /drift/records` · `…/{id}`                                 | `state:read`                 | Durable, acknowledgeable drift records                                 |
+| `GET /drift/records` · `…/{id}`                                 | `state:read`                 | Durable, acknowledgeable drift records. List supports `status`/`source_id`/`severity`/`page`/`per_page`/`start_date`/`end_date` and returns `total` alongside the by-status `counts` |
 | `POST /drift/records/{id}/acknowledge` · `…/resolve`            | `state:drift`                | Record workflow                                                        |
 | `POST /drift/runs/{id}/results`                                 | one-shot run token           | CI machine callback                                                    |
 

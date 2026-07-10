@@ -167,6 +167,8 @@ func TestListDriftRecords(t *testing.T) {
 
 	e.mock.ExpectQuery("FROM drift_records WHERE 1=1 AND status = ANY").
 		WillReturnRows(driftRecRow("r1", "open", "warning"))
+	e.mock.ExpectQuery(`SELECT COUNT\(\*\) FROM drift_records`).
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
 	e.mock.ExpectQuery("SELECT status, COUNT").
 		WillReturnRows(sqlmock.NewRows([]string{"status", "count"}).AddRow("open", 1))
 	w := e.do(http.MethodGet, "/api/v1/drift/records?status=open,acknowledged", "")
@@ -176,13 +178,55 @@ func TestListDriftRecords(t *testing.T) {
 	var resp struct {
 		Records []map[string]any `json:"records"`
 		Counts  map[string]int   `json:"counts"`
+		Total   int              `json:"total"`
 	}
-	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil || len(resp.Records) != 1 || resp.Counts["open"] != 1 {
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil || len(resp.Records) != 1 || resp.Counts["open"] != 1 || resp.Total != 1 {
 		t.Errorf("list payload: %v %s", err, w.Body.String())
 	}
 
 	if w := e.do(http.MethodGet, "/api/v1/drift/records?status=bogus", ""); w.Code != http.StatusBadRequest {
 		t.Errorf("invalid status filter: %d", w.Code)
+	}
+}
+
+// TestDriftRecordsPagination covers page/per_page windowing plus the optional
+// last-detected date range, all bound as query args.
+func TestDriftRecordsPagination(t *testing.T) {
+	e := newDriftEnv(t)
+
+	// page=2&per_page=25 → LIMIT 25 OFFSET 25; both dates bound as args.
+	e.mock.ExpectQuery(`FROM drift_records WHERE 1=1 AND status = ANY.+last_detected_at >=.+last_detected_at <=.+LIMIT.+OFFSET`).
+		WithArgs(sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), 25, 25).
+		WillReturnRows(driftRecRow("r1", "open", "warning"))
+	e.mock.ExpectQuery(`SELECT COUNT\(\*\) FROM drift_records`).
+		WithArgs(sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg()).
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(60))
+	e.mock.ExpectQuery("SELECT status, COUNT").
+		WillReturnRows(sqlmock.NewRows([]string{"status", "count"}).AddRow("open", 60))
+	w := e.do(http.MethodGet,
+		"/api/v1/drift/records?status=open&page=2&per_page=25&start_date=2026-07-01T00:00:00Z&end_date=2026-07-09T00:00:00Z", "")
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"total":60`) {
+		t.Fatalf("paged records: status = %d (%s)", w.Code, w.Body.String())
+	}
+	if err := e.mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("window and date range must reach the query: %v", err)
+	}
+
+	// Out-of-range per_page falls back to the default window; unparsable dates
+	// are ignored rather than erroring (mirrors the audit-log filters).
+	e.mock.ExpectQuery("FROM drift_records WHERE 1=1 .+ LIMIT .+ OFFSET").
+		WithArgs(100, 0).
+		WillReturnRows(driftRecRow("r1", "open", "warning"))
+	e.mock.ExpectQuery(`SELECT COUNT\(\*\) FROM drift_records`).
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
+	e.mock.ExpectQuery("SELECT status, COUNT").
+		WillReturnRows(sqlmock.NewRows([]string{"status", "count"}).AddRow("open", 1))
+	w = e.do(http.MethodGet, "/api/v1/drift/records?per_page=9999&start_date=not-a-date", "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("fallback paging: status = %d (%s)", w.Code, w.Body.String())
+	}
+	if err := e.mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("invalid params must fall back to defaults: %v", err)
 	}
 }
 

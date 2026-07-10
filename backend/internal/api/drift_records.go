@@ -11,6 +11,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
@@ -218,17 +220,27 @@ func (h *DriftHandlers) notifyIngestedDrift(sourceName, stateKey string, added, 
 	}(ev)
 }
 
-// ListDriftRecords returns drift records, filterable by status/source/severity.
-// ?status= is comma-separated; default returns every status.
+// ListDriftRecords returns drift records, filterable by status/source/severity
+// and a last-detected date range, windowed by page/per_page. ?status= is
+// comma-separated; default returns every status. counts stays the global
+// by-status tally (the status chips); total is the filtered count for paging.
 // @Summary      List drift records
 // @Tags         Drift
 // @Produce      json
+// @Param        status      query  string  false  "comma-separated: open, acknowledged, resolved"
+// @Param        source_id   query  string  false  "filter by source"
+// @Param        severity    query  string  false  "filter by severity"
+// @Param        page        query  int     false  "page (default 1)"
+// @Param        per_page    query  int     false  "page size (default 100, max 500)"
+// @Param        start_date  query  string  false  "RFC3339 last-detected lower bound"
+// @Param        end_date    query  string  false  "RFC3339 last-detected upper bound"
 // @Success      200  {object}  map[string]interface{}
 // @Security     BearerAuth
 // @Security     CookieAuth
 // @Router       /drift/records [get]
 func (h *DriftHandlers) ListDriftRecords() gin.HandlerFunc {
 	return func(c *gin.Context) {
+		ctx := c.Request.Context()
 		var statuses []string
 		if s := c.Query("status"); s != "" {
 			for _, part := range splitCSV(s) {
@@ -239,17 +251,45 @@ func (h *DriftHandlers) ListDriftRecords() gin.HandlerFunc {
 				statuses = append(statuses, part)
 			}
 		}
-		records, err := h.recordRepo.List(c.Request.Context(), statuses, c.Query("source_id"), c.Query("severity"), 0)
+		perPage := 100
+		if v, err := strconv.Atoi(c.Query("per_page")); err == nil && v > 0 && v <= 500 {
+			perPage = v
+		}
+		page := 1
+		if v, err := strconv.Atoi(c.Query("page")); err == nil && v > 0 {
+			page = v
+		}
+		// Unparsable dates are ignored rather than erroring, mirroring the
+		// audit-log filters.
+		var start, end *time.Time
+		if v := c.Query("start_date"); v != "" {
+			if ts, err := time.Parse(time.RFC3339, v); err == nil {
+				start = &ts
+			}
+		}
+		if v := c.Query("end_date"); v != "" {
+			if ts, err := time.Parse(time.RFC3339, v); err == nil {
+				end = &ts
+			}
+		}
+
+		sourceID, severity := c.Query("source_id"), c.Query("severity")
+		records, err := h.recordRepo.List(ctx, statuses, sourceID, severity, perPage, (page-1)*perPage, start, end)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to list drift records"})
 			return
 		}
-		counts, err := h.recordRepo.CountsByStatus(c.Request.Context())
+		total, err := h.recordRepo.CountRecords(ctx, statuses, sourceID, severity, start, end)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to list drift records"})
 			return
 		}
-		c.JSON(http.StatusOK, gin.H{"records": records, "counts": counts})
+		counts, err := h.recordRepo.CountsByStatus(ctx)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to list drift records"})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"records": records, "counts": counts, "total": total})
 	}
 }
 

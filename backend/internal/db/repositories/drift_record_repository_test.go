@@ -3,6 +3,7 @@ package repositories
 import (
 	"errors"
 	"testing"
+	"time"
 
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
 	"github.com/lib/pq"
@@ -80,18 +81,35 @@ func TestDriftRecordRepository_ListAndCounts(t *testing.T) {
 	r := NewDriftRecordRepository(db)
 
 	mock.ExpectQuery("FROM drift_records WHERE 1=1 AND status = ANY").
-		WithArgs(pq.Array([]string{"open", "acknowledged"}), "s1", 100).
+		WithArgs(pq.Array([]string{"open", "acknowledged"}), "s1", 100, 0).
 		WillReturnRows(driftRecordRow("r1", "open"))
-	recs, err := r.List(ctx, []string{"open", "acknowledged"}, "s1", "", 0)
+	recs, err := r.List(ctx, []string{"open", "acknowledged"}, "s1", "", 0, 0, nil, nil)
 	if err != nil || len(recs) != 1 || recs[0].Status != "open" {
 		t.Fatalf("List: %v %+v", err, recs)
 	}
 
-	// No filters: only the limit binds.
-	mock.ExpectQuery("FROM drift_records WHERE 1=1 ORDER BY").WithArgs(25).
+	// No filters: only the window binds.
+	mock.ExpectQuery("FROM drift_records WHERE 1=1 ORDER BY").WithArgs(25, 50).
 		WillReturnRows(sqlmock.NewRows(driftRecordCols))
-	if recs, err := r.List(ctx, nil, "", "", 25); err != nil || len(recs) != 0 {
+	if recs, err := r.List(ctx, nil, "", "", 25, 50, nil, nil); err != nil || len(recs) != 0 {
 		t.Fatalf("unfiltered List: %v %+v", err, recs)
+	}
+
+	// A last-detected date range binds both bounds; the filtered count reuses
+	// the same WHERE tail.
+	start := time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)
+	end := time.Date(2026, 7, 9, 0, 0, 0, 0, time.UTC)
+	mock.ExpectQuery("FROM drift_records WHERE 1=1 AND last_detected_at >= .+ AND last_detected_at <=").
+		WithArgs(start, end, 100, 0).
+		WillReturnRows(sqlmock.NewRows(driftRecordCols))
+	if _, err := r.List(ctx, nil, "", "", 0, 0, &start, &end); err != nil {
+		t.Fatalf("date-ranged List: %v", err)
+	}
+	mock.ExpectQuery(`SELECT COUNT\(\*\) FROM drift_records WHERE 1=1 AND severity =`).
+		WithArgs("critical").
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(4))
+	if n, err := r.CountRecords(ctx, nil, "", "critical", nil, nil); err != nil || n != 4 {
+		t.Fatalf("CountRecords: %v n=%d", err, n)
 	}
 
 	mock.ExpectQuery("SELECT status, COUNT").

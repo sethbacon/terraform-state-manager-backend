@@ -204,8 +204,10 @@ func TestDriftCreateRun(t *testing.T) {
 func TestDriftRunsReadAndCallback(t *testing.T) {
 	e := newDriftEnv(t)
 
-	e.mock.ExpectQuery("SELECT .+ FROM drift_runs ORDER BY").WithArgs(50).
+	e.mock.ExpectQuery("SELECT .+ FROM drift_runs ORDER BY").WithArgs(50, 0).
 		WillReturnRows(driftRow("secret"))
+	e.mock.ExpectQuery(`SELECT COUNT\(\*\) FROM drift_runs`).
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
 	w := e.do(http.MethodGet, "/api/v1/drift/runs", "")
 	if w.Code != http.StatusOK || strings.Contains(w.Body.String(), "secret") {
 		t.Fatalf("list: status = %d, token leaked = %v", w.Code, strings.Contains(w.Body.String(), "secret"))
@@ -338,6 +340,31 @@ func TestHealthRunsPagination(t *testing.T) {
 
 	// An unknown status filter is rejected before any query runs.
 	w = e.do(http.MethodGet, "/api/v1/health-lab/runs?status=bogus", "")
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("bad status: status = %d, want 400", w.Code)
+	}
+}
+
+// TestDriftRunsPagination mirrors TestHealthRunsPagination: drift runs get the
+// same server-side window + status filter + total treatment as health runs.
+func TestDriftRunsPagination(t *testing.T) {
+	e := newDriftEnv(t)
+
+	// status + limit + offset reach the query as args; total reflects the filter.
+	e.mock.ExpectQuery("SELECT .+ FROM drift_runs WHERE status = .+ ORDER BY").
+		WithArgs("failed", 25, 50).WillReturnRows(driftRow("secret"))
+	e.mock.ExpectQuery(`SELECT COUNT\(\*\) FROM drift_runs WHERE status =`).
+		WithArgs("failed").WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(3))
+	w := e.do(http.MethodGet, "/api/v1/drift/runs?status=failed&limit=25&offset=50", "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("paged list: status = %d (%s)", w.Code, w.Body.String())
+	}
+	if strings.Contains(w.Body.String(), "secret") || !strings.Contains(w.Body.String(), `"total":3`) {
+		t.Fatalf("paged list: token leak or missing total: %s", w.Body.String())
+	}
+
+	// An unknown status filter is rejected before any query runs.
+	w = e.do(http.MethodGet, "/api/v1/drift/runs?status=bogus", "")
 	if w.Code != http.StatusBadRequest {
 		t.Errorf("bad status: status = %d, want 400", w.Code)
 	}
