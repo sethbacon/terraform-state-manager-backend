@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -326,22 +327,40 @@ func (h *DriftHandlers) dispatchDrift(ctx context.Context, tgt DriftTarget, acto
 	return saved, nil
 }
 
-// ListRuns returns recent drift runs.
+// ListRuns returns drift runs, newest first, with server-side pagination.
 // @Summary      List drift runs
 // @Tags         Drift
 // @Produce      json
+// @Param        status  query  string  false  "filter by status (dispatched|running|completed|failed)"
+// @Param        limit   query  int     false  "page size (default 50, max 200)"
+// @Param        offset  query  int     false  "rows to skip"
 // @Success      200  {object}  map[string]interface{}
 // @Security     BearerAuth
 // @Security     CookieAuth
 // @Router       /drift/runs [get]
 func (h *DriftHandlers) ListRuns() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		runs, err := h.driftRepo.List(c.Request.Context(), 50)
+		ctx := c.Request.Context()
+		status := c.Query("status")
+		switch status {
+		case "", "dispatched", "running", "completed", "failed":
+		default:
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid status filter"})
+			return
+		}
+		limit, _ := strconv.Atoi(c.Query("limit"))   // 0 -> repo default (50)
+		offset, _ := strconv.Atoi(c.Query("offset")) // 0 -> first page
+		runs, err := h.driftRepo.List(ctx, limit, offset, status)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to list drift runs"})
 			return
 		}
-		c.JSON(http.StatusOK, gin.H{"runs": runs})
+		total, err := h.driftRepo.CountRuns(ctx, status)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to count drift runs"})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"runs": runs, "total": total})
 	}
 }
 

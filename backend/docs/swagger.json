@@ -1990,6 +1990,50 @@
                     "Drift"
                 ],
                 "summary": "List drift records",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "comma-separated: open, acknowledged, resolved",
+                        "name": "status",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "filter by source",
+                        "name": "source_id",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "filter by severity",
+                        "name": "severity",
+                        "in": "query"
+                    },
+                    {
+                        "type": "integer",
+                        "description": "page (default 1)",
+                        "name": "page",
+                        "in": "query"
+                    },
+                    {
+                        "type": "integer",
+                        "description": "page size (default 100, max 500)",
+                        "name": "per_page",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "RFC3339 last-detected lower bound",
+                        "name": "start_date",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "RFC3339 last-detected upper bound",
+                        "name": "end_date",
+                        "in": "query"
+                    }
+                ],
                 "responses": {
                     "200": {
                         "description": "OK",
@@ -2066,6 +2110,26 @@
                     "Drift"
                 ],
                 "summary": "List drift runs",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "filter by status (dispatched|running|completed|failed)",
+                        "name": "status",
+                        "in": "query"
+                    },
+                    {
+                        "type": "integer",
+                        "description": "page size (default 50, max 200)",
+                        "name": "limit",
+                        "in": "query"
+                    },
+                    {
+                        "type": "integer",
+                        "description": "rows to skip",
+                        "name": "offset",
+                        "in": "query"
+                    }
+                ],
                 "responses": {
                     "200": {
                         "description": "OK",
