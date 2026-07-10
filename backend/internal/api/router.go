@@ -250,6 +250,7 @@ func NewRouter(cfg *config.Config, database *sql.DB, identityDB *sql.DB) (*gin.E
 
 			ag.GET("/roles", admin.ListRoles())
 			ag.GET("/audit-logs", admin.ListAuditLogs())
+			ag.GET("/audit-logs/export", admin.ExportAuditLogs())
 
 			// CI workflow templates: operator edit/add/replace of the drift /
 			// version-lab YAML per (provider, kind, profile).

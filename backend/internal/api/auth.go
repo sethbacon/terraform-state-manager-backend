@@ -302,6 +302,11 @@ func (h *AuthHandlers) CallbackHandler() gin.HandlerFunc {
 			return
 		}
 
+		// Attribute the entry to the just-authenticated user: the callback is an
+		// unauthenticated route, so the auth middleware has not set user_id.
+		c.Set("user_id", user.ID)
+		h.audit.write(c, "auth.login", "user", user.ID,
+			map[string]interface{}{"provider": "oidc", "email": user.Email})
 		h.setSessionCookies(c, jwtToken)
 		c.Redirect(http.StatusFound, frontendBase+"/auth/callback")
 	}
@@ -407,6 +412,11 @@ func (h *AuthHandlers) RefreshHandler() gin.HandlerFunc {
 func (h *AuthHandlers) LogoutHandler() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		h.revokeCurrent(c)
+		// The route is optionalAuth: only an authenticated logout is auditable —
+		// an anonymous hit must not fabricate an unattributed entry.
+		if uid := userIDOf(c); uid != "" {
+			h.audit.write(c, "auth.logout", "user", uid, nil)
+		}
 		h.clearSessionCookies(c)
 
 		postLogout := deriveFrontendURL(h.cfg) + "/"

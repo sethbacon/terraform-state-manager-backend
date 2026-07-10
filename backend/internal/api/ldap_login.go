@@ -42,6 +42,9 @@ func (h *AuthHandlers) LDAPLoginHandler() gin.HandlerFunc {
 
 		info, err := h.ldapProvider.Authenticate(req.Username, req.Password)
 		if err != nil {
+			// The attempted username is auditable; the response stays uniform.
+			h.audit.write(c, "auth.login_failed", "user", "",
+				map[string]interface{}{"provider": "ldap", "username": req.Username})
 			// Uniform message — never reveal whether the user exists vs. bad password.
 			c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid credentials"})
 			return
@@ -76,6 +79,11 @@ func (h *AuthHandlers) LDAPLoginHandler() gin.HandlerFunc {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate token"})
 			return
 		}
+		// Attribute the entry to the just-authenticated user: this is an
+		// unauthenticated route, so the auth middleware has not set user_id.
+		c.Set("user_id", user.ID)
+		h.audit.write(c, "auth.login", "user", user.ID,
+			map[string]interface{}{"provider": "ldap", "email": user.Email})
 		h.setSessionCookies(c, token)
 		c.JSON(http.StatusOK, gin.H{"expires_in": int(sessionTTL.Seconds())})
 	}
