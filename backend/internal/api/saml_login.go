@@ -192,9 +192,11 @@ func (h *AuthHandlers) SAMLACSHandler() gin.HandlerFunc {
 			fail("email_bound", err.Error())
 			return
 		}
-		// The email is treated as verified: it comes from a signed SAML assertion
-		// the SP has already cryptographically validated, unlike a self-asserted
-		// OIDC claim.
+		// emailVerified=true: this email came from a SAML assertion the IdP
+		// itself signed and vouches for (signature/conditions already validated
+		// by ValidateResponse above), not a value the end user self-asserts —
+		// the same trust level GetOrCreateUserByOIDC's emailVerified gate is
+		// designed to require before establishing a new email->identity binding.
 		user, err := h.userRepo.GetOrCreateUserByOIDC(ctx, sub, info.Email, info.Name, true)
 		if err != nil {
 			fail("user_creation_failed", "Failed to look up or create your account.")

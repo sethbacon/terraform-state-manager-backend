@@ -182,6 +182,34 @@ func TestUIConfigHandler_UnreachableSibling(t *testing.T) {
 	}
 }
 
+// TestNewRouter_PlaintextSiblingURLDegradesToStandalone verifies NewRouter
+// degrades to standalone (suiteClient stays nil, logged) rather than erroring
+// or panicking, now that suite.NewDiscoveryClient fails closed on a plaintext
+// "http://" sibling URL (terraform-suite-identity v0.17.0+).
+func TestNewRouter_PlaintextSiblingURLDegradesToStandalone(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Suite.SiblingURL = "http://tfstate.internal.example.com"
+
+	router, stop, err := NewRouter(cfg, nil, nil)
+	if err != nil {
+		t.Fatalf("NewRouter: %v", err)
+	}
+	defer stop()
+
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/v1/ui/config", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if resp["sibling"] != nil {
+		t.Errorf("sibling = %v, want nil (plaintext sibling URL must degrade to standalone, not start an insecure client)", resp["sibling"])
+	}
+}
+
 func TestUIConfigHandler_ForwardsIdentityBlock(t *testing.T) {
 	sibling := suite.Manifest{
 		SchemaVersion: suite.SchemaVersionV1,

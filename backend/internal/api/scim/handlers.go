@@ -253,11 +253,13 @@ func (h *Handlers) CreateUser() gin.HandlerFunc {
 			oidcSub = "scim:" + uuid.New().String()
 		}
 
+		// emailVerified=true: SCIM has no OIDC email_verified claim to check, but
+		// SCIM provisioning already trusts the calling client out of band — it is
+		// itself an authenticated, admin-configured directory-sync integration,
+		// so the email it provisions is treated as coming from a trusted
+		// directory (the same basis LDAP/SAML logins use here), not a
+		// self-asserted value.
 		ctx := c.Request.Context()
-		// The email is treated as verified: SCIM provisioning routes require an
-		// authenticated bearer token with the scim:provision scope (see
-		// router.go), so the caller is a trusted, admin-authorized provisioning
-		// client rather than a self-asserted end-user claim.
 		user, err := h.userRepo.GetOrCreateUserByOIDC(ctx, oidcSub, email, displayName, true)
 		if err != nil {
 			slog.Error("scim: create user failed", "email", email, "error", err)

@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/jmoiron/sqlx"
 	idoidc "github.com/sethbacon/terraform-suite-identity/identity/auth/oidc"
 	idstore "github.com/sethbacon/terraform-suite-identity/identity/store"
 
@@ -35,6 +36,7 @@ type AuthHandlers struct {
 	cfg           *config.Config
 	userRepo      *idstore.UserRepository
 	orgRepo       *idstore.OrganizationRepository
+	roleRepo      *idstore.RoleTemplateRepository
 	tokenRepo     *idstore.TokenRepository
 	apiKeyRepo    *idstore.APIKeyRepository
 	oidcProvider  atomic.Pointer[auth.OIDCProvider]
@@ -55,6 +57,7 @@ func NewAuthHandlers(cfg *config.Config, identityDB *sql.DB) (*AuthHandlers, err
 		cfg:         cfg,
 		userRepo:    idstore.NewUserRepository(identityDB),
 		orgRepo:     idstore.NewOrganizationRepository(identityDB),
+		roleRepo:    idstore.NewRoleTemplateRepository(sqlx.NewDb(identityDB, "postgres")),
 		tokenRepo:   idstore.NewTokenRepository(identityDB),
 		apiKeyRepo:  idstore.NewAPIKeyRepository(identityDB),
 		stateStore:  auth.NewMemoryStateStore(),
@@ -283,12 +286,14 @@ func (h *AuthHandlers) CallbackHandler() gin.HandlerFunc {
 			fail("id_token_invalid", "The ID token could not be verified.")
 			return
 		}
-		// The library now also returns an email-verified signal directly; this app
-		// still derives that separately via emailVerifiedClaim below (existing
-		// enforceEmailVerified path), so it's discarded here rather than plumbed
-		// through — reconciling onto the library's value is left to the broader
-		// v0.17.0 adoption work.
-		sub, email, name, _, err := op.ExtractUserInfo(idToken)
+		// oidcEmailVerified is the IdP's email_verified signal for THIS login,
+		// as returned by ExtractUserInfo (terraform-suite-identity's fix for
+		// audit #52). It gates GetOrCreateUserByOIDC's new email->identity
+		// binding paths below and is distinct from the enforceEmailVerified
+		// check just after: that one implements this app's own configurable
+		// RequireVerifiedEmail login-rejection policy, re-derived independently
+		// from the raw ID token claim via emailVerifiedClaim.
+		sub, email, name, oidcEmailVerified, err := op.ExtractUserInfo(idToken)
 		if err != nil {
 			fail("user_info_failed", "Failed to read user information from the ID token.")
 			return
@@ -304,12 +309,7 @@ func (h *AuthHandlers) CallbackHandler() gin.HandlerFunc {
 			return
 		}
 
-		// emailVerified gates the two paths inside GetOrCreateUserByOIDC that
-		// establish a NEW email->identity binding (linking a pre-provisioned
-		// account or creating a brand-new one); a returning user matched by
-		// oidc_sub is unaffected regardless of this value.
-		emailVerified := verified != nil && *verified
-		user, err := h.userRepo.GetOrCreateUserByOIDC(ctx, sub, email, name, emailVerified)
+		user, err := h.userRepo.GetOrCreateUserByOIDC(ctx, sub, email, name, oidcEmailVerified)
 		if err != nil {
 			fail("user_creation_failed", "Failed to look up or create your account.")
 			return
@@ -547,6 +547,10 @@ func resolveGroupMappings(groups []string, mappings []config.OIDCGroupMapping) (
 //     member) and skips the default org when it is itself IdP-managed, so login
 //     can never silently overwrite/re-escalate an existing role (preserves the
 //     earlier H4 fix).
+//   - A mapped group whose resolved role_template carries auth.ScopeAdmin is
+//     refused rather than auto-applied (see guardProvisionableRole, #173):
+//     defense-in-depth so an IdP-driven mapping can never silently grant the
+//     grant-all wildcard scope.
 func (h *AuthHandlers) applyGroupMappings(ctx context.Context, userID string, groups []string) error {
 	_, mappings, defaultRole := h.effectiveOIDCGroupConfig(ctx)
 	if len(mappings) == 0 && defaultRole == "" {
@@ -575,6 +579,17 @@ func (h *AuthHandlers) reconcileManagedMemberships(ctx context.Context, userID s
 			return fmt.Errorf("check membership org=%s user=%s: %w", org.ID, userID, err)
 		}
 		if role, want := desired[orgName]; want {
+			// Refuse the automatic, IdP-driven role assignment when the resolved
+			// role_template carries auth.ScopeAdmin — see guardProvisionableRole's
+			// doc for the full rationale (#173). Deliberately does NOT fall
+			// through to the revoke branch below: rejection must leave an
+			// existing (possibly unrelated, legitimately-granted) membership
+			// untouched, not tear it down.
+			if guardErr := h.guardProvisionableRole(ctx, role); guardErr != nil {
+				slog.Warn("group mapping rejected: resolved role is not automatically provisionable by an IdP-driven mapping; a human admin must grant it explicitly",
+					"user_id", userID, "org", orgName, "role", role, "error", guardErr)
+				continue
+			}
 			if isMember {
 				if err := h.orgRepo.UpdateMemberRole(ctx, org.ID, userID, role); err != nil {
 					return fmt.Errorf("update member role org=%s user=%s: %w", org.ID, userID, err)
