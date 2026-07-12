@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	idauth "github.com/sethbacon/terraform-suite-identity/identity/auth"
 )
 
 // A fixed 64-char hex secret so the sync.Once TokenManager construction is
@@ -137,5 +139,46 @@ func TestValidateJWT_Garbage(t *testing.T) {
 		if _, err := ValidateJWT(tok); err == nil {
 			t.Errorf("ValidateJWT(%q) did not return an error", tok)
 		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Issuer pin (issue #178 / terraform-suite-identity audit #51)
+// ---------------------------------------------------------------------------
+
+func TestValidateJWT_TrustedSiblingIssuerAccepted(t *testing.T) {
+	if err := ValidateJWTSecret(); err != nil {
+		t.Fatalf("ValidateJWTSecret() error: %v", err)
+	}
+	// A token signed with the SAME secret but terraform-registry-backend's own
+	// issuer — simulating a sibling app in the shared-secret coupled suite.
+	sibling := idauth.NewTokenManager(testSecret, siblingIssuer)
+	token, err := sibling.Generate("user-1", "user1@example.com", nil, time.Hour)
+	if err != nil {
+		t.Fatalf("sibling Generate() error: %v", err)
+	}
+	claims, err := ValidateJWT(token)
+	if err != nil {
+		t.Fatalf("expected the trusted sibling's token to validate: %v", err)
+	}
+	if claims.UserID != "user-1" {
+		t.Errorf("UserID = %q, want user-1", claims.UserID)
+	}
+}
+
+func TestValidateJWT_UntrustedIssuerRejected(t *testing.T) {
+	if err := ValidateJWTSecret(); err != nil {
+		t.Fatalf("ValidateJWTSecret() error: %v", err)
+	}
+	// A token signed with the SAME secret but an issuer that is neither this
+	// app nor the trusted sibling must be rejected, even though the signature
+	// itself is valid — this is exactly the gap issue #178 closes.
+	untrusted := idauth.NewTokenManager(testSecret, "some-other-app")
+	token, err := untrusted.Generate("user-2", "user2@example.com", nil, time.Hour)
+	if err != nil {
+		t.Fatalf("untrusted Generate() error: %v", err)
+	}
+	if _, err := ValidateJWT(token); err == nil {
+		t.Error("expected an error validating a token from an untrusted issuer")
 	}
 }
