@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	idoidc "github.com/sethbacon/terraform-suite-identity/identity/auth/oidc"
 	idstore "github.com/sethbacon/terraform-suite-identity/identity/store"
 
 	"github.com/terraform-state-manager/terraform-state-manager/internal/auth"
@@ -206,12 +207,27 @@ func (h *AuthHandlers) LoginHandler() gin.HandlerFunc {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to generate state"})
 			return
 		}
-		ss := &auth.SessionState{State: state, CreatedAt: time.Now(), ProviderType: "oidc"}
+		// BeginAuth (rather than the legacy GetAuthURL) generates a per-login
+		// nonce and PKCE verifier. Both must be persisted alongside the state
+		// token so the callback can bind the ID token and code exchange to this
+		// specific login attempt.
+		challenge, err := op.BeginAuth(state)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to initiate OIDC login"})
+			return
+		}
+		ss := &auth.SessionState{
+			State:        state,
+			CreatedAt:    time.Now(),
+			ProviderType: "oidc",
+			Nonce:        challenge.Nonce,
+			CodeVerifier: challenge.CodeVerifier,
+		}
 		if err := h.stateStore.Save(c.Request.Context(), state, ss, 10*time.Minute); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to save session state"})
 			return
 		}
-		c.Redirect(http.StatusFound, op.GetAuthURL(state))
+		c.Redirect(http.StatusFound, challenge.URL)
 	}
 }
 
@@ -245,7 +261,11 @@ func (h *AuthHandlers) CallbackHandler() gin.HandlerFunc {
 			return
 		}
 
-		token, err := op.ExchangeCode(ctx, c.Query("code"))
+		// The PKCE verifier persisted at BeginAuth time binds this exchange to the
+		// authorization request this specific login made, so a stolen
+		// authorization code cannot be redeemed by anyone who did not also
+		// observe the verifier.
+		token, err := op.ExchangeCode(ctx, c.Query("code"), idoidc.WithPKCEVerifier(ss.CodeVerifier))
 		if err != nil {
 			fail("token_exchange_failed", "Failed to exchange the authorization code.")
 			return
@@ -255,7 +275,10 @@ func (h *AuthHandlers) CallbackHandler() gin.HandlerFunc {
 			fail("no_id_token", "The identity provider did not return an ID token.")
 			return
 		}
-		idToken, err := op.VerifyIDToken(ctx, rawIDToken)
+		// The nonce persisted at BeginAuth time binds verification to this
+		// specific login, so a replayed or injected ID token issued for a
+		// different login attempt is rejected.
+		idToken, err := op.VerifyIDToken(ctx, rawIDToken, idoidc.WithExpectedNonce(ss.Nonce))
 		if err != nil {
 			fail("id_token_invalid", "The ID token could not be verified.")
 			return
@@ -271,7 +294,8 @@ func (h *AuthHandlers) CallbackHandler() gin.HandlerFunc {
 			return
 		}
 
-		if err := enforceEmailVerified(emailVerifiedClaim(idToken), h.cfg.Auth.OIDC.RequireVerifiedEmail); err != nil {
+		verified := emailVerifiedClaim(idToken)
+		if err := enforceEmailVerified(verified, h.cfg.Auth.OIDC.RequireVerifiedEmail); err != nil {
 			fail("email_not_verified", err.Error())
 			return
 		}
@@ -280,10 +304,12 @@ func (h *AuthHandlers) CallbackHandler() gin.HandlerFunc {
 			return
 		}
 
-		// enforceEmailVerified above already ensures we only reach this point when
-		// the claim is verified, or verification isn't required by policy — so it's
-		// always safe to report the email as verified to the identity store here.
-		user, err := h.userRepo.GetOrCreateUserByOIDC(ctx, sub, email, name, true)
+		// emailVerified gates the two paths inside GetOrCreateUserByOIDC that
+		// establish a NEW email->identity binding (linking a pre-provisioned
+		// account or creating a brand-new one); a returning user matched by
+		// oidc_sub is unaffected regardless of this value.
+		emailVerified := verified != nil && *verified
+		user, err := h.userRepo.GetOrCreateUserByOIDC(ctx, sub, email, name, emailVerified)
 		if err != nil {
 			fail("user_creation_failed", "Failed to look up or create your account.")
 			return

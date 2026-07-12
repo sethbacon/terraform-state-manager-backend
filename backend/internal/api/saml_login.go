@@ -192,8 +192,9 @@ func (h *AuthHandlers) SAMLACSHandler() gin.HandlerFunc {
 			fail("email_bound", err.Error())
 			return
 		}
-		// The SAML assertion is itself the trusted source of the identity (signature
-		// already validated), so its asserted email is treated as verified.
+		// The email is treated as verified: it comes from a signed SAML assertion
+		// the SP has already cryptographically validated, unlike a self-asserted
+		// OIDC claim.
 		user, err := h.userRepo.GetOrCreateUserByOIDC(ctx, sub, info.Email, info.Name, true)
 		if err != nil {
 			fail("user_creation_failed", "Failed to look up or create your account.")

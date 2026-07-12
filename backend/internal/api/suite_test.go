@@ -105,7 +105,8 @@ func TestUIConfigHandler_ActiveSibling(t *testing.T) {
 	defer srv.Close()
 
 	self := suite.Manifest{SchemaVersion: suite.SchemaVersionV1, App: "terraform-state-manager"}
-	// httptest.NewServer is plain HTTP; NewDiscoveryClient now requires HTTPS.
+	// srv.URL is an httptest server (plaintext HTTP); NewDiscoveryClient fails
+	// closed on that, so tests use the explicit insecure opt-out instead.
 	dc := suite.NewInsecureDiscoveryClient(srv.URL, self, time.Minute)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -154,7 +155,8 @@ func TestUIConfigHandler_ActiveSibling(t *testing.T) {
 
 func TestUIConfigHandler_UnreachableSibling(t *testing.T) {
 	self := suite.Manifest{SchemaVersion: suite.SchemaVersionV1, App: "terraform-state-manager"}
-	// Plain HTTP loopback target; NewDiscoveryClient now requires HTTPS.
+	// Plaintext by design (unreachable-sibling test); use the explicit insecure
+	// opt-out rather than a real HTTPS endpoint.
 	dc := suite.NewInsecureDiscoveryClient("http://127.0.0.1:1", self, 0)
 	dc.Start(ctxThatCancelsImmediately())
 
@@ -193,7 +195,8 @@ func TestUIConfigHandler_ForwardsIdentityBlock(t *testing.T) {
 	defer srv.Close()
 
 	self := suite.Manifest{SchemaVersion: suite.SchemaVersionV1, App: "terraform-state-manager"}
-	// httptest.NewServer is plain HTTP; NewDiscoveryClient now requires HTTPS.
+	// srv.URL is an httptest server (plaintext HTTP); NewDiscoveryClient fails
+	// closed on that, so tests use the explicit insecure opt-out instead.
 	dc := suite.NewInsecureDiscoveryClient(srv.URL, self, time.Minute)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
