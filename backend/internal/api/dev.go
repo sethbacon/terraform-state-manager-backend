@@ -22,7 +22,8 @@ func (h *AuthHandlers) DevLoginHandler() gin.HandlerFunc {
 		}
 		ctx := c.Request.Context()
 
-		// Dev-only fixed account — there is no external identity to verify.
+		// The email is a fixed, server-owned constant (not an externally-asserted
+		// claim), so it is treated as verified.
 		user, err := h.userRepo.GetOrCreateUserByOIDC(ctx, "dev:admin", "admin.user@local.dev", "Dev Admin", true)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create dev user"})

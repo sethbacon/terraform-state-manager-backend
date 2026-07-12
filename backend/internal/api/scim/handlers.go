@@ -254,8 +254,10 @@ func (h *Handlers) CreateUser() gin.HandlerFunc {
 		}
 
 		ctx := c.Request.Context()
-		// SCIM provisioning is driven by the IdP's directory sync, not a user-supplied
-		// claim, so the provisioned email is treated as verified.
+		// The email is treated as verified: SCIM provisioning routes require an
+		// authenticated bearer token with the scim:provision scope (see
+		// router.go), so the caller is a trusted, admin-authorized provisioning
+		// client rather than a self-asserted end-user claim.
 		user, err := h.userRepo.GetOrCreateUserByOIDC(ctx, oidcSub, email, displayName, true)
 		if err != nil {
 			slog.Error("scim: create user failed", "email", email, "error", err)

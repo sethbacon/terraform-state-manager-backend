@@ -461,13 +461,18 @@ func NewRouter(cfg *config.Config, database *sql.DB, identityDB *sql.DB) (*gin.E
 	if cfg.Suite.SiblingURL != "" {
 		dc, err := suite.NewDiscoveryClient(cfg.Suite.SiblingURL, buildSuiteManifest(cfg), cfg.Suite.PollInterval)
 		if err != nil {
-			return nil, stop, fmt.Errorf("failed to initialise suite discovery client: %w", err)
+			// NewDiscoveryClient fails closed on a plaintext HTTP sibling URL (the
+			// manifest fetch would otherwise be exposed to interception/tampering).
+			// Non-fatal: TSM stays fully standalone, same as an unconfigured
+			// SiblingURL.
+			slog.Error("suite: failed to start sibling discovery", "error", err)
+		} else {
+			ctx, cancel := context.WithCancel(context.Background())
+			go dc.Start(ctx)
+			suiteClient = dc
+			prevStop := stop
+			stop = func() { cancel(); prevStop() }
 		}
-		ctx, cancel := context.WithCancel(context.Background())
-		go dc.Start(ctx)
-		suiteClient = dc
-		prevStop := stop
-		stop = func() { cancel(); prevStop() }
 	}
 
 	return r, stop, nil

@@ -57,8 +57,9 @@ func (h *AuthHandlers) LDAPLoginHandler() gin.HandlerFunc {
 			c.JSON(http.StatusForbidden, gin.H{"error": err.Error()})
 			return
 		}
-		// The LDAP directory is itself the trusted source of the identity (search-bind
-		// authentication already succeeded), so its asserted email is treated as verified.
+		// The email is treated as verified: it comes from the LDAP directory
+		// entry of a principal who just proved control of the account via a
+		// successful bind, unlike a self-asserted OIDC claim.
 		user, err := h.userRepo.GetOrCreateUserByOIDC(ctx, sub, info.Email, info.Name, true)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to provision account"})
