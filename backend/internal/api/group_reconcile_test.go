@@ -2,10 +2,12 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 	"time"
 
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
+	"github.com/google/uuid"
 
 	"github.com/terraform-state-manager/terraform-state-manager/internal/config"
 )
@@ -38,13 +40,27 @@ func expectOrgByName(mock sqlmock.Sqlmock, id, name string) {
 		WillReturnRows(sqlmock.NewRows(orgRowCols).AddRow(id, name, name, nil, nil, now, now))
 }
 
+var roleTemplateCols = []string{"id", "name", "display_name", "description", "scopes", "is_system", "created_at", "updated_at"}
+
+// expectRoleScopesLookup queues the guardProvisionableRole scopes lookup
+// (idstore.RoleTemplateRepository.GetRoleTemplateByName) that now runs before
+// every "wanted" (add/update) branch of reconcileManagedMemberships.
+func expectRoleScopesLookup(mock sqlmock.Sqlmock, roleName string, scopes []string) {
+	scopesJSON, _ := json.Marshal(scopes)
+	now := time.Now()
+	mock.ExpectQuery("SELECT id, name, display_name, description, scopes").WithArgs(roleName).
+		WillReturnRows(sqlmock.NewRows(roleTemplateCols).
+			AddRow(uuid.New(), roleName, roleName, nil, scopesJSON, false, now, now))
+}
+
 func TestReconcile_UpsertExistingMember(t *testing.T) {
 	h, mock := newReconcileEnv(t, nil)
 
 	expectOrgByName(mock, "o1", "platform")
-	// Already a member → role update (template id lookup + UPDATE).
+	// Already a member → role update (guard scopes lookup + template id lookup + UPDATE).
 	mock.ExpectQuery("FROM organization_members").WithArgs("o1", "u1").
 		WillReturnRows(sqlmock.NewRows(memberRowCols).AddRow("o1", "u1", nil, time.Now()))
+	expectRoleScopesLookup(mock, "editor", []string{"state:read", "state:write"})
 	mock.ExpectQuery("SELECT id FROM role_templates WHERE name").WithArgs("editor").
 		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("rt-editor"))
 	mock.ExpectExec("UPDATE organization_members").
@@ -66,6 +82,7 @@ func TestReconcile_AddsNewMember(t *testing.T) {
 	expectOrgByName(mock, "o1", "platform")
 	mock.ExpectQuery("FROM organization_members").WithArgs("o1", "u1").
 		WillReturnRows(sqlmock.NewRows(memberRowCols)) // not a member
+	expectRoleScopesLookup(mock, "viewer", []string{"state:read"})
 	mock.ExpectQuery("SELECT id FROM role_templates WHERE name").WithArgs("viewer").
 		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("rt-viewer"))
 	mock.ExpectExec("INSERT INTO organization_members").
@@ -115,7 +132,10 @@ func TestReconcile_UnknownOrgIsSkipped(t *testing.T) {
 }
 
 func TestReconcile_DefaultRoleFirstLoginOnly(t *testing.T) {
-	// First login: no memberships → default role added.
+	// First login: no memberships → default role added. default_role is a
+	// static, admin-configured fallback (not an IdP-driven group mapping), so
+	// guardProvisionableRole does not run here — no scopes lookup is expected,
+	// unlike the "wanted" branch tests above.
 	h, mock := newReconcileEnv(t, nil)
 	expectOrgByName(mock, "o-def", "default") // GetDefaultOrganization → GetByName("default")
 	mock.ExpectQuery("FROM organization_members").WithArgs("o-def", "u1").
@@ -165,6 +185,87 @@ func TestReconcile_SkipsManagedDefaultOrgFallback(t *testing.T) {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// reconcileManagedMemberships — ScopeAdmin guard (issue #173, defense-in-depth
+// adoption of terraform-suite-identity's ValidateProvisionableScopes). An
+// IdP-driven group mapping that resolves to a role_template carrying
+// auth.ScopeAdmin must be refused automatically, not silently granted.
+// ---------------------------------------------------------------------------
+
+// New member add is REJECTED when the resolved role_template's scopes carry
+// ScopeAdmin: no role-template-id lookup or INSERT is issued, and no error is
+// returned (the login itself still succeeds — only the automatic grant is
+// refused and logged).
+func TestReconcile_ResolvedRoleCarriesScopeAdmin_AddPath_Rejected(t *testing.T) {
+	h, mock := newReconcileEnv(t, nil)
+
+	expectOrgByName(mock, "o1", "platform")
+	mock.ExpectQuery("FROM organization_members").WithArgs("o1", "u1").
+		WillReturnRows(sqlmock.NewRows(memberRowCols)) // not a member
+	// guardProvisionableRole's scopes lookup returns the grant-all wildcard —
+	// AddMemberWithParams's own role-template-id lookup and INSERT must NEVER
+	// be reached.
+	expectRoleScopesLookup(mock, "admin", []string{"admin"})
+
+	err := h.reconcileManagedMemberships(context.Background(), "u1",
+		map[string]string{"platform": "admin"}, map[string]struct{}{"platform": {}}, "")
+	if err != nil {
+		t.Fatalf("reconcile: unexpected error: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("unmet expectations (no role-template-id lookup/INSERT should have been issued): %v", err)
+	}
+}
+
+// Existing member's role UPDATE is REJECTED the same way: the membership is
+// left untouched (not upgraded, and — importantly — not revoked either).
+func TestReconcile_ResolvedRoleCarriesScopeAdmin_UpdatePath_Rejected(t *testing.T) {
+	h, mock := newReconcileEnv(t, nil)
+
+	expectOrgByName(mock, "o1", "platform")
+	mock.ExpectQuery("FROM organization_members").WithArgs("o1", "u1").
+		WillReturnRows(sqlmock.NewRows(memberRowCols).AddRow("o1", "u1", "rt-editor", time.Now()))
+	expectRoleScopesLookup(mock, "admin", []string{"admin"})
+	// No UPDATE (or the revoke DELETE) must follow.
+
+	err := h.reconcileManagedMemberships(context.Background(), "u1",
+		map[string]string{"platform": "admin"}, map[string]struct{}{"platform": {}}, "")
+	if err != nil {
+		t.Fatalf("reconcile: unexpected error: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("unmet expectations (no UPDATE/DELETE should have been issued): %v", err)
+	}
+}
+
+// A role_template whose scopes are a normal, non-admin set proceeds exactly as
+// before (already covered by the success-path tests above); this test only
+// pins down the "role name doesn't exist" edge case: guardProvisionableRole
+// must defer to AddMemberWithParams's own lookup error rather than swallowing
+// or duplicating it.
+func TestReconcile_GuardProvisionableRole_UnknownRoleTemplate_DefersToRealLookup(t *testing.T) {
+	h, mock := newReconcileEnv(t, nil)
+
+	expectOrgByName(mock, "o1", "platform")
+	mock.ExpectQuery("FROM organization_members").WithArgs("o1", "u1").
+		WillReturnRows(sqlmock.NewRows(memberRowCols)) // not a member
+	// guardProvisionableRole's own scopes lookup finds no such role template.
+	mock.ExpectQuery("SELECT id, name, display_name, description, scopes").WithArgs("ghost-role").
+		WillReturnRows(sqlmock.NewRows(roleTemplateCols))
+	// AddMemberWithParams's lookup is reached and fails with its own clear error.
+	mock.ExpectQuery("SELECT id FROM role_templates WHERE name").WithArgs("ghost-role").
+		WillReturnRows(sqlmock.NewRows([]string{"id"}))
+
+	err := h.reconcileManagedMemberships(context.Background(), "u1",
+		map[string]string{"platform": "ghost-role"}, map[string]struct{}{"platform": {}}, "")
+	if err == nil {
+		t.Fatal("expected error from AddMemberWithParams' role-template lookup, got nil")
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("unmet expectations: %v", err)
+	}
+}
+
 func TestApplyGroupMappings_EndToEnd(t *testing.T) {
 	h, mock := newReconcileEnv(t, func(cfg *config.Config) {
 		cfg.Auth.OIDC.GroupMappings = []config.OIDCGroupMapping{
@@ -178,6 +279,7 @@ func TestApplyGroupMappings_EndToEnd(t *testing.T) {
 	expectOrgByName(mock, "o-def", "default")
 	mock.ExpectQuery("FROM organization_members").WithArgs("o-def", "u1").
 		WillReturnRows(sqlmock.NewRows(memberRowCols))
+	expectRoleScopesLookup(mock, "editor", []string{"state:read", "state:write"})
 	mock.ExpectQuery("SELECT id FROM role_templates WHERE name").WithArgs("editor").
 		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("rt-editor"))
 	mock.ExpectExec("INSERT INTO organization_members").

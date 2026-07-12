@@ -57,9 +57,13 @@ func (h *AuthHandlers) LDAPLoginHandler() gin.HandlerFunc {
 			c.JSON(http.StatusForbidden, gin.H{"error": err.Error()})
 			return
 		}
-		// The email is treated as verified: it comes from the LDAP directory
-		// entry of a principal who just proved control of the account via a
-		// successful bind, unlike a self-asserted OIDC claim.
+		// emailVerified=true: this email was just read directly off the LDAP
+		// directory entry the user bind-authenticated against above, not a
+		// self-asserted OIDC claim — the directory itself is the trust source
+		// for this attribute, administratively controlled independent of the
+		// end user. That is the same trust level GetOrCreateUserByOIDC's
+		// emailVerified gate is designed to require before establishing a new
+		// email->identity binding.
 		user, err := h.userRepo.GetOrCreateUserByOIDC(ctx, sub, info.Email, info.Name, true)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to provision account"})

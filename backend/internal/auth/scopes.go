@@ -47,6 +47,22 @@ func toStrings(scopes []Scope) []string {
 	return out
 }
 
+// ValidateProvisionableScopes rejects ScopeAdmin ("admin") from a scope list,
+// naming it specifically, and returns nil otherwise. Call this when mapping
+// externally-influenced data (an OIDC/SAML/LDAP IdP group claim, or any other
+// value a lower-trust source contributes) onto a role_template's scopes, BEFORE
+// that resolved scope list is trusted or persisted via an automatic, IdP-driven
+// membership write — never on scopes read back from an already-trusted,
+// admin-seeded role_template used in a direct admin action, where carrying
+// ScopeAdmin is expected and legitimate.
+//
+// Thin wrapper over idauth.ValidateProvisionableScopes, matching this file's
+// existing pattern of re-exporting the shared identity module's scope-checking
+// helpers.
+func ValidateProvisionableScopes(scopes []string) error {
+	return idauth.ValidateProvisionableScopes(scopes)
+}
+
 // RoleTemplateSeed defines an app-owned role→scope mapping. The application owns
 // only the role templates in the shared identity schema; these are upserted at
 // startup (see internal/bootstrap).

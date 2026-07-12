@@ -94,6 +94,28 @@ func TestHasAllScopes(t *testing.T) {
 	}
 }
 
+func TestValidateProvisionableScopes(t *testing.T) {
+	tests := []struct {
+		name    string
+		scopes  []string
+		wantErr bool
+	}{
+		{"empty list", []string{}, false},
+		{"non-admin scopes", []string{"state:read", "sources:manage"}, false},
+		{"admin alone", []string{"admin"}, true},
+		{"admin among others", []string{"state:read", "admin"}, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := ValidateProvisionableScopes(tt.scopes)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("ValidateProvisionableScopes(%v) error = %v, wantErr %v", tt.scopes, err, tt.wantErr)
+			}
+		})
+	}
+}
+
 func TestAppRoleTemplates(t *testing.T) {
 	templates := AppRoleTemplates()
 	if len(templates) != 4 {

@@ -459,13 +459,14 @@ func NewRouter(cfg *config.Config, database *sql.DB, identityDB *sql.DB) (*gin.E
 	}
 
 	if cfg.Suite.SiblingURL != "" {
+		// NewDiscoveryClient (terraform-suite-identity v0.17.0+) fails closed for
+		// a plaintext "http://" sibling URL, protecting the unauthenticated
+		// manifest fetch from tampering by a network-position attacker. Treat
+		// that failure the same as an absent/unreachable sibling: log it and run
+		// standalone rather than starting an insecure client implicitly.
 		dc, err := suite.NewDiscoveryClient(cfg.Suite.SiblingURL, buildSuiteManifest(cfg), cfg.Suite.PollInterval)
 		if err != nil {
-			// NewDiscoveryClient fails closed on a plaintext HTTP sibling URL (the
-			// manifest fetch would otherwise be exposed to interception/tampering).
-			// Non-fatal: TSM stays fully standalone, same as an unconfigured
-			// SiblingURL.
-			slog.Error("suite: failed to start sibling discovery", "error", err)
+			slog.Error("suite discovery: failed to start sibling discovery client", "sibling_url", cfg.Suite.SiblingURL, "error", err)
 		} else {
 			ctx, cancel := context.WithCancel(context.Background())
 			go dc.Start(ctx)

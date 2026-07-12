@@ -22,8 +22,13 @@ func (h *AuthHandlers) DevLoginHandler() gin.HandlerFunc {
 		}
 		ctx := c.Request.Context()
 
-		// The email is a fixed, server-owned constant (not an externally-asserted
-		// claim), so it is treated as verified.
+		// emailVerified=true: this is the hardcoded dev-only bootstrap account,
+		// not an externally-asserted identity — there is no lower-trust claim to
+		// gate here. Reachability is dev-mode-only in two independent places:
+		// the route itself is only registered when auth.IsDevMode() (see
+		// router.go), and this handler re-checks auth.IsDevMode() above and
+		// returns 403 otherwise, so this path cannot run in production even if
+		// the route registration guard were ever bypassed.
 		user, err := h.userRepo.GetOrCreateUserByOIDC(ctx, "dev:admin", "admin.user@local.dev", "Dev Admin", true)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create dev user"})
