@@ -22,6 +22,15 @@ import (
 // jwtIssuer stamps the iss claim on tokens this service generates.
 const jwtIssuer = "terraform-state-manager"
 
+// siblingIssuer is terraform-registry-backend's own jwtIssuer value. In the
+// shared-secret coupled suite (ADR/suite-coupling.md) both backends sign with
+// the same secret, so without an issuer pin a token minted by the sibling
+// would validate here unchanged. This is the same trusted-sibling issuer
+// string terraform-registry-backend already expects from this app (see its
+// own jwt.go / SetTrustedIssuers) and that this repo's suite integration
+// already hardcodes (internal/api/suite.go, internal/api/suite_test.go).
+const siblingIssuer = "terraform-registry"
+
 // Claims is the shared identity JWT claims type, re-exported so call sites refer
 // to auth.Claims. It carries a JTI used for revocation.
 type Claims = idauth.Claims
@@ -69,6 +78,18 @@ func ValidateJWTSecret() error {
 			log.Println("WARNING: TSM_JWT_SECRET is shorter than the recommended 32 characters.")
 		}
 		tokenManager = idauth.NewTokenManager(secret, jwtIssuer)
+		// Pin validation to the trusted issuer set (this app plus the sibling
+		// terraform-registry-backend). Without this, Validate accepts a token
+		// bearing ANY iss claim as long as it is signed with the shared secret —
+		// in the coupled suite deployment this app is the more exposed of the
+		// two backends (terraform-suite-identity audit #51 / issue #178), since
+		// terraform-registry-backend already pins its own allowed issuers.
+		//
+		// NOTE: this does not add audience enforcement. SetAudience is only
+		// available starting terraform-suite-identity v0.17.0 (this repo is
+		// pinned to v0.16.0); see the PR description for why that half is
+		// deferred rather than bundled in via a dependency bump here.
+		tokenManager.SetAllowedIssuers([]string{jwtIssuer, siblingIssuer})
 	})
 	return jwtSecretErr
 }
