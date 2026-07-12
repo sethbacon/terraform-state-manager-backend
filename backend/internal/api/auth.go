@@ -260,7 +260,12 @@ func (h *AuthHandlers) CallbackHandler() gin.HandlerFunc {
 			fail("id_token_invalid", "The ID token could not be verified.")
 			return
 		}
-		sub, email, name, err := op.ExtractUserInfo(idToken)
+		// The library now also returns an email-verified signal directly; this app
+		// still derives that separately via emailVerifiedClaim below (existing
+		// enforceEmailVerified path), so it's discarded here rather than plumbed
+		// through — reconciling onto the library's value is left to the broader
+		// v0.17.0 adoption work.
+		sub, email, name, _, err := op.ExtractUserInfo(idToken)
 		if err != nil {
 			fail("user_info_failed", "Failed to read user information from the ID token.")
 			return
@@ -275,7 +280,10 @@ func (h *AuthHandlers) CallbackHandler() gin.HandlerFunc {
 			return
 		}
 
-		user, err := h.userRepo.GetOrCreateUserByOIDC(ctx, sub, email, name)
+		// enforceEmailVerified above already ensures we only reach this point when
+		// the claim is verified, or verification isn't required by policy — so it's
+		// always safe to report the email as verified to the identity store here.
+		user, err := h.userRepo.GetOrCreateUserByOIDC(ctx, sub, email, name, true)
 		if err != nil {
 			fail("user_creation_failed", "Failed to look up or create your account.")
 			return

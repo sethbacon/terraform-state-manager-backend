@@ -240,15 +240,23 @@ func NewRouter(cfg *config.Config, database *sql.DB, identityDB *sql.DB) (*gin.E
 			ag.GET("/users/:id/export", admin.ExportUserData())
 			ag.POST("/users/:id/erase", admin.EraseUser())
 
-			// Organizations: CRUD + member management.
+			// Organizations: list/create are platform-wide (no specific target
+			// organization to check membership against). Every route naming a
+			// specific :id, though, additionally requires the caller to hold admin
+			// within THAT organization — not just the flat/global admin scope the
+			// outer /admin group already checked — closing the cross-org privilege
+			// escalation the flat scope alone would otherwise allow.
 			ag.GET("/organizations", admin.ListOrganizations())
 			ag.POST("/organizations", admin.CreateOrganization())
-			ag.PUT("/organizations/:id", admin.UpdateOrganization())
-			ag.DELETE("/organizations/:id", admin.DeleteOrganization())
-			ag.GET("/organizations/:id/members", admin.ListOrganizationMembers())
-			ag.POST("/organizations/:id/members", admin.AddOrganizationMember())
-			ag.PUT("/organizations/:id/members/:user_id", admin.UpdateOrganizationMember())
-			ag.DELETE("/organizations/:id/members/:user_id", admin.RemoveOrganizationMember())
+			orgScoped := ag.Group("/organizations/:id", admin.requireOrgScope())
+			{
+				orgScoped.PUT("", admin.UpdateOrganization())
+				orgScoped.DELETE("", admin.DeleteOrganization())
+				orgScoped.GET("/members", admin.ListOrganizationMembers())
+				orgScoped.POST("/members", admin.AddOrganizationMember())
+				orgScoped.PUT("/members/:user_id", admin.UpdateOrganizationMember())
+				orgScoped.DELETE("/members/:user_id", admin.RemoveOrganizationMember())
+			}
 
 			ag.GET("/roles", admin.ListRoles())
 			ag.GET("/audit-logs", admin.ListAuditLogs())
@@ -451,7 +459,10 @@ func NewRouter(cfg *config.Config, database *sql.DB, identityDB *sql.DB) (*gin.E
 	}
 
 	if cfg.Suite.SiblingURL != "" {
-		dc := suite.NewDiscoveryClient(cfg.Suite.SiblingURL, buildSuiteManifest(cfg), cfg.Suite.PollInterval)
+		dc, err := suite.NewDiscoveryClient(cfg.Suite.SiblingURL, buildSuiteManifest(cfg), cfg.Suite.PollInterval)
+		if err != nil {
+			return nil, stop, fmt.Errorf("failed to initialise suite discovery client: %w", err)
+		}
 		ctx, cancel := context.WithCancel(context.Background())
 		go dc.Start(ctx)
 		suiteClient = dc
