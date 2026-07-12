@@ -22,7 +22,8 @@ func (h *AuthHandlers) DevLoginHandler() gin.HandlerFunc {
 		}
 		ctx := c.Request.Context()
 
-		user, err := h.userRepo.GetOrCreateUserByOIDC(ctx, "dev:admin", "admin.user@local.dev", "Dev Admin")
+		// Dev-only fixed account — there is no external identity to verify.
+		user, err := h.userRepo.GetOrCreateUserByOIDC(ctx, "dev:admin", "admin.user@local.dev", "Dev Admin", true)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create dev user"})
 			return
