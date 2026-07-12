@@ -84,12 +84,17 @@ func ValidateJWTSecret() error {
 		// in the coupled suite deployment this app is the more exposed of the
 		// two backends (terraform-suite-identity audit #51 / issue #178), since
 		// terraform-registry-backend already pins its own allowed issuers.
-		//
-		// NOTE: this does not add audience enforcement. SetAudience is only
-		// available starting terraform-suite-identity v0.17.0 (this repo is
-		// pinned to v0.16.0); see the PR description for why that half is
-		// deferred rather than bundled in via a dependency bump here.
 		tokenManager.SetAllowedIssuers([]string{jwtIssuer, siblingIssuer})
+		// Stamp/require this app's own identity as the audience (issue #178,
+		// completed now that terraform-suite-identity v0.17.0 is adopted). An
+		// issuer pin alone still lets a trusted sibling's token through
+		// unchanged; SetAudience closes that gap by additionally requiring a
+		// token — even one from a trusted sibling issuer — to have been minted
+		// FOR this app specifically. Safe to enable unconditionally: Validate
+		// only enforces the check once set, so a standalone (non-coupled)
+		// deployment is unaffected beyond every token now also carrying/
+		// requiring its own aud claim.
+		tokenManager.SetAudience(jwtIssuer)
 	})
 	return jwtSecretErr
 }
