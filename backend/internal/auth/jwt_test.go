@@ -151,8 +151,14 @@ func TestValidateJWT_TrustedSiblingIssuerAccepted(t *testing.T) {
 		t.Fatalf("ValidateJWTSecret() error: %v", err)
 	}
 	// A token signed with the SAME secret but terraform-registry-backend's own
-	// issuer — simulating a sibling app in the shared-secret coupled suite.
+	// issuer — simulating a sibling app in the shared-secret coupled suite. The
+	// sibling also stamps this app's own identity as the audience, as a
+	// well-behaved sibling adopting the coupled-suite convention would when
+	// minting a token meant to be honored here — see
+	// TestValidateJWT_AudienceEnforced below for the cases where it does not
+	// (or audiences it for itself instead).
 	sibling := idauth.NewTokenManager(testSecret, siblingIssuer)
+	sibling.SetAudience(jwtIssuer)
 	token, err := sibling.Generate("user-1", "user1@example.com", nil, time.Hour)
 	if err != nil {
 		t.Fatalf("sibling Generate() error: %v", err)
@@ -181,4 +187,70 @@ func TestValidateJWT_UntrustedIssuerRejected(t *testing.T) {
 	if _, err := ValidateJWT(token); err == nil {
 		t.Error("expected an error validating a token from an untrusted issuer")
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Audience enforcement (issue #178, completed via the terraform-suite-identity
+// v0.17.0 adoption)
+// ---------------------------------------------------------------------------
+
+// TestValidateJWT_AudienceEnforced confirms ValidateJWTSecret now also stamps
+// and requires this app's own audience, closing the half of #178 that the
+// issuer pin alone left open: a trusted sibling issuer is no longer
+// sufficient on its own — the token must also have been minted FOR this app.
+func TestValidateJWT_AudienceEnforced(t *testing.T) {
+	if err := ValidateJWTSecret(); err != nil {
+		t.Fatalf("ValidateJWTSecret() error: %v", err)
+	}
+
+	t.Run("own token carries own audience and validates", func(t *testing.T) {
+		token, err := GenerateJWT("user-1", "user1@example.com", nil, time.Hour)
+		if err != nil {
+			t.Fatalf("GenerateJWT: %v", err)
+		}
+		if _, err := ValidateJWT(token); err != nil {
+			t.Errorf("own token with own audience should validate: %v", err)
+		}
+	})
+
+	t.Run("trusted issuer but no audience claim is rejected", func(t *testing.T) {
+		// The sibling's issuer is trusted, but this token never had an audience
+		// stamped — simulating a sibling that has not (yet) adopted SetAudience.
+		// Trusting the issuer must not be enough on its own.
+		sibling := idauth.NewTokenManager(testSecret, siblingIssuer)
+		token, err := sibling.Generate("attacker-or-unaware-sibling", "x@example.com", []string{"admin"}, time.Hour)
+		if err != nil {
+			t.Fatalf("sibling Generate: %v", err)
+		}
+		if _, err := ValidateJWT(token); err == nil {
+			t.Error("a trusted-issuer token with no audience claim must be rejected once this app requires an audience")
+		}
+	})
+
+	t.Run("trusted issuer but wrong audience is rejected", func(t *testing.T) {
+		// The sibling stamps ITS OWN identity as the audience (i.e. mints a
+		// normal token for its own use), not this app's — this must not validate
+		// here even though the issuer is trusted and the secret matches.
+		sibling := idauth.NewTokenManager(testSecret, siblingIssuer)
+		sibling.SetAudience(siblingIssuer)
+		token, err := sibling.Generate("user-1", "user1@example.com", nil, time.Hour)
+		if err != nil {
+			t.Fatalf("sibling Generate: %v", err)
+		}
+		if _, err := ValidateJWT(token); err == nil {
+			t.Error("a trusted-issuer token audienced for a different app must be rejected")
+		}
+	})
+
+	t.Run("trusted issuer and correct audience validates", func(t *testing.T) {
+		sibling := idauth.NewTokenManager(testSecret, siblingIssuer)
+		sibling.SetAudience(jwtIssuer)
+		token, err := sibling.Generate("user-1", "user1@example.com", nil, time.Hour)
+		if err != nil {
+			t.Fatalf("sibling Generate: %v", err)
+		}
+		if _, err := ValidateJWT(token); err != nil {
+			t.Errorf("a trusted-issuer token correctly audienced for this app should validate: %v", err)
+		}
+	})
 }
