@@ -413,8 +413,15 @@ func registryModuleAddress(src string) (host, source string, ok bool) {
 			return "", "", false
 		}
 		// Canonicalize so the stored host matches the registry's emitted join key
-		// regardless of case / default port / trailing dot.
-		return suite.CanonicalHost(parts[0]), strings.Join(parts[1:], "/"), true
+		// regardless of case / default port / trailing dot. CanonicalHost fails
+		// closed (returns "") on userinfo-bearing or otherwise-unrecoverable host
+		// input — treat that the same as an unparseable host rather than letting
+		// a malformed source string produce ok=true with an empty RegistryHost.
+		host := suite.CanonicalHost(parts[0])
+		if host == "" {
+			return "", "", false
+		}
+		return host, strings.Join(parts[1:], "/"), true
 	default:
 		return "", "", false
 	}

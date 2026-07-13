@@ -257,6 +257,34 @@ func TestModuleRefs_CanonicalizesHost(t *testing.T) {
 	}
 }
 
+// TestModuleRefs_MalformedHostSkipped proves a host-prefixed source whose host
+// segment carries userinfo (rejected by suite.CanonicalHost, which returns ""
+// for it — see terraform-suite-identity#63) is skipped entirely rather than
+// captured with an empty RegistryHost. Regression test for issue #175: before
+// the fix, registryModuleAddress returned ok=true unconditionally in the
+// 4-segment case, so a malformed host produced RegistryHost="" instead of
+// being rejected like any other unparseable host.
+func TestModuleRefs_MalformedHostSkipped(t *testing.T) {
+	planJSON := `{
+		"configuration": {
+			"root_module": {
+				"module_calls": {
+					"vpc": {"source": "user:pass@evil.com:1234/myorg/vpc/aws", "version_constraint": "1.0.0"}
+				}
+			}
+		}
+	}`
+	var plan Plan
+	if err := json.Unmarshal([]byte(planJSON), &plan); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	for _, r := range ModuleRefs(&plan, nil) {
+		if r.ModuleSource == "myorg/vpc/aws" {
+			t.Fatalf("expected the malformed-host source to be skipped, got captured ref: %+v", r)
+		}
+	}
+}
+
 // modulesManifest is a representative .terraform/modules/modules.json: a root
 // entry (skipped — no version), two registry modules (one public, one
 // host-prefixed with mixed case to prove canonicalization), and a local module
