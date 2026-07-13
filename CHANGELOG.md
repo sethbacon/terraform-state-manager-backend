@@ -1,5 +1,24 @@
 # Changelog
 
+## [2.0.0](https://github.com/sethbacon/terraform-state-manager-backend/compare/v1.17.0...v2.0.0) (2026-07-13)
+
+
+### ⚠ BREAKING CHANGES
+
+* **auth:** adopt terraform-suite-identity v0.17.0 ([#186](https://github.com/sethbacon/terraform-state-manager-backend/issues/186))
+
+### Features
+
+* **auth:** adopt terraform-suite-identity v0.17.0 ([#186](https://github.com/sethbacon/terraform-state-manager-backend/issues/186)) ([47dc27e](https://github.com/sethbacon/terraform-state-manager-backend/commit/47dc27ec9228650b0a962f4cbd014005d97ee29a))
+
+
+### Bug Fixes
+
+* **admin:** require per-organization membership on /admin/organizations/:id* routes ([#183](https://github.com/sethbacon/terraform-state-manager-backend/issues/183)) ([7a22f3b](https://github.com/sethbacon/terraform-state-manager-backend/commit/7a22f3b3a6e0bdc6b865f20bfefd38a99c97f38a))
+* **auth:** bind OIDC login with a nonce and PKCE verifier ([#185](https://github.com/sethbacon/terraform-state-manager-backend/issues/185)) ([0f61102](https://github.com/sethbacon/terraform-state-manager-backend/commit/0f6110245c648a1fd930bf92e2d9a384f53b228e))
+* **auth:** call SetAudience to close the JWT audience gap in [#178](https://github.com/sethbacon/terraform-state-manager-backend/issues/178) ([#188](https://github.com/sethbacon/terraform-state-manager-backend/issues/188)) ([7f3aea7](https://github.com/sethbacon/terraform-state-manager-backend/commit/7f3aea7efa392973bab956377359ce727652618d))
+* **auth:** enforce OIDC RequireHTTPS in prod + JWT issuer pin ([#184](https://github.com/sethbacon/terraform-state-manager-backend/issues/184)) ([0ec9a04](https://github.com/sethbacon/terraform-state-manager-backend/commit/0ec9a04cdf3a40b6e2855001fc4851b716e95859))
+
 ## [1.17.0](https://github.com/sethbacon/terraform-state-manager-backend/compare/v1.16.1...v1.17.0) (2026-07-10)
 
 
