@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.0.1](https://github.com/sethbacon/terraform-state-manager-backend/compare/v2.0.0...v2.0.1) (2026-07-13)
+
+
+### Bug Fixes
+
+* **driftingest:** reject a malformed host instead of an empty RegistryHost ([#189](https://github.com/sethbacon/terraform-state-manager-backend/issues/189)) ([d77cc33](https://github.com/sethbacon/terraform-state-manager-backend/commit/d77cc337c027889b3c25d12973b90f906afa62fd))
+
 ## [2.0.0](https://github.com/sethbacon/terraform-state-manager-backend/compare/v1.17.0...v2.0.0) (2026-07-13)
 
 
