@@ -180,6 +180,18 @@ jobs:
             VERSION=${{ github.ref_name }}
             BUILD_DATE=${{ github.event.head_commit.timestamp }}
 
+      - name: Trivy image scan (published digest)
+        # ci.yml's fs-scan only covers the source tree/go.sum on the local build-smoke-test
+        # image, not the actual multi-arch image published here — scan the real pushed
+        # digest for OS-package and dependency CVEs before it's signed/attested.
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: image
+          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.build.outputs.digest }}
+          severity: HIGH,CRITICAL
+          exit-code: 1
+          format: table
+
       - name: Install cosign
         uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
 
