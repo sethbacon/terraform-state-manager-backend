@@ -43,6 +43,16 @@ func newAdminOrgScopeEnv(t *testing.T, callerUserID string) *sourcesEnv {
 		orgScoped.PUT("/members/:user_id", h.UpdateOrganizationMember())
 		orgScoped.DELETE("/members/:user_id", h.RemoveOrganizationMember())
 	}
+	admin.GET("/users", h.ListUsers())
+	admin.POST("/users", h.CreateUser())
+	userScoped := admin.Group("/users/:id", h.requireSharedOrgAdminWithTargetUser())
+	{
+		userScoped.PUT("", h.UpdateUser())
+		userScoped.DELETE("", h.DeleteUser())
+		userScoped.GET("/memberships", h.GetUserMemberships())
+		userScoped.GET("/export", h.ExportUserData())
+		userScoped.POST("/erase", h.EraseUser())
+	}
 	return &sourcesEnv{r: r, mock: mock}
 }
 
@@ -66,6 +76,22 @@ func expectNoMembership(mock sqlmock.Sqlmock, orgID, userID string) {
 	mock.ExpectQuery("FROM organization_members om").
 		WithArgs(orgID, userID).
 		WillReturnRows(sqlmock.NewRows(scopeMemberCols))
+}
+
+// userMembershipCols mirrors GetUserMemberships' row shape (identity module's
+// organization_repository.go).
+var userMembershipCols = []string{"organization_id", "organization_name", "role_template_id", "created_at",
+	"role_template_name", "role_template_display_name", "role_template_scopes"}
+
+// expectGetUserMemberships queues the GetUserMemberships lookup
+// requireSharedOrgAdminWithTargetUser issues for the TARGET user, returning one
+// membership row per orgID given (empty orgIDs -> a no-memberships result).
+func expectGetUserMemberships(mock sqlmock.Sqlmock, targetUserID string, orgIDs ...string) {
+	rows := sqlmock.NewRows(userMembershipCols)
+	for _, orgID := range orgIDs {
+		rows.AddRow(orgID, "Org "+orgID, "rt-1", time.Now(), "role", "Role", []byte(`["placeholder"]`))
+	}
+	mock.ExpectQuery("FROM organization_members om").WithArgs(targetUserID).WillReturnRows(rows)
 }
 
 func TestRequireOrgScope_AllowsAdminActingOnOwnOrg(t *testing.T) {
@@ -183,5 +209,137 @@ func TestRequireOrgScope_DoesNotGateOrganizationListOrCreate(t *testing.T) {
 	w := e.do(http.MethodGet, "/api/v1/admin/organizations", "")
 	if w.Code != http.StatusOK {
 		t.Fatalf("list organizations: status = %d (%s), want 200 (no membership check expected)", w.Code, w.Body.String())
+	}
+}
+
+// ---------------------------------------------------------------------------
+// requireSharedOrgAdminWithTargetUser
+// ---------------------------------------------------------------------------
+
+func TestRequireSharedOrgAdminWithTargetUser_AllowsWhenCallerAdminsSharedOrg(t *testing.T) {
+	e := newAdminOrgScopeEnv(t, "caller-1")
+
+	// Target user "target-1" belongs only to org-a.
+	expectGetUserMemberships(e.mock, "target-1", "org-a")
+	// Caller holds admin scope in org-a — a genuine shared-org relationship.
+	expectGetUserScopesForOrg(e.mock, "org-a", "caller-1", `["admin"]`)
+	// The handler itself (GetUserMemberships) re-queries the target's memberships.
+	expectGetUserMemberships(e.mock, "target-1", "org-a")
+
+	w := e.do(http.MethodGet, "/api/v1/admin/users/target-1/memberships", "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("caller admins a shared org with the target user: status = %d (%s), want 200", w.Code, w.Body.String())
+	}
+	if err := e.mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("expected the membership check then the handler's own query to run: %v", err)
+	}
+}
+
+func TestRequireSharedOrgAdminWithTargetUser_RejectsWhenCallerNotAdminInAnyTargetOrg(t *testing.T) {
+	e := newAdminOrgScopeEnv(t, "caller-1")
+
+	// Target user belongs only to org-b, where the caller has no membership at all.
+	expectGetUserMemberships(e.mock, "target-1", "org-b")
+	expectNoMembership(e.mock, "org-b", "caller-1")
+
+	w := e.do(http.MethodDelete, "/api/v1/admin/users/target-1", "")
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("caller shares no admin org with the target user: status = %d (%s), want 403", w.Code, w.Body.String())
+	}
+	if err := e.mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("DeleteUser must NOT be reached: %v", err)
+	}
+}
+
+func TestRequireSharedOrgAdminWithTargetUser_AllowsWhenTargetHasNoMemberships(t *testing.T) {
+	e := newAdminOrgScopeEnv(t, "caller-1")
+
+	// Target user has zero organization memberships at all (e.g. orphaned /
+	// pre-provisioned) — nothing cross-tenant to protect, so this must pass
+	// through without ever calling GetUserScopesForOrg.
+	expectGetUserMemberships(e.mock, "target-1")
+	expectGetUserMemberships(e.mock, "target-1") // the handler's own re-query
+
+	w := e.do(http.MethodGet, "/api/v1/admin/users/target-1/memberships", "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("target user with no memberships: status = %d (%s), want 200", w.Code, w.Body.String())
+	}
+	if err := e.mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("no GetUserScopesForOrg call expected when the target has no memberships: %v", err)
+	}
+}
+
+func TestRequireSharedOrgAdminWithTargetUser_ChecksAllMembershipsUntilMatch(t *testing.T) {
+	e := newAdminOrgScopeEnv(t, "caller-1")
+
+	// Target user belongs to org-b (caller has no admin there) AND org-c (caller
+	// IS admin there) — the middleware must not stop at the first non-matching
+	// membership.
+	expectGetUserMemberships(e.mock, "target-1", "org-b", "org-c")
+	expectNoMembership(e.mock, "org-b", "caller-1")
+	expectGetUserScopesForOrg(e.mock, "org-c", "caller-1", `["admin"]`)
+	expectGetUserMemberships(e.mock, "target-1", "org-b", "org-c") // handler's own re-query
+
+	w := e.do(http.MethodGet, "/api/v1/admin/users/target-1/memberships", "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("caller admins the target's SECOND org membership: status = %d (%s), want 200", w.Code, w.Body.String())
+	}
+	if err := e.mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("expected both memberships to be checked in order: %v", err)
+	}
+}
+
+func TestRequireSharedOrgAdminWithTargetUser_MembershipsLookupDBError(t *testing.T) {
+	e := newAdminOrgScopeEnv(t, "caller-1")
+
+	e.mock.ExpectQuery("FROM organization_members om").WithArgs("target-1").
+		WillReturnError(errors.New("db down"))
+
+	w := e.do(http.MethodGet, "/api/v1/admin/users/target-1/memberships", "")
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("target-memberships DB error: status = %d (%s), want 500", w.Code, w.Body.String())
+	}
+}
+
+func TestRequireSharedOrgAdminWithTargetUser_ScopeLookupDBError(t *testing.T) {
+	e := newAdminOrgScopeEnv(t, "caller-1")
+
+	expectGetUserMemberships(e.mock, "target-1", "org-a")
+	e.mock.ExpectQuery("FROM organization_members om").WithArgs("org-a", "caller-1").
+		WillReturnError(errors.New("db down"))
+
+	w := e.do(http.MethodGet, "/api/v1/admin/users/target-1/memberships", "")
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("caller-scope DB error: status = %d (%s), want 500", w.Code, w.Body.String())
+	}
+}
+
+func TestRequireSharedOrgAdminWithTargetUser_MissingCallerIdentityIsForbidden(t *testing.T) {
+	// No user_id in context at all — simulates a misconfigured chain rather than
+	// a normal request (requireAuth always sets it), but must fail closed.
+	e := newAdminOrgScopeEnv(t, "")
+
+	w := e.do(http.MethodGet, "/api/v1/admin/users/target-1/memberships", "")
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("missing caller identity: status = %d (%s), want 403", w.Code, w.Body.String())
+	}
+	if err := e.mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("no DB query should run without a caller id: %v", err)
+	}
+}
+
+func TestRequireSharedOrgAdminWithTargetUser_DoesNotGateUserListOrCreate(t *testing.T) {
+	// /admin/users (list/create) names no specific target user, so it must stay
+	// gated only by the outer /admin ScopeAdmin check (exercised by the router's
+	// own middleware chain in production, not this handler-level rig) —
+	// requireSharedOrgAdminWithTargetUser must not be on its path at all.
+	e := newAdminOrgScopeEnv(t, "caller-1")
+
+	e.mock.ExpectQuery("SELECT COUNT").WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
+	e.mock.ExpectQuery("FROM users").WillReturnRows(sqlmock.NewRows(
+		[]string{"id", "email", "name", "oidc_sub", "created_at", "updated_at"}))
+	w := e.do(http.MethodGet, "/api/v1/admin/users", "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("list users: status = %d (%s), want 200 (no membership check expected)", w.Code, w.Body.String())
 	}
 }
