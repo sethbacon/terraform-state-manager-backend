@@ -5,8 +5,10 @@ package api
 
 import (
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/mail"
 	"net/url"
 
 	"github.com/gin-gonic/gin"
@@ -24,6 +26,13 @@ type NotificationHandlers struct {
 	repo     *repositories.NotificationChannelRepository
 	notifier *notify.Notifier
 	audit    auditor
+
+	// settingsRepo and smtp back the shared SMTP relay settings endpoints
+	// (GET/PUT /notifications/smtp-config, POST /notifications/test-email).
+	// Set via WithSMTPSettings; nil until then, in which case those endpoints
+	// report 503 rather than panicking.
+	settingsRepo *repositories.SystemSettingsRepository
+	smtp         *notify.SMTPConfig
 }
 
 // NewNotificationHandlers builds the handlers over the app connection.
@@ -34,6 +43,16 @@ func NewNotificationHandlers(database, identityDB *sql.DB, notifier *notify.Noti
 		notifier: notifier,
 		audit:    newAuditor(identityDB),
 	}
+}
+
+// WithSMTPSettings wires in the persisted-settings repository and the shared,
+// live SMTP config pointer (the same one passed to notify.New) so the SMTP
+// relay settings endpoints can read and update it in place. Returns the
+// handler for chaining.
+func (h *NotificationHandlers) WithSMTPSettings(settingsRepo *repositories.SystemSettingsRepository, smtp *notify.SMTPConfig) *NotificationHandlers {
+	h.settingsRepo = settingsRepo
+	h.smtp = smtp
+	return h
 }
 
 type channelRequest struct {
@@ -226,5 +245,233 @@ func (h *NotificationHandlers) TestChannel() gin.HandlerFunc {
 		}
 		h.audit.write(c, "notification_channel.test", "notification_channel", c.Param("id"), nil)
 		c.JSON(http.StatusOK, gin.H{"status": "sent"})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Shared SMTP relay settings (backs every "email" channel). Mirrors
+// terraform-registry's admin notifications-config API for parity: the relay
+// is configured once here (host/port/credentials/from/use_tls), independent
+// of any specific channel.
+// ---------------------------------------------------------------------------
+
+// notificationsSMTPConfigDB is the persistence shape stored in
+// system_settings.notifications_config. Exported so router.go can reuse it
+// when reloading the persisted configuration at startup.
+type notificationsSMTPConfigDB struct {
+	SMTP struct {
+		Host              string `json:"host"`
+		Port              int    `json:"port"`
+		Username          string `json:"username"`
+		From              string `json:"from"`
+		UseTLS            bool   `json:"use_tls"`
+		PasswordEncrypted string `json:"password_encrypted,omitempty"`
+	} `json:"smtp"`
+}
+
+// NotificationsSMTPResponse is the redacted SMTP relay configuration returned
+// by GET/PUT; the password is never included.
+type NotificationsSMTPResponse struct {
+	Host               string `json:"host"`
+	Port               int    `json:"port"`
+	Username           string `json:"username"`
+	From               string `json:"from"`
+	UseTLS             bool   `json:"use_tls"`
+	PasswordConfigured bool   `json:"password_configured"`
+}
+
+// notificationsSMTPInput is the PUT /notifications/smtp-config request body.
+// The password is write-only: send a non-empty value to change it, or omit/
+// blank it to preserve the currently stored password.
+type notificationsSMTPInput struct {
+	Host     string `json:"host"`
+	Port     int    `json:"port"`
+	Username string `json:"username"`
+	Password string `json:"password"`
+	From     string `json:"from"`
+	UseTLS   bool   `json:"use_tls"`
+}
+
+func (h *NotificationHandlers) smtpResponse(passwordConfigured bool) NotificationsSMTPResponse {
+	return NotificationsSMTPResponse{
+		Host: h.smtp.Host, Port: h.smtp.Port, Username: h.smtp.Username, From: h.smtp.From,
+		UseTLS: h.smtp.UseTLS, PasswordConfigured: passwordConfigured,
+	}
+}
+
+// GetSMTPConfig returns the current shared SMTP relay configuration (password redacted).
+// @Summary      Get SMTP relay configuration
+// @Tags         Notifications
+// @Produce      json
+// @Success      200  {object}  NotificationsSMTPResponse
+// @Failure      503  {object}  map[string]interface{}
+// @Security     BearerAuth
+// @Security     CookieAuth
+// @Router       /notifications/smtp-config [get]
+func (h *NotificationHandlers) GetSMTPConfig() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if h.smtp == nil || h.settingsRepo == nil {
+			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "smtp settings are not available"})
+			return
+		}
+		passwordConfigured := h.smtp.Password != ""
+		if raw, err := h.settingsRepo.GetNotificationsConfig(c.Request.Context()); err == nil && raw != nil {
+			var dbc notificationsSMTPConfigDB
+			if json.Unmarshal(raw, &dbc) == nil && dbc.SMTP.PasswordEncrypted != "" {
+				passwordConfigured = true
+			}
+		}
+		c.JSON(http.StatusOK, h.smtpResponse(passwordConfigured))
+	}
+}
+
+// PutSMTPConfig validates and persists the shared SMTP relay configuration,
+// then updates the live config in place so the Notifier's next send observes
+// the change immediately — no restart required.
+// @Summary      Update SMTP relay configuration
+// @Tags         Notifications
+// @Accept       json
+// @Produce      json
+// @Success      200  {object}  NotificationsSMTPResponse
+// @Failure      400  {object}  map[string]interface{}
+// @Failure      503  {object}  map[string]interface{}
+// @Security     BearerAuth
+// @Security     CookieAuth
+// @Router       /notifications/smtp-config [put]
+func (h *NotificationHandlers) PutSMTPConfig() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if h.smtp == nil || h.settingsRepo == nil {
+			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "smtp settings are not available"})
+			return
+		}
+		var input notificationsSMTPInput
+		if err := c.ShouldBindJSON(&input); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		if input.Port == 0 {
+			input.Port = 587
+		}
+		if input.Port < 1 || input.Port > 65535 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "port must be between 1 and 65535"})
+			return
+		}
+		if input.From != "" {
+			if _, err := mail.ParseAddress(input.From); err != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "from must be a valid email address"})
+				return
+			}
+		}
+
+		ctx := c.Request.Context()
+		var existingEncrypted string
+		if raw, err := h.settingsRepo.GetNotificationsConfig(ctx); err == nil && raw != nil {
+			var existing notificationsSMTPConfigDB
+			if json.Unmarshal(raw, &existing) == nil {
+				existingEncrypted = existing.SMTP.PasswordEncrypted
+			}
+		}
+
+		var dbc notificationsSMTPConfigDB
+		dbc.SMTP.Host = input.Host
+		dbc.SMTP.Port = input.Port
+		dbc.SMTP.Username = input.Username
+		dbc.SMTP.From = input.From
+		dbc.SMTP.UseTLS = input.UseTLS
+		if input.Password != "" {
+			if !crypto.Available() {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "cannot store password: encryption key not configured (set TSM_ENCRYPTION_KEY)"})
+				return
+			}
+			enc, err := crypto.Encrypt([]byte(input.Password))
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to encrypt smtp password"})
+				return
+			}
+			dbc.SMTP.PasswordEncrypted = string(enc)
+		} else {
+			dbc.SMTP.PasswordEncrypted = existingEncrypted
+		}
+
+		configJSON, err := json.Marshal(dbc)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to marshal smtp configuration"})
+			return
+		}
+		if err := h.settingsRepo.SetNotificationsConfig(ctx, configJSON); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to save smtp configuration"})
+			return
+		}
+
+		// Update the live config in place (never reassign h.smtp) so the
+		// Notifier's next send observes the new settings immediately.
+		h.smtp.Host = input.Host
+		h.smtp.Port = input.Port
+		h.smtp.Username = input.Username
+		h.smtp.From = input.From
+		h.smtp.UseTLS = input.UseTLS
+		if input.Password != "" {
+			h.smtp.Password = input.Password
+		}
+
+		h.audit.write(c, "notifications.smtp_config.update", "notifications", "smtp", nil)
+
+		passwordConfigured := dbc.SMTP.PasswordEncrypted != "" || h.smtp.Password != ""
+		c.JSON(http.StatusOK, h.smtpResponse(passwordConfigured))
+	}
+}
+
+// notificationsTestEmailInput is the POST /notifications/test-email request body.
+type notificationsTestEmailInput struct {
+	Recipients []string `json:"recipients"`
+	Subject    string   `json:"subject"`
+}
+
+// TestEmail sends a test email using the current SMTP relay configuration,
+// independent of any specific channel. Always returns 200 with
+// {success,message}, even when the send fails. Mirrors terraform-registry's
+// POST /admin/notifications/test for parity.
+// @Summary      Send a test email via the shared SMTP relay
+// @Tags         Notifications
+// @Accept       json
+// @Produce      json
+// @Success      200  {object}  map[string]interface{}
+// @Failure      400  {object}  map[string]interface{}
+// @Security     BearerAuth
+// @Security     CookieAuth
+// @Router       /notifications/test-email [post]
+func (h *NotificationHandlers) TestEmail() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		var input notificationsTestEmailInput
+		if err := c.ShouldBindJSON(&input); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		if len(input.Recipients) == 0 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "at least one recipient is required"})
+			return
+		}
+		for _, r := range input.Recipients {
+			if _, err := mail.ParseAddress(r); err != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("invalid email address %q", r)})
+				return
+			}
+		}
+		if h.smtp == nil || h.smtp.Host == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "smtp host is not configured"})
+			return
+		}
+
+		subject := input.Subject
+		if subject == "" {
+			subject = "Terraform State Manager: test notification"
+		}
+		body := "This is a test notification email sent from the Terraform State Manager admin notifications settings."
+
+		if err := h.notifier.SendTestEmail(c.Request.Context(), input.Recipients, subject, body); err != nil {
+			c.JSON(http.StatusOK, gin.H{"success": false, "message": "failed to send test email: " + err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"success": true, "message": "test email sent"})
 	}
 }

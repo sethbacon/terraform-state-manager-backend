@@ -259,6 +259,13 @@ notifications:
     # -- Optional SMTP AUTH password. Stored in the chart Secret; ignored if
     # security.existingSecret is set (add TSM_NOTIFICATIONS_SMTP_PASSWORD there).
     password: ""
+    # -- Enables STARTTLS (port 587) or implicit TLS (port 465) when true. When
+    # false, the connection is deliberately kept plaintext and never
+    # opportunistically upgraded, even if the relay advertises STARTTLS — use
+    # this for a trusted internal relay whose STARTTLS support is broken or
+    # backed by an untrusted certificate. Mirrors terraform-registry's
+    # notifications.smtp.use_tls.
+    use_tls: true
 
 # -- First-run setup wizard. By default the backend GENERATES a one-time setup
 # token and prints it to the logs at first start (see NOTES). Set `token` to PIN

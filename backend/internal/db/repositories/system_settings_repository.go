@@ -118,3 +118,28 @@ func (r *SystemSettingsRepository) GetStatus(ctx context.Context) (SetupStatus, 
 	s.AuthMethod = auth.String
 	return s, nil
 }
+
+// GetNotificationsConfig retrieves the persisted notifications/SMTP
+// configuration JSON (may be nil if never saved). Mirrors terraform-registry's
+// OIDCConfigRepository.GetNotificationsConfig for parity.
+func (r *SystemSettingsRepository) GetNotificationsConfig(ctx context.Context) ([]byte, error) {
+	var configJSON []byte
+	err := r.db.QueryRowContext(ctx, `SELECT notifications_config FROM system_settings WHERE id = 1`).Scan(&configJSON)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return configJSON, nil
+}
+
+// SetNotificationsConfig stores the notifications configuration JSON (the SMTP
+// password MUST be encrypted by the caller via internal/crypto before it
+// reaches here) and marks notifications as configured.
+func (r *SystemSettingsRepository) SetNotificationsConfig(ctx context.Context, configJSON []byte) error {
+	_, err := r.db.ExecContext(ctx,
+		`UPDATE system_settings SET notifications_configured = true, notifications_config = $1, updated_at = $2 WHERE id = 1`,
+		configJSON, time.Now())
+	return err
+}

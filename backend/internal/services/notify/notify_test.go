@@ -26,7 +26,7 @@ func newNotifier(t *testing.T) (*Notifier, sqlmock.Sqlmock) {
 		t.Fatalf("sqlmock.New: %v", err)
 	}
 	t.Cleanup(func() { db.Close() })
-	return New(repositories.NewNotificationChannelRepository(db), SMTPConfig{}), mock
+	return New(repositories.NewNotificationChannelRepository(db), &SMTPConfig{}), mock
 }
 
 // sealedURL encrypts a target URL the way the API layer stores it.
@@ -122,7 +122,7 @@ func TestNotify_TeamsPayload(t *testing.T) {
 
 func TestNotify_EmailRoutesToRelay(t *testing.T) {
 	n, mock := newNotifier(t)
-	n.smtp = SMTPConfig{Host: "relay.internal", Port: 587, From: "tsm@example.com"}
+	n.smtp = &SMTPConfig{Host: "relay.internal", Port: 587, From: "tsm@example.com"}
 	var gotTo []string
 	var gotMsg string
 	n.mailer = func(_ context.Context, cfg SMTPConfig, to []string, msg []byte) error {
