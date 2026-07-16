@@ -1,5 +1,18 @@
 # Changelog
 
+## [2.1.0](https://github.com/sethbacon/terraform-state-manager-backend/compare/v2.0.1...v2.1.0) (2026-07-16)
+
+
+### Features
+
+* **notifications:** DB-persisted SMTP relay config and TLS control ([#195](https://github.com/sethbacon/terraform-state-manager-backend/issues/195)) ([1f31a96](https://github.com/sethbacon/terraform-state-manager-backend/commit/1f31a96659add7f8cb69a1f39f087b541db72e8a))
+
+
+### Bug Fixes
+
+* **ci:** make Trivy scans blocking and scan the published image digest ([#191](https://github.com/sethbacon/terraform-state-manager-backend/issues/191)) ([aeb756f](https://github.com/sethbacon/terraform-state-manager-backend/commit/aeb756ffbf7376ed6f0f4f2540e420b19e0da023))
+* require shared-org admin for cross-org user management ([#54](https://github.com/sethbacon/terraform-state-manager-backend/issues/54)) ([#194](https://github.com/sethbacon/terraform-state-manager-backend/issues/194)) ([12ee2df](https://github.com/sethbacon/terraform-state-manager-backend/commit/12ee2dfa78eb4544bfb906671f608f3588a0db56))
+
 ## [2.0.1](https://github.com/sethbacon/terraform-state-manager-backend/compare/v2.0.0...v2.0.1) (2026-07-13)
 
 
