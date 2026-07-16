@@ -47,6 +47,11 @@ type SMTPConfig struct {
 	From     string
 	Username string
 	Password string
+	// UseTLS enables implicit TLS (port 465, falling back to STARTTLS on dial
+	// failure) when true. When false, the connection is deliberately kept
+	// plaintext and never opportunistically upgraded to STARTTLS even if the
+	// relay advertises it — see sendSMTPPlain.
+	UseTLS bool
 }
 
 // smtpSender sends a pre-built RFC 5322 message to the recipients through the
@@ -57,14 +62,20 @@ type smtpSender func(ctx context.Context, cfg SMTPConfig, to []string, msg []byt
 type Notifier struct {
 	repo   *repositories.NotificationChannelRepository
 	client *http.Client
-	smtp   SMTPConfig
+	smtp   *SMTPConfig
 	mailer smtpSender
 	logger *slog.Logger
 }
 
 // New builds a Notifier over the channel repository. smtp configures the shared
-// relay for email channels (an empty Host disables the email type).
-func New(repo *repositories.NotificationChannelRepository, smtp SMTPConfig) *Notifier {
+// relay for email channels (a nil or empty-Host config disables the email
+// type). smtp is held by reference so a runtime configuration update (e.g. via
+// the admin notifications API) is observed by the Notifier without recreating
+// it — mirroring how the registry's notify.Mailer holds its SMTP config.
+func New(repo *repositories.NotificationChannelRepository, smtp *SMTPConfig) *Notifier {
+	if smtp == nil {
+		smtp = &SMTPConfig{}
+	}
 	return &Notifier{
 		repo:   repo,
 		client: &http.Client{Timeout: 10 * time.Second},
@@ -104,6 +115,17 @@ func (n *Notifier) SendTest(ctx context.Context, channelID string) error {
 		return fmt.Errorf("channel not found")
 	}
 	return n.deliver(ctx, ch, "Test notification", "This is a test from Terraform State Manager.")
+}
+
+// SendTestEmail delivers an ad-hoc message directly through the shared SMTP
+// relay, independent of any configured channel — the "send test email" action
+// for the SMTP relay settings themselves (mirrors terraform-registry's
+// POST /admin/notifications/test).
+func (n *Notifier) SendTestEmail(ctx context.Context, recipients []string, subject, body string) error {
+	if n == nil {
+		return fmt.Errorf("notifications are not available")
+	}
+	return n.sendEmail(ctx, strings.Join(recipients, ","), subject, body)
 }
 
 func (n *Notifier) deliver(ctx context.Context, ch *repositories.NotificationChannel, title, message string) error {
@@ -210,7 +232,7 @@ func (n *Notifier) sendEmail(ctx context.Context, recipients, title, message str
 	if err != nil {
 		return err
 	}
-	return n.mailer(ctx, n.smtp, to, buildEmailMessage(n.smtp.From, to, title, message))
+	return n.mailer(ctx, *n.smtp, to, buildEmailMessage(n.smtp.From, to, title, message))
 }
 
 // ParseRecipients splits a comma-separated recipient list and validates each as
@@ -251,10 +273,38 @@ func buildEmailMessage(from string, to []string, title, message string) []byte {
 	return b.Bytes()
 }
 
-// sendSMTP is the live transport: dial the relay, opportunistically upgrade to TLS
-// (STARTTLS), authenticate when credentials are configured, and send the message.
+// sendSMTP is the live transport: dial the relay, authenticate when
+// credentials are configured, and send the message. When cfg.UseTLS is set, an
+// implicit TLS connection (port 465) is attempted first, falling back to
+// STARTTLS (port 587 pattern) on dial failure; otherwise the connection is
+// deliberately kept plaintext — see sendSMTPPlain.
 func sendSMTP(ctx context.Context, cfg SMTPConfig, to []string, msg []byte) error {
 	addr := net.JoinHostPort(cfg.Host, strconv.Itoa(cfg.Port))
+	auth := authForSMTP(cfg)
+	if cfg.UseTLS {
+		return sendSMTPTLS(ctx, addr, cfg.Host, auth, cfg.From, to, msg)
+	}
+	return sendSMTPPlain(ctx, addr, cfg.Host, auth, cfg.From, to, msg)
+}
+
+// authForSMTP returns the SMTP authentication mechanism for the configured
+// credentials, or nil when no username is set (an internal relay may accept
+// unauthenticated mail).
+func authForSMTP(cfg SMTPConfig) smtp.Auth {
+	if cfg.Username == "" {
+		return nil
+	}
+	return smtp.PlainAuth("", cfg.Username, cfg.Password, cfg.Host)
+}
+
+// sendSMTPPlain connects without TLS and sends a message, deliberately never
+// attempting a STARTTLS upgrade even if the relay advertises the extension.
+// This is the UseTLS=false path: many relays advertise STARTTLS even when
+// unauthenticated/internal, and opportunistically upgrading (as smtp.SendMail
+// and earlier versions of this function did) would fail the handshake against
+// a self-signed or otherwise untrusted certificate, aborting a send the
+// operator explicitly configured as plaintext.
+func sendSMTPPlain(ctx context.Context, addr, host string, auth smtp.Auth, from string, to []string, msg []byte) error {
 	conn, err := (&net.Dialer{}).DialContext(ctx, "tcp", addr)
 	if err != nil {
 		return fmt.Errorf("dial smtp relay: %w", err)
@@ -262,26 +312,69 @@ func sendSMTP(ctx context.Context, cfg SMTPConfig, to []string, msg []byte) erro
 	if deadline, ok := ctx.Deadline(); ok {
 		_ = conn.SetDeadline(deadline)
 	}
-	c, err := smtp.NewClient(conn, cfg.Host)
+	c, err := smtp.NewClient(conn, host)
 	if err != nil {
 		_ = conn.Close()
 		return fmt.Errorf("smtp handshake: %w", err)
 	}
 	defer func() { _ = c.Close() }()
+	return finishSMTP(c, auth, from, to, msg)
+}
 
-	if ok, _ := c.Extension("STARTTLS"); ok {
-		if err := c.StartTLS(&tls.Config{ServerName: cfg.Host}); err != nil {
-			return fmt.Errorf("smtp starttls: %w", err)
-		}
+// sendSMTPTLS connects via implicit TLS (port 465 / SMTPS) and sends a
+// message, falling back to the STARTTLS pattern (port 587) if the TLS dial
+// itself fails to connect.
+func sendSMTPTLS(ctx context.Context, addr, host string, auth smtp.Auth, from string, to []string, msg []byte) error {
+	dialer := &tls.Dialer{Config: &tls.Config{ServerName: host, MinVersion: tls.VersionTLS12}}
+	conn, err := dialer.DialContext(ctx, "tcp", addr)
+	if err != nil {
+		return sendSMTPStartTLS(ctx, addr, host, auth, from, to, msg)
 	}
-	if cfg.Username != "" {
-		// PlainAuth refuses to send the password over an unencrypted connection,
-		// so this fails closed if the relay offered no STARTTLS above.
-		if err := c.Auth(smtp.PlainAuth("", cfg.Username, cfg.Password, cfg.Host)); err != nil {
+	if deadline, ok := ctx.Deadline(); ok {
+		_ = conn.SetDeadline(deadline)
+	}
+	c, err := smtp.NewClient(conn, host)
+	if err != nil {
+		_ = conn.Close()
+		return fmt.Errorf("smtp handshake: %w", err)
+	}
+	defer func() { _ = c.Close() }()
+	return finishSMTP(c, auth, from, to, msg)
+}
+
+// sendSMTPStartTLS connects in plaintext, then upgrades via STARTTLS (the
+// standard submission-port pattern) before authenticating and sending.
+func sendSMTPStartTLS(ctx context.Context, addr, host string, auth smtp.Auth, from string, to []string, msg []byte) error {
+	conn, err := (&net.Dialer{}).DialContext(ctx, "tcp", addr)
+	if err != nil {
+		return fmt.Errorf("dial smtp relay: %w", err)
+	}
+	if deadline, ok := ctx.Deadline(); ok {
+		_ = conn.SetDeadline(deadline)
+	}
+	c, err := smtp.NewClient(conn, host)
+	if err != nil {
+		_ = conn.Close()
+		return fmt.Errorf("smtp handshake: %w", err)
+	}
+	defer func() { _ = c.Close() }()
+	if err := c.StartTLS(&tls.Config{ServerName: host, MinVersion: tls.VersionTLS12}); err != nil {
+		return fmt.Errorf("smtp starttls: %w", err)
+	}
+	return finishSMTP(c, auth, from, to, msg)
+}
+
+// finishSMTP authenticates (when auth is non-nil) and delivers msg over an
+// already-connected (and, if applicable, already-encrypted) client. PlainAuth
+// refuses to send the password over an unencrypted connection, so auth fails
+// closed if the caller reached here over sendSMTPPlain with credentials set.
+func finishSMTP(c *smtp.Client, auth smtp.Auth, from string, to []string, msg []byte) error {
+	if auth != nil {
+		if err := c.Auth(auth); err != nil {
 			return fmt.Errorf("smtp auth: %w", err)
 		}
 	}
-	if err := c.Mail(cfg.From); err != nil {
+	if err := c.Mail(from); err != nil {
 		return fmt.Errorf("smtp mail from: %w", err)
 	}
 	for _, rcpt := range to {

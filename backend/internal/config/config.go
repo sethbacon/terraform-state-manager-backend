@@ -64,7 +64,7 @@ type NotificationsConfig struct {
 // channels. Each email channel stores only its recipient address(es); they all
 // send through this relay. Host empty (default) disables the email channel type.
 // Auth is optional — an internal relay may accept unauthenticated mail — but when
-// Username is set the relay must offer STARTTLS so the password is never sent in
+// Username is set the relay must offer TLS so the password is never sent in
 // the clear. Env: TSM_NOTIFICATIONS_SMTP_*.
 type SMTPConfig struct {
 	Host     string `mapstructure:"host"`
@@ -72,6 +72,11 @@ type SMTPConfig struct {
 	From     string `mapstructure:"from"`     // envelope + header From address
 	Username string `mapstructure:"username"` // optional SMTP AUTH user
 	Password string `mapstructure:"password"` // optional SMTP AUTH password
+	// UseTLS enables STARTTLS (port 587) or implicit TLS (port 465) when true.
+	// When false the connection is deliberately kept plaintext and never
+	// opportunistically upgraded, even if the relay advertises STARTTLS.
+	// Mirrors terraform-registry's notifications.smtp.use_tls for parity.
+	UseTLS bool `mapstructure:"use_tls"`
 }
 
 // WorkersConfig gates the periodic background workers (schedule runner +
@@ -477,6 +482,7 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("notifications.smtp.from", "")
 	v.SetDefault("notifications.smtp.username", "")
 	v.SetDefault("notifications.smtp.password", "")
+	v.SetDefault("notifications.smtp.use_tls", true)
 
 	// Suite runtime discovery
 	v.SetDefault("suite.sibling_url", "")

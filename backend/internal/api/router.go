@@ -7,6 +7,7 @@ package api
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -292,15 +293,24 @@ func NewRouter(cfg *config.Config, database *sql.DB, identityDB *sql.DB) (*gin.E
 
 		// Notifier fans drift/failure alerts out to configured channels. Nil with a
 		// nil DB (unit tests) — the drift handler treats a nil notifier as a no-op.
+		// smtpCfg is held by reference (not a value copy) so a runtime SMTP
+		// settings update via PUT /notifications/smtp-config is observed by the
+		// Notifier on its next send without recreating it — mirroring
+		// terraform-registry's notify.Mailer. Any persisted config (saved via
+		// that same endpoint) is reloaded on top of the YAML/env defaults so it
+		// survives a restart.
 		var notifier *notify.Notifier
+		smtpCfg := &notify.SMTPConfig{
+			Host:     cfg.Notifications.SMTP.Host,
+			Port:     cfg.Notifications.SMTP.Port,
+			From:     cfg.Notifications.SMTP.From,
+			Username: cfg.Notifications.SMTP.Username,
+			Password: cfg.Notifications.SMTP.Password,
+			UseTLS:   cfg.Notifications.SMTP.UseTLS,
+		}
 		if database != nil {
-			notifier = notify.New(repositories.NewNotificationChannelRepository(database), notify.SMTPConfig{
-				Host:     cfg.Notifications.SMTP.Host,
-				Port:     cfg.Notifications.SMTP.Port,
-				From:     cfg.Notifications.SMTP.From,
-				Username: cfg.Notifications.SMTP.Username,
-				Password: cfg.Notifications.SMTP.Password,
-			})
+			reloadNotificationsSMTPConfigFromDB(smtpCfg, settingsRepo)
+			notifier = notify.New(repositories.NewNotificationChannelRepository(database), smtpCfg)
 		}
 
 		// Operator-managed workflow-template store backs the /workflow endpoints;
@@ -387,6 +397,9 @@ func NewRouter(cfg *config.Config, database *sql.DB, identityDB *sql.DB) (*gin.E
 		// Notification channels (admin): alert destinations + the drift-event hook.
 		// Target URLs are secrets, so the whole group is admin-scoped.
 		notif := NewNotificationHandlers(database, identityDB, notifier)
+		if database != nil {
+			notif.WithSMTPSettings(settingsRepo, smtpCfg)
+		}
 		ng := v1.Group("/notifications", requireAuth, middleware.RequireScope(auth.ScopeAdmin))
 		{
 			ng.GET("/channels", notif.ListChannels())
@@ -394,6 +407,9 @@ func NewRouter(cfg *config.Config, database *sql.DB, identityDB *sql.DB) (*gin.E
 			ng.PUT("/channels/:id", notif.UpdateChannel())
 			ng.DELETE("/channels/:id", notif.DeleteChannel())
 			ng.POST("/channels/:id/test", notif.TestChannel())
+			ng.GET("/smtp-config", notif.GetSMTPConfig())
+			ng.PUT("/smtp-config", notif.PutSMTPConfig())
+			ng.POST("/test-email", notif.TestEmail())
 		}
 
 		// Background workers. Guarded on database so unit tests that build the
@@ -486,4 +502,33 @@ func NewRouter(cfg *config.Config, database *sql.DB, identityDB *sql.DB) (*gin.E
 	}
 
 	return r, stop, nil
+}
+
+// reloadNotificationsSMTPConfigFromDB applies any persisted SMTP relay
+// configuration (saved via PUT /notifications/smtp-config) onto smtp, so a
+// runtime admin change survives a process restart. Fields are set in place
+// (never reassigned) so the Notifier holding this same pointer observes the
+// reloaded values. Mirrors terraform-registry's reloadNotificationsConfigFromDB.
+func reloadNotificationsSMTPConfigFromDB(smtp *notify.SMTPConfig, settingsRepo *repositories.SystemSettingsRepository) {
+	raw, err := settingsRepo.GetNotificationsConfig(context.Background())
+	if err != nil || raw == nil {
+		return
+	}
+	var dbc notificationsSMTPConfigDB
+	if err := json.Unmarshal(raw, &dbc); err != nil {
+		slog.Error("notifications startup: failed to parse persisted smtp config", "error", err)
+		return
+	}
+	smtp.Host = dbc.SMTP.Host
+	smtp.Port = dbc.SMTP.Port
+	smtp.Username = dbc.SMTP.Username
+	smtp.From = dbc.SMTP.From
+	smtp.UseTLS = dbc.SMTP.UseTLS
+	if dbc.SMTP.PasswordEncrypted != "" {
+		if pw, derr := crypto.Decrypt([]byte(dbc.SMTP.PasswordEncrypted)); derr != nil {
+			slog.Error("notifications startup: failed to decrypt persisted smtp password", "error", derr)
+		} else {
+			smtp.Password = string(pw)
+		}
+	}
 }
