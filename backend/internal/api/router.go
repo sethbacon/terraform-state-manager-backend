@@ -232,13 +232,22 @@ func NewRouter(cfg *config.Config, database *sql.DB, identityDB *sql.DB) (*gin.E
 			ag.GET("/stats", admin.Stats())
 
 			// Users: list/search + CRUD + memberships + GDPR data-subject actions.
+			// Every route naming a specific target user (:id), other than list and
+			// create, additionally requires the caller to hold admin within at
+			// least one organization THAT USER also belongs to — not just the
+			// flat/global admin scope the outer /admin group already checked —
+			// closing the cross-org privilege escalation the flat scope alone
+			// would otherwise allow (mirroring the /organizations/:id gating below).
 			ag.GET("/users", admin.ListUsers())
 			ag.POST("/users", admin.CreateUser())
-			ag.PUT("/users/:id", admin.UpdateUser())
-			ag.DELETE("/users/:id", admin.DeleteUser())
-			ag.GET("/users/:id/memberships", admin.GetUserMemberships())
-			ag.GET("/users/:id/export", admin.ExportUserData())
-			ag.POST("/users/:id/erase", admin.EraseUser())
+			userScoped := ag.Group("/users/:id", admin.requireSharedOrgAdminWithTargetUser())
+			{
+				userScoped.PUT("", admin.UpdateUser())
+				userScoped.DELETE("", admin.DeleteUser())
+				userScoped.GET("/memberships", admin.GetUserMemberships())
+				userScoped.GET("/export", admin.ExportUserData())
+				userScoped.POST("/erase", admin.EraseUser())
+			}
 
 			// Organizations: list/create are platform-wide (no specific target
 			// organization to check membership against). Every route naming a
