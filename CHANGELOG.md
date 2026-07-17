@@ -1,5 +1,17 @@
 # Changelog
 
+## [2.2.0](https://github.com/sethbacon/terraform-state-manager-backend/compare/v2.1.1...v2.2.0) (2026-07-17)
+
+
+### Features
+
+* **helm:** support extra init containers on the backend pod ([#203](https://github.com/sethbacon/terraform-state-manager-backend/issues/203)) ([c25f200](https://github.com/sethbacon/terraform-state-manager-backend/commit/c25f200cb4325131eb3dad4d42f63123e91a7e98))
+
+
+### Bug Fixes
+
+* **docker:** bump Go toolchain to 1.26.5 (CVE-2026-39822) ([#201](https://github.com/sethbacon/terraform-state-manager-backend/issues/201)) ([fa399f4](https://github.com/sethbacon/terraform-state-manager-backend/commit/fa399f4da76f4c6f22e322258f48bbe1899059bb))
+
 ## [2.1.1](https://github.com/sethbacon/terraform-state-manager-backend/compare/v2.1.0...v2.1.1) (2026-07-17)
 
 
