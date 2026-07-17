@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.1.1](https://github.com/sethbacon/terraform-state-manager-backend/compare/v2.1.0...v2.1.1) (2026-07-17)
+
+
+### Bug Fixes
+
+* **config:** document missing notifications.smtp section in config.example.yaml ([#199](https://github.com/sethbacon/terraform-state-manager-backend/issues/199)) ([016ef9b](https://github.com/sethbacon/terraform-state-manager-backend/commit/016ef9be6d0d8f650f1bc9bab992746f9e0d0072))
+
 ## [2.1.0](https://github.com/sethbacon/terraform-state-manager-backend/compare/v2.0.1...v2.1.0) (2026-07-16)
 
 
