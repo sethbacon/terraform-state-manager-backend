@@ -34,6 +34,10 @@ spec:
       serviceAccountName: {{ include "tsm.serviceAccountName" . }}
       securityContext:
         {{- toYaml .Values.backend.podSecurityContext | nindent 8 }}
+      {{- with .Values.backend.extraInitContainers }}
+      initContainers:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       containers:
         - name: backend
           image: {{ include "tsm.backendImage" . }}
