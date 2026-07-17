@@ -165,3 +165,16 @@ suite:
   # value as the sibling registry's TFR_SUITE_SIBLING_TOKEN to enable "Consumed by".
   # Read from TSM_SUITE_SERVICE_TOKEN in production (a secret — do not commit it).
   service_token: ""
+
+# Outbound alert delivery for drift/health run events. Channel types (webhook,
+# slack, teams, email) are managed via the API/UI; the "email" channel type
+# additionally requires the shared SMTP relay below (host empty = email
+# channels disabled, other channel types are unaffected).
+notifications:
+  smtp:
+    host: ""          # SMTP relay host; empty disables email channels
+    port: 587          # submission/STARTTLS default
+    from: ""           # From address; required when host is set
+    username: ""       # optional SMTP AUTH user; enables PlainAuth
+    password: ""       # optional SMTP AUTH password (read from TSM_NOTIFICATIONS_SMTP_PASSWORD)
+    use_tls: true       # implicit TLS (port 465), falls back to STARTTLS on dial failure
