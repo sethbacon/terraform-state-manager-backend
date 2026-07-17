@@ -1,7 +1,7 @@
 # Multi-stage Dockerfile for the Terraform State Manager backend.
 
 # Stage 1: build the Go binary.
-FROM golang:1.26.4-alpine AS builder
+FROM golang:1.26.5-alpine AS builder
 
 RUN apk add --no-cache git ca-certificates tzdata && update-ca-certificates || true
 
