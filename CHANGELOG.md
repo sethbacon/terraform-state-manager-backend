@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.2.1](https://github.com/sethbacon/terraform-state-manager-backend/compare/v2.2.0...v2.2.1) (2026-07-17)
+
+
+### Bug Fixes
+
+* **helm:** apply backend.extraInitContainers to the dedicated worker too ([#204](https://github.com/sethbacon/terraform-state-manager-backend/issues/204)) ([a2e25e6](https://github.com/sethbacon/terraform-state-manager-backend/commit/a2e25e6cace905c31ecbd106f0775085eb23e5ea))
+
 ## [2.2.0](https://github.com/sethbacon/terraform-state-manager-backend/compare/v2.1.1...v2.2.0) (2026-07-17)
 
 
