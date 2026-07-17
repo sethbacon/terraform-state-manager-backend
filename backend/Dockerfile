@@ -22,9 +22,9 @@ RUN CLEAN_VERSION="${VERSION#v}" && \
     ./cmd/server
 
 # Stage 2: minimal runtime image.
-FROM alpine:3.21
+FROM alpine:3.23
 
-# apk upgrade: apply the latest Alpine 3.21 security patches at build time (the
+# apk upgrade: apply the latest Alpine 3.23 security patches at build time (the
 # base is tag-pinned, so a rebuild picks up backports).
 # git: go-git shells out to git-upload-pack for file-path remotes (http/ssh
 # remotes are pure-Go); needed so local-path git sources work in-container.
