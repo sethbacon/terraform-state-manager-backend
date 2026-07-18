@@ -16,6 +16,9 @@ import (
 	"github.com/jmoiron/sqlx"
 
 	identitycrypto "github.com/sethbacon/terraform-suite-identity/identity/crypto"
+	identitymailer "github.com/sethbacon/terraform-suite-identity/identity/mailer"
+	identitynotify "github.com/sethbacon/terraform-suite-identity/identity/notify"
+	idstore "github.com/sethbacon/terraform-suite-identity/identity/store"
 	"github.com/sethbacon/terraform-suite-identity/identity/suite"
 
 	"github.com/terraform-state-manager/terraform-state-manager/docs"
@@ -320,6 +323,7 @@ func NewRouter(cfg *config.Config, database *sql.DB, identityDB *sql.DB) (*gin.E
 		}
 		if database != nil {
 			reloadNotificationsSMTPConfigFromDB(smtpCfg, settingsRepo)
+			reloadNotificationsExpiryConfigFromDB(&cfg.Notifications, settingsRepo)
 			if tc, err := buildIdentityTokenCipher(); err != nil {
 				slog.Warn("notification channels disabled: channel-target encryption unavailable", "error", err)
 			} else {
@@ -414,6 +418,7 @@ func NewRouter(cfg *config.Config, database *sql.DB, identityDB *sql.DB) (*gin.E
 		notif := NewNotificationHandlers(database, identityDB, notifier, tokenCipher)
 		if database != nil {
 			notif.WithSMTPSettings(settingsRepo, smtpCfg)
+			notif.WithAPIKeyExpirySettings(&cfg.Notifications)
 		}
 		ng := v1.Group("/notifications", requireAuth, middleware.RequireScope(auth.ScopeAdmin))
 		{
@@ -425,6 +430,8 @@ func NewRouter(cfg *config.Config, database *sql.DB, identityDB *sql.DB) (*gin.E
 			ng.GET("/smtp-config", notif.GetSMTPConfig())
 			ng.PUT("/smtp-config", notif.PutSMTPConfig())
 			ng.POST("/test-email", notif.TestEmail())
+			ng.GET("/api-key-expiry", notif.GetAPIKeyExpiryConfig())
+			ng.PUT("/api-key-expiry", notif.PutAPIKeyExpiryConfig())
 		}
 
 		// Background workers. Guarded on database so unit tests that build the
@@ -465,12 +472,42 @@ func NewRouter(cfg *config.Config, database *sql.DB, identityDB *sql.DB) (*gin.E
 					cfg.Drift.RunTTL, cfg.Drift.ReconcileInterval,
 				)
 				healthReconciler.Start()
+
+				// API key expiry notifier: periodic per-user warning emails for
+				// keys nearing expiry. Gated on the dedicated worker replica like
+				// the jobs above -- FindExpiringKeys/MarkExpiryNotificationSent has
+				// no cross-replica claim, so running it on every API pod in a
+				// multi-replica deployment could double-send warning emails.
+				expiryNotifier := identitynotify.NewAPIKeyExpiryNotifier(
+					idstore.NewAPIKeyRepository(identityDB),
+					idstore.NewUserRepository(identityDB),
+					func() identitynotify.ExpiryConfig {
+						return identitynotify.ExpiryConfig{
+							Enabled:        cfg.Notifications.Enabled,
+							APIKeyExpiring: cfg.Notifications.Events.APIKeyExpiring,
+							SMTP: identitymailer.Config{
+								Host:     smtpCfg.Host,
+								Port:     smtpCfg.Port,
+								From:     smtpCfg.From,
+								Username: smtpCfg.Username,
+								Password: smtpCfg.Password,
+								UseTLS:   smtpCfg.UseTLS,
+							},
+							WarningDays:        cfg.Notifications.APIKeyExpiryWarningDays,
+							CheckIntervalHours: cfg.Notifications.APIKeyExpiryCheckIntervalHours,
+						}
+					},
+					identitynotify.ExpiryOptions{ProductName: "Terraform State Manager"},
+				)
+				go func() { _ = expiryNotifier.Start(context.Background()) }()
+
 				runnerStop := runner.Stop
 				stop = func() {
 					runnerStop()
 					syncer.Stop()
 					reconciler.Stop()
 					healthReconciler.Stop()
+					_ = expiryNotifier.Stop()
 				}
 			} else {
 				slog.Info("background workers disabled on this replica (workers.enabled=false); " +
@@ -546,4 +583,28 @@ func reloadNotificationsSMTPConfigFromDB(smtp *notify.SMTPConfig, settingsRepo *
 			smtp.Password = string(pw)
 		}
 	}
+}
+
+// reloadNotificationsExpiryConfigFromDB applies any persisted API-key-expiry
+// settings (saved via PUT /notifications/api-key-expiry) onto notifCfg, so a
+// runtime admin change survives a process restart. A nil Expiry section
+// (never explicitly saved via that endpoint) leaves the YAML/env defaults
+// untouched -- mirrors reloadNotificationsSMTPConfigFromDB for the Expiry
+// section of the same persisted blob.
+func reloadNotificationsExpiryConfigFromDB(notifCfg *config.NotificationsConfig, settingsRepo *repositories.SystemSettingsRepository) {
+	raw, err := settingsRepo.GetNotificationsConfig(context.Background())
+	if err != nil || raw == nil {
+		return
+	}
+	var dbc notificationsSMTPConfigDB
+	if err := json.Unmarshal(raw, &dbc); err != nil {
+		slog.Error("notifications startup: failed to parse persisted api key expiry config", "error", err)
+		return
+	}
+	if dbc.Expiry == nil {
+		return
+	}
+	notifCfg.Events.APIKeyExpiring = dbc.Expiry.APIKeyExpiring
+	notifCfg.APIKeyExpiryWarningDays = dbc.Expiry.WarningDays
+	notifCfg.APIKeyExpiryCheckIntervalHours = dbc.Expiry.CheckIntervalHours
 }

@@ -15,6 +15,7 @@ import (
 
 	identitycrypto "github.com/sethbacon/terraform-suite-identity/identity/crypto"
 
+	"github.com/terraform-state-manager/terraform-state-manager/internal/config"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/crypto"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/db/repositories"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/services/notify"
@@ -25,9 +26,9 @@ var validEvents = map[string]bool{notify.EventDriftDetected: true, notify.EventR
 
 // NotificationHandlers serves the notification-channel endpoints.
 type NotificationHandlers struct {
-	repo        *repositories.NotificationChannelRepository
-	notifier    *notify.Notifier
-	audit       auditor
+	repo     *repositories.NotificationChannelRepository
+	notifier *notify.Notifier
+	audit    auditor
 	// tokenCipher encrypts/decrypts channel targets — must be the same shared
 	// identity/crypto cipher instance (same key material) the Notifier uses to
 	// decrypt at send time.
@@ -39,6 +40,11 @@ type NotificationHandlers struct {
 	// report 503 rather than panicking.
 	settingsRepo *repositories.SystemSettingsRepository
 	smtp         *notify.SMTPConfig
+
+	// notifCfg backs the API-key-expiry settings endpoints (GET/PUT
+	// /notifications/api-key-expiry). Set via WithAPIKeyExpirySettings; nil
+	// until then, in which case those endpoints report 503.
+	notifCfg *config.NotificationsConfig
 }
 
 // NewNotificationHandlers builds the handlers over the app connection.
@@ -61,6 +67,15 @@ func NewNotificationHandlers(database, identityDB *sql.DB, notifier *notify.Noti
 func (h *NotificationHandlers) WithSMTPSettings(settingsRepo *repositories.SystemSettingsRepository, smtp *notify.SMTPConfig) *NotificationHandlers {
 	h.settingsRepo = settingsRepo
 	h.smtp = smtp
+	return h
+}
+
+// WithAPIKeyExpirySettings wires in the live notifications config pointer so
+// the API-key-expiry settings endpoints can read and update it in place.
+// Reuses the settingsRepo set by WithSMTPSettings (call after it in the same
+// database-available branch). Returns the handler for chaining.
+func (h *NotificationHandlers) WithAPIKeyExpirySettings(notifCfg *config.NotificationsConfig) *NotificationHandlers {
+	h.notifCfg = notifCfg
 	return h
 }
 
@@ -276,6 +291,18 @@ type notificationsSMTPConfigDB struct {
 		UseTLS            bool   `json:"use_tls"`
 		PasswordEncrypted string `json:"password_encrypted,omitempty"`
 	} `json:"smtp"`
+	// Expiry is a pointer so a blob persisted before this feature existed
+	// (nil) is distinguishable from one that explicitly saved zero/false
+	// values -- mirrors terraform-registry's NotificationsConfigDB.Events
+	// pointer for the same reason.
+	Expiry *notificationsExpiryConfigDB `json:"expiry,omitempty"`
+}
+
+// notificationsExpiryConfigDB is the Expiry section of notificationsSMTPConfigDB.
+type notificationsExpiryConfigDB struct {
+	APIKeyExpiring     bool `json:"api_key_expiring"`
+	WarningDays        int  `json:"warning_days"`
+	CheckIntervalHours int  `json:"check_interval_hours"`
 }
 
 // NotificationsSMTPResponse is the redacted SMTP relay configuration returned
@@ -373,15 +400,12 @@ func (h *NotificationHandlers) PutSMTPConfig() gin.HandlerFunc {
 		}
 
 		ctx := c.Request.Context()
-		var existingEncrypted string
-		if raw, err := h.settingsRepo.GetNotificationsConfig(ctx); err == nil && raw != nil {
-			var existing notificationsSMTPConfigDB
-			if json.Unmarshal(raw, &existing) == nil {
-				existingEncrypted = existing.SMTP.PasswordEncrypted
-			}
-		}
-
 		var dbc notificationsSMTPConfigDB
+		if raw, err := h.settingsRepo.GetNotificationsConfig(ctx); err == nil && raw != nil {
+			_ = json.Unmarshal(raw, &dbc) // preserve the Expiry section; only SMTP fields are mutated below
+		}
+		existingEncrypted := dbc.SMTP.PasswordEncrypted
+
 		dbc.SMTP.Host = input.Host
 		dbc.SMTP.Port = input.Port
 		dbc.SMTP.Username = input.Username
@@ -427,6 +451,121 @@ func (h *NotificationHandlers) PutSMTPConfig() gin.HandlerFunc {
 
 		passwordConfigured := dbc.SMTP.PasswordEncrypted != "" || h.smtp.Password != ""
 		c.JSON(http.StatusOK, h.smtpResponse(passwordConfigured))
+	}
+}
+
+// NotificationsAPIKeyExpiryResponse is the current API-key-expiry
+// notification settings. Enabled reflects the master notifications.enabled
+// switch (read-only here -- this app has no endpoint to toggle that switch).
+type NotificationsAPIKeyExpiryResponse struct {
+	Enabled            bool `json:"enabled"`
+	APIKeyExpiring     bool `json:"api_key_expiring"`
+	WarningDays        int  `json:"api_key_expiry_warning_days"`
+	CheckIntervalHours int  `json:"api_key_expiry_check_interval_hours"`
+}
+
+// notificationsAPIKeyExpiryInput is the PUT /notifications/api-key-expiry
+// request body.
+type notificationsAPIKeyExpiryInput struct {
+	APIKeyExpiring     bool `json:"api_key_expiring"`
+	WarningDays        int  `json:"api_key_expiry_warning_days"`
+	CheckIntervalHours int  `json:"api_key_expiry_check_interval_hours"`
+}
+
+func (h *NotificationHandlers) apiKeyExpiryResponse() NotificationsAPIKeyExpiryResponse {
+	return NotificationsAPIKeyExpiryResponse{
+		Enabled:            h.notifCfg.Enabled,
+		APIKeyExpiring:     h.notifCfg.Events.APIKeyExpiring,
+		WarningDays:        h.notifCfg.APIKeyExpiryWarningDays,
+		CheckIntervalHours: h.notifCfg.APIKeyExpiryCheckIntervalHours,
+	}
+}
+
+// GetAPIKeyExpiryConfig returns the current API-key-expiry notification settings.
+// @Summary      Get API key expiry notification configuration
+// @Tags         Notifications
+// @Produce      json
+// @Success      200  {object}  NotificationsAPIKeyExpiryResponse
+// @Failure      503  {object}  map[string]interface{}
+// @Security     BearerAuth
+// @Security     CookieAuth
+// @Router       /notifications/api-key-expiry [get]
+func (h *NotificationHandlers) GetAPIKeyExpiryConfig() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if h.notifCfg == nil || h.settingsRepo == nil {
+			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "api key expiry settings are not available"})
+			return
+		}
+		c.JSON(http.StatusOK, h.apiKeyExpiryResponse())
+	}
+}
+
+// PutAPIKeyExpiryConfig validates and persists the API-key-expiry
+// notification settings, then updates the live config in place so the
+// background notifier observes enabled/warning-days changes on its next
+// tick. CheckIntervalHours only takes effect after a process restart -- the
+// notifier's ticker interval is sized once, at construction.
+// @Summary      Update API key expiry notification configuration
+// @Tags         Notifications
+// @Accept       json
+// @Produce      json
+// @Param        body  body  notificationsAPIKeyExpiryInput  true  "API key expiry settings"
+// @Success      200  {object}  NotificationsAPIKeyExpiryResponse
+// @Failure      400  {object}  map[string]interface{}
+// @Failure      503  {object}  map[string]interface{}
+// @Security     BearerAuth
+// @Security     CookieAuth
+// @Router       /notifications/api-key-expiry [put]
+func (h *NotificationHandlers) PutAPIKeyExpiryConfig() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if h.notifCfg == nil || h.settingsRepo == nil {
+			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "api key expiry settings are not available"})
+			return
+		}
+		var input notificationsAPIKeyExpiryInput
+		if err := c.ShouldBindJSON(&input); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		if input.WarningDays < 0 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "api_key_expiry_warning_days must not be negative"})
+			return
+		}
+		if input.CheckIntervalHours < 0 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "api_key_expiry_check_interval_hours must not be negative"})
+			return
+		}
+
+		ctx := c.Request.Context()
+		var dbc notificationsSMTPConfigDB
+		if raw, err := h.settingsRepo.GetNotificationsConfig(ctx); err == nil && raw != nil {
+			_ = json.Unmarshal(raw, &dbc) // preserve the SMTP section; only Expiry is mutated below
+		}
+		dbc.Expiry = &notificationsExpiryConfigDB{
+			APIKeyExpiring:     input.APIKeyExpiring,
+			WarningDays:        input.WarningDays,
+			CheckIntervalHours: input.CheckIntervalHours,
+		}
+
+		configJSON, err := json.Marshal(dbc)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to marshal api key expiry configuration"})
+			return
+		}
+		if err := h.settingsRepo.SetNotificationsConfig(ctx, configJSON); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to save api key expiry configuration"})
+			return
+		}
+
+		// Update the live config in place (never reassign h.notifCfg) so the
+		// API-key-expiry notifier observes the change on its next tick.
+		h.notifCfg.Events.APIKeyExpiring = input.APIKeyExpiring
+		h.notifCfg.APIKeyExpiryWarningDays = input.WarningDays
+		h.notifCfg.APIKeyExpiryCheckIntervalHours = input.CheckIntervalHours
+
+		h.audit.write(c, "notifications.api_key_expiry.update", "notifications", "api_key_expiry", nil)
+
+		c.JSON(http.StatusOK, h.apiKeyExpiryResponse())
 	}
 }
 
