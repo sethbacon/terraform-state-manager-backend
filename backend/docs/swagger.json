@@ -2315,6 +2315,93 @@
                 }
             }
         },
+        "/notifications/api-key-expiry": {
+            "get": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    },
+                    {
+                        "CookieAuth": []
+                    }
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Notifications"
+                ],
+                "summary": "Get API key expiry notification configuration",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/api.NotificationsAPIKeyExpiryResponse"
+                        }
+                    },
+                    "503": {
+                        "description": "Service Unavailable",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    }
+                }
+            },
+            "put": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    },
+                    {
+                        "CookieAuth": []
+                    }
+                ],
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Notifications"
+                ],
+                "summary": "Update API key expiry notification configuration",
+                "parameters": [
+                    {
+                        "description": "API key expiry settings",
+                        "name": "body",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/api.notificationsAPIKeyExpiryInput"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/api.NotificationsAPIKeyExpiryResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "503": {
+                        "description": "Service Unavailable",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    }
+                }
+            }
+        },
         "/notifications/channels": {
             "get": {
                 "security": [
@@ -4308,6 +4395,23 @@
         }
     },
     "definitions": {
+        "api.NotificationsAPIKeyExpiryResponse": {
+            "type": "object",
+            "properties": {
+                "api_key_expiring": {
+                    "type": "boolean"
+                },
+                "api_key_expiry_check_interval_hours": {
+                    "type": "integer"
+                },
+                "api_key_expiry_warning_days": {
+                    "type": "integer"
+                },
+                "enabled": {
+                    "type": "boolean"
+                }
+            }
+        },
         "api.NotificationsSMTPResponse": {
             "type": "object",
             "properties": {
@@ -4364,6 +4468,20 @@
                 },
                 "user_id": {
                     "type": "string"
+                }
+            }
+        },
+        "api.notificationsAPIKeyExpiryInput": {
+            "type": "object",
+            "properties": {
+                "api_key_expiring": {
+                    "type": "boolean"
+                },
+                "api_key_expiry_check_interval_hours": {
+                    "type": "integer"
+                },
+                "api_key_expiry_warning_days": {
+                    "type": "integer"
                 }
             }
         },
