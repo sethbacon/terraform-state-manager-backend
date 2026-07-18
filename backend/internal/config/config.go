@@ -55,9 +55,31 @@ type DriftConfig struct {
 // NotificationsConfig configures outbound alert delivery. The webhook/Slack/Teams
 // channel types carry their own destination URL per channel and need nothing
 // here; the email channel type sends through one shared SMTP relay configured
-// below.
+// below. Enabled/Events/APIKeyExpiry* gate ONLY the per-user API-key-expiry
+// warning email (a personal notice, never routed through admin-configured
+// channels) — mirroring terraform-registry's identical mechanism for
+// cross-app parity. drift_detected/run_failed alerts are routed exclusively
+// through admin-configured channels (gated by which events each channel
+// subscribes to, not by a global toggle here), matching this app's existing
+// behavior; there is no direct-recipients-list email path for them.
 type NotificationsConfig struct {
-	SMTP SMTPConfig `mapstructure:"smtp"`
+	Enabled bool                     `mapstructure:"enabled"`
+	SMTP    SMTPConfig               `mapstructure:"smtp"`
+	Events  NotificationEventsConfig `mapstructure:"events"`
+	// APIKeyExpiryWarningDays sets how many days before expiry the owning
+	// user is warned (default 7 when <= 0). APIKeyExpiryCheckIntervalHours
+	// sets how often the background job checks for expiring keys (default
+	// 24 when <= 0).
+	APIKeyExpiryWarningDays        int `mapstructure:"api_key_expiry_warning_days"`
+	APIKeyExpiryCheckIntervalHours int `mapstructure:"api_key_expiry_check_interval_hours"`
+}
+
+// NotificationEventsConfig toggles the per-user API-key-expiry warning email.
+// (terraform-registry's equivalent struct also gates several admin-facing
+// broadcast events sent to a direct recipients list; this app has no such
+// direct-recipients mechanism, so APIKeyExpiring is the only field needed here.)
+type NotificationEventsConfig struct {
+	APIKeyExpiring bool `mapstructure:"api_key_expiring"`
 }
 
 // SMTPConfig is the shared outbound mail relay backing email notification
@@ -477,12 +499,16 @@ func setDefaults(v *viper.Viper) {
 
 	// Notifications — shared outbound SMTP relay backing the "email" channel type.
 	// Empty host (default) leaves the email channel type disabled.
+	v.SetDefault("notifications.enabled", false)
 	v.SetDefault("notifications.smtp.host", "")
 	v.SetDefault("notifications.smtp.port", 587)
 	v.SetDefault("notifications.smtp.from", "")
 	v.SetDefault("notifications.smtp.username", "")
 	v.SetDefault("notifications.smtp.password", "")
 	v.SetDefault("notifications.smtp.use_tls", true)
+	v.SetDefault("notifications.api_key_expiry_warning_days", 7)
+	v.SetDefault("notifications.api_key_expiry_check_interval_hours", 24)
+	v.SetDefault("notifications.events.api_key_expiring", true)
 
 	// Suite runtime discovery
 	v.SetDefault("suite.sibling_url", "")

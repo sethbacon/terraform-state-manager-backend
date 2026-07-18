@@ -109,80 +109,10 @@ func TestScheduleRepository_DueAndRecord(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// NotificationChannelRepository
-// ---------------------------------------------------------------------------
-
-var channelCols = []string{"id", "name", "type", "encrypted_target", "events", "enabled",
-	"last_status", "last_error", "last_sent_at", "created_at", "updated_at"}
-
-func channelRow() *sqlmock.Rows {
-	return sqlmock.NewRows(channelCols).
-		AddRow("n1", "ops-slack", "slack", []byte("sealed"), []byte(`{drift_detected,run_failed}`), true,
-			nil, nil, nil, "2026-06-10", "2026-06-10")
-}
-
-func TestNotificationChannelRepository_CRUD(t *testing.T) {
-	db, mock := newMock(t)
-	r := NewNotificationChannelRepository(db)
-
-	mock.ExpectQuery("INSERT INTO notification_channels").WillReturnRows(channelRow())
-	created, err := r.Create(ctx, &NotificationChannel{
-		Name: "ops-slack", Type: "slack", EncryptedTarget: []byte("sealed"),
-		Events: []string{"drift_detected", "run_failed"}, Enabled: true,
-	})
-	if err != nil {
-		t.Fatalf("Create: %v", err)
-	}
-	if !created.HasTarget {
-		t.Error("HasTarget should be derived from the sealed target")
-	}
-	if len(created.Events) != 2 {
-		t.Errorf("events array not scanned: %+v", created.Events)
-	}
-
-	mock.ExpectQuery("SELECT .+ FROM notification_channels ORDER BY").WillReturnRows(channelRow())
-	list, err := r.List(ctx)
-	if err != nil || len(list) != 1 {
-		t.Fatalf("List: %v %d", err, len(list))
-	}
-
-	mock.ExpectQuery("SELECT .+ FROM notification_channels WHERE id").WithArgs("nope").WillReturnError(sql.ErrNoRows)
-	if ch, err := r.GetByID(ctx, "nope"); err != nil || ch != nil {
-		t.Errorf("missing channel should be (nil, nil), got %+v %v", ch, err)
-	}
-
-	mock.ExpectQuery("UPDATE notification_channels").WillReturnRows(channelRow())
-	updated, err := r.Update(ctx, "n1", "ops-slack", "slack", []string{"drift_detected"}, true, nil)
-	if err != nil || updated == nil {
-		t.Fatalf("Update: %v", err)
-	}
-
-	mock.ExpectExec("DELETE FROM notification_channels").WithArgs("n1").WillReturnResult(sqlmock.NewResult(0, 1))
-	if err := r.Delete(ctx, "n1"); err != nil {
-		t.Errorf("Delete: %v", err)
-	}
-}
-
-func TestNotificationChannelRepository_EventDelivery(t *testing.T) {
-	db, mock := newMock(t)
-	r := NewNotificationChannelRepository(db)
-
-	mock.ExpectQuery("FROM notification_channels WHERE enabled").WithArgs("drift_detected").
-		WillReturnRows(channelRow())
-	chans, err := r.ListEnabledForEvent(ctx, "drift_detected")
-	if err != nil || len(chans) != 1 {
-		t.Fatalf("ListEnabledForEvent: %v %d", err, len(chans))
-	}
-
-	now := time.Now()
-	mock.ExpectExec("UPDATE notification_channels").
-		WithArgs("n1", "sent", "", now).
-		WillReturnResult(sqlmock.NewResult(0, 1))
-	if err := r.RecordDelivery(ctx, "n1", "sent", "", now); err != nil {
-		t.Errorf("RecordDelivery: %v", err)
-	}
-}
-
+// NotificationChannelRepository is now a thin alias over the shared
+// identity/notify.ChannelRepository (terraform-suite-identity); its CRUD and
+// event-delivery behavior is covered there
+// (identity/notify/channel_repository_test.go), not duplicated here.
 // ---------------------------------------------------------------------------
 // StateEditRepository
 // ---------------------------------------------------------------------------

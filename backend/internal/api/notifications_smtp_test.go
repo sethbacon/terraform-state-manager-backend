@@ -9,6 +9,8 @@ import (
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
 	"github.com/gin-gonic/gin"
 
+	identitycrypto "github.com/sethbacon/terraform-suite-identity/identity/crypto"
+
 	"github.com/terraform-state-manager/terraform-state-manager/internal/db/repositories"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/services/notify"
 )
@@ -19,15 +21,19 @@ import (
 // Notifier and handler both observe.
 func newSMTPSettingsEnv(t *testing.T, smtp *notify.SMTPConfig) *sourcesEnv {
 	t.Helper()
-	t.Setenv("TSM_ENCRYPTION_KEY", "0123456789abcdef0123456789abcdef")
+	t.Setenv("TSM_ENCRYPTION_KEY", testEncryptionKey)
 	db, mock, err := sqlmock.New()
 	if err != nil {
 		t.Fatalf("sqlmock.New: %v", err)
 	}
 	t.Cleanup(func() { db.Close() })
 
-	notifier := notify.New(repositories.NewNotificationChannelRepository(db), smtp)
-	h := NewNotificationHandlers(db, nil, notifier)
+	tc, err := identitycrypto.NewTokenCipher([]byte(testEncryptionKey))
+	if err != nil {
+		t.Fatalf("NewTokenCipher: %v", err)
+	}
+	notifier := notify.New(repositories.NewNotificationChannelRepository(db), smtp, tc, nil)
+	h := NewNotificationHandlers(db, nil, notifier, tc)
 	if smtp != nil {
 		h = h.WithSMTPSettings(repositories.NewSystemSettingsRepository(db), smtp)
 	}

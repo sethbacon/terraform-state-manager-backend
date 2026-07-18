@@ -14,6 +14,8 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/jmoiron/sqlx"
+
+	identitycrypto "github.com/sethbacon/terraform-suite-identity/identity/crypto"
 	"github.com/sethbacon/terraform-suite-identity/identity/suite"
 
 	"github.com/terraform-state-manager/terraform-state-manager/docs"
@@ -292,14 +294,22 @@ func NewRouter(cfg *config.Config, database *sql.DB, identityDB *sql.DB) (*gin.E
 		}
 
 		// Notifier fans drift/failure alerts out to configured channels. Nil with a
-		// nil DB (unit tests) — the drift handler treats a nil notifier as a no-op.
-		// smtpCfg is held by reference (not a value copy) so a runtime SMTP
-		// settings update via PUT /notifications/smtp-config is observed by the
-		// Notifier on its next send without recreating it — mirroring
-		// terraform-registry's notify.Mailer. Any persisted config (saved via
-		// that same endpoint) is reloaded on top of the YAML/env defaults so it
-		// survives a restart.
+		// nil DB (unit tests), or when no encryption key is configured — the drift
+		// handler treats a nil notifier as a no-op. smtpCfg is held by reference
+		// (not a value copy) so a runtime SMTP settings update via PUT
+		// /notifications/smtp-config is observed by the Notifier on its next send
+		// without recreating it — mirroring terraform-registry's notify.Mailer.
+		// Any persisted config (saved via that same endpoint) is reloaded on top
+		// of the YAML/env defaults so it survives a restart.
+		//
+		// identityTokenCipher (shared identity/crypto, used ONLY for
+		// notification-channel targets) is separate from this repo's own
+		// internal/crypto (used for CI-source tokens, OIDC secrets, etc.) — see
+		// buildIdentityTokenCipher's doc comment. A nil egress guard applies the
+		// shared identity/httpsafe strict default SSRF policy (this app has no
+		// security.egress.allowlist equivalent config).
 		var notifier *notify.Notifier
+		var tokenCipher *identitycrypto.TokenCipher
 		smtpCfg := &notify.SMTPConfig{
 			Host:     cfg.Notifications.SMTP.Host,
 			Port:     cfg.Notifications.SMTP.Port,
@@ -310,7 +320,12 @@ func NewRouter(cfg *config.Config, database *sql.DB, identityDB *sql.DB) (*gin.E
 		}
 		if database != nil {
 			reloadNotificationsSMTPConfigFromDB(smtpCfg, settingsRepo)
-			notifier = notify.New(repositories.NewNotificationChannelRepository(database), smtpCfg)
+			if tc, err := buildIdentityTokenCipher(); err != nil {
+				slog.Warn("notification channels disabled: channel-target encryption unavailable", "error", err)
+			} else {
+				tokenCipher = tc
+				notifier = notify.New(repositories.NewNotificationChannelRepository(database), smtpCfg, tokenCipher, nil)
+			}
 		}
 
 		// Operator-managed workflow-template store backs the /workflow endpoints;
@@ -396,7 +411,7 @@ func NewRouter(cfg *config.Config, database *sql.DB, identityDB *sql.DB) (*gin.E
 
 		// Notification channels (admin): alert destinations + the drift-event hook.
 		// Target URLs are secrets, so the whole group is admin-scoped.
-		notif := NewNotificationHandlers(database, identityDB, notifier)
+		notif := NewNotificationHandlers(database, identityDB, notifier, tokenCipher)
 		if database != nil {
 			notif.WithSMTPSettings(settingsRepo, smtpCfg)
 		}
