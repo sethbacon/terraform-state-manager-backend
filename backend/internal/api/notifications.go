@@ -13,6 +13,8 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	identitycrypto "github.com/sethbacon/terraform-suite-identity/identity/crypto"
+
 	"github.com/terraform-state-manager/terraform-state-manager/internal/crypto"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/db/repositories"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/services/notify"
@@ -23,9 +25,13 @@ var validEvents = map[string]bool{notify.EventDriftDetected: true, notify.EventR
 
 // NotificationHandlers serves the notification-channel endpoints.
 type NotificationHandlers struct {
-	repo     *repositories.NotificationChannelRepository
-	notifier *notify.Notifier
-	audit    auditor
+	repo        *repositories.NotificationChannelRepository
+	notifier    *notify.Notifier
+	audit       auditor
+	// tokenCipher encrypts/decrypts channel targets — must be the same shared
+	// identity/crypto cipher instance (same key material) the Notifier uses to
+	// decrypt at send time.
+	tokenCipher *identitycrypto.TokenCipher
 
 	// settingsRepo and smtp back the shared SMTP relay settings endpoints
 	// (GET/PUT /notifications/smtp-config, POST /notifications/test-email).
@@ -36,12 +42,15 @@ type NotificationHandlers struct {
 }
 
 // NewNotificationHandlers builds the handlers over the app connection.
-// identityDB (may be nil) carries the shared audit log.
-func NewNotificationHandlers(database, identityDB *sql.DB, notifier *notify.Notifier) *NotificationHandlers {
+// identityDB (may be nil) carries the shared audit log. tokenCipher encrypts
+// channel targets at create/update time (must match the cipher passed to
+// notify.New so the Notifier can decrypt them at send time).
+func NewNotificationHandlers(database, identityDB *sql.DB, notifier *notify.Notifier, tokenCipher *identitycrypto.TokenCipher) *NotificationHandlers {
 	return &NotificationHandlers{
-		repo:     repositories.NewNotificationChannelRepository(database),
-		notifier: notifier,
-		audit:    newAuditor(identityDB),
+		repo:        repositories.NewNotificationChannelRepository(database),
+		notifier:    notifier,
+		audit:       newAuditor(identityDB),
+		tokenCipher: tokenCipher,
 	}
 }
 
@@ -140,11 +149,11 @@ func (h *NotificationHandlers) CreateChannel() gin.HandlerFunc {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "target URL is required"})
 			return
 		}
-		if !crypto.Available() {
+		if h.tokenCipher == nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "cannot store target: encryption key not configured (set TSM_ENCRYPTION_KEY)"})
 			return
 		}
-		enc, err := crypto.Encrypt([]byte(req.Target))
+		enc, err := h.tokenCipher.Seal(req.Target)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to encrypt target"})
 			return
@@ -186,14 +195,14 @@ func (h *NotificationHandlers) UpdateChannel() gin.HandlerFunc {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
-		var enc []byte
+		var enc string
 		if req.Target != "" {
-			if !crypto.Available() {
+			if h.tokenCipher == nil {
 				c.JSON(http.StatusBadRequest, gin.H{"error": "cannot store target: encryption key not configured (set TSM_ENCRYPTION_KEY)"})
 				return
 			}
 			var encErr error
-			if enc, encErr = crypto.Encrypt([]byte(req.Target)); encErr != nil {
+			if enc, encErr = h.tokenCipher.Seal(req.Target); encErr != nil {
 				c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to encrypt target"})
 				return
 			}

@@ -154,3 +154,10 @@ require (
 	google.golang.org/protobuf v1.36.10 // indirect
 	gopkg.in/warnings.v0 v0.1.2 // indirect
 )
+
+// TEMPORARY: local dev against the unreleased terraform-suite-identity
+// feat/shared-notify branch (identity/notify, identity/crypto,
+// identity/httpsafe). Remove this replace and bump the require above to the
+// real released version once github.com/sethbacon/terraform-suite-identity
+// PR #115 merges and is released.
+replace github.com/sethbacon/terraform-suite-identity => ../../terraform-suite-identity

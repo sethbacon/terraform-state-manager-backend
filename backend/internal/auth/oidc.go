@@ -20,19 +20,18 @@ func NewOIDCProvider(cfg *config.OIDCConfig) (*OIDCProvider, error) {
 }
 
 // NewOIDCProviderWithContext initialises an OIDC provider with the given context.
-// RequireHTTPS is relaxed only in DEV_MODE, so local dev can use an http
-// Keycloak issuer; it is enforced (an https issuer is required) everywhere
-// else, including production.
+// AllowInsecureIssuer is set only in DEV_MODE, so local dev can use an http
+// Keycloak issuer; HTTPS is required everywhere else, including production.
 func NewOIDCProviderWithContext(ctx context.Context, cfg *config.OIDCConfig) (*OIDCProvider, error) {
 	if !cfg.Enabled {
 		return nil, fmt.Errorf("OIDC is not enabled")
 	}
 	return idoidc.NewProviderWithContext(ctx, idoidc.Config{
-		IssuerURL:    cfg.IssuerURL,
-		ClientID:     cfg.ClientID,
-		ClientSecret: cfg.ClientSecret,
-		RedirectURL:  cfg.RedirectURL,
-		Scopes:       cfg.Scopes,
-		RequireHTTPS: !IsDevMode(),
+		IssuerURL:           cfg.IssuerURL,
+		ClientID:            cfg.ClientID,
+		ClientSecret:        cfg.ClientSecret,
+		RedirectURL:         cfg.RedirectURL,
+		Scopes:              cfg.Scopes,
+		AllowInsecureIssuer: IsDevMode(),
 	})
 }

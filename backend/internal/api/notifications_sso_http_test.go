@@ -5,12 +5,15 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
 	"github.com/gin-gonic/gin"
 
+	identitycrypto "github.com/sethbacon/terraform-suite-identity/identity/crypto"
+	identityhttpsafe "github.com/sethbacon/terraform-suite-identity/identity/httpsafe"
+
 	"github.com/terraform-state-manager/terraform-state-manager/internal/config"
-	"github.com/terraform-state-manager/terraform-state-manager/internal/crypto"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/db/repositories"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/services/notify"
 )
@@ -19,30 +22,46 @@ import (
 // Notification channel handlers
 // ---------------------------------------------------------------------------
 
+// testEncryptionKey matches the TSM_ENCRYPTION_KEY set by newNotificationsEnv
+// / newSMTPSettingsEnv, so notifChannelRow's fixtures decrypt correctly
+// through the same shared TokenCipher the handlers use.
+const testEncryptionKey = "0123456789abcdef0123456789abcdef"
+
 var notifChannelCols = []string{"id", "name", "type", "encrypted_target", "events", "enabled",
 	"last_status", "last_error", "last_sent_at", "created_at", "updated_at"}
 
 func notifChannelRow(t *testing.T, target string) *sqlmock.Rows {
 	t.Helper()
-	enc, err := crypto.Encrypt([]byte(target))
+	tc, err := identitycrypto.NewTokenCipher([]byte(testEncryptionKey))
 	if err != nil {
-		t.Fatalf("Encrypt: %v", err)
+		t.Fatalf("NewTokenCipher: %v", err)
 	}
+	enc, err := tc.Seal(target)
+	if err != nil {
+		t.Fatalf("Seal: %v", err)
+	}
+	now := time.Now()
 	return sqlmock.NewRows(notifChannelCols).
-		AddRow("n1", "ops", "webhook", enc, []byte(`{drift_detected}`), true, nil, nil, nil, "2026-06-10", "2026-06-10")
+		AddRow("n1", "ops", "webhook", enc, []byte(`["drift_detected"]`), true, nil, nil, nil, now, now)
 }
 
 func newNotificationsEnv(t *testing.T) *sourcesEnv {
 	t.Helper()
-	t.Setenv("TSM_ENCRYPTION_KEY", "0123456789abcdef0123456789abcdef")
+	t.Setenv("TSM_ENCRYPTION_KEY", testEncryptionKey)
 	db, mock, err := sqlmock.New()
 	if err != nil {
 		t.Fatalf("sqlmock.New: %v", err)
 	}
 	t.Cleanup(func() { db.Close() })
 
-	notifier := notify.New(repositories.NewNotificationChannelRepository(db), &notify.SMTPConfig{})
-	h := NewNotificationHandlers(db, nil, notifier)
+	tc, err := identitycrypto.NewTokenCipher([]byte(testEncryptionKey))
+	if err != nil {
+		t.Fatalf("NewTokenCipher: %v", err)
+	}
+	// Loopback is allow-listed so TestNotificationChannels_TestEndpoint's
+	// httptest.NewServer (127.0.0.1) is a reachable channel target.
+	notifier := notify.New(repositories.NewNotificationChannelRepository(db), &notify.SMTPConfig{}, tc, identityhttpsafe.MustGuard("127.0.0.1"))
+	h := NewNotificationHandlers(db, nil, notifier, tc)
 
 	r := gin.New()
 	v1 := r.Group("/api/v1/notifications")
