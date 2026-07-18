@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.4.0](https://github.com/sethbacon/terraform-state-manager-backend/compare/v2.3.0...v2.4.0) (2026-07-18)
+
+
+### Features
+
+* **notifications:** add GET/PUT /notifications/api-key-expiry endpoint ([#208](https://github.com/sethbacon/terraform-state-manager-backend/issues/208)) ([5e6bea1](https://github.com/sethbacon/terraform-state-manager-backend/commit/5e6bea12bb9a212b924a00dbb0c564b9552e377f))
+
 ## [2.3.0](https://github.com/sethbacon/terraform-state-manager-backend/compare/v2.2.1...v2.3.0) (2026-07-18)
 
 
