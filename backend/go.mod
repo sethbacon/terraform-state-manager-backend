@@ -23,7 +23,7 @@ require (
 	github.com/lib/pq v1.12.3
 	github.com/prometheus/client_golang v1.23.2
 	github.com/robfig/cron/v3 v3.0.1
-	github.com/sethbacon/terraform-suite-identity v0.17.0
+	github.com/sethbacon/terraform-suite-identity v0.20.1
 	github.com/spf13/viper v1.21.0
 	golang.org/x/crypto v0.54.0
 	golang.org/x/mod v0.37.0
@@ -154,10 +154,3 @@ require (
 	google.golang.org/protobuf v1.36.10 // indirect
 	gopkg.in/warnings.v0 v0.1.2 // indirect
 )
-
-// TEMPORARY: local dev against the unreleased terraform-suite-identity
-// feat/shared-notify branch (identity/notify, identity/crypto,
-// identity/httpsafe). Remove this replace and bump the require above to the
-// real released version once github.com/sethbacon/terraform-suite-identity
-// PR #115 merges and is released.
-replace github.com/sethbacon/terraform-suite-identity => ../../terraform-suite-identity
