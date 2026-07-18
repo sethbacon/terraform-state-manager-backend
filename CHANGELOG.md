@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.3.0](https://github.com/sethbacon/terraform-state-manager-backend/compare/v2.2.1...v2.3.0) (2026-07-18)
+
+
+### Features
+
+* **notify:** adopt shared identity/notify, identity/crypto, identity/httpsafe ([#206](https://github.com/sethbacon/terraform-state-manager-backend/issues/206)) ([72c92b4](https://github.com/sethbacon/terraform-state-manager-backend/commit/72c92b4dcda3223f98463dde5e69aeceaa42fd15))
+
 ## [2.2.1](https://github.com/sethbacon/terraform-state-manager-backend/compare/v2.2.0...v2.2.1) (2026-07-17)
 
 
