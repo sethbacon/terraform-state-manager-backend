@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.4.1](https://github.com/sethbacon/terraform-state-manager-backend/compare/v2.4.0...v2.4.1) (2026-07-19)
+
+
+### Bug Fixes
+
+* **db:** drop column defaults before type change in migration 000023 ([#210](https://github.com/sethbacon/terraform-state-manager-backend/issues/210)) ([de876c9](https://github.com/sethbacon/terraform-state-manager-backend/commit/de876c9a3dd294e8dcb25a6b8134c1dc82cd70a2))
+
 ## [2.4.0](https://github.com/sethbacon/terraform-state-manager-backend/compare/v2.3.0...v2.4.0) (2026-07-18)
 
 
