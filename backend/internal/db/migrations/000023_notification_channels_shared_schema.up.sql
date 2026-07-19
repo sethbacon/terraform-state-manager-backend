@@ -10,5 +10,12 @@
 -- for schema correctness rather than a real data conversion.
 ALTER TABLE notification_channels
     ALTER COLUMN encrypted_target TYPE TEXT USING encode(encrypted_target, 'base64'),
+    -- The existing '{}'::text[] default must be dropped before the type change:
+    -- Postgres validates the old default is auto-castable to the NEW column
+    -- type as part of ALTER COLUMN TYPE, and there is no automatic cast from
+    -- text[] to jsonb, so leaving the old default in place makes this whole
+    -- statement fail with "default for column \"events\" cannot be cast
+    -- automatically to type jsonb" (confirmed live against a real deployment).
+    ALTER COLUMN events DROP DEFAULT,
     ALTER COLUMN events TYPE JSONB USING to_jsonb(events),
     ALTER COLUMN events SET DEFAULT '[]'::jsonb;
