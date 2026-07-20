@@ -273,9 +273,24 @@ func (h *AdminHandlers) CreateOrganization() gin.HandlerFunc {
 			Name:        strings.TrimSpace(req.Name),
 			DisplayName: strings.TrimSpace(req.DisplayName),
 		}
-		if err := h.orgRepo.CreateOrganization(c.Request.Context(), org); err != nil {
+		ctx := c.Request.Context()
+		if err := h.orgRepo.CreateOrganization(ctx, org); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create organization"})
 			return
+		}
+		// Auto-add the caller as the new organization's first admin member. Every
+		// other /admin/organizations/:id* route (including member management)
+		// requires the caller to already hold admin within that exact organization
+		// (requireOrgScope, see admin_org_scope.go) — without this, a brand-new
+		// organization would have no member able to manage it at all, since
+		// nobody could pass that check for an org with zero members.
+		if callerID, ok := c.Get("user_id"); ok {
+			if uid, _ := callerID.(string); uid != "" {
+				if err := h.orgRepo.AddMemberWithParams(ctx, org.ID, uid, "admin"); err != nil {
+					c.JSON(http.StatusInternalServerError, gin.H{"error": "organization created, but failed to add you as its admin"})
+					return
+				}
+			}
 		}
 		h.writeAudit(c, "organization.create", "organization", org.ID, map[string]interface{}{"name": org.Name})
 		c.JSON(http.StatusCreated, org)

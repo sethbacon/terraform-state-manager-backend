@@ -212,6 +212,54 @@ func TestRequireOrgScope_DoesNotGateOrganizationListOrCreate(t *testing.T) {
 	}
 }
 
+// TestCreateOrganization_AddsCallerAsAdmin covers the bootstrap fix: without
+// auto-adding the creator as the new organization's first admin member, no
+// caller could ever pass requireOrgScope for a brand-new organization (it has
+// zero members), so nobody could manage it — not even its creator.
+func TestCreateOrganization_AddsCallerAsAdmin(t *testing.T) {
+	e := newAdminOrgScopeEnv(t, "caller-1")
+
+	e.mock.ExpectQuery("INSERT INTO organizations").
+		WithArgs("Acme", "Acme Corp").
+		WillReturnRows(sqlmock.NewRows([]string{"id", "created_at", "updated_at"}).
+			AddRow("org-1", time.Now(), time.Now()))
+	e.mock.ExpectQuery("SELECT id FROM role_templates").
+		WithArgs("admin").
+		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("rt-admin"))
+	e.mock.ExpectExec("INSERT INTO organization_members").
+		WithArgs("org-1", "caller-1", "rt-admin").
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	e.mock.ExpectExec("INSERT INTO audit_logs").WillReturnResult(sqlmock.NewResult(0, 1))
+
+	w := e.do(http.MethodPost, "/api/v1/admin/organizations", `{"name":"Acme","display_name":"Acme Corp"}`)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("create organization: status = %d (%s), want 201", w.Code, w.Body.String())
+	}
+	if err := e.mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("creator must be added as an admin member of the new organization: %v", err)
+	}
+}
+
+// TestCreateOrganization_FailsIfAddingAdminMemberFails ensures a failure to add
+// the creator as admin is surfaced as an error (rather than silently returning
+// 201 for an organization nobody can manage).
+func TestCreateOrganization_FailsIfAddingAdminMemberFails(t *testing.T) {
+	e := newAdminOrgScopeEnv(t, "caller-1")
+
+	e.mock.ExpectQuery("INSERT INTO organizations").
+		WithArgs("Acme", "").
+		WillReturnRows(sqlmock.NewRows([]string{"id", "created_at", "updated_at"}).
+			AddRow("org-1", time.Now(), time.Now()))
+	e.mock.ExpectQuery("SELECT id FROM role_templates").
+		WithArgs("admin").
+		WillReturnError(errors.New("role template not seeded"))
+
+	w := e.do(http.MethodPost, "/api/v1/admin/organizations", `{"name":"Acme"}`)
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("create organization: status = %d (%s), want 500", w.Code, w.Body.String())
+	}
+}
+
 // ---------------------------------------------------------------------------
 // requireSharedOrgAdminWithTargetUser
 // ---------------------------------------------------------------------------
