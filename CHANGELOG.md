@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.4.2](https://github.com/sethbacon/terraform-state-manager-backend/compare/v2.4.1...v2.4.2) (2026-07-20)
+
+
+### Bug Fixes
+
+* **api:** auto-add the creator as the new organization's first admin member ([#212](https://github.com/sethbacon/terraform-state-manager-backend/issues/212)) ([73e4e65](https://github.com/sethbacon/terraform-state-manager-backend/commit/73e4e651829e88e84467d2dd5199202b5439ffbf))
+
 ## [2.4.1](https://github.com/sethbacon/terraform-state-manager-backend/compare/v2.4.0...v2.4.1) (2026-07-19)
 
 
