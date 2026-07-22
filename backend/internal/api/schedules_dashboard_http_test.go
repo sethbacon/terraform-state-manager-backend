@@ -292,3 +292,83 @@ func TestDashboardOverview_SourceListError(t *testing.T) {
 		t.Errorf("status = %d, want 500 on a cold cache + dead DB", w.Code)
 	}
 }
+
+func TestStatesByVersion_HTTP(t *testing.T) {
+	newEnv := func(t *testing.T) (*gin.Engine, sqlmock.Sqlmock) {
+		db, mock, err := sqlmock.New()
+		if err != nil {
+			t.Fatalf("sqlmock: %v", err)
+		}
+		t.Cleanup(func() { db.Close() })
+		h := NewSourcesHandlers(db, nil)
+		r := gin.New()
+		r.GET("/api/v1/dashboard/states-by-version", h.StatesByVersion())
+		return r, mock
+	}
+	exactCols := []string{"source_id", "name", "state_key", "terraform_version", "rum", "full_count"}
+
+	t.Run("eq pushes to SQL and reports total + truncated", func(t *testing.T) {
+		r, mock := newEnv(t)
+		// Window full_count 502 but only two rows returned -> truncated.
+		mock.ExpectQuery(`WHERE a.terraform_version = \$1`).WithArgs("1.5.7", versionStatesCap).
+			WillReturnRows(sqlmock.NewRows(exactCols).
+				AddRow("s2", "dev", "d.tfstate", "1.5.7", 12, 502).
+				AddRow("s2", "dev", "e.tfstate", "1.5.7", 4, 502))
+		w := doGet(r, "/api/v1/dashboard/states-by-version?version=1.5.7")
+		if w.Code != http.StatusOK {
+			t.Fatalf("status = %d (%s)", w.Code, w.Body.String())
+		}
+		var resp struct {
+			Total     int              `json:"total"`
+			Truncated bool             `json:"truncated"`
+			States    []map[string]any `json:"states"`
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		if resp.Total != 502 || !resp.Truncated || len(resp.States) != 2 {
+			t.Errorf("resp = %+v", resp)
+		}
+	})
+
+	t.Run("unknown maps to the empty version", func(t *testing.T) {
+		r, mock := newEnv(t)
+		mock.ExpectQuery(`WHERE a.terraform_version = \$1`).WithArgs("", versionStatesCap).
+			WillReturnRows(sqlmock.NewRows(exactCols).AddRow("s2", "dev", "f.tfstate", "", 0, 1))
+		w := doGet(r, "/api/v1/dashboard/states-by-version?version=unknown")
+		if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"total":1`) {
+			t.Errorf("unknown: status=%d body=%s", w.Code, w.Body.String())
+		}
+	})
+
+	t.Run("semver range filters via StateVersions in Go", func(t *testing.T) {
+		r, mock := newEnv(t)
+		mock.ExpectQuery("FROM state_analyses a").
+			WillReturnRows(sqlmock.NewRows([]string{"source_id", "name", "state_key", "terraform_version", "rum"}).
+				AddRow("s1", "prod", "b.tfstate", "0.14.11", 8).
+				AddRow("s1", "prod", "c.tfstate", "1.0.0", 5))
+		w := doGet(r, "/api/v1/dashboard/states-by-version?version=1.0.0&op=lt")
+		if w.Code != http.StatusOK {
+			t.Fatalf("status = %d", w.Code)
+		}
+		// Only 0.14.11 < 1.0.0.
+		if !strings.Contains(w.Body.String(), "b.tfstate") || strings.Contains(w.Body.String(), "c.tfstate") {
+			t.Errorf("semver body = %s", w.Body.String())
+		}
+	})
+
+	t.Run("invalid op is 400", func(t *testing.T) {
+		r, _ := newEnv(t)
+		if w := doGet(r, "/api/v1/dashboard/states-by-version?version=1.0.0&op=between"); w.Code != http.StatusBadRequest {
+			t.Errorf("status = %d, want 400", w.Code)
+		}
+	})
+
+	t.Run("eq store error is 500", func(t *testing.T) {
+		r, mock := newEnv(t)
+		mock.ExpectQuery(`WHERE a.terraform_version = \$1`).WillReturnError(errors.New("boom"))
+		if w := doGet(r, "/api/v1/dashboard/states-by-version?version=1.5.7"); w.Code != http.StatusInternalServerError {
+			t.Errorf("status = %d, want 500", w.Code)
+		}
+	})
+}

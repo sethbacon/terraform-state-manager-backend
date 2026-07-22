@@ -130,6 +130,10 @@ func (h *SourcesHandlers) DashboardOverview() gin.HandlerFunc {
 // by semantic version.
 var versionOps = map[string]struct{}{"eq": {}, "lt": {}, "lte": {}, "gt": {}, "gte": {}}
 
+// versionStatesCap bounds the states returned by the version drill-down. total in
+// the response still reflects the full match, and truncated flags when the cap hit.
+const versionStatesCap = 500
+
 // StatesByVersion lists the state files whose Terraform version matches the
 // given version and comparison operator, backing the dashboard's click-a-version
 // drill-down. op defaults to "eq"; lt/lte/gt/gte select a semver range (e.g.
@@ -160,15 +164,51 @@ func (h *SourcesHandlers) StatesByVersion() gin.HandlerFunc {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid op"})
 			return
 		}
-		rows, err := h.analysisRepo.StateVersions(c.Request.Context())
+		ctx := c.Request.Context()
+
+		// Exact match (the common click-a-version-bar case) pushes the predicate and
+		// a cap into SQL instead of loading the whole store to filter in Go. The
+		// dashboard's "unknown" bucket is the empty version the store records.
+		if op == "eq" {
+			v := ver
+			if v == "unknown" {
+				v = ""
+			}
+			states, total, err := h.analysisRepo.StatesByVersionExact(ctx, v, versionStatesCap)
+			if err != nil {
+				serverError(c, err, "failed to load states by version")
+				return
+			}
+			c.JSON(http.StatusOK, gin.H{
+				"version":   ver,
+				"op":        op,
+				"states":    states,
+				"total":     total,
+				"truncated": total > len(states),
+			})
+			return
+		}
+
+		// Range operators need semantic-version comparison, so load and filter in Go,
+		// then cap the result (with a truncated flag) to bound a very large bucket.
+		rows, err := h.analysisRepo.StateVersions(ctx)
 		if err != nil {
 			serverError(c, err, "failed to load state versions")
 			return
 		}
+		matched := filterStatesByVersion(rows, ver, op)
+		total := len(matched)
+		truncated := false
+		if len(matched) > versionStatesCap {
+			matched = matched[:versionStatesCap]
+			truncated = true
+		}
 		c.JSON(http.StatusOK, gin.H{
-			"version": ver,
-			"op":      op,
-			"states":  filterStatesByVersion(rows, ver, op),
+			"version":   ver,
+			"op":        op,
+			"states":    matched,
+			"total":     total,
+			"truncated": truncated,
 		})
 	}
 }
