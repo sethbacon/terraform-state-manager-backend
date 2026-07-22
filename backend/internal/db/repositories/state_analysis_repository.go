@@ -385,10 +385,11 @@ func (r *StateAnalysisRepository) VersionCounts(ctx context.Context) (map[string
 }
 
 // StateVersions returns every analyzed state file with its Terraform version,
-// owning source (id + name), and RUM. The dashboard filters these by a clicked
-// version — optionally a semver range — to list which states use it. The store
-// is small (one row per state file), so filtering in the handler is simpler and
-// clearer than encoding semantic-version comparison in SQL.
+// owning source (id + name), and RUM. It backs the dashboard's semver-RANGE
+// drill-down (op lt/lte/gt/gte), which needs semantic-version comparison that is
+// awkward in SQL, so those rows are still filtered in the handler. The common
+// exact-match case (op eq — a click on a version bar) uses StatesByVersionExact
+// instead, which pushes the predicate and a cap into SQL.
 func (r *StateAnalysisRepository) StateVersions(ctx context.Context) ([]StateVersionRow, error) {
 	rows, err := r.db.QueryContext(ctx, `
 		SELECT a.source_id, COALESCE(s.name, ''), a.state_key, a.terraform_version, a.rum
@@ -409,6 +410,40 @@ func (r *StateAnalysisRepository) StateVersions(ctx context.Context) ([]StateVer
 		out = append(out, v)
 	}
 	return out, rows.Err()
+}
+
+// StatesByVersionExact returns up to limit states whose terraform_version equals
+// version (the empty string matches the unknown/unset version the store records
+// for stateless or legacy files), ordered by source name + state key, together
+// with the full-match count from a window aggregate. This is the exact-match
+// (op eq) version drill-down pushed into SQL: a click on a version bar no longer
+// loads the entire store to filter in Go, and a very large bucket is bounded by
+// the caller's limit while total still reflects the whole match.
+func (r *StateAnalysisRepository) StatesByVersionExact(ctx context.Context, version string, limit int) ([]StateVersionRow, int, error) {
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT a.source_id, COALESCE(s.name, ''), a.state_key, a.terraform_version, a.rum,
+		       COUNT(*) OVER() AS full_count
+		FROM state_analyses a
+		LEFT JOIN state_sources s ON s.id = a.source_id
+		WHERE a.terraform_version = $1
+		ORDER BY s.name, a.state_key
+		LIMIT $2`, version, limit)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+
+	out := []StateVersionRow{}
+	total := 0
+	for rows.Next() {
+		var v StateVersionRow
+		// full_count (the window aggregate) repeats on every row; the last read wins.
+		if err := rows.Scan(&v.SourceID, &v.SourceName, &v.StateKey, &v.TerraformVersion, &v.RUM, &total); err != nil {
+			return nil, 0, err
+		}
+		out = append(out, v)
+	}
+	return out, total, rows.Err()
 }
 
 // AllStates returns every analyzed state file with its full field set. It is a

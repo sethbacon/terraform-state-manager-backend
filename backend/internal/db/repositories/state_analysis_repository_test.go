@@ -425,3 +425,35 @@ func TestPreviewStatesWithTotals(t *testing.T) {
 		t.Error(err)
 	}
 }
+
+func TestStatesByVersionExact(t *testing.T) {
+	db, mock := newMock(t)
+	r := NewStateAnalysisRepository(db)
+
+	// The version predicate binds via $1 and the cap via $2; full_count (window)
+	// repeats on every row and is read into total.
+	mock.ExpectQuery(`WHERE a.terraform_version = \$1`).
+		WithArgs("1.5.7", 500).
+		WillReturnRows(sqlmock.NewRows([]string{"source_id", "name", "state_key", "terraform_version", "rum", "full_count"}).
+			AddRow("s2", "dev", "d.tfstate", "1.5.7", 12, 3).
+			AddRow("s2", "dev", "e.tfstate", "1.5.7", 4, 3))
+
+	states, total, err := r.StatesByVersionExact(ctx, "1.5.7", 500)
+	if err != nil {
+		t.Fatalf("StatesByVersionExact: %v", err)
+	}
+	if len(states) != 2 || states[0].StateKey != "d.tfstate" || states[0].RUM != 12 {
+		t.Errorf("states = %+v", states)
+	}
+	if total != 3 { // full match exceeds the two returned rows
+		t.Errorf("total = %d, want 3", total)
+	}
+
+	mock.ExpectQuery(`WHERE a.terraform_version = \$1`).WillReturnError(errDB)
+	if _, _, err := r.StatesByVersionExact(ctx, "", 500); err == nil {
+		t.Error("expected error")
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Error(err)
+	}
+}
