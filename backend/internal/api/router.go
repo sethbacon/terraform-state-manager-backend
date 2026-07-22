@@ -181,6 +181,9 @@ func NewRouter(cfg *config.Config, database *sql.DB, identityDB *sql.DB) (*gin.E
 		{
 			s.GET("", middleware.RequireScope(auth.ScopeStateRead), sources.ListSources())
 			s.POST("", middleware.RequireScope(auth.ScopeSourcesManage), sources.CreateSource())
+			// Static /test must not collide with /:id below: gin resolves static
+			// segments before params, so POST /sources/test is unambiguous.
+			s.POST("/test", middleware.RequireScope(auth.ScopeSourcesManage), sources.TestSourceConfig())
 			s.GET("/:id", middleware.RequireScope(auth.ScopeStateRead), sources.GetSource())
 			s.PUT("/:id", middleware.RequireScope(auth.ScopeSourcesManage), sources.UpdateSource())
 			s.DELETE("/:id", middleware.RequireScope(auth.ScopeSourcesManage), sources.DeleteSource())

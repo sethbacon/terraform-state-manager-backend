@@ -69,6 +69,7 @@ func newSourcesEnv(t *testing.T) *sourcesEnv {
 	v1.GET("/sources/:id", h.GetSource())
 	v1.PUT("/sources/:id", h.UpdateSource())
 	v1.DELETE("/sources/:id", h.DeleteSource())
+	v1.POST("/sources/test", h.TestSourceConfig())
 	v1.POST("/sources/:id/test", h.TestSource())
 	v1.GET("/sources/:id/states", h.ListStates())
 	v1.GET("/sources/:id/state/analysis", h.AnalyzeState())
@@ -293,6 +294,59 @@ func TestTestSource(t *testing.T) {
 			AddRow("s2", "broken", "local", "", cfg, []byte(`{}`), nil, "2026-06-10", "2026-06-10"))
 	if w := e.do(http.MethodPost, "/api/v1/sources/s2/test", ""); w.Code != http.StatusBadRequest && w.Code != http.StatusBadGateway {
 		t.Errorf("broken: status = %d, want 400/502", w.Code)
+	}
+}
+
+func TestTestSourceConfig(t *testing.T) {
+	e := newSourcesEnv(t)
+	e.seed(t, "app.tfstate", minState(7, "lin-1", "aws_instance.web"))
+
+	// A valid unsaved config connects and counts states without persisting.
+	body := fmt.Sprintf(`{"type":"local","config":{"base_path":%q}}`, filepath.ToSlash(e.dir))
+	w := e.do(http.MethodPost, "/api/v1/sources/test", body)
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"status":"ok"`) ||
+		!strings.Contains(w.Body.String(), `"states":1`) {
+		t.Fatalf("test ok: status = %d (%s)", w.Code, w.Body.String())
+	}
+
+	// Missing type and unknown type are config errors, not gateway errors.
+	if w := e.do(http.MethodPost, "/api/v1/sources/test", `{"config":{}}`); w.Code != http.StatusBadRequest {
+		t.Errorf("missing type: status = %d, want 400", w.Code)
+	}
+	if w := e.do(http.MethodPost, "/api/v1/sources/test", `{"type":"nonexistent-xyz"}`); w.Code != http.StatusBadRequest {
+		t.Errorf("unknown type: status = %d, want 400", w.Code)
+	}
+
+	// A bad config surfaces the connector's own error.
+	badBody := fmt.Sprintf(`{"type":"local","config":{"base_path":%q}}`, filepath.ToSlash(filepath.Join(e.dir, "gone")))
+	if w := e.do(http.MethodPost, "/api/v1/sources/test", badBody); w.Code != http.StatusBadRequest && w.Code != http.StatusBadGateway {
+		t.Errorf("bad config: status = %d, want 400/502", w.Code)
+	}
+}
+
+func TestTestSourceConfigMergesStoredCredentials(t *testing.T) {
+	e := newSourcesEnv(t)
+	e.seed(t, "app.tfstate", minState(3, "lin-2", "aws_instance.db"))
+
+	// source_id with blank credentials loads the stored source and reuses its
+	// decrypted credentials — the edit-dialog contract (blank = keep existing).
+	e.expectSource("s1", e.dir)
+	body := fmt.Sprintf(`{"type":"local","config":{"base_path":%q},"source_id":"s1"}`, filepath.ToSlash(e.dir))
+	w := e.do(http.MethodPost, "/api/v1/sources/test", body)
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"states":1`) {
+		t.Fatalf("merge ok: status = %d (%s)", w.Code, w.Body.String())
+	}
+
+	// An unknown source_id is a 404, mirroring the by-id routes.
+	e.mock.ExpectQuery("SELECT .+ FROM state_sources WHERE id").WithArgs("ghost").
+		WillReturnRows(sqlmock.NewRows(
+			[]string{"id", "name", "type", "endpoint", "config", "scope", "encrypted_credentials", "created_at", "updated_at"}))
+	ghost := fmt.Sprintf(`{"type":"local","config":{"base_path":%q},"source_id":"ghost"}`, filepath.ToSlash(e.dir))
+	if w := e.do(http.MethodPost, "/api/v1/sources/test", ghost); w.Code != http.StatusNotFound {
+		t.Errorf("ghost source_id: status = %d, want 404", w.Code)
+	}
+	if err := e.mock.ExpectationsWereMet(); err != nil {
+		t.Error(err)
 	}
 }
 
