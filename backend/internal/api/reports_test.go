@@ -62,7 +62,10 @@ func eqKeys(got []repositories.StateRow, want []string) bool {
 	return true
 }
 
-func TestApplyReportFilters(t *testing.T) {
+// TestApplyResidual covers the predicates that stay in Go (semver-range version,
+// provider/resource-type substring). The clean predicates now live in SQL and
+// are covered by TestSQLFilterMapping + the repository's buildStateWhere test.
+func TestApplyResidual(t *testing.T) {
 	rows := reportSampleRows()
 
 	withKey := func(mut func(*reportFilters)) reportFilters {
@@ -76,40 +79,85 @@ func TestApplyReportFilters(t *testing.T) {
 		f    reportFilters
 		want []string
 	}{
-		{"no filters", widest(),
+		{"no residual passes through unchanged", widest(),
 			[]string{"envs/prod/app.tfstate", "envs/prod/net.tfstate", "dev/sandbox.tfstate", "dev/data.tfstate"}},
-		{"by source", withKey(func(f *reportFilters) { f.sourceIDs = []string{"s2"} }),
-			[]string{"dev/sandbox.tfstate", "dev/data.tfstate"}},
-		{"key substring", withKey(func(f *reportFilters) { f.keyQuery = "prod" }),
-			[]string{"envs/prod/app.tfstate", "envs/prod/net.tfstate"}},
 		{"version lt 1.0.0", withKey(func(f *reportFilters) { f.version, f.versionOp = "1.0.0", "lt" }),
 			[]string{"envs/prod/net.tfstate"}},
-		{"version eq exact", withKey(func(f *reportFilters) { f.version, f.versionOp = "1.5.7", "eq" }),
-			[]string{"envs/prod/app.tfstate"}},
-		{"version unknown", withKey(func(f *reportFilters) { f.version, f.versionOp = "unknown", "eq" }),
-			[]string{"dev/sandbox.tfstate"}},
 		{"provider aws", withKey(func(f *reportFilters) { f.provider = "aws" }),
 			[]string{"envs/prod/app.tfstate", "dev/data.tfstate"}},
 		{"resource type aws_", withKey(func(f *reportFilters) { f.resourceType = "aws_" }),
 			[]string{"envs/prod/app.tfstate", "dev/data.tfstate"}},
-		{"rum min 10", withKey(func(f *reportFilters) { f.rumMin = 10 }),
-			[]string{"envs/prod/app.tfstate"}},
-		{"rum max 5", withKey(func(f *reportFilters) { f.rumMax = 5 }),
-			[]string{"dev/sandbox.tfstate", "dev/data.tfstate"}},
-		{"size min 1000", withKey(func(f *reportFilters) { f.sizeMin = 1000 }),
-			[]string{"envs/prod/app.tfstate", "dev/data.tfstate"}},
-		{"source + provider", withKey(func(f *reportFilters) { f.sourceIDs, f.provider = []string{"s1"}, "aws" }),
-			[]string{"envs/prod/app.tfstate"}},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := applyReportFilters(rows, tc.f)
+			got := tc.f.applyResidual(rows)
 			if !eqKeys(got, tc.want) {
-				t.Errorf("applyReportFilters = %v, want %v", matchedKeys(got), tc.want)
+				t.Errorf("applyResidual = %v, want %v", matchedKeys(got), tc.want)
 			}
 		})
 	}
+}
+
+// TestSQLFilterMapping asserts the handler projects the clean predicates onto the
+// repository filter (and leaves the residual ones out), and that hasResidual
+// classifies each filter correctly.
+func TestSQLFilterMapping(t *testing.T) {
+	t.Run("clean predicates map; residual stays out", func(t *testing.T) {
+		f := widest()
+		f.sourceIDs = []string{"s1", "s2"}
+		f.keyQuery = "prod"
+		f.version, f.versionOp = "1.5.7", "eq"
+		f.rumMin = 10
+		f.sizeMax = 1000
+		f.provider = "aws" // residual — must NOT appear in the SQL filter
+
+		q := f.sqlFilter()
+		if len(q.SourceIDs) != 2 || q.KeyContains != "prod" {
+			t.Errorf("source/key not mapped: %+v", q)
+		}
+		if q.VersionExact == nil || *q.VersionExact != "1.5.7" {
+			t.Errorf("version eq not mapped: %+v", q.VersionExact)
+		}
+		if q.RUMMin == nil || *q.RUMMin != 10 || q.RUMMax != nil {
+			t.Errorf("rum bounds: min=%v max=%v", q.RUMMin, q.RUMMax)
+		}
+		if q.SizeMax == nil || *q.SizeMax != 1000 || q.SizeMin != nil {
+			t.Errorf("size bounds: min=%v max=%v", q.SizeMin, q.SizeMax)
+		}
+	})
+
+	t.Run("unknown version maps to the empty string", func(t *testing.T) {
+		f := widest()
+		f.version, f.versionOp = "unknown", "eq"
+		q := f.sqlFilter()
+		if q.VersionExact == nil || *q.VersionExact != "" {
+			t.Errorf("unknown should map to \"\": %+v", q.VersionExact)
+		}
+	})
+
+	t.Run("semver-range version is residual, not projected", func(t *testing.T) {
+		f := widest()
+		f.version, f.versionOp = "1.0.0", "lt"
+		if q := f.sqlFilter(); q.VersionExact != nil {
+			t.Errorf("range version must not project to VersionExact: %+v", q.VersionExact)
+		}
+		if !f.hasResidual() {
+			t.Error("range version should be residual")
+		}
+	})
+
+	t.Run("hasResidual classification", func(t *testing.T) {
+		if widest().hasResidual() {
+			t.Error("empty filter has no residual")
+		}
+		cleanOnly := widest()
+		cleanOnly.sourceIDs, cleanOnly.keyQuery, cleanOnly.rumMin = []string{"s1"}, "k", 5
+		cleanOnly.version, cleanOnly.versionOp = "1.5.7", "eq"
+		if cleanOnly.hasResidual() {
+			t.Error("source/key/eq-version/numeric are all clean")
+		}
+	})
 }
 
 func reportCtx(rawQuery string) *gin.Context {
@@ -185,6 +233,24 @@ func allStatesRows() *sqlmock.Rows {
 			8, 8, 0, 8, []byte(`{"registry.terraform.io/hashicorp/azurerm":8}`), []byte(`{"azurerm_virtual_network":3}`), "2026-06-18T00:00:00Z")
 }
 
+// previewCols mirrors the PreviewStatesWithTotals projection (scalar columns +
+// the four window aggregates), so mock rows line up with the repository's Scan.
+var previewCols = []string{
+	"source_id", "name", "type", "state_key", "terraform_version", "serial", "size",
+	"rum", "managed_resources", "data_sources", "total_resources", "analyzed_at",
+	"full_count", "sum_rum", "sum_managed", "sum_data", "sum_total",
+}
+
+// previewRows returns the same two states as allStatesRows in the preview shape.
+// The window aggregates repeat on every row (COUNT=2, and the per-column SUMs).
+func previewRows() *sqlmock.Rows {
+	return sqlmock.NewRows(previewCols).
+		AddRow("s1", "prod", "s3", "envs/prod/app.tfstate", "1.5.7", 10, 2048,
+			40, 38, 2, 42, "2026-06-18T00:00:00Z", 2, 48, 46, 2, 50).
+		AddRow("s2", "dev", "local", "dev/net.tfstate", "0.14.11", 5, 512,
+			8, 8, 0, 8, "2026-06-18T00:00:00Z", 2, 48, 46, 2, 50)
+}
+
 // reportEnv wires the two Reports routes over a sqlmock app DB.
 func reportEnv(t *testing.T) (*gin.Engine, sqlmock.Sqlmock) {
 	t.Helper()
@@ -209,7 +275,8 @@ func doGet(r *gin.Engine, path string) *httptest.ResponseRecorder {
 func TestReportStatesHandler(t *testing.T) {
 	t.Run("returns summary and rows for the full match", func(t *testing.T) {
 		r, mock := reportEnv(t)
-		mock.ExpectQuery("FROM state_analyses a").WillReturnRows(allStatesRows())
+		// No filter → no residual → the window-aggregate preview query.
+		mock.ExpectQuery("FROM state_analyses a").WillReturnRows(previewRows())
 
 		w := doGet(r, "/api/v1/reports/states")
 		if w.Code != http.StatusOK {
@@ -244,6 +311,27 @@ func TestReportStatesHandler(t *testing.T) {
 		}
 		if !strings.Contains(w.Body.String(), `"total":1`) || !strings.Contains(w.Body.String(), "dev/net.tfstate") {
 			t.Errorf("expected only the <1.0.0 state: %s", w.Body.String())
+		}
+	})
+
+	t.Run("reports truncation from the SQL count on the fast path", func(t *testing.T) {
+		r, mock := reportEnv(t)
+		// full_count exceeds the preview cap even though only two rows are returned:
+		// the window COUNT reflects the whole match, so truncated must be true.
+		big := sqlmock.NewRows(previewCols).
+			AddRow("s1", "prod", "s3", "envs/prod/app.tfstate", "1.5.7", 10, 2048,
+				40, 38, 2, 42, "2026-06-18T00:00:00Z", reportPreviewCap+5, 48, 46, 2, 50).
+			AddRow("s2", "dev", "local", "dev/net.tfstate", "0.14.11", 5, 512,
+				8, 8, 0, 8, "2026-06-18T00:00:00Z", reportPreviewCap+5, 48, 46, 2, 50)
+		mock.ExpectQuery("FROM state_analyses a").WillReturnRows(big)
+
+		w := doGet(r, "/api/v1/reports/states")
+		if w.Code != http.StatusOK {
+			t.Fatalf("status = %d (%s)", w.Code, w.Body.String())
+		}
+		if !strings.Contains(w.Body.String(), `"truncated":true`) ||
+			!strings.Contains(w.Body.String(), `"total":505`) {
+			t.Errorf("expected truncated total: %s", w.Body.String())
 		}
 	})
 

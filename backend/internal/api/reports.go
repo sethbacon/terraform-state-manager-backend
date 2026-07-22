@@ -100,51 +100,104 @@ func parseReportFilters(c *gin.Context) (reportFilters, error) {
 	return f, nil
 }
 
-// matches reports whether a state satisfies every provided predicate.
-func (f reportFilters) matches(r repositories.StateRow) bool {
-	if len(f.sourceIDs) > 0 && !containsString(f.sourceIDs, r.SourceID) {
-		return false
+// sqlFilter projects the SQL-pushable predicates (source membership, key
+// substring, exact version, numeric ranges) into a repository filter so the DB
+// does the bulk of the work. The no-op numeric bounds parseReportFilters applies
+// (0 / MaxInt) are dropped, so an absent bound adds no WHERE term. The residual
+// predicates (semver-range version, provider/resource-type substring) are NOT
+// projected here — applyResidual handles them.
+func (f reportFilters) sqlFilter() repositories.StateQueryFilter {
+	q := repositories.StateQueryFilter{
+		SourceIDs:   f.sourceIDs,
+		KeyContains: f.keyQuery, // already lower-cased in parseReportFilters
 	}
-	if f.keyQuery != "" && !strings.Contains(strings.ToLower(r.StateKey), f.keyQuery) {
-		return false
+	if f.version != "" && f.versionOp == "eq" {
+		v := f.version
+		if v == "unknown" { // matchesExactVersion treats "unknown" as the empty version
+			v = ""
+		}
+		q.VersionExact = &v
 	}
-	if f.version != "" && !matchesVersion(r.TerraformVersion, f.version, f.versionOp) {
-		return false
+	if f.rumMin > 0 {
+		m := f.rumMin
+		q.RUMMin = &m
 	}
-	if f.provider != "" && !mapKeyContains(r.Providers, f.provider) {
-		return false
+	if f.rumMax < math.MaxInt {
+		m := f.rumMax
+		q.RUMMax = &m
 	}
-	if f.resourceType != "" && !mapKeyContains(r.ResourceTypes, f.resourceType) {
-		return false
+	if f.managedMin > 0 {
+		m := f.managedMin
+		q.ManagedMin = &m
 	}
-	if r.RUM < f.rumMin || r.RUM > f.rumMax {
-		return false
+	if f.managedMax < math.MaxInt {
+		m := f.managedMax
+		q.ManagedMax = &m
 	}
-	if r.ManagedResources < f.managedMin || r.ManagedResources > f.managedMax {
-		return false
+	if f.dataMin > 0 {
+		m := f.dataMin
+		q.DataMin = &m
 	}
-	if r.DataSources < f.dataMin || r.DataSources > f.dataMax {
-		return false
+	if f.dataMax < math.MaxInt {
+		m := f.dataMax
+		q.DataMax = &m
 	}
-	if r.TotalResources < f.totalMin || r.TotalResources > f.totalMax {
-		return false
+	if f.totalMin > 0 {
+		m := f.totalMin
+		q.TotalMin = &m
 	}
-	if r.Size < f.sizeMin || r.Size > f.sizeMax {
-		return false
+	if f.totalMax < math.MaxInt {
+		m := f.totalMax
+		q.TotalMax = &m
 	}
-	return true
+	if f.sizeMin > 0 {
+		m := f.sizeMin
+		q.SizeMin = &m
+	}
+	if f.sizeMax < math.MaxInt64 {
+		m := f.sizeMax
+		q.SizeMax = &m
+	}
+	return q
 }
 
-// applyReportFilters returns the subset of rows matching the filters, preserving
-// order. Shared by the preview and export endpoints so they can never diverge.
-func applyReportFilters(rows []repositories.StateRow, f reportFilters) []repositories.StateRow {
-	out := make([]repositories.StateRow, 0)
+// hasResidual reports whether the filter carries a predicate that cannot be
+// expressed in SQL and so must be applied in Go after the WHERE-reduced fetch:
+// a semver-range version comparison, or a provider/resource-type key substring.
+func (f reportFilters) hasResidual() bool {
+	return (f.version != "" && f.versionOp != "eq") || f.provider != "" || f.resourceType != ""
+}
+
+// applyResidual filters rows by the predicates SQL could not express. The clean
+// predicates are already guaranteed by the WHERE clause, so this only re-checks
+// the semver-range version and the provider/resource-type substrings. It is a
+// no-op (returns rows unchanged) when no residual predicate is active.
+func (f reportFilters) applyResidual(rows []repositories.StateRow) []repositories.StateRow {
+	if !f.hasResidual() {
+		return rows
+	}
+	out := make([]repositories.StateRow, 0, len(rows))
 	for _, r := range rows {
-		if f.matches(r) {
-			out = append(out, r)
+		if f.version != "" && f.versionOp != "eq" && !matchesVersion(r.TerraformVersion, f.version, f.versionOp) {
+			continue
 		}
+		if f.provider != "" && !mapKeyContains(r.Providers, f.provider) {
+			continue
+		}
+		if f.resourceType != "" && !mapKeyContains(r.ResourceTypes, f.resourceType) {
+			continue
+		}
+		out = append(out, r)
 	}
 	return out
+}
+
+// capRows trims rows to the preview cap, reporting whether truncation occurred.
+func capRows(rows []repositories.StateRow) ([]repositories.StateRow, bool) {
+	if len(rows) > reportPreviewCap {
+		return rows[:reportPreviewCap], true
+	}
+	return rows, false
 }
 
 // describe renders the active filters as a structured object (for the JSON
@@ -225,24 +278,45 @@ func (h *SourcesHandlers) ReportStates() gin.HandlerFunc {
 		if c.Query("refresh") == "true" && h.syncer != nil {
 			h.refreshForReport(ctx, f.sourceIDs)
 		}
-		rows, err := h.analysisRepo.AllStates(ctx)
+
+		// Fast path: with no residual predicate, the SQL WHERE fully captures the
+		// filter, so the DB returns the exact page plus the full-match COUNT/SUMs
+		// (window functions) — no full-store load, no JSONB unmarshal, no Go pass.
+		if !f.hasResidual() {
+			preview, agg, err := h.analysisRepo.PreviewStatesWithTotals(ctx, f.sqlFilter(), reportPreviewCap)
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load states"})
+				return
+			}
+			c.JSON(http.StatusOK, gin.H{
+				"total":     agg.Matched,
+				"truncated": agg.Matched > reportPreviewCap,
+				"summary": reporting.StatesSummary{
+					Matched:          agg.Matched,
+					RUM:              agg.RUM,
+					ManagedResources: agg.ManagedResources,
+					DataSources:      agg.DataSources,
+					TotalResources:   agg.TotalResources,
+				},
+				"states": toPreviewRows(preview),
+			})
+			return
+		}
+
+		// Residual path: the WHERE clause still reduces the scan to the clean
+		// predicates; the semver-range / provider / resource-type predicates are
+		// applied in Go over that reduced set.
+		rows, err := h.analysisRepo.FilterStates(ctx, f.sqlFilter())
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load states"})
 			return
 		}
-		matched := applyReportFilters(rows, f)
-		summary := reporting.SummarizeStates(toStateRecords(matched))
-
-		capped := matched
-		truncated := false
-		if len(capped) > reportPreviewCap {
-			capped = capped[:reportPreviewCap]
-			truncated = true
-		}
+		matched := f.applyResidual(rows)
+		capped, truncated := capRows(matched)
 		c.JSON(http.StatusOK, gin.H{
 			"total":     len(matched),
 			"truncated": truncated,
-			"summary":   summary,
+			"summary":   reporting.SummarizeStates(toStateRecords(matched)),
 			"states":    toPreviewRows(capped),
 		})
 	}
@@ -287,12 +361,14 @@ func (h *SourcesHandlers) ReportStatesExport() gin.HandlerFunc {
 			return
 		}
 		format := reporting.Format(c.DefaultQuery("format", "json"))
-		rows, err := h.analysisRepo.AllStates(c.Request.Context())
+		// Exports need every matched row (all columns), so the WHERE clause reduces
+		// the scan to the clean predicates and the residual pass finishes the rest.
+		rows, err := h.analysisRepo.FilterStates(c.Request.Context(), f.sqlFilter())
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load states"})
 			return
 		}
-		matched := applyReportFilters(rows, f)
+		matched := f.applyResidual(rows)
 		filters, filterText := f.describe()
 		meta := reporting.StatesReportMeta{
 			GeneratedAt: time.Now().UTC().Format(time.RFC3339),
@@ -339,15 +415,6 @@ func toStateRecords(rows []repositories.StateRow) []reporting.StateRecord {
 		})
 	}
 	return out
-}
-
-func containsString(ss []string, s string) bool {
-	for _, v := range ss {
-		if v == s {
-			return true
-		}
-	}
-	return false
 }
 
 // mapKeyContains reports whether any key of m contains sub (both lower-cased).

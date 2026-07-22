@@ -4,6 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
+	"strings"
 
 	"github.com/lib/pq"
 )
@@ -80,6 +82,89 @@ type StateRow struct {
 	Providers        map[string]int `json:"providers"`
 	ResourceTypes    map[string]int `json:"resource_types"`
 	AnalyzedAt       string         `json:"analyzed_at"`
+}
+
+// StateQueryFilter holds the Reports predicates that push cleanly into SQL:
+// source membership, a case-insensitive state-key substring, an exact Terraform
+// version, and numeric range bounds. A nil bound means "unbounded on that side",
+// so an absent filter adds no WHERE term. The awkward predicates (semver-range
+// version comparison, provider/resource-type key substring) are NOT expressed
+// here — the handler applies them as a residual Go pass (see reports.go).
+type StateQueryFilter struct {
+	SourceIDs    []string
+	KeyContains  string  // already lower-cased; empty = no filter
+	VersionExact *string // exact terraform_version match; nil = no filter ("" matches the unknown/empty version)
+
+	RUMMin, RUMMax         *int
+	ManagedMin, ManagedMax *int
+	DataMin, DataMax       *int
+	TotalMin, TotalMax     *int
+	SizeMin, SizeMax       *int64
+}
+
+// StatesAggregate is the full-match summary computed in SQL (COUNT + SUMs) so the
+// Reports summary and total never require loading every matched row into memory.
+type StatesAggregate struct {
+	Matched          int
+	RUM              int
+	ManagedResources int
+	DataSources      int
+	TotalResources   int
+}
+
+// buildStateWhere renders f as a parameterized WHERE clause (or "" when empty)
+// and the ordered args. Placeholders are $1..$N; callers that append further
+// args (e.g. a LIMIT) must do so AFTER these so the numbering stays correct.
+func buildStateWhere(f StateQueryFilter) (string, []any) {
+	var conds []string
+	var args []any
+	next := func() int { return len(args) + 1 }
+
+	if len(f.SourceIDs) > 0 {
+		ph := make([]string, len(f.SourceIDs))
+		for i, id := range f.SourceIDs {
+			ph[i] = fmt.Sprintf("$%d", next())
+			args = append(args, id)
+		}
+		conds = append(conds, "a.source_id IN ("+strings.Join(ph, ",")+")")
+	}
+	if f.KeyContains != "" {
+		conds = append(conds, fmt.Sprintf("strpos(lower(a.state_key), $%d) > 0", next()))
+		args = append(args, f.KeyContains)
+	}
+	if f.VersionExact != nil {
+		conds = append(conds, fmt.Sprintf("a.terraform_version = $%d", next()))
+		args = append(args, *f.VersionExact)
+	}
+	addInt := func(col, cmp string, v *int) {
+		if v == nil {
+			return
+		}
+		conds = append(conds, fmt.Sprintf("a.%s %s $%d", col, cmp, next()))
+		args = append(args, *v)
+	}
+	addInt64 := func(col, cmp string, v *int64) {
+		if v == nil {
+			return
+		}
+		conds = append(conds, fmt.Sprintf("a.%s %s $%d", col, cmp, next()))
+		args = append(args, *v)
+	}
+	addInt("rum", ">=", f.RUMMin)
+	addInt("rum", "<=", f.RUMMax)
+	addInt("managed_resources", ">=", f.ManagedMin)
+	addInt("managed_resources", "<=", f.ManagedMax)
+	addInt("data_sources", ">=", f.DataMin)
+	addInt("data_sources", "<=", f.DataMax)
+	addInt("total_resources", ">=", f.TotalMin)
+	addInt("total_resources", "<=", f.TotalMax)
+	addInt64("size", ">=", f.SizeMin)
+	addInt64("size", "<=", f.SizeMax)
+
+	if len(conds) == 0 {
+		return "", args
+	}
+	return "WHERE " + strings.Join(conds, " AND "), args
 }
 
 // StateAnalysisRepository is the DAO for state_analyses and source_sync_status.
@@ -326,12 +411,21 @@ func (r *StateAnalysisRepository) StateVersions(ctx context.Context) ([]StateVer
 	return out, rows.Err()
 }
 
-// AllStates returns every analyzed state file with its full scalar field set,
-// provider/resource-type maps, and owning source name + type. The Reports page
-// filters these in the handler (the store is one row per state file, so an
-// in-memory pass is simpler and more flexible than encoding every predicate —
-// substring, semver range, provider/type membership, numeric ranges — in SQL).
+// AllStates returns every analyzed state file with its full field set. It is a
+// FilterStates with no predicates, retained for callers/tests that want the
+// whole store.
 func (r *StateAnalysisRepository) AllStates(ctx context.Context) ([]StateRow, error) {
+	return r.FilterStates(ctx, StateQueryFilter{})
+}
+
+// FilterStates returns the analyzed state files matching f (the SQL-pushable
+// predicates), each with its full scalar set, provider/resource-type maps, and
+// owning source name + type. Pushing the predicates into the WHERE clause means
+// a filtered Reports view (or export) no longer loads and JSON-unmarshals the
+// entire store on every request. The handler applies any residual predicates
+// (semver-range version, provider/type substring) to this reduced set.
+func (r *StateAnalysisRepository) FilterStates(ctx context.Context, f StateQueryFilter) ([]StateRow, error) {
+	where, args := buildStateWhere(f)
 	rows, err := r.db.QueryContext(ctx, `
 		SELECT a.source_id, COALESCE(s.name, ''), COALESCE(s.type, ''), a.state_key,
 		       a.terraform_version, a.serial, a.lineage, a.size,
@@ -339,7 +433,8 @@ func (r *StateAnalysisRepository) AllStates(ctx context.Context) ([]StateRow, er
 		       a.providers, a.resource_types, a.analyzed_at::text
 		FROM state_analyses a
 		LEFT JOIN state_sources s ON s.id = a.source_id
-		ORDER BY s.name, a.state_key`)
+		`+where+`
+		ORDER BY s.name, a.state_key`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -360,6 +455,52 @@ func (r *StateAnalysisRepository) AllStates(ctx context.Context) ([]StateRow, er
 		out = append(out, v)
 	}
 	return out, rows.Err()
+}
+
+// PreviewStatesWithTotals returns up to limit matched rows (scalar columns only —
+// the preview omits the provider/resource-type maps) together with the full-match
+// aggregate (COUNT + SUMs) computed in SQL via window functions. This is the fast
+// path for the Reports table: the DB does the counting and summing over the whole
+// match, while only one page of rows crosses the wire and no JSONB is unmarshalled.
+// Only valid when the request carries no residual predicate (see FilterStates).
+func (r *StateAnalysisRepository) PreviewStatesWithTotals(ctx context.Context, f StateQueryFilter, limit int) ([]StateRow, StatesAggregate, error) {
+	where, args := buildStateWhere(f)
+	args = append(args, limit)
+	q := `
+		SELECT a.source_id, COALESCE(s.name, ''), COALESCE(s.type, ''), a.state_key,
+		       a.terraform_version, a.serial, a.size,
+		       a.rum, a.managed_resources, a.data_sources, a.total_resources, a.analyzed_at::text,
+		       COUNT(*) OVER() AS full_count,
+		       COALESCE(SUM(a.rum) OVER(), 0),
+		       COALESCE(SUM(a.managed_resources) OVER(), 0),
+		       COALESCE(SUM(a.data_sources) OVER(), 0),
+		       COALESCE(SUM(a.total_resources) OVER(), 0)
+		FROM state_analyses a
+		LEFT JOIN state_sources s ON s.id = a.source_id
+		` + where + `
+		ORDER BY s.name, a.state_key
+		LIMIT $` + fmt.Sprintf("%d", len(args))
+
+	rows, err := r.db.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, StatesAggregate{}, err
+	}
+	defer rows.Close()
+
+	out := []StateRow{}
+	var agg StatesAggregate
+	for rows.Next() {
+		var v StateRow
+		// Window aggregates repeat on every row; the last read wins (all equal).
+		if err := rows.Scan(&v.SourceID, &v.SourceName, &v.SourceType, &v.StateKey,
+			&v.TerraformVersion, &v.Serial, &v.Size,
+			&v.RUM, &v.ManagedResources, &v.DataSources, &v.TotalResources, &v.AnalyzedAt,
+			&agg.Matched, &agg.RUM, &agg.ManagedResources, &agg.DataSources, &agg.TotalResources); err != nil {
+			return nil, StatesAggregate{}, err
+		}
+		out = append(out, v)
+	}
+	return out, agg, rows.Err()
 }
 
 func (r *StateAnalysisRepository) jsonbCounts(ctx context.Context, query string) (map[string]int, error) {
