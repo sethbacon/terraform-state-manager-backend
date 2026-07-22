@@ -307,6 +307,73 @@ func (h *SourcesHandlers) TestSource() gin.HandlerFunc {
 	}
 }
 
+// TestSourceConfig validates connectivity for an UNSAVED source configuration:
+// it builds the connector from the request body and lists its states, without
+// persisting anything. This is the main-app counterpart to the setup wizard's
+// POST /setup/sources/test, so the add-source dialog can test before saving.
+// When source_id is set and credentials are blank, the stored source's
+// credentials are reused — the edit-dialog contract (blank = keep existing),
+// mirroring UpdateSource's validation path.
+// @Summary      Test an unsaved source configuration
+// @Description  Builds a connector from the request body and lists its states; nothing is persisted. With source_id and blank credentials, the stored credentials are reused. Requires sources:manage.
+// @Tags         Sources
+// @Accept       json
+// @Produce      json
+// @Success      200  {object}  map[string]interface{}
+// @Failure      400  {object}  map[string]interface{}
+// @Failure      404  {object}  map[string]interface{}
+// @Failure      502  {object}  map[string]interface{}
+// @Security     BearerAuth
+// @Security     CookieAuth
+// @Router       /sources/test [post]
+func (h *SourcesHandlers) TestSourceConfig() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		var req struct {
+			Type        string         `json:"type" binding:"required"`
+			Config      map[string]any `json:"config"`
+			Credentials map[string]any `json:"credentials"`
+			SourceID    string         `json:"source_id"`
+		}
+		if err := c.ShouldBindJSON(&req); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"status": "failed", "error": "type is required"})
+			return
+		}
+
+		creds := req.Credentials
+		if len(creds) == 0 && req.SourceID != "" {
+			existing, err := h.repo.GetByID(c.Request.Context(), req.SourceID)
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"status": "failed", "error": "failed to load source"})
+				return
+			}
+			if existing == nil {
+				c.JSON(http.StatusNotFound, gin.H{"status": "failed", "error": "source not found"})
+				return
+			}
+			stored, dErr := decryptCredentials(existing)
+			if dErr != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"status": "failed", "error": "failed to decrypt source credentials"})
+				return
+			}
+			creds = stored
+		}
+
+		conn, err := statesource.New(req.Type, req.Config, creds)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"status": "failed", "error": err.Error()})
+			return
+		}
+		ctx, cancel := context.WithTimeout(c.Request.Context(), 15*time.Second)
+		defer cancel()
+		refs, err := conn.List(ctx)
+		if err != nil {
+			c.JSON(http.StatusBadGateway, gin.H{"status": "failed", "error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"status": "ok", "states": len(refs)})
+	}
+}
+
 // DeleteSource removes a source.
 // @Summary      Delete state source
 // @Description  Disconnects the source from the State Manager. The underlying backend and its files are not touched. Requires sources:manage.
