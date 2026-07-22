@@ -426,15 +426,15 @@ func (r *StateAnalysisRepository) AllStates(ctx context.Context) ([]StateRow, er
 // (semver-range version, provider/type substring) to this reduced set.
 func (r *StateAnalysisRepository) FilterStates(ctx context.Context, f StateQueryFilter) ([]StateRow, error) {
 	where, args := buildStateWhere(f)
-	rows, err := r.db.QueryContext(ctx, `
+	q := `
 		SELECT a.source_id, COALESCE(s.name, ''), COALESCE(s.type, ''), a.state_key,
 		       a.terraform_version, a.serial, a.lineage, a.size,
 		       a.rum, a.managed_resources, a.data_sources, a.total_resources,
 		       a.providers, a.resource_types, a.analyzed_at::text
 		FROM state_analyses a
-		LEFT JOIN state_sources s ON s.id = a.source_id
-		`+where+`
-		ORDER BY s.name, a.state_key`, args...)
+		LEFT JOIN state_sources s ON s.id = a.source_id`
+	q += " " + where + " ORDER BY s.name, a.state_key" // #nosec G202 -- where is fixed column names + $N placeholders from buildStateWhere; all values bound via args
+	rows, err := r.db.QueryContext(ctx, q, args...)    // #nosec G202 -- q is built from fixed SQL + placeholders above
 	if err != nil {
 		return nil, err
 	}
@@ -476,12 +476,9 @@ func (r *StateAnalysisRepository) PreviewStatesWithTotals(ctx context.Context, f
 		       COALESCE(SUM(a.data_sources) OVER(), 0),
 		       COALESCE(SUM(a.total_resources) OVER(), 0)
 		FROM state_analyses a
-		LEFT JOIN state_sources s ON s.id = a.source_id
-		` + where + `
-		ORDER BY s.name, a.state_key
-		LIMIT $` + fmt.Sprintf("%d", len(args))
-
-	rows, err := r.db.QueryContext(ctx, q, args...)
+		LEFT JOIN state_sources s ON s.id = a.source_id`
+	q += " " + where + " ORDER BY s.name, a.state_key LIMIT $" + fmt.Sprintf("%d", len(args)) // #nosec G202 -- where is fixed column names + $N placeholders from buildStateWhere; all values bound via args
+	rows, err := r.db.QueryContext(ctx, q, args...)                                           // #nosec G202 -- q is built from fixed SQL + placeholders above
 	if err != nil {
 		return nil, StatesAggregate{}, err
 	}
