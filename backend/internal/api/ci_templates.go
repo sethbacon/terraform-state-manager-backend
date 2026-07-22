@@ -74,7 +74,7 @@ func (h *CITemplateHandlers) ListCITemplates() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		templates, err := h.repo.List(c.Request.Context())
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to list templates"})
+			serverError(c, err, "failed to list templates")
 			return
 		}
 		c.JSON(http.StatusOK, gin.H{"templates": templates})
@@ -94,7 +94,7 @@ func (h *CITemplateHandlers) GetCITemplate() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		t, err := h.repo.GetByID(c.Request.Context(), c.Param("id"))
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load template"})
+			serverError(c, err, "failed to load template")
 			return
 		}
 		if t == nil {
@@ -152,7 +152,7 @@ func (h *CITemplateHandlers) CreateCITemplate() gin.HandlerFunc {
 			Name: strings.TrimSpace(req.Name), Description: strings.TrimSpace(req.Description), Content: req.Content,
 		})
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create template"})
+			serverError(c, err, "failed to create template")
 			return
 		}
 		h.audit.write(c, "ci_template.create", "ci_template", t.ID,
@@ -189,7 +189,7 @@ func (h *CITemplateHandlers) UpdateCITemplate() gin.HandlerFunc {
 			Description: strings.TrimSpace(req.Description), Content: req.Content,
 		})
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update template"})
+			serverError(c, err, "failed to update template")
 			return
 		}
 		if updated == nil {
@@ -217,7 +217,7 @@ func (h *CITemplateHandlers) DeleteCITemplate() gin.HandlerFunc {
 		id := c.Param("id")
 		t, err := h.repo.GetByID(c.Request.Context(), id)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load template"})
+			serverError(c, err, "failed to load template")
 			return
 		}
 		if t == nil {
@@ -229,7 +229,7 @@ func (h *CITemplateHandlers) DeleteCITemplate() gin.HandlerFunc {
 			return
 		}
 		if err := h.repo.Delete(c.Request.Context(), id); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to delete template"})
+			serverError(c, err, "failed to delete template")
 			return
 		}
 		h.audit.write(c, "ci_template.delete", "ci_template", id, nil)

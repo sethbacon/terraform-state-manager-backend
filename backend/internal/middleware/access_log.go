@@ -26,16 +26,28 @@ func AccessLog() gin.HandlerFunc {
 		if path == "" {
 			path = "unmatched"
 		}
+		status := c.Writer.Status()
 		attrs := []any{
 			"method", c.Request.Method,
 			"path", path,
-			"status", c.Writer.Status(),
+			"status", status,
 			"latency_ms", time.Since(start).Milliseconds(),
 			"request_id", c.GetString("request_id"),
 			"client_ip", c.ClientIP(),
 		}
 		if uid := c.GetString("user_id"); uid != "" {
 			attrs = append(attrs, "user_id", uid)
+		}
+		// A 5xx means an internal fault the client sees only as a generic body.
+		// Surface the cause (attached by handlers via c.Error / serverError) in the
+		// server-side log so a request_id can be traced to a real error, and log at
+		// Error level so 5xx is alertable. The response body is unchanged.
+		if status >= 500 {
+			if len(c.Errors) > 0 {
+				attrs = append(attrs, "error", c.Errors.String())
+			}
+			slog.Error("http_request", attrs...)
+			return
 		}
 		slog.Info("http_request", attrs...)
 	}

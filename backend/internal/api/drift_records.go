@@ -106,7 +106,7 @@ func (h *DriftHandlers) IngestDrift() gin.HandlerFunc {
 		}
 		src, err := h.sourceRepo.GetByID(ctx, req.SourceID)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load source"})
+			serverError(c, err, "failed to load source")
 			return
 		}
 		if src == nil {
@@ -153,7 +153,7 @@ func (h *DriftHandlers) IngestDrift() gin.HandlerFunc {
 		if !drifted {
 			resolved, err := h.recordRepo.ResolveClean(ctx, req.SourceID, req.StateKey)
 			if err != nil {
-				c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to record clean result"})
+				serverError(c, err, "failed to record clean result")
 				return
 			}
 			h.audit.write(c, "drift.ingest", "drift_record", req.SourceID,
@@ -173,7 +173,7 @@ func (h *DriftHandlers) IngestDrift() gin.HandlerFunc {
 			ExternalRef: extRef,
 		})
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to record drift"})
+			serverError(c, err, "failed to record drift")
 			return
 		}
 		h.audit.write(c, "drift.ingest", "drift_record", rec.ID,
@@ -276,17 +276,17 @@ func (h *DriftHandlers) ListDriftRecords() gin.HandlerFunc {
 		sourceID, severity := c.Query("source_id"), c.Query("severity")
 		records, err := h.recordRepo.List(ctx, statuses, sourceID, severity, perPage, (page-1)*perPage, start, end)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to list drift records"})
+			serverError(c, err, "failed to list drift records")
 			return
 		}
 		total, err := h.recordRepo.CountRecords(ctx, statuses, sourceID, severity, start, end)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to list drift records"})
+			serverError(c, err, "failed to list drift records")
 			return
 		}
 		counts, err := h.recordRepo.CountsByStatus(ctx)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to list drift records"})
+			serverError(c, err, "failed to list drift records")
 			return
 		}
 		c.JSON(http.StatusOK, gin.H{"records": records, "counts": counts, "total": total})
@@ -298,7 +298,7 @@ func (h *DriftHandlers) GetDriftRecord() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		rec, err := h.recordRepo.GetByID(c.Request.Context(), c.Param("id"))
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load drift record"})
+			serverError(c, err, "failed to load drift record")
 			return
 		}
 		if rec == nil {
@@ -333,7 +333,7 @@ func (h *DriftHandlers) AcknowledgeDriftRecord() gin.HandlerFunc {
 		}
 		rec, err := h.recordRepo.Acknowledge(c.Request.Context(), c.Param("id"), userIDOf(c), req.Note)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to acknowledge drift record"})
+			serverError(c, err, "failed to acknowledge drift record")
 			return
 		}
 		if rec == nil {
@@ -357,7 +357,7 @@ func (h *DriftHandlers) ResolveDriftRecord() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		rec, err := h.recordRepo.Resolve(c.Request.Context(), c.Param("id"))
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to resolve drift record"})
+			serverError(c, err, "failed to resolve drift record")
 			return
 		}
 		if rec == nil {

@@ -77,7 +77,7 @@ func (h *SourcesHandlers) doTransfer(c *gin.Context, mode string) {
 
 	srcB, err := h.repo.GetByID(ctx, req.TargetSourceID)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load target source"})
+		serverError(c, err, "failed to load target source")
 		return
 	}
 	if srcB == nil {
@@ -86,7 +86,7 @@ func (h *SourcesHandlers) doTransfer(c *gin.Context, mode string) {
 	}
 	credsB, err := decryptCredentials(srcB)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to decrypt target credentials"})
+		serverError(c, err, "failed to decrypt target credentials")
 		return
 	}
 	connB, err := statesource.New(srcB.Type, srcB.Config, credsB)
@@ -146,7 +146,7 @@ func (h *SourcesHandlers) doTransfer(c *gin.Context, mode string) {
 
 	saved, err := h.transferRepo.Create(ctx, rec)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "transfer completed but failed to record it"})
+		serverError(c, err, "transfer completed but failed to record it")
 		return
 	}
 	h.audit.write(c, "state."+mode, "state", srcA.ID, map[string]interface{}{
@@ -197,7 +197,7 @@ func (h *SourcesHandlers) GetTransfer() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		t, err := h.transferRepo.GetByID(c.Request.Context(), c.Param("id"))
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load transfer"})
+			serverError(c, err, "failed to load transfer")
 			return
 		}
 		if t == nil {

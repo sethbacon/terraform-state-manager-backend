@@ -31,7 +31,7 @@ func (h *AuthHandlers) DevLoginHandler() gin.HandlerFunc {
 		// the route registration guard were ever bypassed.
 		user, err := h.userRepo.GetOrCreateUserByOIDC(ctx, "dev:admin", "admin.user@local.dev", "Dev Admin", true)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create dev user"})
+			serverError(c, err, "Failed to create dev user")
 			return
 		}
 		h.assignRole(ctx, user.ID, "admin")
@@ -42,7 +42,7 @@ func (h *AuthHandlers) DevLoginHandler() gin.HandlerFunc {
 		}
 		token, err := auth.GenerateJWT(user.ID, user.Email, scopes, sessionTTL)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to generate token"})
+			serverError(c, err, "Failed to generate token")
 			return
 		}
 		h.setSessionCookies(c, token)

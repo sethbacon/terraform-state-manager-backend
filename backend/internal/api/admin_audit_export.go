@@ -50,7 +50,7 @@ func (h *AdminHandlers) ExportAuditLogs() gin.HandlerFunc {
 		for offset := 0; ; offset += exportAuditPageSize {
 			logs, total, err := h.auditRepo.ListAuditLogs(c.Request.Context(), filters, exportAuditPageSize, offset)
 			if err != nil {
-				c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to export audit logs"})
+				serverError(c, err, "failed to export audit logs")
 				return
 			}
 			collected = append(collected, logs...)

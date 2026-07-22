@@ -72,7 +72,7 @@ func (h *AdminHandlers) CreateUser() gin.HandlerFunc {
 		}
 		user := &idmodels.User{Email: strings.TrimSpace(req.Email), Name: strings.TrimSpace(req.Name)}
 		if err := h.userRepo.CreateUser(c.Request.Context(), user); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create user"})
+			serverError(c, err, "failed to create user")
 			return
 		}
 		h.writeAudit(c, "user.create", "user", user.ID, map[string]interface{}{"email": user.Email})
@@ -106,7 +106,7 @@ func (h *AdminHandlers) UpdateUser() gin.HandlerFunc {
 			user.Name = strings.TrimSpace(req.Name)
 		}
 		if err := h.userRepo.UpdateUser(c.Request.Context(), user); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update user"})
+			serverError(c, err, "failed to update user")
 			return
 		}
 		h.writeAudit(c, "user.update", "user", user.ID, nil)
@@ -126,7 +126,7 @@ func (h *AdminHandlers) DeleteUser() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		id := c.Param("id")
 		if err := h.userRepo.DeleteUser(c.Request.Context(), id); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to delete user"})
+			serverError(c, err, "failed to delete user")
 			return
 		}
 		h.writeAudit(c, "user.delete", "user", id, nil)
@@ -146,7 +146,7 @@ func (h *AdminHandlers) GetUserMemberships() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		memberships, err := h.orgRepo.GetUserMemberships(c.Request.Context(), c.Param("id"))
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load memberships"})
+			serverError(c, err, "failed to load memberships")
 			return
 		}
 		c.JSON(http.StatusOK, gin.H{"memberships": memberships})
@@ -176,14 +176,14 @@ func (h *AdminHandlers) ExportUserData() gin.HandlerFunc {
 		}
 		memberships, err := h.orgRepo.GetUserMemberships(ctx, id)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load memberships"})
+			serverError(c, err, "failed to load memberships")
 			return
 		}
 		// All audit entries attributed to the user (capped — exports are not a
 		// general audit-archival mechanism).
 		logs, _, err := h.auditRepo.ListAuditLogs(ctx, auditFiltersForUser(id), 1000, 0)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load audit entries"})
+			serverError(c, err, "failed to load audit entries")
 			return
 		}
 		export := gin.H{
@@ -194,7 +194,7 @@ func (h *AdminHandlers) ExportUserData() gin.HandlerFunc {
 		}
 		data, err := json.MarshalIndent(export, "", "  ")
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to encode export"})
+			serverError(c, err, "failed to encode export")
 			return
 		}
 		h.writeAudit(c, "user.export", "user", id, nil)
@@ -228,11 +228,11 @@ func (h *AdminHandlers) EraseUser() gin.HandlerFunc {
 		user.Name = "Erased User"
 		user.OIDCSub = nil
 		if err := h.userRepo.UpdateUser(ctx, user); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to anonymize user"})
+			serverError(c, err, "failed to anonymize user")
 			return
 		}
 		if err := h.orgRepo.RemoveAllMembershipsForUser(ctx, id); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to revoke memberships"})
+			serverError(c, err, "failed to revoke memberships")
 			return
 		}
 		h.writeAudit(c, "user.erase", "user", id, nil)
@@ -275,7 +275,7 @@ func (h *AdminHandlers) CreateOrganization() gin.HandlerFunc {
 		}
 		ctx := c.Request.Context()
 		if err := h.orgRepo.CreateOrganization(ctx, org); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create organization"})
+			serverError(c, err, "failed to create organization")
 			return
 		}
 		// Auto-add the caller as the new organization's first admin member. Every
@@ -287,7 +287,7 @@ func (h *AdminHandlers) CreateOrganization() gin.HandlerFunc {
 		if callerID, ok := c.Get("user_id"); ok {
 			if uid, _ := callerID.(string); uid != "" {
 				if err := h.orgRepo.AddMemberWithParams(ctx, org.ID, uid, "admin"); err != nil {
-					c.JSON(http.StatusInternalServerError, gin.H{"error": "organization created, but failed to add you as its admin"})
+					serverError(c, err, "organization created, but failed to add you as its admin")
 					return
 				}
 			}
@@ -323,7 +323,7 @@ func (h *AdminHandlers) UpdateOrganization() gin.HandlerFunc {
 		}
 		if name := strings.TrimSpace(req.Name); name != "" && name != org.Name {
 			if err := h.orgRepo.Rename(ctx, org.ID, name); err != nil {
-				c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to rename organization"})
+				serverError(c, err, "failed to rename organization")
 				return
 			}
 			org.Name = name
@@ -339,7 +339,7 @@ func (h *AdminHandlers) UpdateOrganization() gin.HandlerFunc {
 			org.IdpName = nilIfEmpty(*req.IdpName)
 		}
 		if err := h.orgRepo.Update(ctx, org); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update organization"})
+			serverError(c, err, "failed to update organization")
 			return
 		}
 		h.writeAudit(c, "organization.update", "organization", org.ID, nil)
@@ -367,7 +367,7 @@ func (h *AdminHandlers) DeleteOrganization() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		id := c.Param("id")
 		if err := h.orgRepo.Delete(c.Request.Context(), id); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to delete organization"})
+			serverError(c, err, "failed to delete organization")
 			return
 		}
 		h.writeAudit(c, "organization.delete", "organization", id, nil)
@@ -387,7 +387,7 @@ func (h *AdminHandlers) ListOrganizationMembers() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		members, err := h.orgRepo.ListMembersWithUsers(c.Request.Context(), c.Param("id"))
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to list members"})
+			serverError(c, err, "failed to list members")
 			return
 		}
 		c.JSON(http.StatusOK, gin.H{"members": members})
@@ -440,7 +440,7 @@ func (h *AdminHandlers) AddOrganizationMember() gin.HandlerFunc {
 		}
 		orgID := c.Param("id")
 		if err := h.orgRepo.AddMemberWithRoleTemplate(c.Request.Context(), orgID, req.UserID, roleID); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to add member"})
+			serverError(c, err, "failed to add member")
 			return
 		}
 		h.writeAudit(c, "organization.member.add", "organization", orgID, map[string]interface{}{"user_id": req.UserID})
@@ -476,7 +476,7 @@ func (h *AdminHandlers) UpdateOrganizationMember() gin.HandlerFunc {
 		}
 		orgID, userID := c.Param("id"), c.Param("user_id")
 		if err := h.orgRepo.UpdateMemberRoleTemplate(c.Request.Context(), orgID, userID, roleID); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update member"})
+			serverError(c, err, "failed to update member")
 			return
 		}
 		h.writeAudit(c, "organization.member.update", "organization", orgID, map[string]interface{}{"user_id": userID})
@@ -496,7 +496,7 @@ func (h *AdminHandlers) RemoveOrganizationMember() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		orgID, userID := c.Param("id"), c.Param("user_id")
 		if err := h.orgRepo.RemoveMember(c.Request.Context(), orgID, userID); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to remove member"})
+			serverError(c, err, "failed to remove member")
 			return
 		}
 		h.writeAudit(c, "organization.member.remove", "organization", orgID, map[string]interface{}{"user_id": userID})

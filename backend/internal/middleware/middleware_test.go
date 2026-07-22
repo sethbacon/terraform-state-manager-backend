@@ -3,10 +3,12 @@ package middleware
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"regexp"
+	"strings"
 	"testing"
 
 	"github.com/gin-gonic/gin"
@@ -180,5 +182,40 @@ func TestAccessLog_SkipsProbePaths(t *testing.T) {
 	records := accessLogRecords(t, "/health", func(c *gin.Context) { c.Status(http.StatusOK) })
 	if len(records) != 0 {
 		t.Fatalf("expected no access-log records for /health, got %d", len(records))
+	}
+}
+
+func TestAccessLog_LogsCauseAt5xx(t *testing.T) {
+	records := accessLogRecords(t, "/api/v1/things/x", func(c *gin.Context) {
+		// What serverError does: attach the cause, respond with a generic 500.
+		_ = c.Error(errors.New("connection refused"))
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load"})
+	})
+	if len(records) != 1 {
+		t.Fatalf("expected 1 record, got %d", len(records))
+	}
+	rec := records[0]
+	if rec["level"] != "ERROR" {
+		t.Errorf("level = %v, want ERROR for a 5xx", rec["level"])
+	}
+	if rec["status"] != float64(http.StatusInternalServerError) {
+		t.Errorf("status = %v, want 500", rec["status"])
+	}
+	errStr, _ := rec["error"].(string)
+	if !strings.Contains(errStr, "connection refused") {
+		t.Errorf("error field = %q, want it to carry the attached cause", errStr)
+	}
+}
+
+func TestAccessLog_5xxWithoutAttachedError(t *testing.T) {
+	// A 5xx with no c.Error still logs at Error level (alertable), just without a cause.
+	records := accessLogRecords(t, "/api/v1/things/x", func(c *gin.Context) {
+		c.Status(http.StatusBadGateway)
+	})
+	if len(records) != 1 || records[0]["level"] != "ERROR" {
+		t.Fatalf("expected 1 ERROR record, got %+v", records)
+	}
+	if _, hasErr := records[0]["error"]; hasErr {
+		t.Error("no error field expected when nothing was attached")
 	}
 }

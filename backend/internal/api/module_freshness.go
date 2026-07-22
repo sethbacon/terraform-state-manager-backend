@@ -71,7 +71,7 @@ func (h *SourcesHandlers) ListStateModuleFreshness(getClient func() *suite.Disco
 	return func(c *gin.Context) {
 		refs, err := h.moduleRefRepo.ListBySource(c.Request.Context(), c.Param("id"), c.Query("key"))
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load module provenance"})
+			serverError(c, err, "failed to load module provenance")
 			return
 		}
 
