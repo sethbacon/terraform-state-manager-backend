@@ -87,7 +87,7 @@ func TestReportStates_Refresh(t *testing.T) {
 		env.mock.ExpectExec("DELETE FROM state_analyses WHERE source_id").WillReturnResult(sqlmock.NewResult(0, 0))
 		env.mock.ExpectExec("INSERT INTO source_sync_status").WillReturnResult(sqlmock.NewResult(0, 1))
 		// Then the report read aggregates the store.
-		env.mock.ExpectQuery("FROM state_analyses a").WillReturnRows(allStatesRows())
+		env.mock.ExpectQuery("FROM state_analyses a").WillReturnRows(previewRows())
 
 		w := doGet(env.r, "/api/v1/reports/states?refresh=true&source_id=s1")
 		if w.Code != http.StatusOK {
@@ -122,7 +122,7 @@ func TestReportStates_Refresh(t *testing.T) {
 		env.mock.ExpectExec("DELETE FROM state_analyses WHERE source_id").WillReturnResult(sqlmock.NewResult(0, 0))
 		env.mock.ExpectExec("DELETE FROM state_analysis_history").WillReturnResult(sqlmock.NewResult(0, 0))
 		env.mock.ExpectExec("INSERT INTO source_sync_status").WillReturnResult(sqlmock.NewResult(0, 1))
-		env.mock.ExpectQuery("FROM state_analyses a").WillReturnRows(allStatesRows())
+		env.mock.ExpectQuery("FROM state_analyses a").WillReturnRows(previewRows())
 
 		w := doGet(env.r, "/api/v1/reports/states?refresh=true")
 		if w.Code != http.StatusOK {

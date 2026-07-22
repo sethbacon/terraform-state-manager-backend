@@ -1,6 +1,7 @@
 package repositories
 
 import (
+	"reflect"
 	"testing"
 
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
@@ -312,6 +313,113 @@ func TestStateAnalysisHistory(t *testing.T) {
 		WillReturnResult(sqlmock.NewResult(0, 9))
 	if err := r.PruneHistory(ctx); err != nil {
 		t.Errorf("PruneHistory: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Error(err)
+	}
+}
+
+// ptrInt/ptrInt64 build the *int/*int64 bounds StateQueryFilter uses.
+func ptrInt(v int) *int       { return &v }
+func ptrInt64(v int64) *int64 { return &v }
+
+func TestBuildStateWhere(t *testing.T) {
+	t.Run("empty filter yields no clause and no args", func(t *testing.T) {
+		where, args := buildStateWhere(StateQueryFilter{})
+		if where != "" || len(args) != 0 {
+			t.Errorf("empty: where=%q args=%v", where, args)
+		}
+	})
+
+	t.Run("clean predicates render in order with $N placeholders", func(t *testing.T) {
+		ver := "1.5.7"
+		where, args := buildStateWhere(StateQueryFilter{
+			SourceIDs:    []string{"s1", "s2"},
+			KeyContains:  "prod",
+			VersionExact: &ver,
+			RUMMin:       ptrInt(10),
+			RUMMax:       ptrInt(100),
+			SizeMax:      ptrInt64(2048),
+		})
+		want := "WHERE a.source_id IN ($1,$2) AND strpos(lower(a.state_key), $3) > 0 " +
+			"AND a.terraform_version = $4 AND a.rum >= $5 AND a.rum <= $6 AND a.size <= $7"
+		if where != want {
+			t.Errorf("where =\n%q\nwant\n%q", where, want)
+		}
+		wantArgs := []any{"s1", "s2", "prod", "1.5.7", 10, 100, int64(2048)}
+		if !reflect.DeepEqual(args, wantArgs) {
+			t.Errorf("args = %v, want %v", args, wantArgs)
+		}
+	})
+
+	t.Run("empty exact version matches the unknown/empty version", func(t *testing.T) {
+		empty := ""
+		where, args := buildStateWhere(StateQueryFilter{VersionExact: &empty})
+		if where != "WHERE a.terraform_version = $1" || len(args) != 1 || args[0] != "" {
+			t.Errorf("unknown-version: where=%q args=%v", where, args)
+		}
+	})
+}
+
+// analysisFullCols mirrors the FilterStates projection.
+var analysisFullCols = []string{
+	"source_id", "name", "type", "state_key", "terraform_version", "serial", "lineage", "size",
+	"rum", "managed_resources", "data_sources", "total_resources", "providers", "resource_types", "analyzed_at",
+}
+
+func TestFilterStates(t *testing.T) {
+	db, mock := newMock(t)
+	r := NewStateAnalysisRepository(db)
+
+	ver := "1.5.7"
+	// The clean predicates must be threaded through as positional args.
+	mock.ExpectQuery("FROM state_analyses a").
+		WithArgs("s1", "prod", "1.5.7", 10).
+		WillReturnRows(sqlmock.NewRows(analysisFullCols).
+			AddRow("s1", "prod", "s3", "envs/prod/app.tfstate", "1.5.7", int64(10), "lin-1", int64(2048),
+				40, 38, 2, 42, []byte(`{"aws":40}`), []byte(`{"aws_instance":12}`), "2026-06-18T00:00:00Z"))
+
+	rows, err := r.FilterStates(ctx, StateQueryFilter{
+		SourceIDs: []string{"s1"}, KeyContains: "prod", VersionExact: &ver, RUMMin: ptrInt(10),
+	})
+	if err != nil {
+		t.Fatalf("FilterStates: %v", err)
+	}
+	if len(rows) != 1 || rows[0].StateKey != "envs/prod/app.tfstate" || rows[0].Providers["aws"] != 40 {
+		t.Errorf("unexpected rows: %+v", rows)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Error(err)
+	}
+}
+
+func TestPreviewStatesWithTotals(t *testing.T) {
+	db, mock := newMock(t)
+	r := NewStateAnalysisRepository(db)
+
+	cols := []string{
+		"source_id", "name", "type", "state_key", "terraform_version", "serial", "size",
+		"rum", "managed_resources", "data_sources", "total_resources", "analyzed_at",
+		"full_count", "sum_rum", "sum_managed", "sum_data", "sum_total",
+	}
+	// No filter: the only positional arg is the LIMIT. Window aggregates repeat.
+	mock.ExpectQuery(`COUNT\(\*\) OVER`).
+		WithArgs(500).
+		WillReturnRows(sqlmock.NewRows(cols).
+			AddRow("s1", "prod", "s3", "envs/prod/app.tfstate", "1.5.7", int64(10), int64(2048),
+				40, 38, 2, 42, "2026-06-18T00:00:00Z", 2, 48, 46, 2, 50).
+			AddRow("s2", "dev", "local", "dev/net.tfstate", "0.14.11", int64(5), int64(512),
+				8, 8, 0, 8, "2026-06-18T00:00:00Z", 2, 48, 46, 2, 50))
+
+	rows, agg, err := r.PreviewStatesWithTotals(ctx, StateQueryFilter{}, 500)
+	if err != nil {
+		t.Fatalf("PreviewStatesWithTotals: %v", err)
+	}
+	if len(rows) != 2 || rows[0].StateKey != "envs/prod/app.tfstate" {
+		t.Errorf("unexpected rows: %+v", rows)
+	}
+	if agg.Matched != 2 || agg.RUM != 48 || agg.ManagedResources != 46 || agg.DataSources != 2 || agg.TotalResources != 50 {
+		t.Errorf("unexpected aggregate: %+v", agg)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Error(err)
