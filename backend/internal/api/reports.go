@@ -227,7 +227,7 @@ func (h *SourcesHandlers) ReportStates() gin.HandlerFunc {
 		}
 		rows, err := h.analysisRepo.AllStates(ctx)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load states"})
+			serverError(c, err, "failed to load states")
 			return
 		}
 		matched := applyReportFilters(rows, f)
@@ -289,7 +289,7 @@ func (h *SourcesHandlers) ReportStatesExport() gin.HandlerFunc {
 		format := reporting.Format(c.DefaultQuery("format", "json"))
 		rows, err := h.analysisRepo.AllStates(c.Request.Context())
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load states"})
+			serverError(c, err, "failed to load states")
 			return
 		}
 		matched := applyReportFilters(rows, f)

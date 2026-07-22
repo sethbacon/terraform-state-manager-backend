@@ -54,7 +54,7 @@ func serveWorkflowTemplate(templates *repositories.WorkflowTemplateRepository, k
 		if templates != nil {
 			t, err := templates.GetByKey(c.Request.Context(), provider, kind, profile)
 			if err != nil {
-				c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load template"})
+				serverError(c, err, "failed to load template")
 				return
 			}
 			if t != nil {

@@ -45,7 +45,7 @@ func (h *AuthHandlers) samlLogin(c *gin.Context, provider string) {
 
 	state, err := generateState()
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to generate state"})
+		serverError(c, err, "Failed to generate state")
 		return
 	}
 	redirectURL, requestID, err := sp.MakeAuthenticationRequest(state)
@@ -62,7 +62,7 @@ func (h *AuthHandlers) samlLogin(c *gin.Context, provider string) {
 		RequestID:    requestID,
 	}
 	if err := h.stateStore.Save(c.Request.Context(), state, ss, 10*time.Minute); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to save session state"})
+		serverError(c, err, "Failed to save session state")
 		return
 	}
 	c.Redirect(http.StatusFound, redirectURL.String())
@@ -96,7 +96,7 @@ func (h *AuthHandlers) SAMLMetadataHandler() gin.HandlerFunc {
 		}
 		data, err := xml.MarshalIndent(provider.GetMetadata(), "", "  ")
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to marshal SP metadata"})
+			serverError(c, err, "Failed to marshal SP metadata")
 			return
 		}
 		c.Data(http.StatusOK, "application/samlmetadata+xml", data)

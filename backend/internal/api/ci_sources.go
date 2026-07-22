@@ -77,7 +77,7 @@ func (h *CISourceHandlers) ListCISources() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		sources, err := h.repo.List(c.Request.Context())
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to list CI sources"})
+			serverError(c, err, "failed to list CI sources")
 			return
 		}
 		out := make([]gin.H, 0, len(sources))
@@ -163,7 +163,7 @@ func (h *CISourceHandlers) CreateCISource() gin.HandlerFunc {
 			}
 			enc, err := crypto.Encrypt([]byte(req.Token))
 			if err != nil {
-				c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to encrypt token"})
+				serverError(c, err, "failed to encrypt token")
 				return
 			}
 			src.EncryptedToken = enc
@@ -178,7 +178,7 @@ func (h *CISourceHandlers) CreateCISource() gin.HandlerFunc {
 				}
 				enc, err := crypto.Encrypt([]byte(req.ClientSecret))
 				if err != nil {
-					c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to encrypt client secret"})
+					serverError(c, err, "failed to encrypt client secret")
 					return
 				}
 				src.EncryptedClientSecret = enc
@@ -197,7 +197,7 @@ func (h *CISourceHandlers) CreateCISource() gin.HandlerFunc {
 				}
 				enc, err := crypto.Encrypt([]byte(req.AppPrivateKey))
 				if err != nil {
-					c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to encrypt app private key"})
+					serverError(c, err, "failed to encrypt app private key")
 					return
 				}
 				src.EncryptedAppPrivateKey = enc
@@ -214,7 +214,7 @@ func (h *CISourceHandlers) CreateCISource() gin.HandlerFunc {
 
 		saved, err := h.repo.Create(c.Request.Context(), src)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create CI source"})
+			serverError(c, err, "failed to create CI source")
 			return
 		}
 		writeAuditEntry(c, h.audit, "ci_source.create", "ci_source", saved.ID,
@@ -236,7 +236,7 @@ func (h *CISourceHandlers) DeleteCISource() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		id := c.Param("id")
 		if err := h.repo.Delete(c.Request.Context(), id); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to delete CI source"})
+			serverError(c, err, "failed to delete CI source")
 			return
 		}
 		writeAuditEntry(c, h.audit, "ci_source.delete", "ci_source", id, nil)
@@ -341,7 +341,7 @@ func ptrStr(p *string) string {
 func (h *CISourceHandlers) loadWithToken(c *gin.Context) (*repositories.CISource, string, bool) {
 	src, err := h.repo.GetByID(c.Request.Context(), c.Param("id"))
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load CI source"})
+		serverError(c, err, "failed to load CI source")
 		return nil, "", false
 	}
 	if src == nil {
@@ -350,7 +350,7 @@ func (h *CISourceHandlers) loadWithToken(c *gin.Context) (*repositories.CISource
 	}
 	token, err := sourceToken(c.Request.Context(), src)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to resolve CI source credential"})
+		serverError(c, err, "failed to resolve CI source credential")
 		return nil, "", false
 	}
 	return src, token, true

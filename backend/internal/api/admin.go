@@ -62,7 +62,7 @@ func (h *AdminHandlers) ListUsers() gin.HandlerFunc {
 		if q := c.Query("q"); q != "" {
 			users, err := h.userRepo.SearchWithMemberships(c.Request.Context(), q, limit, offset)
 			if err != nil {
-				c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to search users"})
+				serverError(c, err, "failed to search users")
 				return
 			}
 			// Search has no exact count; clients page until a short page comes back.
@@ -71,7 +71,7 @@ func (h *AdminHandlers) ListUsers() gin.HandlerFunc {
 		}
 		users, total, err := h.userRepo.ListUsersWithMemberships(c.Request.Context(), limit, offset)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to list users"})
+			serverError(c, err, "failed to list users")
 			return
 		}
 		c.JSON(http.StatusOK, gin.H{"users": users, "total": total})
@@ -91,7 +91,7 @@ func (h *AdminHandlers) ListOrganizations() gin.HandlerFunc {
 		limit, offset := pageParams(c)
 		orgs, err := h.orgRepo.List(c.Request.Context(), limit, offset)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to list organizations"})
+			serverError(c, err, "failed to list organizations")
 			return
 		}
 		c.JSON(http.StatusOK, gin.H{"organizations": orgs})
@@ -110,7 +110,7 @@ func (h *AdminHandlers) ListRoles() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		roles, err := h.roleRepo.ListRoleTemplates(c.Request.Context())
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to list role templates"})
+			serverError(c, err, "failed to list role templates")
 			return
 		}
 		c.JSON(http.StatusOK, gin.H{"roles": roles})
@@ -196,7 +196,7 @@ func (h *AdminHandlers) ListAuditLogs() gin.HandlerFunc {
 		limit, offset := pageParams(c)
 		logs, total, err := h.auditRepo.ListAuditLogs(c.Request.Context(), auditFiltersFromQuery(c), limit, offset)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to list audit logs"})
+			serverError(c, err, "failed to list audit logs")
 			return
 		}
 		c.JSON(http.StatusOK, gin.H{"logs": auditLogsJSON(logs), "total": total})

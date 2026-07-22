@@ -176,7 +176,7 @@ func (h *AuthHandlers) UpdateOIDCGroupMapping() gin.HandlerFunc {
 				repositories.SSOGroupMapping{Group: g, Organization: o, Role: r})
 		}
 		if err := h.ssoSettings.Upsert(c.Request.Context(), settings); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to save group mapping"})
+			serverError(c, err, "failed to save group mapping")
 			return
 		}
 		h.audit.write(c, "sso.group_mapping.update", "sso", "oidc", map[string]interface{}{

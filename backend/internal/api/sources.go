@@ -79,7 +79,7 @@ func (h *SourcesHandlers) ListSources() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		sources, err := h.repo.List(c.Request.Context())
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to list sources"})
+			serverError(c, err, "failed to list sources")
 			return
 		}
 		c.JSON(http.StatusOK, gin.H{"sources": sources})
@@ -135,7 +135,7 @@ func (h *SourcesHandlers) CreateSource() gin.HandlerFunc {
 			plain, _ := json.Marshal(req.Credentials)
 			enc, err := crypto.Encrypt(plain)
 			if err != nil {
-				c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to encrypt credentials"})
+				serverError(c, err, "failed to encrypt credentials")
 				return
 			}
 			src.EncryptedCredentials = enc
@@ -143,7 +143,7 @@ func (h *SourcesHandlers) CreateSource() gin.HandlerFunc {
 
 		created, err := h.repo.Create(c.Request.Context(), src)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create source"})
+			serverError(c, err, "failed to create source")
 			return
 		}
 		h.audit.write(c, "source.create", "source", created.ID,
@@ -171,7 +171,7 @@ func (h *SourcesHandlers) GetSource() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		s, err := h.repo.GetByID(c.Request.Context(), c.Param("id"))
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load source"})
+			serverError(c, err, "failed to load source")
 			return
 		}
 		if s == nil {
@@ -200,7 +200,7 @@ func (h *SourcesHandlers) UpdateSource() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		existing, err := h.repo.GetByID(c.Request.Context(), c.Param("id"))
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load source"})
+			serverError(c, err, "failed to load source")
 			return
 		}
 		if existing == nil {
@@ -226,7 +226,7 @@ func (h *SourcesHandlers) UpdateSource() gin.HandlerFunc {
 		if len(validateCreds) == 0 {
 			stored, dErr := decryptCredentials(existing)
 			if dErr != nil {
-				c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to decrypt source credentials"})
+				serverError(c, dErr, "failed to decrypt source credentials")
 				return
 			}
 			validateCreds = stored
@@ -253,7 +253,7 @@ func (h *SourcesHandlers) UpdateSource() gin.HandlerFunc {
 			plain, _ := json.Marshal(req.Credentials)
 			enc, err := crypto.Encrypt(plain)
 			if err != nil {
-				c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to encrypt credentials"})
+				serverError(c, err, "failed to encrypt credentials")
 				return
 			}
 			src.EncryptedCredentials = enc
@@ -261,7 +261,7 @@ func (h *SourcesHandlers) UpdateSource() gin.HandlerFunc {
 
 		updated, err := h.repo.Update(c.Request.Context(), src)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update source"})
+			serverError(c, err, "failed to update source")
 			return
 		}
 		if updated == nil {
@@ -320,7 +320,7 @@ func (h *SourcesHandlers) DeleteSource() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		id := c.Param("id")
 		if err := h.repo.Delete(c.Request.Context(), id); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to delete source"})
+			serverError(c, err, "failed to delete source")
 			return
 		}
 		h.audit.write(c, "source.delete", "source", id, nil)
@@ -490,7 +490,7 @@ func (h *SourcesHandlers) StateHistory() gin.HandlerFunc {
 		limit, _ := strconv.Atoi(c.DefaultQuery("limit", "0"))
 		history, err := h.analysisRepo.History(c.Request.Context(), c.Param("id"), key, limit)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load analysis history"})
+			serverError(c, err, "failed to load analysis history")
 			return
 		}
 		c.JSON(http.StatusOK, gin.H{"key": key, "history": history})
@@ -514,7 +514,7 @@ func (h *SourcesHandlers) ListStateModules() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		mods, err := h.moduleRefRepo.ListBySource(c.Request.Context(), c.Param("id"), c.Query("key"))
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load module provenance"})
+			serverError(c, err, "failed to load module provenance")
 			return
 		}
 		c.JSON(http.StatusOK, gin.H{"modules": mods})
@@ -564,7 +564,7 @@ func (h *SourcesHandlers) Consumers() gin.HandlerFunc {
 		}
 		consumers, err := h.moduleRefRepo.FindConsumers(c.Request.Context(), hosts, module)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load consumers"})
+			serverError(c, err, "failed to load consumers")
 			return
 		}
 		c.JSON(http.StatusOK, gin.H{"consumers": consumers, "total": len(consumers)})
@@ -611,7 +611,7 @@ func (h *SourcesHandlers) StateReport() gin.HandlerFunc {
 func (h *SourcesHandlers) connectorFor(c *gin.Context) (statesource.Connector, bool) {
 	s, err := h.repo.GetByID(c.Request.Context(), c.Param("id"))
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load source"})
+		serverError(c, err, "failed to load source")
 		return nil, false
 	}
 	if s == nil {
@@ -620,7 +620,7 @@ func (h *SourcesHandlers) connectorFor(c *gin.Context) (statesource.Connector, b
 	}
 	creds, err := decryptCredentials(s)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to decrypt source credentials"})
+		serverError(c, err, "failed to decrypt source credentials")
 		return nil, false
 	}
 	conn, err := statesource.New(s.Type, s.Config, creds)

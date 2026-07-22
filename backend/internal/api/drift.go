@@ -93,7 +93,7 @@ func (h *DriftHandlers) ListPipelines() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		conns, err := h.pipelineRepo.List(c.Request.Context())
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to list pipelines"})
+			serverError(c, err, "failed to list pipelines")
 			return
 		}
 		c.JSON(http.StatusOK, gin.H{"pipelines": conns})
@@ -125,14 +125,14 @@ func (h *DriftHandlers) CreatePipeline() gin.HandlerFunc {
 			}
 			enc, err := crypto.Encrypt([]byte(req.Token))
 			if err != nil {
-				c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to encrypt token"})
+				serverError(c, err, "failed to encrypt token")
 				return
 			}
 			pc.EncryptedToken = enc
 		}
 		saved, err := h.pipelineRepo.Create(c.Request.Context(), pc)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create pipeline connection"})
+			serverError(c, err, "failed to create pipeline connection")
 			return
 		}
 		h.audit.write(c, "pipeline.create", "pipeline_connection", saved.ID,
@@ -164,14 +164,14 @@ func (h *DriftHandlers) UpdatePipeline() gin.HandlerFunc {
 			}
 			enc, err := crypto.Encrypt([]byte(req.Token))
 			if err != nil {
-				c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to encrypt token"})
+				serverError(c, err, "failed to encrypt token")
 				return
 			}
 			pc.EncryptedToken = enc
 		}
 		saved, err := h.pipelineRepo.Update(c.Request.Context(), pc, updateToken)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update pipeline connection"})
+			serverError(c, err, "failed to update pipeline connection")
 			return
 		}
 		if saved == nil {
@@ -189,7 +189,7 @@ func (h *DriftHandlers) DeletePipeline() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		id := c.Param("id")
 		if err := h.pipelineRepo.Delete(c.Request.Context(), id); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to delete pipeline connection"})
+			serverError(c, err, "failed to delete pipeline connection")
 			return
 		}
 		h.audit.write(c, "pipeline.delete", "pipeline_connection", id, nil)
@@ -248,7 +248,7 @@ func (h *DriftHandlers) CreateRun() gin.HandlerFunc {
 			// The run was recorded but the CI dispatch failed; return the run detail.
 			c.JSON(http.StatusBadGateway, saved)
 		case err != nil:
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to dispatch drift run"})
+			serverError(c, err, "failed to dispatch drift run")
 		default:
 			c.JSON(http.StatusAccepted, saved)
 		}
@@ -352,12 +352,12 @@ func (h *DriftHandlers) ListRuns() gin.HandlerFunc {
 		offset, _ := strconv.Atoi(c.Query("offset")) // 0 -> first page
 		runs, err := h.driftRepo.List(ctx, limit, offset, status)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to list drift runs"})
+			serverError(c, err, "failed to list drift runs")
 			return
 		}
 		total, err := h.driftRepo.CountRuns(ctx, status)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to count drift runs"})
+			serverError(c, err, "failed to count drift runs")
 			return
 		}
 		c.JSON(http.StatusOK, gin.H{"runs": runs, "total": total})
@@ -369,7 +369,7 @@ func (h *DriftHandlers) GetRun() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		run, err := h.driftRepo.GetByID(c.Request.Context(), c.Param("id"))
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load drift run"})
+			serverError(c, err, "failed to load drift run")
 			return
 		}
 		if run == nil {
@@ -422,7 +422,7 @@ func (h *DriftHandlers) RunResults() gin.HandlerFunc {
 
 		run, err := h.driftRepo.GetByID(ctx, c.Param("id"))
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load drift run"})
+			serverError(c, err, "failed to load drift run")
 			return
 		}
 		// Uniform 401 whether the run is missing or the token is wrong, so the
@@ -435,7 +435,7 @@ func (h *DriftHandlers) RunResults() gin.HandlerFunc {
 		// One-shot: atomically consume the token; a replay finds it already cleared.
 		consumed, err := h.driftRepo.ConsumeCallbackToken(ctx, run.ID, run.CallbackToken)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to record results"})
+			serverError(c, err, "failed to record results")
 			return
 		}
 		if !consumed {
@@ -452,7 +452,7 @@ func (h *DriftHandlers) RunResults() gin.HandlerFunc {
 			drifted = *body.Drifted
 		}
 		if err := h.driftRepo.UpdateResult(ctx, run.ID, status, body.Added, body.Changed, body.Destroyed, drifted, body.Summary, body.Detail); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to record results"})
+			serverError(c, err, "failed to record results")
 			return
 		}
 

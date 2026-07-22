@@ -207,7 +207,7 @@ func (h *AuthHandlers) LoginHandler() gin.HandlerFunc {
 		}
 		state, err := generateState()
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to generate state"})
+			serverError(c, err, "Failed to generate state")
 			return
 		}
 		// BeginAuth (rather than the legacy GetAuthURL) generates a per-login
@@ -216,7 +216,7 @@ func (h *AuthHandlers) LoginHandler() gin.HandlerFunc {
 		// specific login attempt.
 		challenge, err := op.BeginAuth(state)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to initiate OIDC login"})
+			serverError(c, err, "Failed to initiate OIDC login")
 			return
 		}
 		ss := &auth.SessionState{
@@ -227,7 +227,7 @@ func (h *AuthHandlers) LoginHandler() gin.HandlerFunc {
 			CodeVerifier: challenge.CodeVerifier,
 		}
 		if err := h.stateStore.Save(c.Request.Context(), state, ss, 10*time.Minute); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to save session state"})
+			serverError(c, err, "Failed to save session state")
 			return
 		}
 		c.Redirect(http.StatusFound, challenge.URL)
@@ -367,7 +367,7 @@ func (h *AuthHandlers) MeHandler() gin.HandlerFunc {
 
 		userWithRoles, err := h.userRepo.GetUserWithOrgRoles(c.Request.Context(), uid)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get user information"})
+			serverError(c, err, "Failed to get user information")
 			return
 		}
 		if userWithRoles == nil {
@@ -431,7 +431,7 @@ func (h *AuthHandlers) RefreshHandler() gin.HandlerFunc {
 
 		newToken, err := auth.GenerateJWT(user.ID, user.Email, scopes, sessionTTL)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to generate new token"})
+			serverError(c, err, "Failed to generate new token")
 			return
 		}
 		h.setSessionCookies(c, newToken)

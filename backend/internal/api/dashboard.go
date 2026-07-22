@@ -43,32 +43,32 @@ func (h *SourcesHandlers) DashboardOverview() gin.HandlerFunc {
 
 		sources, err := h.repo.List(ctx)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to list sources"})
+			serverError(c, err, "failed to list sources")
 			return
 		}
 		totals, err := h.analysisRepo.Totals(ctx)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to aggregate analyses"})
+			serverError(c, err, "failed to aggregate analyses")
 			return
 		}
 		providers, err := h.analysisRepo.ProviderCounts(ctx)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to aggregate providers"})
+			serverError(c, err, "failed to aggregate providers")
 			return
 		}
 		resTypes, err := h.analysisRepo.ResourceTypeCounts(ctx)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to aggregate resource types"})
+			serverError(c, err, "failed to aggregate resource types")
 			return
 		}
 		versions, err := h.analysisRepo.VersionCounts(ctx)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to aggregate versions"})
+			serverError(c, err, "failed to aggregate versions")
 			return
 		}
 		statuses, err := h.analysisRepo.SyncStatuses(ctx)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load sync status"})
+			serverError(c, err, "failed to load sync status")
 			return
 		}
 
@@ -162,7 +162,7 @@ func (h *SourcesHandlers) StatesByVersion() gin.HandlerFunc {
 		}
 		rows, err := h.analysisRepo.StateVersions(c.Request.Context())
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load state versions"})
+			serverError(c, err, "failed to load state versions")
 			return
 		}
 		c.JSON(http.StatusOK, gin.H{

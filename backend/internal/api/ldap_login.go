@@ -66,7 +66,7 @@ func (h *AuthHandlers) LDAPLoginHandler() gin.HandlerFunc {
 		// email->identity binding.
 		user, err := h.userRepo.GetOrCreateUserByOIDC(ctx, sub, info.Email, info.Name, true)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to provision account"})
+			serverError(c, err, "failed to provision account")
 			return
 		}
 
@@ -83,7 +83,7 @@ func (h *AuthHandlers) LDAPLoginHandler() gin.HandlerFunc {
 		}
 		token, err := auth.GenerateJWT(user.ID, user.Email, scopes, sessionTTL)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate token"})
+			serverError(c, err, "failed to generate token")
 			return
 		}
 		// Attribute the entry to the just-authenticated user: this is an

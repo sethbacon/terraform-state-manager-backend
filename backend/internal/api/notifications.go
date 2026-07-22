@@ -132,7 +132,7 @@ func (h *NotificationHandlers) ListChannels() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		items, err := h.repo.List(c.Request.Context())
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to list channels"})
+			serverError(c, err, "failed to list channels")
 			return
 		}
 		c.JSON(http.StatusOK, gin.H{"channels": items})
@@ -170,7 +170,7 @@ func (h *NotificationHandlers) CreateChannel() gin.HandlerFunc {
 		}
 		enc, err := h.tokenCipher.Seal(req.Target)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to encrypt target"})
+			serverError(c, err, "failed to encrypt target")
 			return
 		}
 		enabled := req.Enabled == nil || *req.Enabled
@@ -179,7 +179,7 @@ func (h *NotificationHandlers) CreateChannel() gin.HandlerFunc {
 		}
 		saved, err := h.repo.Create(c.Request.Context(), ch)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create channel"})
+			serverError(c, err, "failed to create channel")
 			return
 		}
 		h.audit.write(c, "notification_channel.create", "notification_channel", saved.ID,
@@ -218,14 +218,14 @@ func (h *NotificationHandlers) UpdateChannel() gin.HandlerFunc {
 			}
 			var encErr error
 			if enc, encErr = h.tokenCipher.Seal(req.Target); encErr != nil {
-				c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to encrypt target"})
+				serverError(c, encErr, "failed to encrypt target")
 				return
 			}
 		}
 		enabled := req.Enabled == nil || *req.Enabled
 		updated, err := h.repo.Update(c.Request.Context(), c.Param("id"), req.Name, req.Type, req.events(), enabled, enc)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update channel"})
+			serverError(c, err, "failed to update channel")
 			return
 		}
 		if updated == nil {
@@ -243,7 +243,7 @@ func (h *NotificationHandlers) DeleteChannel() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		id := c.Param("id")
 		if err := h.repo.Delete(c.Request.Context(), id); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to delete channel"})
+			serverError(c, err, "failed to delete channel")
 			return
 		}
 		h.audit.write(c, "notification_channel.delete", "notification_channel", id, nil)
@@ -418,7 +418,7 @@ func (h *NotificationHandlers) PutSMTPConfig() gin.HandlerFunc {
 			}
 			enc, err := crypto.Encrypt([]byte(input.Password))
 			if err != nil {
-				c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to encrypt smtp password"})
+				serverError(c, err, "failed to encrypt smtp password")
 				return
 			}
 			dbc.SMTP.PasswordEncrypted = string(enc)
@@ -428,11 +428,11 @@ func (h *NotificationHandlers) PutSMTPConfig() gin.HandlerFunc {
 
 		configJSON, err := json.Marshal(dbc)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to marshal smtp configuration"})
+			serverError(c, err, "failed to marshal smtp configuration")
 			return
 		}
 		if err := h.settingsRepo.SetNotificationsConfig(ctx, configJSON); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to save smtp configuration"})
+			serverError(c, err, "failed to save smtp configuration")
 			return
 		}
 
@@ -549,11 +549,11 @@ func (h *NotificationHandlers) PutAPIKeyExpiryConfig() gin.HandlerFunc {
 
 		configJSON, err := json.Marshal(dbc)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to marshal api key expiry configuration"})
+			serverError(c, err, "failed to marshal api key expiry configuration")
 			return
 		}
 		if err := h.settingsRepo.SetNotificationsConfig(ctx, configJSON); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to save api key expiry configuration"})
+			serverError(c, err, "failed to save api key expiry configuration")
 			return
 		}
 
