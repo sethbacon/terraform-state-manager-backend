@@ -96,7 +96,7 @@ func (h *SourcesHandlers) EditState() gin.HandlerFunc {
 			}
 			id, bErr := h.editRepo.CreateBackup(ctx, src.ID, key, cur.Data, beforeSerial, actor)
 			if bErr != nil {
-				c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to back up current state"})
+				serverError(c, bErr, "failed to back up current state")
 				return
 			}
 			backupID = &id
@@ -227,7 +227,7 @@ func (h *SourcesHandlers) StateOperation() gin.HandlerFunc {
 		}
 		backupID, bErr := h.editRepo.CreateBackup(ctx, src.ID, key, cur.Data, beforeSerial, actor)
 		if bErr != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to back up current state"})
+			serverError(c, bErr, "failed to back up current state")
 			return
 		}
 
@@ -276,7 +276,7 @@ func (h *SourcesHandlers) deleteState(c *gin.Context, src *repositories.Source, 
 
 	backupID, bErr := h.editRepo.CreateBackup(ctx, src.ID, key, cur.Data, beforeSerial, actor)
 	if bErr != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to back up current state before delete"})
+		serverError(c, bErr, "failed to back up current state before delete")
 		return
 	}
 
@@ -330,7 +330,7 @@ func (h *SourcesHandlers) ListBackups() gin.HandlerFunc {
 		}
 		backups, err := h.editRepo.ListBackups(c.Request.Context(), c.Param("id"), key)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to list backups"})
+			serverError(c, err, "failed to list backups")
 			return
 		}
 		c.JSON(http.StatusOK, gin.H{"backups": backups})
@@ -383,7 +383,7 @@ func (h *SourcesHandlers) DiffBackup() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		backup, err := h.editRepo.GetBackup(c.Request.Context(), c.Param("backupId"))
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load backup"})
+			serverError(c, err, "failed to load backup")
 			return
 		}
 		if backup == nil {
@@ -473,7 +473,7 @@ func (h *SourcesHandlers) DiffBackup() gin.HandlerFunc {
 func (h *SourcesHandlers) loadOwnedBackup(c *gin.Context) (*repositories.Backup, bool) {
 	backup, err := h.editRepo.GetBackup(c.Request.Context(), c.Param("backupId"))
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load backup"})
+		serverError(c, err, "failed to load backup")
 		return nil, false
 	}
 	if backup == nil {
@@ -482,7 +482,7 @@ func (h *SourcesHandlers) loadOwnedBackup(c *gin.Context) (*repositories.Backup,
 	}
 	src, err := h.repo.GetByID(c.Request.Context(), c.Param("id"))
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load source"})
+		serverError(c, err, "failed to load source")
 		return nil, false
 	}
 	if src == nil || backup.SourceID != src.ID {
@@ -498,7 +498,7 @@ func (h *SourcesHandlers) RestoreBackup() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		backup, err := h.editRepo.GetBackup(c.Request.Context(), c.Param("backupId"))
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load backup"})
+			serverError(c, err, "failed to load backup")
 			return
 		}
 		if backup == nil {
@@ -539,7 +539,7 @@ func (h *SourcesHandlers) RestoreBackup() gin.HandlerFunc {
 			}
 			id, bErr := h.editRepo.CreateBackup(ctx, src.ID, backup.StateKey, cur.Data, beforeSerial, actor)
 			if bErr != nil {
-				c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to back up current state"})
+				serverError(c, bErr, "failed to back up current state")
 				return
 			}
 			preBackupID = &id
@@ -563,7 +563,7 @@ func (h *SourcesHandlers) RestoreBackup() gin.HandlerFunc {
 func (h *SourcesHandlers) sourceAndConnector(c *gin.Context) (*repositories.Source, statesource.Connector, bool) {
 	s, err := h.repo.GetByID(c.Request.Context(), c.Param("id"))
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load source"})
+		serverError(c, err, "failed to load source")
 		return nil, nil, false
 	}
 	if s == nil {
@@ -572,7 +572,7 @@ func (h *SourcesHandlers) sourceAndConnector(c *gin.Context) (*repositories.Sour
 	}
 	creds, err := decryptCredentials(s)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to decrypt source credentials"})
+		serverError(c, err, "failed to decrypt source credentials")
 		return nil, nil, false
 	}
 	conn, err := statesource.New(s.Type, s.Config, creds)
@@ -625,7 +625,7 @@ func (h *SourcesHandlers) ListLocks() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		locks, err := h.lockRepo.List(c.Request.Context(), c.Param("id"))
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to list locks"})
+			serverError(c, err, "failed to list locks")
 			return
 		}
 		c.JSON(http.StatusOK, gin.H{"locks": locks})
@@ -656,7 +656,7 @@ func (h *SourcesHandlers) ForceUnlock() gin.HandlerFunc {
 		}
 		released, err := h.lockRepo.ForceRelease(c.Request.Context(), c.Param("id"), key)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to release lock"})
+			serverError(c, err, "failed to release lock")
 			return
 		}
 		h.audit.write(c, "state.force_unlock", "state", c.Param("id"),

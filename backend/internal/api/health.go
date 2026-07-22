@@ -78,7 +78,7 @@ func (h *HealthHandlers) CreateRun() gin.HandlerFunc {
 		ctx := c.Request.Context()
 		conn, err := h.pipelineRepo.GetByID(ctx, req.PipelineConnectionID)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load pipeline connection"})
+			serverError(c, err, "failed to load pipeline connection")
 			return
 		}
 		if conn == nil {
@@ -88,7 +88,7 @@ func (h *HealthHandlers) CreateRun() gin.HandlerFunc {
 		// Connection-level token, or the shared token of its CI source.
 		token, bearer, err := resolvePipelineToken(ctx, h.ciSourceRepo, conn)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to resolve pipeline token"})
+			serverError(c, err, "failed to resolve pipeline token")
 			return
 		}
 
@@ -106,7 +106,7 @@ func (h *HealthHandlers) CreateRun() gin.HandlerFunc {
 		}
 		saved, err := h.healthRepo.Create(ctx, run)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create health run"})
+			serverError(c, err, "failed to create health run")
 			return
 		}
 
@@ -182,12 +182,12 @@ func (h *HealthHandlers) ListRuns() gin.HandlerFunc {
 		offset, _ := strconv.Atoi(c.Query("offset")) // 0 -> first page
 		runs, err := h.healthRepo.List(ctx, limit, offset, status)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to list health runs"})
+			serverError(c, err, "failed to list health runs")
 			return
 		}
 		total, err := h.healthRepo.CountRuns(ctx, status)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to count health runs"})
+			serverError(c, err, "failed to count health runs")
 			return
 		}
 		c.JSON(http.StatusOK, gin.H{"runs": runs, "total": total})
@@ -199,7 +199,7 @@ func (h *HealthHandlers) GetRun() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		run, err := h.healthRepo.GetByID(c.Request.Context(), c.Param("id"))
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load health run"})
+			serverError(c, err, "failed to load health run")
 			return
 		}
 		if run == nil {
@@ -234,7 +234,7 @@ func (h *HealthHandlers) RunResults() gin.HandlerFunc {
 
 		run, err := h.healthRepo.GetByID(ctx, c.Param("id"))
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load health run"})
+			serverError(c, err, "failed to load health run")
 			return
 		}
 		// Uniform 401 whether the run is missing or the token is wrong (no oracle).
@@ -246,7 +246,7 @@ func (h *HealthHandlers) RunResults() gin.HandlerFunc {
 		// One-shot: atomically consume the token; a replay finds it already cleared.
 		consumed, err := h.healthRepo.ConsumeCallbackToken(ctx, run.ID, run.CallbackToken)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to record results"})
+			serverError(c, err, "failed to record results")
 			return
 		}
 		if !consumed {
@@ -265,7 +265,7 @@ func (h *HealthHandlers) RunResults() gin.HandlerFunc {
 			success = *body.Success
 		}
 		if err := h.healthRepo.UpdateResult(ctx, run.ID, status, initOK, planOK, success, body.Summary, body.Detail); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to record results"})
+			serverError(c, err, "failed to record results")
 			return
 		}
 

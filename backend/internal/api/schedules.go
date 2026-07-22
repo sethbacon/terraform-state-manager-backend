@@ -108,7 +108,7 @@ func (h *ScheduleHandlers) ListSchedules() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		items, err := h.repo.List(c.Request.Context())
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to list schedules"})
+			serverError(c, err, "failed to list schedules")
 			return
 		}
 		c.JSON(http.StatusOK, gin.H{"schedules": items})
@@ -143,7 +143,7 @@ func (h *ScheduleHandlers) CreateSchedule() gin.HandlerFunc {
 		}
 		saved, err := h.repo.Create(c.Request.Context(), s, h.nextRun(req.CronExpr, enabled))
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create schedule"})
+			serverError(c, err, "failed to create schedule")
 			return
 		}
 		h.audit.write(c, "schedule.create", "schedule", saved.ID,
@@ -157,7 +157,7 @@ func (h *ScheduleHandlers) GetSchedule() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		s, err := h.repo.GetByID(c.Request.Context(), c.Param("id"))
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load schedule"})
+			serverError(c, err, "failed to load schedule")
 			return
 		}
 		if s == nil {
@@ -197,7 +197,7 @@ func (h *ScheduleHandlers) UpdateSchedule() gin.HandlerFunc {
 		}
 		updated, err := h.repo.Update(c.Request.Context(), c.Param("id"), s, h.nextRun(req.CronExpr, enabled))
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update schedule"})
+			serverError(c, err, "failed to update schedule")
 			return
 		}
 		if updated == nil {
@@ -215,7 +215,7 @@ func (h *ScheduleHandlers) DeleteSchedule() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		id := c.Param("id")
 		if err := h.repo.Delete(c.Request.Context(), id); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to delete schedule"})
+			serverError(c, err, "failed to delete schedule")
 			return
 		}
 		h.audit.write(c, "schedule.delete", "schedule", id, nil)
@@ -238,7 +238,7 @@ func (h *ScheduleHandlers) RunSchedule() gin.HandlerFunc {
 		ctx := c.Request.Context()
 		s, err := h.repo.GetByID(ctx, c.Param("id"))
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load schedule"})
+			serverError(c, err, "failed to load schedule")
 			return
 		}
 		if s == nil {

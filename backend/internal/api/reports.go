@@ -308,7 +308,7 @@ func (h *SourcesHandlers) ReportStates() gin.HandlerFunc {
 		// applied in Go over that reduced set.
 		rows, err := h.analysisRepo.FilterStates(ctx, f.sqlFilter())
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load states"})
+			serverError(c, err, "failed to load states")
 			return
 		}
 		matched := f.applyResidual(rows)
@@ -365,7 +365,7 @@ func (h *SourcesHandlers) ReportStatesExport() gin.HandlerFunc {
 		// the scan to the clean predicates and the residual pass finishes the rest.
 		rows, err := h.analysisRepo.FilterStates(c.Request.Context(), f.sqlFilter())
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load states"})
+			serverError(c, err, "failed to load states")
 			return
 		}
 		matched := f.applyResidual(rows)

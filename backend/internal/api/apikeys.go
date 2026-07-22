@@ -87,7 +87,7 @@ func validateGrantedScopes(c *gin.Context, requested []string) (ok bool, bad str
 func (h *APIKeysHandlers) ownsOrAdmin(c *gin.Context) (*models.APIKey, bool) {
 	key, err := h.keys.GetByID(c.Request.Context(), c.Param("id"))
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load API key"})
+		serverError(c, err, "failed to load API key")
 		return nil, false
 	}
 	if key == nil {
@@ -122,7 +122,7 @@ func (h *APIKeysHandlers) ListAPIKeys() gin.HandlerFunc {
 			keys, err = h.keys.ListByUser(c.Request.Context(), userIDOf(c))
 		}
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to list API keys"})
+			serverError(c, err, "failed to list API keys")
 			return
 		}
 		if keys == nil {
@@ -188,7 +188,7 @@ func (h *APIKeysHandlers) CreateAPIKey() gin.HandlerFunc {
 		}
 		key, created, err := h.mintKey(c, req, expires, userIDOf(c))
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create API key"})
+			serverError(c, err, "failed to create API key")
 			return
 		}
 		h.audit.write(c, "api_key.create", "api_key", created.ID,
@@ -270,7 +270,7 @@ func (h *APIKeysHandlers) UpdateAPIKey() gin.HandlerFunc {
 		key.Scopes = req.Scopes
 		key.ExpiresAt = expires
 		if err := h.keys.Update(c.Request.Context(), key); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update API key"})
+			serverError(c, err, "failed to update API key")
 			return
 		}
 		h.audit.write(c, "api_key.update", "api_key", key.ID,
@@ -287,7 +287,7 @@ func (h *APIKeysHandlers) DeleteAPIKey() gin.HandlerFunc {
 			return
 		}
 		if err := h.keys.Delete(c.Request.Context(), key.ID); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to delete API key"})
+			serverError(c, err, "failed to delete API key")
 			return
 		}
 		h.audit.write(c, "api_key.delete", "api_key", key.ID, map[string]interface{}{"name": key.Name})
@@ -334,20 +334,20 @@ func (h *APIKeysHandlers) RotateAPIKey() gin.HandlerFunc {
 		}
 		secret, created, err := h.mintKey(c, input, key.ExpiresAt, owner)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to rotate API key"})
+			serverError(c, err, "failed to rotate API key")
 			return
 		}
 
 		if req.GracePeriodHours == 0 {
 			if err := h.keys.Delete(c.Request.Context(), key.ID); err != nil {
-				c.JSON(http.StatusInternalServerError, gin.H{"error": "rotated, but failed to revoke the old key"})
+				serverError(c, err, "rotated, but failed to revoke the old key")
 				return
 			}
 		} else {
 			cutoff := time.Now().Add(time.Duration(req.GracePeriodHours) * time.Hour)
 			key.ExpiresAt = &cutoff
 			if err := h.keys.Update(c.Request.Context(), key); err != nil {
-				c.JSON(http.StatusInternalServerError, gin.H{"error": "rotated, but failed to schedule the old key's expiry"})
+				serverError(c, err, "rotated, but failed to schedule the old key's expiry")
 				return
 			}
 		}
