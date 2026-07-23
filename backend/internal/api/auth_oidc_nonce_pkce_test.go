@@ -124,6 +124,11 @@ func newOIDCCallbackEnv(t *testing.T, idp *oidcTestIdP) (*sourcesEnv, *config.Co
 	if err != nil {
 		t.Fatalf("NewAuthHandlers: %v", err)
 	}
+	// With a non-nil DB the handlers wire the durable login-state store, whose
+	// queries this sqlmock does not script; the store's own repository test
+	// covers it. This test targets the nonce/PKCE round-trip, so the in-memory
+	// implementation of the same contract keeps the flow observable.
+	h.stateStore = auth.NewMemoryStateStore()
 
 	ctx := context.Background()
 	p, err := auth.NewOIDCProviderWithContext(ctx, &config.OIDCConfig{

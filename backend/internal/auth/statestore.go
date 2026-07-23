@@ -51,6 +51,12 @@ type stateEntry struct {
 	expiresAt time.Time
 }
 
+// memoryStateCap bounds the state map. /auth/login is unauthenticated and each
+// call inserts an entry, so without a cap abandoned or scripted logins grow
+// the map without bound. At the cap the entry closest to expiry is evicted —
+// a flood degrades other in-flight logins rather than exhausting memory.
+const memoryStateCap = 4096
+
 // NewMemoryStateStore creates an empty in-memory state store.
 func NewMemoryStateStore() *MemoryStateStore {
 	return &MemoryStateStore{states: make(map[string]stateEntry)}
@@ -59,7 +65,25 @@ func NewMemoryStateStore() *MemoryStateStore {
 func (m *MemoryStateStore) Save(_ context.Context, key string, state *SessionState, ttl time.Duration) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.states[key] = stateEntry{state: state, expiresAt: time.Now().Add(ttl)}
+	now := time.Now()
+	// Opportunistic purge: expired entries are never Loaded (abandoned
+	// logins), so this is the only place they are reclaimed.
+	for k, e := range m.states {
+		if now.After(e.expiresAt) {
+			delete(m.states, k)
+		}
+	}
+	if len(m.states) >= memoryStateCap {
+		var oldestKey string
+		var oldest time.Time
+		for k, e := range m.states {
+			if oldestKey == "" || e.expiresAt.Before(oldest) {
+				oldestKey, oldest = k, e.expiresAt
+			}
+		}
+		delete(m.states, oldestKey)
+	}
+	m.states[key] = stateEntry{state: state, expiresAt: now.Add(ttl)}
 	return nil
 }
 

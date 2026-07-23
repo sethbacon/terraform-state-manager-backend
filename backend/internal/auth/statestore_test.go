@@ -2,12 +2,44 @@ package auth
 
 import (
 	"context"
+	"strconv"
 	"testing"
 	"time"
 )
 
 func TestMemoryStateStore_ImplementsInterface(t *testing.T) {
 	var _ StateStore = NewMemoryStateStore()
+}
+
+// TestMemoryStateStore_CapAndPurge: /auth/login is unauthenticated, so the map
+// must stay bounded — expired entries are purged on Save and, at the cap, the
+// entry closest to expiry is evicted for the new one.
+func TestMemoryStateStore_CapAndPurge(t *testing.T) {
+	store := NewMemoryStateStore()
+	ctx := context.Background()
+
+	for i := 0; i < memoryStateCap+100; i++ {
+		key := "flood-" + strconv.Itoa(i)
+		if err := store.Save(ctx, key, &SessionState{State: key}, time.Minute); err != nil {
+			t.Fatalf("Save(%s): %v", key, err)
+		}
+	}
+	if n := len(store.states); n > memoryStateCap {
+		t.Fatalf("store grew past the cap: %d > %d", n, memoryStateCap)
+	}
+	// The newest entry survived the eviction churn.
+	if got, _ := store.Load(ctx, "flood-"+strconv.Itoa(memoryStateCap+99)); got == nil {
+		t.Error("newest entry must survive cap eviction")
+	}
+
+	// Expired entries are reclaimed by the next Save even though they are
+	// never Loaded (abandoned logins).
+	store2 := NewMemoryStateStore()
+	_ = store2.Save(ctx, "gone", &SessionState{State: "gone"}, -time.Second)
+	_ = store2.Save(ctx, "fresh", &SessionState{State: "fresh"}, time.Minute)
+	if _, ok := store2.states["gone"]; ok {
+		t.Error("expired entry must be purged on the next Save")
+	}
 }
 
 func TestMemoryStateStore_SaveAndLoad(t *testing.T) {

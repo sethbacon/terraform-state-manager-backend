@@ -53,6 +53,15 @@ type AuthHandlers struct {
 // identity schema (search_path=identity,public). The OIDC provider is initialised
 // only when OIDC is enabled in config.
 func NewAuthHandlers(cfg *config.Config, identityDB *sql.DB) (*AuthHandlers, error) {
+	// The login state store must be shared across replicas: the login redirect
+	// (Save) and the callback (Load) are separate HTTP requests, and behind a
+	// load balancer they land on different pods — a per-process map fails
+	// (N-1)/N of SSO logins there. The DB store is durable and single-use
+	// across the fleet; the memory store remains for nil-DB test rigs.
+	var stateStore auth.StateStore = auth.NewMemoryStateStore()
+	if identityDB != nil {
+		stateStore = repositories.NewLoginStateRepository(identityDB)
+	}
 	h := &AuthHandlers{
 		cfg:         cfg,
 		userRepo:    idstore.NewUserRepository(identityDB),
@@ -60,7 +69,7 @@ func NewAuthHandlers(cfg *config.Config, identityDB *sql.DB) (*AuthHandlers, err
 		roleRepo:    idstore.NewRoleTemplateRepository(sqlx.NewDb(identityDB, "postgres")),
 		tokenRepo:   idstore.NewTokenRepository(identityDB),
 		apiKeyRepo:  idstore.NewAPIKeyRepository(identityDB),
-		stateStore:  auth.NewMemoryStateStore(),
+		stateStore:  stateStore,
 		ssoSettings: repositories.NewSSOSettingsRepository(identityDB),
 		audit:       newAuditor(identityDB),
 	}
