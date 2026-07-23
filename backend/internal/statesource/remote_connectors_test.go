@@ -432,6 +432,15 @@ func TestS3_NewValidation(t *testing.T) {
 	if _, err := newS3(map[string]any{}, nil); err == nil {
 		t.Error("missing bucket must error")
 	}
+	// A half-specified static credential must error, not silently fall back to
+	// the ambient AWS chain (confused-deputy guard).
+	cfg := map[string]any{"bucket": "b"}
+	if _, err := newS3(cfg, map[string]any{"access_key_id": "AKIA-test"}); err == nil {
+		t.Error("access key without secret must error")
+	}
+	if _, err := newS3(cfg, map[string]any{"secret_access_key": "s"}); err == nil {
+		t.Error("secret without access key must error")
+	}
 }
 
 func TestS3_ListReadWrite(t *testing.T) {
@@ -688,5 +697,74 @@ func TestHCP_ReadResolvesWorkspaceNames(t *testing.T) {
 	if _, err := conn.Read(context.Background(), "missing-name"); err == nil ||
 		!strings.Contains(err.Error(), "not found in organization") {
 		t.Errorf("missing name: %v", err)
+	}
+}
+
+func TestSameHost(t *testing.T) {
+	cases := []struct {
+		a, b string
+		want bool
+	}{
+		{"https://app.terraform.io/download/x", "https://app.terraform.io", true},
+		{"https://APP.terraform.io/x", "https://app.terraform.io", true}, // case-insensitive host
+		{"https://s3.amazonaws.com/bucket/x", "https://tfe.internal", false},
+		{"https://tfe.internal:8443/x", "https://tfe.internal", false}, // port differs
+		{"://bad", "https://tfe.internal", false},                      // parse failure fails closed
+	}
+	for _, tc := range cases {
+		if got := sameHost(tc.a, tc.b); got != tc.want {
+			t.Errorf("sameHost(%q, %q) = %v, want %v", tc.a, tc.b, got, tc.want)
+		}
+	}
+}
+
+func TestHCP_TokenNotForwardedToForeignDownloadHost(t *testing.T) {
+	// A separate object-store host (as self-managed TFE with external storage
+	// returns) records whether it received the API bearer token.
+	var gotAuth string
+	store := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		_, _ = w.Write([]byte(`{"version":4,"serial":9}`))
+	}))
+	defer store.Close()
+
+	var sameHostAuth string
+	var api *httptest.Server
+	api = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// A ws-… key skips name resolution, so only the state-version read hits the API.
+		switch {
+		case strings.HasPrefix(r.URL.Path, "/api/v2/workspaces/ws-foreign/"):
+			// Presigned URL points at the FOREIGN store host, not the API host.
+			fmt.Fprintf(w, `{"data":{"attributes":{"hosted-state-download-url":"%s/blob","serial":9}}}`, store.URL)
+		case strings.HasPrefix(r.URL.Path, "/api/v2/workspaces/ws-inline/"):
+			// Inline TFE storage: the download URL is on the API host itself.
+			fmt.Fprintf(w, `{"data":{"attributes":{"hosted-state-download-url":"%s/inline-blob","serial":9}}}`, api.URL)
+		case r.URL.Path == "/inline-blob":
+			sameHostAuth = r.Header.Get("Authorization")
+			_, _ = w.Write([]byte(`{"version":4,"serial":9}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer api.Close()
+
+	h := newHCPOver(api)
+	rs, err := h.Read(context.Background(), "ws-foreign")
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if !bytes.Contains(rs.Data, []byte(`"serial":9`)) {
+		t.Errorf("state not downloaded from the foreign host: %s", rs.Data)
+	}
+	if gotAuth != "" {
+		t.Errorf("API bearer token was forwarded to the foreign download host: %q", gotAuth)
+	}
+
+	// Positive control: a same-host (inline TFE) download still carries the token.
+	if _, err := h.Read(context.Background(), "ws-inline"); err != nil {
+		t.Fatalf("inline read: %v", err)
+	}
+	if !strings.HasPrefix(sameHostAuth, "Bearer ") {
+		t.Errorf("same-host download should carry the API token, got %q", sameHostAuth)
 	}
 }

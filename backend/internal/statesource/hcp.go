@@ -374,14 +374,35 @@ func (h *hcp) getJSON(ctx context.Context, u string, out any) error {
 	return json.NewDecoder(resp.Body).Decode(out)
 }
 
-// download fetches the (authenticated) state download URL and transparently
-// decompresses a gzip body.
+// sameHost reports whether rawURL and base parse to the same (case-insensitive)
+// host:port. Used to decide whether the API bearer token may be attached to a
+// state-download URL. A parse failure on either side returns false (fail closed:
+// do not attach the token to a URL we cannot vet).
+func sameHost(rawURL, base string) bool {
+	a, err1 := url.Parse(rawURL)
+	b, err2 := url.Parse(base)
+	if err1 != nil || err2 != nil {
+		return false
+	}
+	return strings.EqualFold(a.Host, b.Host)
+}
+
+// download fetches the state download URL and transparently decompresses a gzip
+// body. The API bearer token is attached only for a same-host (inline TFE) URL —
+// see the call site.
 func (h *hcp) download(ctx context.Context, u string) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Authorization", "Bearer "+h.token)
+	// The hosted-state-download-url the API returns is presigned and needs no
+	// bearer token. On self-managed TFE with external object storage it points at
+	// a DIFFERENT host (S3/Blob/GCS/MinIO), so attaching the long-lived TFE API
+	// token would forward it to an API-chosen third party that logs request
+	// headers. Send the token only when the download host is the API host itself.
+	if sameHost(u, h.baseURL) {
+		req.Header.Set("Authorization", "Bearer "+h.token)
+	}
 	resp, err := h.client.Do(req)
 	if err != nil {
 		return nil, err
