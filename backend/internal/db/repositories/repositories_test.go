@@ -6,6 +6,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
 	"github.com/lib/pq"
@@ -191,6 +192,66 @@ func TestStateLockRepository_AcquireRelease(t *testing.T) {
 	released, err = r.ForceRelease(ctx, "s1", "nope")
 	if err != nil || released {
 		t.Errorf("ForceRelease on unlocked key: %v released=%v", err, released)
+	}
+}
+
+func TestStateLockRepository_RenewHeartbeat(t *testing.T) {
+	db, mock := newMock(t)
+	r := NewStateLockRepository(db)
+
+	// A live lock renews (rows=1 -> alive).
+	mock.ExpectExec("UPDATE state_locks SET renewed_at").WithArgs("lock-1", "s1", "k").
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	alive, err := r.Renew(ctx, "s1", "k", "lock-1")
+	if err != nil || !alive {
+		t.Errorf("Renew live: %v alive=%v", err, alive)
+	}
+
+	// A reaped/force-released lock reports gone (rows=0) so renewal stops.
+	mock.ExpectExec("UPDATE state_locks SET renewed_at").WithArgs("lock-1", "s1", "k").
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	alive, err = r.Renew(ctx, "s1", "k", "lock-1")
+	if err != nil || alive {
+		t.Errorf("Renew gone: %v alive=%v", err, alive)
+	}
+}
+
+func TestStateLockRepository_KeepAlive(t *testing.T) {
+	db, mock := newMock(t)
+	r := NewStateLockRepository(db)
+
+	// First tick renews; second tick finds the row gone and the loop exits on
+	// its own (force-release/reap while the operation ran).
+	mock.ExpectExec("UPDATE state_locks SET renewed_at").WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("UPDATE state_locks SET renewed_at").WillReturnResult(sqlmock.NewResult(0, 0))
+
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		r.KeepAlive("s1", "k", "lock-1", 5*time.Millisecond, stop)
+		close(done)
+	}()
+	select {
+	case <-done: // exited after the rows=0 tick
+	case <-time.After(2 * time.Second):
+		t.Fatal("KeepAlive did not exit after the lock disappeared")
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("expected two renewals: %v", err)
+	}
+
+	// The stop channel ends the loop without further queries.
+	stop2 := make(chan struct{})
+	done2 := make(chan struct{})
+	go func() {
+		r.KeepAlive("s1", "k", "lock-1", time.Hour, stop2)
+		close(done2)
+	}()
+	close(stop2)
+	select {
+	case <-done2:
+	case <-time.After(2 * time.Second):
+		t.Fatal("KeepAlive did not exit on stop")
 	}
 }
 
