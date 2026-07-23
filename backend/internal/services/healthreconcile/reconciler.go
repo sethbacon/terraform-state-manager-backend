@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/terraform-state-manager/terraform-state-manager/internal/db/repositories"
+	"github.com/terraform-state-manager/terraform-state-manager/internal/telemetry"
 )
 
 const (
@@ -68,12 +69,14 @@ func New(repo *repositories.HealthRepository, notifier FailureNotifier, ttl, int
 // sweep runs right away so a fresh boot reaps anything already overdue.
 func (r *Reconciler) Start() {
 	ticker := time.NewTicker(r.interval)
+	telemetry.RegisterWorker("healthreconcile", r.interval)
 	r.logger.Info("health reconciler started", "interval", r.interval.String(), "ttl", r.ttl.String())
 	go func() {
 		r.reconcile()
 		for {
 			select {
 			case <-ticker.C:
+				telemetry.WorkerTick("healthreconcile")
 				r.reconcile()
 			case <-r.stopCh:
 				ticker.Stop()
@@ -84,8 +87,11 @@ func (r *Reconciler) Start() {
 	}()
 }
 
-// Stop ends the loop. Safe to call once.
-func (r *Reconciler) Stop() { close(r.stopCh) }
+// Stop ends the loop and withdraws its liveness registration. Safe to call once.
+func (r *Reconciler) Stop() {
+	close(r.stopCh)
+	telemetry.UnregisterWorker("healthreconcile")
+}
 
 // reconcile runs one sweep under a bounded context.
 func (r *Reconciler) reconcile() {

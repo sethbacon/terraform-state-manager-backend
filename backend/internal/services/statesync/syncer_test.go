@@ -270,6 +270,51 @@ func TestSyncAll_SourceFailuresAreRecordedNotFatal(t *testing.T) {
 	}
 }
 
+// TestSyncAll_SourcesRunConcurrently: sources reconcile in parallel (bounded by
+// sourceConcurrency), so a slow source no longer serializes the fleet. Three
+// sources each block in List until every one of them has started — with the old
+// serial loop this would deadlock; with the pool (3 slots) all proceed.
+func TestSyncAll_SourcesRunConcurrently(t *testing.T) {
+	db, mock := newMock(t)
+	cfg, _ := json.Marshal(map[string]any{"base_path": "/x"})
+	rows := sqlmock.NewRows([]string{"id", "name", "type", "endpoint", "config", "scope", "encrypted_credentials", "created_at", "updated_at"})
+	for i := 1; i <= 3; i++ {
+		rows.AddRow(fmt.Sprintf("s%d", i), fmt.Sprintf("src-%d", i), "local", "", cfg, []byte(`{}`), nil, "2026-06-10", "2026-06-10")
+	}
+	mock.ExpectQuery("SELECT .+ FROM state_sources ORDER BY").WillReturnRows(rows)
+	for range [3]struct{}{} {
+		mock.ExpectExec("INSERT INTO source_sync_status").WillReturnResult(sqlmock.NewResult(0, 1))
+	}
+	mock.ExpectExec("DELETE FROM state_analysis_history").WillReturnResult(sqlmock.NewResult(0, 0))
+
+	var started sync.WaitGroup
+	started.Add(3)
+	release := make(chan struct{})
+	s := newSyncer(db, func(*repositories.Source) (statesource.Connector, error) {
+		started.Done() // signal this source's cycle began
+		<-release      // ...and hold it until all three have begun
+		return nil, errors.New("done")
+	})
+
+	go func() {
+		started.Wait() // only reachable when all 3 run concurrently
+		close(release)
+	}()
+	done := make(chan error, 1)
+	go func() { done <- s.SyncAll(ctx) }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("SyncAll: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("SyncAll deadlocked — sources are not running concurrently")
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Error(err)
+	}
+}
+
 func TestSyncAll_ReadAndAnalyzeErrorsCount(t *testing.T) {
 	db, mock := newMock(t)
 	now := time.Now()

@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
 	"github.com/gin-gonic/gin"
@@ -143,5 +144,26 @@ func TestReady_IdentityDown(t *testing.T) {
 	}
 	if body["error"] != "identity database unreachable" {
 		t.Fatalf("error = %q, want \"identity database unreachable\"", body["error"])
+	}
+}
+
+// TestReady_WorkerStalled: on a worker replica whose background loop stopped
+// ticking, /ready must fail even though both databases ping fine — DB health
+// alone cannot see a wedged worker goroutine.
+func TestReady_WorkerStalled(t *testing.T) {
+	orig := staleWorkers
+	staleWorkers = func(time.Time) []string { return []string{"statesync"} }
+	t.Cleanup(func() { staleWorkers = orig })
+
+	w := readyRecorder(t, pingableDB(t, nil), pingableDB(t, nil))
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503, got %d: %s", w.Code, w.Body.String())
+	}
+	var body map[string]string
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("invalid json: %v", err)
+	}
+	if body["error"] != "background workers stalled: statesync" {
+		t.Fatalf("error = %q, want stalled statesync", body["error"])
 	}
 }
