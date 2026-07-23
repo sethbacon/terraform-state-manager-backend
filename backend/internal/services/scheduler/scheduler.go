@@ -75,8 +75,12 @@ func (r *Runner) Start() {
 	}()
 }
 
-// Stop ends the polling loop. Safe to call once.
-func (r *Runner) Stop() { close(r.stopCh) }
+// Stop ends the polling loop and withdraws its liveness registration. Safe to
+// call once.
+func (r *Runner) Stop() {
+	close(r.stopCh)
+	telemetry.UnregisterWorker("scheduler")
+}
 
 func (r *Runner) checkDue() {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)

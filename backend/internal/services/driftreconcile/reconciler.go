@@ -86,8 +86,11 @@ func (r *Reconciler) Start() {
 	}()
 }
 
-// Stop ends the loop. Safe to call once.
-func (r *Reconciler) Stop() { close(r.stopCh) }
+// Stop ends the loop and withdraws its liveness registration. Safe to call once.
+func (r *Reconciler) Stop() {
+	close(r.stopCh)
+	telemetry.UnregisterWorker("driftreconcile")
+}
 
 // reconcile runs one sweep under a bounded context.
 func (r *Reconciler) reconcile() {

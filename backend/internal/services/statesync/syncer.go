@@ -82,7 +82,12 @@ func New(sources *repositories.SourceRepository, store *repositories.StateAnalys
 
 // Start launches the reconcile loop in a goroutine and returns immediately.
 // The first cycle runs right away so a fresh boot backfills the store.
+// Restartable after Stop (leader election starts/stops the loop across
+// leadership terms while the object stays attached for on-demand syncs);
+// Start/Stop must not be called concurrently.
 func (s *Syncer) Start() {
+	s.stopCh = make(chan struct{})
+	stopCh := s.stopCh
 	ticker := time.NewTicker(s.interval)
 	telemetry.RegisterWorker(workerName, s.interval)
 	s.logger.Info("statesync started", "interval", s.interval.String())
@@ -92,7 +97,7 @@ func (s *Syncer) Start() {
 			select {
 			case <-ticker.C:
 				s.syncAllLogged()
-			case <-s.stopCh:
+			case <-stopCh:
 				ticker.Stop()
 				s.logger.Info("statesync stopped")
 				return
@@ -101,8 +106,12 @@ func (s *Syncer) Start() {
 	}()
 }
 
-// Stop ends the loop. Safe to call once.
-func (s *Syncer) Stop() { close(s.stopCh) }
+// Stop ends the loop and withdraws its liveness registration (a demoted
+// standby must not fail /ready for a loop it deliberately stopped).
+func (s *Syncer) Stop() {
+	close(s.stopCh)
+	telemetry.UnregisterWorker(workerName)
+}
 
 func (s *Syncer) syncAllLogged() {
 	// The tick lands BEFORE the cycle: liveness telemetry measures "the loop is
