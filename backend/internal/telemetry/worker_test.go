@@ -21,9 +21,11 @@ func TestWorkerLiveness(t *testing.T) {
 	if s := StaleWorkers(time.Now().Add(4 * time.Minute)); len(s) != 1 || s[0] != "w-test" {
 		t.Errorf("expected [w-test] stale, got %v", s)
 	}
-	// A tick resets the budget.
+	// A tick resets the budget. Check just inside the 3-minute budget — at the
+	// exact boundary, the wall-clock time between the tick and this call tips
+	// the comparison on a slow runner.
 	WorkerTick("w-test")
-	if s := StaleWorkers(time.Now().Add(3 * time.Minute)); len(s) != 0 {
+	if s := StaleWorkers(time.Now().Add(3*time.Minute - 10*time.Second)); len(s) != 0 {
 		t.Errorf("ticked worker reported stale: %v", s)
 	}
 }
