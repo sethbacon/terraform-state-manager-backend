@@ -1,5 +1,18 @@
 # Changelog
 
+## [2.6.0](https://github.com/sethbacon/terraform-state-manager-backend/compare/v2.5.0...v2.6.0) (2026-07-23)
+
+
+### Features
+
+* whitelabel theming — persisted branding served at /ui/theme ([#242](https://github.com/sethbacon/terraform-state-manager-backend/issues/242)) ([a99ea84](https://github.com/sethbacon/terraform-state-manager-backend/commit/a99ea84b7d9e8aaf5e08161631ffde1ce707def8))
+
+
+### Bug Fixes
+
+* adopt org_owner/org_provisioner scopes and grant org_owner instead of admin on org creation ([#246](https://github.com/sethbacon/terraform-state-manager-backend/issues/246)) ([003d043](https://github.com/sethbacon/terraform-state-manager-backend/commit/003d043db0d5d223a7f41b20fd5e2b001f89afe2))
+* durable cross-replica login state; cap the in-memory store ([#241](https://github.com/sethbacon/terraform-state-manager-backend/issues/241)) ([70cac3f](https://github.com/sethbacon/terraform-state-manager-backend/commit/70cac3f8f3665eace7fbbf10697ab392a040936e))
+
 ## [2.5.0](https://github.com/sethbacon/terraform-state-manager-backend/compare/v2.4.2...v2.5.0) (2026-07-23)
 
 
