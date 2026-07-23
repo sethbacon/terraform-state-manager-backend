@@ -143,3 +143,26 @@ func (r *SystemSettingsRepository) SetNotificationsConfig(ctx context.Context, c
 		configJSON, time.Now())
 	return err
 }
+
+// GetUIThemeConfig retrieves the persisted whitelabel branding JSON (nil when
+// never saved) — the payload GET /api/v1/ui/theme serves.
+func (r *SystemSettingsRepository) GetUIThemeConfig(ctx context.Context) ([]byte, error) {
+	var configJSON []byte
+	err := r.db.QueryRowContext(ctx, `SELECT ui_theme_config FROM system_settings WHERE id = 1`).Scan(&configJSON)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return configJSON, nil
+}
+
+// SetUIThemeConfig stores the whitelabel branding JSON (validated by the API
+// layer; contains no secrets).
+func (r *SystemSettingsRepository) SetUIThemeConfig(ctx context.Context, configJSON []byte) error {
+	_, err := r.db.ExecContext(ctx,
+		`UPDATE system_settings SET ui_theme_config = $1, updated_at = $2 WHERE id = 1`,
+		configJSON, time.Now())
+	return err
+}

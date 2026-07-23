@@ -813,6 +813,44 @@
                 }
             }
         },
+        "/admin/ui/theme": {
+            "put": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    },
+                    {
+                        "CookieAuth": []
+                    }
+                ],
+                "description": "Validates and persists runtime branding. Colors must be hex or rgb()/hsl() notation; URLs must be https or root-relative. Empty fields clear their overrides. Requires admin.",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "UI"
+                ],
+                "summary": "Update whitelabel theme",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/api.UIThemeConfig"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    }
+                }
+            }
+        },
         "/admin/users": {
             "get": {
                 "security": [
@@ -4445,6 +4483,26 @@
                     }
                 }
             }
+        },
+        "/ui/theme": {
+            "get": {
+                "description": "Runtime branding for the SPA (product name, palette colors, logo/favicon/login-hero URLs). Empty object when no branding is configured.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "UI"
+                ],
+                "summary": "Whitelabel theme",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/api.UIThemeConfig"
+                        }
+                    }
+                }
+            }
         }
     },
     "definitions": {
@@ -4484,6 +4542,32 @@
                     "type": "boolean"
                 },
                 "username": {
+                    "type": "string"
+                }
+            }
+        },
+        "api.UIThemeConfig": {
+            "type": "object",
+            "properties": {
+                "favicon_url": {
+                    "type": "string"
+                },
+                "login_hero_url": {
+                    "type": "string"
+                },
+                "logo_url": {
+                    "type": "string"
+                },
+                "primary_color": {
+                    "type": "string"
+                },
+                "product_name": {
+                    "type": "string"
+                },
+                "secondary_color_dark": {
+                    "type": "string"
+                },
+                "secondary_color_light": {
                     "type": "string"
                 }
             }
