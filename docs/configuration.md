@@ -8,6 +8,15 @@ optional YAML file (path via `CONFIG_PATH`; see `backend/config.example.yaml`)
 **Secret** values must come from a secret store (Key Vault / Secrets Manager /
 Secret Manager / Kubernetes Secrets) — never config files or Helm values.
 
+**Validated at boot (fail-fast).** The server checks cross-field invariants
+before it connects to anything and refuses to start (printing every problem) on
+a misconfiguration, rather than crashing on first use or misbehaving silently:
+an enabled OIDC provider missing `issuer_url`/`client_id`; an enabled LDAP
+provider missing `host`/`base_dn`; `notifications.smtp.username` set while
+`use_tls` is false (the password would go in cleartext); a `database.ssl_mode`
+(or `identity_database.ssl_mode`) outside `disable|allow|prefer|require|verify-ca|verify-full`;
+and a non-empty `logging.level` outside `debug|info|warn|error`.
+
 **Sections:** [Server](#server) · [Database](#database) ·
 [Identity database](#identity-database-shared--standalone) ·
 [Core secrets](#core-secrets) · [Workers](#workers) ·

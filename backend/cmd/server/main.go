@@ -106,6 +106,12 @@ func run() error {
 }
 
 func serve(cfg *config.Config) error {
+	// Fail fast on a misconfiguration (before touching logging or the DB) so an
+	// operator sees the problem at boot rather than as a first-use crash.
+	if err := cfg.Validate(); err != nil {
+		return err
+	}
+
 	// Initialise structured logging as early as possible so all later output uses
 	// the configured format/level.
 	telemetry.SetupLogger(cfg.Logging.Format, cfg.Logging.Level)
