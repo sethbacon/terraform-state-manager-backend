@@ -432,6 +432,15 @@ func TestS3_NewValidation(t *testing.T) {
 	if _, err := newS3(map[string]any{}, nil); err == nil {
 		t.Error("missing bucket must error")
 	}
+	// A half-specified static credential must error, not silently fall back to
+	// the ambient AWS chain (confused-deputy guard).
+	cfg := map[string]any{"bucket": "b"}
+	if _, err := newS3(cfg, map[string]any{"access_key_id": "AKIA-test"}); err == nil {
+		t.Error("access key without secret must error")
+	}
+	if _, err := newS3(cfg, map[string]any{"secret_access_key": "s"}); err == nil {
+		t.Error("secret without access key must error")
+	}
 }
 
 func TestS3_ListReadWrite(t *testing.T) {
