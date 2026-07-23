@@ -23,7 +23,7 @@ require (
 	github.com/lib/pq v1.12.3
 	github.com/prometheus/client_golang v1.23.2
 	github.com/robfig/cron/v3 v3.0.1
-	github.com/sethbacon/terraform-suite-identity v0.20.2
+	github.com/sethbacon/terraform-suite-identity v0.20.3
 	github.com/spf13/viper v1.21.0
 	golang.org/x/crypto v0.54.0
 	golang.org/x/mod v0.37.0
@@ -154,10 +154,3 @@ require (
 	google.golang.org/protobuf v1.36.11 // indirect
 	gopkg.in/warnings.v0 v0.1.2 // indirect
 )
-
-// TEMPORARY: points at the local sibling checkout that carries
-// ScopeOrganizationsCreate/RoleScopesPermittedBy ahead of a released
-// terraform-suite-identity version. Remove this replace (and re-run
-// `go mod tidy`) once terraform-suite-identity#126 ships a real tag — do not
-// merge this PR with the directive still in place.
-replace github.com/sethbacon/terraform-suite-identity => ../../terraform-suite-identity
