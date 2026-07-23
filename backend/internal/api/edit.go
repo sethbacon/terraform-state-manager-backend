@@ -603,7 +603,15 @@ func (h *SourcesHandlers) acquireLock(c *gin.Context, sourceID string, conn stat
 		c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
 		return nil, false
 	}
-	return func() { _ = h.lockRepo.Release(context.Background(), sourceID, key, lockID) }, true
+	// Heartbeat while the operation runs: the stale reap keys on renewed_at, so
+	// a slow backend (a >15min transfer against a rate-limited store) is never
+	// mistaken for a crashed holder, while a real crash stops renewing.
+	stop := make(chan struct{})
+	go h.lockRepo.KeepAlive(sourceID, key, lockID, repositories.LockRenewInterval, stop)
+	return func() {
+		close(stop)
+		_ = h.lockRepo.Release(context.Background(), sourceID, key, lockID)
+	}, true
 }
 
 // ListLocks returns the app-level advisory locks currently held for a source,

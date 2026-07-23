@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/lib/pq"
 )
@@ -13,11 +14,17 @@ import (
 // already locked by another editor.
 var ErrLocked = errors.New("state is locked by another operation")
 
-// staleLockTTL bounds how long an orphaned lock can wedge a key. Locks are
-// request-scoped (acquired and released within one HTTP request), so any lock
-// older than this belongs to a crashed process and is reaped on the next
-// Acquire. Postgres interval syntax.
+// staleLockTTL bounds how long an orphaned lock can wedge a key. Reaping keys
+// on the renewed_at heartbeat, not acquisition age: a holder renews while it
+// works (KeepAlive), so only a lock whose holder stopped renewing — i.e. a
+// crashed process — ages past this and is reaped on the next Acquire. Postgres
+// interval syntax.
 const staleLockTTL = "15 minutes"
+
+// LockRenewInterval is how often a live holder renews its heartbeat — well
+// under staleLockTTL so a healthy long-running operation can never age out
+// (it would take three consecutive missed renewals).
+const LockRenewInterval = 5 * time.Minute
 
 // StateLockRepository implements app-level advisory locks over state_locks. It
 // guarantees mutual exclusion for any source, including connectors that have no
@@ -65,11 +72,13 @@ func (r *StateLockRepository) List(ctx context.Context, sourceID string) ([]Stat
 // Acquire inserts a lock row, returning its id. If the (source_id, state_key) is
 // already held, the UNIQUE constraint rejects the insert and Acquire returns
 // ErrLocked (annotated with the holder when known). This is atomic at the
-// database — no read-then-write race. Locks past staleLockTTL are reaped first
-// so a crash between Acquire and Release cannot wedge the key forever.
+// database — no read-then-write race. Locks whose HEARTBEAT (renewed_at) aged
+// past staleLockTTL are reaped first, so a crash between Acquire and Release
+// cannot wedge the key forever — while a live long-running holder, which keeps
+// renewing, is never reaped out from under its operation.
 func (r *StateLockRepository) Acquire(ctx context.Context, sourceID, key, actor string) (string, error) {
 	if _, err := r.db.ExecContext(ctx,
-		`DELETE FROM state_locks WHERE source_id = $1 AND state_key = $2 AND acquired_at < now() - $3::interval`,
+		`DELETE FROM state_locks WHERE source_id = $1 AND state_key = $2 AND renewed_at < now() - $3::interval`,
 		sourceID, key, staleLockTTL); err != nil {
 		return "", err
 	}
@@ -92,6 +101,42 @@ func (r *StateLockRepository) Acquire(ctx context.Context, sourceID, key, actor 
 		return "", err
 	}
 	return id, nil
+}
+
+// Renew refreshes the lock's heartbeat. False (no error) means the row is gone
+// — force-released or reaped — so the caller's operation no longer holds the
+// lock and renewing must stop.
+func (r *StateLockRepository) Renew(ctx context.Context, sourceID, key, lockID string) (bool, error) {
+	res, err := r.db.ExecContext(ctx,
+		`UPDATE state_locks SET renewed_at = now() WHERE id = $1 AND source_id = $2 AND state_key = $3`,
+		lockID, sourceID, key)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n > 0, err
+}
+
+// KeepAlive renews the lock's heartbeat every interval until stop is closed or
+// the lock row disappears. Run it in a goroutine alongside a long operation;
+// close stop before Release. Renewal errors are tolerated (transient DB blips
+// must not kill the heartbeat — the next tick retries within the TTL budget).
+func (r *StateLockRepository) KeepAlive(sourceID, key, lockID string, interval time.Duration, stop <-chan struct{}) {
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-t.C:
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			alive, err := r.Renew(ctx, sourceID, key, lockID)
+			cancel()
+			if err == nil && !alive {
+				return
+			}
+		case <-stop:
+			return
+		}
+	}
 }
 
 // Release removes the lock row identified by lockID (scoped to source/key).

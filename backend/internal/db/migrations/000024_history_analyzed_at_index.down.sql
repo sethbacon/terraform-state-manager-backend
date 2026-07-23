@@ -1,0 +1,1 @@
+DROP INDEX IF EXISTS idx_state_analysis_history_analyzed_at;

@@ -4,7 +4,9 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"net/url"
 	"regexp"
+	"strings"
 	"time"
 
 	_ "github.com/lib/pq" // PostgreSQL driver, already a project dependency
@@ -24,11 +26,35 @@ type pgSource struct {
 	schema  string
 }
 
+// pgKeywordPassword matches a `password=` keyword in a libpq keyword/value DSN
+// (start-of-string or whitespace-delimited), case-insensitive.
+var pgKeywordPassword = regexp.MustCompile(`(?i)(^|\s)password\s*=`)
+
+// dsnHasPassword reports whether a PostgreSQL DSN embeds a password, in either
+// the URL form (postgres://user:pass@host) or the libpq keyword form
+// (host=... password=...).
+func dsnHasPassword(dsn string) bool {
+	if u, err := url.Parse(strings.TrimSpace(dsn)); err == nil && u.User != nil {
+		if _, ok := u.User.Password(); ok {
+			return true
+		}
+	}
+	return pgKeywordPassword.MatchString(dsn)
+}
+
 func newPG(config, credentials map[string]any) (*pgSource, error) {
 	connStr, _ := credentials["conn_str"].(string)
 	if connStr == "" {
-		// Allow non-secret DSNs (e.g. trust auth in a lab) via config.
-		connStr, _ = config["conn_str"].(string)
+		// The config map is stored unencrypted and echoed in source-detail
+		// responses, so only a PASSWORDLESS DSN (e.g. trust auth in a lab) may
+		// come from it. A password-bearing DSN must go through credentials.conn_str
+		// so it is encrypted at rest and never returned to the API/UI.
+		if cfgConn, _ := config["conn_str"].(string); cfgConn != "" {
+			if dsnHasPassword(cfgConn) {
+				return nil, fmt.Errorf("pg source: config.conn_str contains a password; put a password-bearing DSN in credentials.conn_str (encrypted at rest) instead of config")
+			}
+			connStr = cfgConn
+		}
 	}
 	if connStr == "" {
 		return nil, fmt.Errorf("pg source requires credentials.conn_str (PostgreSQL DSN)")

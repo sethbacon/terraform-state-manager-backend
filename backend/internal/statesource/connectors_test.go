@@ -186,6 +186,25 @@ func TestPGConfigValidation(t *testing.T) {
 	if _, err := newPG(map[string]any{"schema_name": "terraform_remote_state"}, map[string]any{"conn_str": "postgres://x"}); err != nil {
 		t.Errorf("valid schema rejected: %v", err)
 	}
+	// config.conn_str is unencrypted and echoed by the API: a password-bearing
+	// DSN there (URL or libpq keyword form) must be rejected, passwordless allowed.
+	for _, bad := range []string{
+		"postgres://user:hunter2@db.example.com/states",
+		"host=db.example.com user=u password=hunter2",
+		"host=db.example.com PASSWORD = hunter2",
+	} {
+		if _, err := newPG(map[string]any{"conn_str": bad}, map[string]any{}); err == nil ||
+			!strings.Contains(err.Error(), "credentials.conn_str") {
+			t.Errorf("password-bearing config.conn_str %q should be rejected, got %v", bad, err)
+		}
+	}
+	if _, err := newPG(map[string]any{"conn_str": "postgres://user@db.example.com/states?sslmode=disable"}, map[string]any{}); err != nil {
+		t.Errorf("passwordless config.conn_str rejected: %v", err)
+	}
+	// credentials.conn_str is the sanctioned home for a password-bearing DSN.
+	if _, err := newPG(map[string]any{}, map[string]any{"conn_str": "postgres://user:hunter2@db.example.com/states"}); err != nil {
+		t.Errorf("password in credentials.conn_str rejected: %v", err)
+	}
 }
 
 // --- kubernetes ---
