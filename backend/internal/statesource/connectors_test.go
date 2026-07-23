@@ -156,6 +156,99 @@ func TestConsulWriteCASConflict(t *testing.T) {
 	}
 }
 
+// The consul connector must implement Locker: the edit pipeline only uses a
+// native lock when the interface is satisfied, and only the native lock
+// excludes a concurrent `terraform apply` (which knows nothing of TSM's
+// app-level PG lock).
+var _ Locker = (*consul)(nil)
+
+func TestConsulLockUnlock(t *testing.T) {
+	var destroyed bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPut && r.URL.Path == "/v1/session/create":
+			_, _ = w.Write([]byte(`{"ID":"sess-1"}`))
+		case r.Method == http.MethodPut && r.URL.Path == "/v1/kv/terraform/prod/.lock" && r.URL.Query().Get("acquire") == "sess-1":
+			_, _ = w.Write([]byte("true"))
+		case r.Method == http.MethodPut && r.URL.Path == "/v1/kv/terraform/prod/.lock" && r.URL.Query().Get("release") == "sess-1":
+			_, _ = w.Write([]byte("true"))
+		case r.Method == http.MethodPut && r.URL.Path == "/v1/session/destroy/sess-1":
+			destroyed = true
+			_, _ = w.Write([]byte("true"))
+		default:
+			t.Errorf("unexpected request: %s %s?%s", r.Method, r.URL.Path, r.URL.RawQuery)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+	u, _ := url.Parse(srv.URL)
+	c, err := newConsul(map[string]any{"address": u.Host}, nil)
+	if err != nil {
+		t.Fatalf("newConsul: %v", err)
+	}
+
+	id, err := c.Lock(context.Background(), "terraform/prod")
+	if err != nil || id != "sess-1" {
+		t.Fatalf("Lock: %v (id %q)", err, id)
+	}
+	if err := c.Unlock(context.Background(), "terraform/prod", id); err != nil {
+		t.Fatalf("Unlock: %v", err)
+	}
+	if !destroyed {
+		t.Error("Unlock must destroy the lock's session")
+	}
+}
+
+func TestConsulLockConflict(t *testing.T) {
+	// The acquire is rejected ("false"): terraform (or another edit) holds
+	// <key>/.lock. Lock must error and clean its session up.
+	var destroyed bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/v1/session/create":
+			_, _ = w.Write([]byte(`{"ID":"sess-2"}`))
+		case strings.HasSuffix(r.URL.Path, "/.lock"):
+			_, _ = w.Write([]byte("false"))
+		case r.URL.Path == "/v1/session/destroy/sess-2":
+			destroyed = true
+			_, _ = w.Write([]byte("true"))
+		}
+	}))
+	defer srv.Close()
+	u, _ := url.Parse(srv.URL)
+	c, _ := newConsul(map[string]any{"address": u.Host}, nil)
+
+	_, err := c.Lock(context.Background(), "terraform/prod")
+	if err == nil || !strings.Contains(err.Error(), "locked") {
+		t.Errorf("rejected acquire must surface a lock conflict, got %v", err)
+	}
+	if !destroyed {
+		t.Error("a failed acquire must destroy the orphaned session")
+	}
+}
+
+func TestConsulListSkipsLockArtifacts(t *testing.T) {
+	stateBody := `{"version":4}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode([]consulKVEntry{
+			{Key: "terraform/prod", Value: base64.StdEncoding.EncodeToString([]byte(stateBody)), ModifyIndex: 41},
+			{Key: "terraform/prod/.lock", Value: ""},     // TSM/terraform lock key
+			{Key: "terraform/prod/.lockinfo", Value: ""}, // terraform lock metadata
+		})
+	}))
+	defer srv.Close()
+	u, _ := url.Parse(srv.URL)
+	c, _ := newConsul(map[string]any{"address": u.Host}, nil)
+
+	refs, err := c.List(context.Background())
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(refs) != 1 || refs[0].Key != "terraform/prod" {
+		t.Errorf("lock artifacts must not list as states: %+v", refs)
+	}
+}
+
 func TestConsulDeleteError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)

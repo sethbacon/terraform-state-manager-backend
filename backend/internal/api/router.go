@@ -32,6 +32,7 @@ import (
 	"github.com/terraform-state-manager/terraform-state-manager/internal/middleware"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/services/driftreconcile"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/services/healthreconcile"
+	"github.com/terraform-state-manager/terraform-state-manager/internal/services/leaderelect"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/services/notify"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/services/scheduler"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/services/statesync"
@@ -441,9 +442,11 @@ func NewRouter(cfg *config.Config, database *sql.DB, identityDB *sql.DB) (*gin.E
 		// router with a nil DB don't spin up goroutines that would hit it. The
 		// syncer OBJECT is always attached (post-write refreshes and source-create
 		// backfills must work on every replica); the PERIODIC loops — schedule
-		// runner + statesync reconcile — start only when workers are enabled, so
-		// multi-replica deployments can scale API pods while exactly one dedicated
-		// worker replica fires schedules (GetDue has no cross-replica claim).
+		// runner + statesync reconcile — run only on worker-enabled replicas, and
+		// among those a Postgres advisory lock elects exactly ONE leader, so a
+		// mis-scaled deployment with several worker-enabled replicas can no
+		// longer double-fire schedules, syncs, or expiry emails. Non-leaders
+		// stand by and promote automatically when the leader's session dies.
 		if database != nil {
 			syncer := statesync.New(
 				repositories.NewSourceRepository(database),
@@ -452,69 +455,70 @@ func NewRouter(cfg *config.Config, database *sql.DB, identityDB *sql.DB) (*gin.E
 			)
 			sources.AttachSyncer(syncer)
 			if cfg.Workers.Enabled {
-				runner := scheduler.New(repositories.NewScheduleRepository(database), driftDisp)
-				runner.Start()
-				syncer.Start()
-				// Reap drift runs stuck in "dispatched" whose CI job never called
-				// back (build/agent died), firing the same failure alert a real
-				// callback would. A periodic worker — gated here so it runs on the
-				// single worker replica, like the runner and syncer above.
-				reconciler := driftreconcile.New(
-					repositories.NewDriftRepository(database),
-					driftFailureNotifier{drift: drift},
-					cfg.Drift.RunTTL, cfg.Drift.ReconcileInterval,
-				)
-				reconciler.Start()
-				// Same backstop for version-lab health runs, which carry the
-				// identical stuck-dispatched failure mode in a separate table. It
-				// reuses the drift TTL/interval (the anchor and reasoning are the
-				// same: created_at, a single end-of-job callback, no heartbeat).
-				healthReconciler := healthreconcile.New(
-					repositories.NewHealthRepository(database),
-					healthFailureNotifier{health: health},
-					cfg.Drift.RunTTL, cfg.Drift.ReconcileInterval,
-				)
-				healthReconciler.Start()
+				startWorkers := func() (stopWorkers func()) {
+					runner := scheduler.New(repositories.NewScheduleRepository(database), driftDisp)
+					runner.Start()
+					syncer.Start()
+					// Reap drift runs stuck in "dispatched" whose CI job never called
+					// back (build/agent died), firing the same failure alert a real
+					// callback would.
+					reconciler := driftreconcile.New(
+						repositories.NewDriftRepository(database),
+						driftFailureNotifier{drift: drift},
+						cfg.Drift.RunTTL, cfg.Drift.ReconcileInterval,
+					)
+					reconciler.Start()
+					// Same backstop for version-lab health runs, which carry the
+					// identical stuck-dispatched failure mode in a separate table. It
+					// reuses the drift TTL/interval (the anchor and reasoning are the
+					// same: created_at, a single end-of-job callback, no heartbeat).
+					healthReconciler := healthreconcile.New(
+						repositories.NewHealthRepository(database),
+						healthFailureNotifier{health: health},
+						cfg.Drift.RunTTL, cfg.Drift.ReconcileInterval,
+					)
+					healthReconciler.Start()
 
-				// API key expiry notifier: periodic per-user warning emails for
-				// keys nearing expiry. Gated on the dedicated worker replica like
-				// the jobs above -- FindExpiringKeys/MarkExpiryNotificationSent has
-				// no cross-replica claim, so running it on every API pod in a
-				// multi-replica deployment could double-send warning emails.
-				expiryNotifier := identitynotify.NewAPIKeyExpiryNotifier(
-					idstore.NewAPIKeyRepository(identityDB),
-					idstore.NewUserRepository(identityDB),
-					func() identitynotify.ExpiryConfig {
-						return identitynotify.ExpiryConfig{
-							Enabled:        cfg.Notifications.Enabled,
-							APIKeyExpiring: cfg.Notifications.Events.APIKeyExpiring,
-							SMTP: identitymailer.Config{
-								Host:     smtpCfg.Host,
-								Port:     smtpCfg.Port,
-								From:     smtpCfg.From,
-								Username: smtpCfg.Username,
-								Password: smtpCfg.Password,
-								UseTLS:   smtpCfg.UseTLS,
-							},
-							WarningDays:        cfg.Notifications.APIKeyExpiryWarningDays,
-							CheckIntervalHours: cfg.Notifications.APIKeyExpiryCheckIntervalHours,
-						}
-					},
-					identitynotify.ExpiryOptions{ProductName: "Terraform State Manager"},
-				)
-				go func() { _ = expiryNotifier.Start(context.Background()) }()
+					// API key expiry notifier: periodic per-user warning emails for
+					// keys nearing expiry. Leader-gated like the jobs above so a
+					// multi-replica deployment cannot double-send warning emails.
+					expiryNotifier := identitynotify.NewAPIKeyExpiryNotifier(
+						idstore.NewAPIKeyRepository(identityDB),
+						idstore.NewUserRepository(identityDB),
+						func() identitynotify.ExpiryConfig {
+							return identitynotify.ExpiryConfig{
+								Enabled:        cfg.Notifications.Enabled,
+								APIKeyExpiring: cfg.Notifications.Events.APIKeyExpiring,
+								SMTP: identitymailer.Config{
+									Host:     smtpCfg.Host,
+									Port:     smtpCfg.Port,
+									From:     smtpCfg.From,
+									Username: smtpCfg.Username,
+									Password: smtpCfg.Password,
+									UseTLS:   smtpCfg.UseTLS,
+								},
+								WarningDays:        cfg.Notifications.APIKeyExpiryWarningDays,
+								CheckIntervalHours: cfg.Notifications.APIKeyExpiryCheckIntervalHours,
+							}
+						},
+						identitynotify.ExpiryOptions{ProductName: "Terraform State Manager"},
+					)
+					go func() { _ = expiryNotifier.Start(context.Background()) }()
 
-				runnerStop := runner.Stop
-				stop = func() {
-					runnerStop()
-					syncer.Stop()
-					reconciler.Stop()
-					healthReconciler.Stop()
-					_ = expiryNotifier.Stop()
+					return func() {
+						runner.Stop()
+						syncer.Stop()
+						reconciler.Stop()
+						healthReconciler.Stop()
+						_ = expiryNotifier.Stop()
+					}
 				}
+				elector := leaderelect.New(database, startWorkers)
+				elector.Start()
+				stop = elector.Stop
 			} else {
 				slog.Info("background workers disabled on this replica (workers.enabled=false); " +
-					"schedule firing and periodic state sync run on the dedicated worker")
+					"schedule firing and periodic state sync run on a worker-enabled replica")
 			}
 		}
 	}

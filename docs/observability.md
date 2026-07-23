@@ -7,6 +7,18 @@ never expose it publicly): `http_requests_total{method,path,status}`,
 `http_request_duration_seconds` (histogram), `db_connections_{open,in_use,idle}`,
 `app_info{version,go_version,build_date}`, plus Go runtime metrics.
 
+Worker & sync health (worker-enabled replica only):
+`tsm_worker_last_tick_timestamp_seconds{worker}` (statesync / scheduler /
+driftreconcile / healthreconcile loop heartbeats — alert on
+`time() - metric > 3 * interval` to catch a wedged loop that `TSMTargetDown`
+cannot see, since the process and metrics port stay up),
+`tsm_source_last_sync_timestamp_seconds{source_id,source_name}` and
+`tsm_source_sync_read_errors{source_id,source_name}` (per-source sync
+freshness and last-cycle read errors). `/ready` on the worker replica also
+fails when any registered loop stops ticking past its staleness budget
+(3 intervals, 2-minute floor), so Kubernetes surfaces a stalled worker
+without any Prometheus rule.
+
 - Kubernetes: `serviceMonitor.enabled=true` (+ `prometheusRule.enabled`,
   `grafanaDashboard.enabled`) in the chart; NetworkPolicy already admits the
   `monitoring` namespace on 9090.
