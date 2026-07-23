@@ -5,7 +5,7 @@
 
 ## Context
 
-Before mutating a state file, the edit pipeline must guarantee mutual exclusion: two concurrent editors of the same `(source, key)` must not clobber each other. Some backends provide native locking that the State Manager uses directly — HCP/TFC workspace lock-then-verify, Consul check-and-set, local lock files. But several common backends provide **no native state lock at all**: S3, GCS, Azure Blob, and git. For those, the application must supply its own lock.
+Before mutating a state file, the edit pipeline must guarantee mutual exclusion: two concurrent editors of the same `(source, key)` must not clobber each other. Some backends provide native locking that the State Manager uses directly — HCP/TFC workspace lock-then-verify, Consul session locks on `<key>/.lock` (the same key Terraform's consul backend locks), local lock files. But several common backends provide **no native state lock at all**: S3, GCS, Azure Blob, and git. For those, the application must supply its own lock.
 
 An application-level lock raises the classic orphaned-lock problem. Locks are acquired and released within a single HTTP request, with `release()` deferred. But a process can crash, get OOM-killed, or be force-terminated between acquiring the lock and releasing it. Without a backstop, a single crash would **wedge a state key forever** — no future edit could acquire the lock, and the only recovery would be manual database surgery.
 

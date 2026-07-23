@@ -111,6 +111,9 @@ func (c *consul) List(ctx context.Context) ([]StateRef, error) {
 		if strings.HasSuffix(e.Key, "/") {
 			continue // directory placeholder
 		}
+		if strings.HasSuffix(e.Key, consulLockSuffix) || strings.HasSuffix(e.Key, "/.lockinfo") {
+			continue // lock artifacts (TSM sessions, terraform's consul backend), not state
+		}
 		size := int64(0)
 		if decoded, dErr := base64.StdEncoding.DecodeString(e.Value); dErr == nil {
 			size = int64(len(decoded))
@@ -178,6 +181,93 @@ func (c *consul) Delete(ctx context.Context, key string) error {
 		return fmt.Errorf("consul delete returned status %d", resp.StatusCode)
 	}
 	return nil
+}
+
+// --- Locker (Consul session lock) ---
+
+// consulLockSuffix is appended to the state key to form the lock key. It is
+// the same key Terraform's consul backend locks (<path>/.lock), so a TSM edit
+// and a concurrent `terraform apply` mutually exclude each other. This closes
+// the read-to-write CAS gap: Write's ?cas index is fetched at write time, so
+// on its own it cannot see a writer that committed between the edit pipeline's
+// read and the write — under this lock no such writer can commit.
+const consulLockSuffix = "/.lock"
+
+// consulSessionTTL bounds an orphaned lock: the session is created with
+// Behavior=release, so if TSM crashes mid-edit Consul expires the session and
+// releases the lock server-side. Matches the app-level advisory lock's
+// 15-minute stale TTL (ADR 003).
+const consulSessionTTL = "15m"
+
+// sessionURL builds a Consul session API URL (datacenter-aware like kvURL).
+func (c *consul) sessionURL(p string) string {
+	q := url.Values{}
+	if c.datacenter != "" {
+		q.Set("dc", c.datacenter)
+	}
+	u := url.URL{Scheme: c.scheme, Host: c.address, Path: p, RawQuery: q.Encode()}
+	return u.String()
+}
+
+// Lock implements Locker: a fresh Consul session acquires <key>/.lock. The
+// session id doubles as the lock id. A rejected acquire means another editor
+// or a terraform operation holds the lock — the edit pipeline surfaces that
+// as a 409 conflict.
+func (c *consul) Lock(ctx context.Context, key string) (string, error) {
+	body, _ := json.Marshal(map[string]string{
+		"Name":     "terraform-state-manager state edit",
+		"TTL":      consulSessionTTL,
+		"Behavior": "release",
+	})
+	resp, err := c.do(ctx, http.MethodPut, c.sessionURL("/v1/session/create"), bytes.NewReader(body))
+	if err != nil {
+		return "", fmt.Errorf("consul session create failed: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("consul session create returned status %d", resp.StatusCode)
+	}
+	var sess struct {
+		ID string `json:"ID"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&sess); err != nil || sess.ID == "" {
+		return "", fmt.Errorf("consul session create returned no session id (%v)", err)
+	}
+
+	info, _ := json.Marshal(map[string]string{"Holder": "terraform-state-manager", "Operation": "state edit"})
+	aResp, err := c.do(ctx, http.MethodPut, c.kvURL(key+consulLockSuffix, url.Values{"acquire": {sess.ID}}), bytes.NewReader(info))
+	if err != nil {
+		c.destroySession(ctx, sess.ID)
+		return "", fmt.Errorf("consul lock acquire failed: %w", err)
+	}
+	defer func() { _ = aResp.Body.Close() }()
+	ok, _ := io.ReadAll(io.LimitReader(aResp.Body, 64))
+	if aResp.StatusCode != http.StatusOK || strings.TrimSpace(string(ok)) != "true" {
+		c.destroySession(ctx, sess.ID)
+		return "", fmt.Errorf("state %q is locked in Consul (another edit or a terraform operation holds %s)", key, key+consulLockSuffix)
+	}
+	return sess.ID, nil
+}
+
+// Unlock releases <key>/.lock and destroys the lock's session. Both steps are
+// tolerant of an already-expired session (Consul released the lock itself).
+func (c *consul) Unlock(ctx context.Context, key, lockID string) error {
+	resp, err := c.do(ctx, http.MethodPut, c.kvURL(key+consulLockSuffix, url.Values{"release": {lockID}}), nil)
+	if err == nil {
+		_ = resp.Body.Close()
+	}
+	c.destroySession(ctx, lockID)
+	if err != nil {
+		return fmt.Errorf("consul lock release failed: %w", err)
+	}
+	return nil
+}
+
+// destroySession is best-effort teardown; an expired session is already gone.
+func (c *consul) destroySession(ctx context.Context, id string) {
+	if resp, err := c.do(ctx, http.MethodPut, c.sessionURL("/v1/session/destroy/"+id), nil); err == nil {
+		_ = resp.Body.Close()
+	}
 }
 
 // modifyIndex returns the key's current ModifyIndex for check-and-set writes,
