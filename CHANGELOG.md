@@ -1,5 +1,31 @@
 # Changelog
 
+## [2.5.0](https://github.com/sethbacon/terraform-state-manager-backend/compare/v2.4.2...v2.5.0) (2026-07-23)
+
+
+### Features
+
+* **api:** surface the cause on 5xx responses in the access log ([#230](https://github.com/sethbacon/terraform-state-manager-backend/issues/230)) ([ae553ed](https://github.com/sethbacon/terraform-state-manager-backend/commit/ae553edb84fe7881ef9a365327399b32d1b0ac4b))
+* **config:** validate configuration at boot (fail-fast) ([#233](https://github.com/sethbacon/terraform-state-manager-backend/issues/233)) ([57d2a9a](https://github.com/sethbacon/terraform-state-manager-backend/commit/57d2a9a1846f6cf6b529525bcb86225551867937)), closes [#218](https://github.com/sethbacon/terraform-state-manager-backend/issues/218)
+* **sources:** add POST /sources/test for unsaved source configurations ([#227](https://github.com/sethbacon/terraform-state-manager-backend/issues/227)) ([1a3681d](https://github.com/sethbacon/terraform-state-manager-backend/commit/1a3681d4b25381c5be9fffcc4817f65ad00bbd42))
+
+
+### Bug Fixes
+
+* **admin:** revoke a user's API keys on delete and GDPR erasure ([#234](https://github.com/sethbacon/terraform-state-manager-backend/issues/234)) ([7c81c9d](https://github.com/sethbacon/terraform-state-manager-backend/commit/7c81c9da1dec6dca8798e80a73c25e03eec27245)), closes [#223](https://github.com/sethbacon/terraform-state-manager-backend/issues/223)
+* claim schedules atomically before dispatch (no duplicate CI runs) ([#237](https://github.com/sethbacon/terraform-state-manager-backend/issues/237)) ([c15dd6d](https://github.com/sethbacon/terraform-state-manager-backend/commit/c15dd6d54bc295815e7b251e3d336f5680c9ebe9))
+* consul connector implements Locker via session lock on &lt;key&gt;/.lock ([#240](https://github.com/sethbacon/terraform-state-manager-backend/issues/240)) ([ce18265](https://github.com/sethbacon/terraform-state-manager-backend/commit/ce1826564235ac3ea0ea10b6fd24c242431efef5))
+* harden connector credential handling ([#235](https://github.com/sethbacon/terraform-state-manager-backend/issues/235)) ([e20d3c9](https://github.com/sethbacon/terraform-state-manager-backend/commit/e20d3c9914f01792b92c8ccb24e17615712cd586))
+* reap stale state locks by heartbeat, not acquisition age ([#238](https://github.com/sethbacon/terraform-state-manager-backend/issues/238)) ([c8a5a45](https://github.com/sethbacon/terraform-state-manager-backend/commit/c8a5a45d4ddfa37aa20f6245e372aa85b85bf877))
+
+
+### Performance
+
+* cache dashboard aggregates, de-correlate SyncStatuses, index history prune ([#236](https://github.com/sethbacon/terraform-state-manager-backend/issues/236)) ([ff5e671](https://github.com/sethbacon/terraform-state-manager-backend/commit/ff5e67142f4c78b5baf8b5d7004a093adae4e286))
+* **dashboard:** push the exact-match version drill-down into SQL ([#232](https://github.com/sethbacon/terraform-state-manager-backend/issues/232)) ([a27a4e8](https://github.com/sethbacon/terraform-state-manager-backend/commit/a27a4e84007bac5c1eb4a768fa1cba2c9ebb74df))
+* multi-replica-safe workers — leader election, parallel sync, liveness telemetry ([#239](https://github.com/sethbacon/terraform-state-manager-backend/issues/239)) ([e487598](https://github.com/sethbacon/terraform-state-manager-backend/commit/e487598300534e1566b4aa8ac4580607169e96d3))
+* **reports:** push report filters into SQL instead of scanning the whole store ([#228](https://github.com/sethbacon/terraform-state-manager-backend/issues/228)) ([63bfb44](https://github.com/sethbacon/terraform-state-manager-backend/commit/63bfb445bb23e909059dd568dfe749997d50dd1e))
+
 ## [2.4.2](https://github.com/sethbacon/terraform-state-manager-backend/compare/v2.4.1...v2.4.2) (2026-07-20)
 
 
