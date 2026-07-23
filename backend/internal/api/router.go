@@ -124,6 +124,17 @@ func NewRouter(cfg *config.Config, database *sql.DB, identityDB *sql.DB) (*gin.E
 		// middleware and are permanently disabled once setup completes. CSRF is a
 		// no-op here (no session cookie exists during first-run setup).
 		settingsRepo := repositories.NewSystemSettingsRepository(database)
+		// Whitelabel branding: public read (the login page renders it before any
+		// session exists), admin-scoped write. Nil settings on the nil-DB rig.
+		themeSettings := settingsRepo
+		if database == nil {
+			themeSettings = nil
+		}
+		v1.GET("/ui/theme", GetUITheme(themeSettings))
+		if database != nil {
+			v1.PUT("/admin/ui/theme", requireAuth, middleware.RequireScope(auth.ScopeAdmin),
+				UpdateUITheme(settingsRepo, newAuditor(identityDB)))
+		}
 		setupHandlers := setup.NewHandlers(settingsRepo, oidcConfigRepo, repositories.NewSourceRepository(database), identityDB, cfg, authHandlers.SetOIDCProvider)
 		v1.GET("/setup/status", setupHandlers.GetSetupStatus)
 		setupGroup := v1.Group("/setup")
