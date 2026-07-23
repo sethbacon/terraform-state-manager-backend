@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"net/http"
 	"strconv"
 	"time"
@@ -15,20 +16,40 @@ import (
 // roles, audit log) backed by the shared terraform-suite-identity repositories.
 // All routes are gated by the admin scope in the router.
 type AdminHandlers struct {
-	userRepo  *idstore.UserRepository
-	orgRepo   *idstore.OrganizationRepository
-	roleRepo  *idstore.RoleTemplateRepository
-	auditRepo *idstore.AuditRepository
+	userRepo   *idstore.UserRepository
+	orgRepo    *idstore.OrganizationRepository
+	roleRepo   *idstore.RoleTemplateRepository
+	auditRepo  *idstore.AuditRepository
+	apiKeyRepo *idstore.APIKeyRepository
 }
 
 // NewAdminHandlers builds the admin handlers over the identity-schema connection.
 func NewAdminHandlers(identityDB *sqlx.DB) *AdminHandlers {
 	return &AdminHandlers{
-		userRepo:  idstore.NewUserRepository(identityDB.DB),
-		orgRepo:   idstore.NewOrganizationRepository(identityDB.DB),
-		roleRepo:  idstore.NewRoleTemplateRepository(identityDB),
-		auditRepo: idstore.NewAuditRepository(identityDB.DB),
+		userRepo:   idstore.NewUserRepository(identityDB.DB),
+		orgRepo:    idstore.NewOrganizationRepository(identityDB.DB),
+		roleRepo:   idstore.NewRoleTemplateRepository(identityDB),
+		auditRepo:  idstore.NewAuditRepository(identityDB.DB),
+		apiKeyRepo: idstore.NewAPIKeyRepository(identityDB.DB),
 	}
+}
+
+// revokeUserAPIKeys deletes every API key owned by userID. API keys carry static
+// scopes validated only against the key row (the owner's live scopes are never
+// re-derived), and have no natural expiry, so an offboarded or erased user's key
+// keeps authenticating at its original — possibly admin — scope unless revoked
+// here. Returns the number revoked so callers can record it in the audit trail.
+func (h *AdminHandlers) revokeUserAPIKeys(ctx context.Context, userID string) (int, error) {
+	keys, err := h.apiKeyRepo.ListAPIKeysByUser(ctx, userID)
+	if err != nil {
+		return 0, err
+	}
+	for _, k := range keys {
+		if err := h.apiKeyRepo.RevokeAPIKey(ctx, k.ID); err != nil {
+			return 0, err
+		}
+	}
+	return len(keys), nil
 }
 
 func pageParams(c *gin.Context) (limit, offset int) {

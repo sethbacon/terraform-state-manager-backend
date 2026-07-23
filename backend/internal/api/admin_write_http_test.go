@@ -87,9 +87,36 @@ func TestAdminUpdateUser(t *testing.T) {
 
 func TestAdminDeleteUser(t *testing.T) {
 	e := newAdminWriteEnv(t)
+	// Keys are revoked before the account is removed (none here).
+	e.mock.ExpectQuery("FROM api_keys").WithArgs("u1").WillReturnRows(sqlmock.NewRows([]string{"id"}))
 	e.mock.ExpectExec("DELETE FROM users").WithArgs("u1").WillReturnResult(sqlmock.NewResult(0, 1))
 	if w := e.do(http.MethodDelete, "/api/v1/admin/users/u1", ""); w.Code != http.StatusNoContent {
 		t.Errorf("delete: status = %d, want 204", w.Code)
+	}
+}
+
+// apiKeyListCols mirrors ListAPIKeysByUser's scanAPIKeyWithUserName projection.
+var apiKeyListCols = []string{
+	"id", "user_id", "organization_id", "name", "description", "key_hash", "key_prefix", "scopes",
+	"expires_at", "last_used_at", "expiry_notification_sent_at", "created_at", "user_name",
+}
+
+func TestAdminDeleteUserRevokesAPIKeys(t *testing.T) {
+	e := newAdminWriteEnv(t)
+	// The offboarded user owns two keys; both must be deleted before the account.
+	e.mock.ExpectQuery("FROM api_keys").WithArgs("u1").WillReturnRows(
+		sqlmock.NewRows(apiKeyListCols).
+			AddRow("k1", "u1", "o1", "CI", nil, "h", "tsm_a", []byte(`["admin"]`), nil, nil, nil, time.Now(), "Alice").
+			AddRow("k2", "u1", "o1", "Deploy", nil, "h", "tsm_b", []byte(`["state:read"]`), nil, nil, nil, time.Now(), "Alice"))
+	e.mock.ExpectExec("DELETE FROM api_keys").WithArgs("k1").WillReturnResult(sqlmock.NewResult(0, 1))
+	e.mock.ExpectExec("DELETE FROM api_keys").WithArgs("k2").WillReturnResult(sqlmock.NewResult(0, 1))
+	e.mock.ExpectExec("DELETE FROM users").WithArgs("u1").WillReturnResult(sqlmock.NewResult(0, 1))
+
+	if w := e.do(http.MethodDelete, "/api/v1/admin/users/u1", ""); w.Code != http.StatusNoContent {
+		t.Fatalf("delete: status = %d", w.Code)
+	}
+	if err := e.mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("both keys must be revoked before the user is deleted: %v", err)
 	}
 }
 
@@ -157,13 +184,19 @@ func TestAdminEraseUser(t *testing.T) {
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	e.mock.ExpectExec("DELETE FROM organization_members").WithArgs("u1").
 		WillReturnResult(sqlmock.NewResult(0, 2))
+	// Erasure also revokes the user's API keys (tombstone would otherwise keep
+	// them valid); the one key here is deleted.
+	e.mock.ExpectQuery("FROM api_keys").WithArgs("u1").WillReturnRows(
+		sqlmock.NewRows(apiKeyListCols).
+			AddRow("k1", "u1", "o1", "CI", nil, "h", "tsm_a", []byte(`["admin"]`), nil, nil, nil, time.Now(), "Alice"))
+	e.mock.ExpectExec("DELETE FROM api_keys").WithArgs("k1").WillReturnResult(sqlmock.NewResult(0, 1))
 
 	w := e.do(http.MethodPost, "/api/v1/admin/users/u1/erase", "")
 	if w.Code != http.StatusOK {
 		t.Fatalf("erase: status = %d (%s)", w.Code, w.Body.String())
 	}
 	if err := e.mock.ExpectationsWereMet(); err != nil {
-		t.Errorf("erase must anonymize and revoke memberships: %v", err)
+		t.Errorf("erase must anonymize, revoke memberships, and revoke api keys: %v", err)
 	}
 }
 

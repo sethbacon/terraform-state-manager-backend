@@ -124,12 +124,20 @@ func (h *AdminHandlers) UpdateUser() gin.HandlerFunc {
 // @Router       /admin/users/{id} [delete]
 func (h *AdminHandlers) DeleteUser() gin.HandlerFunc {
 	return func(c *gin.Context) {
+		ctx := c.Request.Context()
 		id := c.Param("id")
-		if err := h.userRepo.DeleteUser(c.Request.Context(), id); err != nil {
+		// Revoke the user's API keys before removing the account so no key row is
+		// orphaned and nothing can keep authenticating as the deleted user.
+		revoked, err := h.revokeUserAPIKeys(ctx, id)
+		if err != nil {
+			serverError(c, err, "failed to revoke api keys")
+			return
+		}
+		if err := h.userRepo.DeleteUser(ctx, id); err != nil {
 			serverError(c, err, "failed to delete user")
 			return
 		}
-		h.writeAudit(c, "user.delete", "user", id, nil)
+		h.writeAudit(c, "user.delete", "user", id, map[string]interface{}{"api_keys_revoked": revoked})
 		c.Status(http.StatusNoContent)
 	}
 }
@@ -235,7 +243,15 @@ func (h *AdminHandlers) EraseUser() gin.HandlerFunc {
 			serverError(c, err, "failed to revoke memberships")
 			return
 		}
-		h.writeAudit(c, "user.erase", "user", id, nil)
+		// GDPR erasure keeps the user row as a resolvable tombstone, so a
+		// still-valid API key would keep authenticating at its stored scopes.
+		// Revoke every key the user owns as part of the erasure.
+		revoked, err := h.revokeUserAPIKeys(ctx, id)
+		if err != nil {
+			serverError(c, err, "failed to revoke api keys")
+			return
+		}
+		h.writeAudit(c, "user.erase", "user", id, map[string]interface{}{"api_keys_revoked": revoked})
 		c.JSON(http.StatusOK, gin.H{
 			"message": "User data has been erased. Audit log entries are preserved with anonymized identifiers.",
 			"user_id": id,
