@@ -270,24 +270,6 @@ func NewRouter(cfg *config.Config, database *sql.DB, identityDB *sql.DB) (*gin.E
 				userScoped.POST("/erase", admin.EraseUser())
 			}
 
-			// Organizations: list/create are platform-wide (no specific target
-			// organization to check membership against). Every route naming a
-			// specific :id, though, additionally requires the caller to hold admin
-			// within THAT organization — not just the flat/global admin scope the
-			// outer /admin group already checked — closing the cross-org privilege
-			// escalation the flat scope alone would otherwise allow.
-			ag.GET("/organizations", admin.ListOrganizations())
-			ag.POST("/organizations", admin.CreateOrganization())
-			orgScoped := ag.Group("/organizations/:id", admin.requireOrgScope())
-			{
-				orgScoped.PUT("", admin.UpdateOrganization())
-				orgScoped.DELETE("", admin.DeleteOrganization())
-				orgScoped.GET("/members", admin.ListOrganizationMembers())
-				orgScoped.POST("/members", admin.AddOrganizationMember())
-				orgScoped.PUT("/members/:user_id", admin.UpdateOrganizationMember())
-				orgScoped.DELETE("/members/:user_id", admin.RemoveOrganizationMember())
-			}
-
 			ag.GET("/roles", admin.ListRoles())
 			ag.GET("/audit-logs", admin.ListAuditLogs())
 			ag.GET("/audit-logs/export", admin.ExportAuditLogs())
@@ -309,6 +291,32 @@ func NewRouter(cfg *config.Config, database *sql.DB, identityDB *sql.DB) (*gin.E
 			ag.PUT("/oidc/group-mapping", authHandlers.UpdateOIDCGroupMapping())
 			ag.GET("/identity-group-mappings", authHandlers.IdentityGroupMappingsHandler())
 			ag.GET("/mtls", authHandlers.MTLSConfigHandler())
+		}
+
+		// Organizations: deliberately NOT nested under the ScopeAdmin-gated ag
+		// group above (only requireAuth at the group level) — org management is
+		// delegated to org-tier scopes instead of the flat/global admin wildcard,
+		// so an org_owner/org_provisioner never needs platform-admin rights just
+		// to run their own organization. List/create name no specific target
+		// organization, so they're gated by organizations:read/:create directly;
+		// every route naming a specific :id, though, still requires the caller to
+		// hold organizations:write (or admin) within THAT organization —
+		// re-derived per-request via GetUserScopesForOrg (requireOrgScope, see
+		// admin_org_scope.go) rather than trusted from the flat scope set — so an
+		// org_owner in org A cannot act on org B.
+		orgAdmin := v1.Group("/admin/organizations", requireAuth)
+		{
+			orgAdmin.GET("", middleware.RequireScope(auth.ScopeOrganizationsRead), admin.ListOrganizations())
+			orgAdmin.POST("", middleware.RequireScope(auth.ScopeOrganizationsCreate), admin.CreateOrganization())
+			orgScoped := orgAdmin.Group("/:id", admin.requireOrgScope())
+			{
+				orgScoped.PUT("", admin.UpdateOrganization())
+				orgScoped.DELETE("", admin.DeleteOrganization())
+				orgScoped.GET("/members", admin.ListOrganizationMembers())
+				orgScoped.POST("/members", admin.AddOrganizationMember())
+				orgScoped.PUT("/members/:user_id", admin.UpdateOrganizationMember())
+				orgScoped.DELETE("/members/:user_id", admin.RemoveOrganizationMember())
+			}
 		}
 
 		// Notifier fans drift/failure alerts out to configured channels. Nil with a

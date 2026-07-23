@@ -199,9 +199,10 @@ func TestRequireOrgScope_MissingCallerIdentityIsForbidden(t *testing.T) {
 
 func TestRequireOrgScope_DoesNotGateOrganizationListOrCreate(t *testing.T) {
 	// /admin/organizations (list/create) names no specific target organization,
-	// so it must stay gated only by the outer /admin ScopeAdmin check (exercised
-	// by the router's own middleware chain in production, not this handler-level
-	// rig) — requireOrgScope must not be on its path at all.
+	// so requireOrgScope must not be on its path at all — in production these are
+	// gated instead by organizations:read/:create scopes on a sibling route group
+	// (see router.go and admin_org_routing_test.go), which this handler-level rig
+	// intentionally omits so it can isolate requireOrgScope's own behavior.
 	e := newAdminOrgScopeEnv(t, "caller-1")
 
 	e.mock.ExpectQuery("FROM organizations").WillReturnRows(sqlmock.NewRows(
@@ -212,11 +213,13 @@ func TestRequireOrgScope_DoesNotGateOrganizationListOrCreate(t *testing.T) {
 	}
 }
 
-// TestCreateOrganization_AddsCallerAsAdmin covers the bootstrap fix: without
-// auto-adding the creator as the new organization's first admin member, no
+// TestCreateOrganization_AddsCallerAsOrgOwner covers the bootstrap fix: without
+// auto-adding the creator as the new organization's org_owner member, no
 // caller could ever pass requireOrgScope for a brand-new organization (it has
-// zero members), so nobody could manage it — not even its creator.
-func TestCreateOrganization_AddsCallerAsAdmin(t *testing.T) {
+// zero members), so nobody could manage it — not even its creator. org_owner
+// (rather than admin) is what keeps this from re-granting the flat platform
+// admin wildcard just for creating an organization.
+func TestCreateOrganization_AddsCallerAsOrgOwner(t *testing.T) {
 	e := newAdminOrgScopeEnv(t, "caller-1")
 
 	e.mock.ExpectQuery("INSERT INTO organizations").
@@ -224,10 +227,10 @@ func TestCreateOrganization_AddsCallerAsAdmin(t *testing.T) {
 		WillReturnRows(sqlmock.NewRows([]string{"id", "created_at", "updated_at"}).
 			AddRow("org-1", time.Now(), time.Now()))
 	e.mock.ExpectQuery("SELECT id FROM role_templates").
-		WithArgs("admin").
-		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("rt-admin"))
+		WithArgs("org_owner").
+		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("rt-org-owner"))
 	e.mock.ExpectExec("INSERT INTO organization_members").
-		WithArgs("org-1", "caller-1", "rt-admin").
+		WithArgs("org-1", "caller-1", "rt-org-owner").
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	e.mock.ExpectExec("INSERT INTO audit_logs").WillReturnResult(sqlmock.NewResult(0, 1))
 
@@ -236,14 +239,14 @@ func TestCreateOrganization_AddsCallerAsAdmin(t *testing.T) {
 		t.Fatalf("create organization: status = %d (%s), want 201", w.Code, w.Body.String())
 	}
 	if err := e.mock.ExpectationsWereMet(); err != nil {
-		t.Errorf("creator must be added as an admin member of the new organization: %v", err)
+		t.Errorf("creator must be added as an org_owner member of the new organization: %v", err)
 	}
 }
 
-// TestCreateOrganization_FailsIfAddingAdminMemberFails ensures a failure to add
-// the creator as admin is surfaced as an error (rather than silently returning
-// 201 for an organization nobody can manage).
-func TestCreateOrganization_FailsIfAddingAdminMemberFails(t *testing.T) {
+// TestCreateOrganization_FailsIfAddingOrgOwnerMemberFails ensures a failure to
+// add the creator as org_owner is surfaced as an error (rather than silently
+// returning 201 for an organization nobody can manage).
+func TestCreateOrganization_FailsIfAddingOrgOwnerMemberFails(t *testing.T) {
 	e := newAdminOrgScopeEnv(t, "caller-1")
 
 	e.mock.ExpectQuery("INSERT INTO organizations").
@@ -251,12 +254,49 @@ func TestCreateOrganization_FailsIfAddingAdminMemberFails(t *testing.T) {
 		WillReturnRows(sqlmock.NewRows([]string{"id", "created_at", "updated_at"}).
 			AddRow("org-1", time.Now(), time.Now()))
 	e.mock.ExpectQuery("SELECT id FROM role_templates").
-		WithArgs("admin").
+		WithArgs("org_owner").
 		WillReturnError(errors.New("role template not seeded"))
 
 	w := e.do(http.MethodPost, "/api/v1/admin/organizations", `{"name":"Acme"}`)
 	if w.Code != http.StatusInternalServerError {
 		t.Fatalf("create organization: status = %d (%s), want 500", w.Code, w.Body.String())
+	}
+}
+
+// TestRequireOrgScope_AllowsOrganizationsWriteWithoutAdmin proves org_owner
+// (organizations:write, no admin wildcard) can manage its own organization —
+// the entire point of the parity fix: org management no longer requires the
+// flat platform-admin scope.
+func TestRequireOrgScope_AllowsOrganizationsWriteWithoutAdmin(t *testing.T) {
+	e := newAdminOrgScopeEnv(t, "caller-1")
+
+	expectGetUserScopesForOrg(e.mock, "org-a", "caller-1", `["organizations:write"]`)
+	e.mock.ExpectExec("DELETE FROM organization_members").WithArgs("org-a", "u2").
+		WillReturnResult(sqlmock.NewResult(0, 1))
+
+	w := e.do(http.MethodDelete, "/api/v1/admin/organizations/org-a/members/u2", "")
+	if w.Code != http.StatusNoContent {
+		t.Fatalf("organizations:write (no admin) removing a member of its own org: status = %d (%s), want 204", w.Code, w.Body.String())
+	}
+	if err := e.mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("expected the org-scope lookup and the member removal to both run: %v", err)
+	}
+}
+
+// TestRequireOrgScope_RejectsCrossOrgOrganizationsWrite proves the org-scoped
+// non-admin path still respects the cross-org boundary: holding
+// organizations:write in org-a must NOT authorize acting on org-b.
+func TestRequireOrgScope_RejectsCrossOrgOrganizationsWrite(t *testing.T) {
+	e := newAdminOrgScopeEnv(t, "caller-1")
+
+	expectNoMembership(e.mock, "org-b", "caller-1")
+
+	w := e.do(http.MethodDelete, "/api/v1/admin/organizations/org-b", "")
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("caller with no membership in org-b: status = %d (%s), want 403", w.Code, w.Body.String())
+	}
+	if err := e.mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("DeleteOrganization must NOT be reached: %v", err)
 	}
 }
 

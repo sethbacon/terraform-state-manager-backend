@@ -154,3 +154,10 @@ require (
 	google.golang.org/protobuf v1.36.11 // indirect
 	gopkg.in/warnings.v0 v0.1.2 // indirect
 )
+
+// TEMPORARY: points at the local sibling checkout that carries
+// ScopeOrganizationsCreate/RoleScopesPermittedBy ahead of a released
+// terraform-suite-identity version. Remove this replace (and re-run
+// `go mod tidy`) once terraform-suite-identity#126 ships a real tag — do not
+// merge this PR with the directive still in place.
+replace github.com/sethbacon/terraform-suite-identity => ../../terraform-suite-identity
