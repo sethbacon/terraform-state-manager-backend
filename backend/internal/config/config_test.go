@@ -207,3 +207,49 @@ func TestIdentityDatabasePartialOverride(t *testing.T) {
 		t.Errorf("IdentityDatabase.MaxConnections = %d, want inherited %d", cfg.IdentityDatabase.MaxConnections, cfg.Database.MaxConnections)
 	}
 }
+
+func TestValidate(t *testing.T) {
+	// The default config must pass — otherwise every boot fails.
+	base, err := Load("")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if err := base.Validate(); err != nil {
+		t.Fatalf("default config failed Validate: %v", err)
+	}
+
+	cases := []struct {
+		name    string
+		mutate  func(c *Config)
+		wantErr bool
+	}{
+		{"oidc enabled without issuer", func(c *Config) { c.Auth.OIDC.Enabled = true; c.Auth.OIDC.ClientID = "x" }, true},
+		{"oidc enabled without client id", func(c *Config) { c.Auth.OIDC.Enabled = true; c.Auth.OIDC.IssuerURL = "https://idp" }, true},
+		{"oidc enabled complete", func(c *Config) {
+			c.Auth.OIDC.Enabled, c.Auth.OIDC.IssuerURL, c.Auth.OIDC.ClientID = true, "https://idp", "x"
+		}, false},
+		{"ldap enabled without host", func(c *Config) { c.Auth.LDAP.Enabled = true; c.Auth.LDAP.BaseDN = "dc=x" }, true},
+		{"ldap enabled without base_dn", func(c *Config) { c.Auth.LDAP.Enabled = true; c.Auth.LDAP.Host = "ldap" }, true},
+		{"ldap disabled ignores missing fields", func(c *Config) { c.Auth.LDAP.Enabled = false }, false},
+		{"smtp user without tls", func(c *Config) { c.Notifications.SMTP.Username = "u"; c.Notifications.SMTP.UseTLS = false }, true},
+		{"smtp user with tls", func(c *Config) { c.Notifications.SMTP.Username = "u"; c.Notifications.SMTP.UseTLS = true }, false},
+		{"bad ssl_mode", func(c *Config) { c.Database.SSLMode = "sorta" }, true},
+		{"good ssl_mode", func(c *Config) { c.Database.SSLMode = "verify-full" }, false},
+		{"bad identity ssl_mode", func(c *Config) { c.IdentityDatabase.SSLMode = "nope" }, true},
+		{"bad log level", func(c *Config) { c.Logging.Level = "verbose" }, true},
+		{"empty log level ok", func(c *Config) { c.Logging.Level = "" }, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c, _ := Load("")
+			tc.mutate(c)
+			err := c.Validate()
+			if tc.wantErr && err == nil {
+				t.Error("expected a validation error, got nil")
+			}
+			if !tc.wantErr && err != nil {
+				t.Errorf("unexpected validation error: %v", err)
+			}
+		})
+	}
+}

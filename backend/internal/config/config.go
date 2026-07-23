@@ -419,6 +419,76 @@ func Load(path string) (*Config, error) {
 	return &cfg, nil
 }
 
+// validSSLModes are the libpq sslmode values the Postgres driver accepts.
+var validSSLModes = map[string]struct{}{
+	"disable": {}, "allow": {}, "prefer": {}, "require": {}, "verify-ca": {}, "verify-full": {},
+}
+
+// validLogLevels mirrors LoggingConfig.Level's documented set.
+var validLogLevels = map[string]struct{}{
+	"debug": {}, "info": {}, "warn": {}, "error": {},
+}
+
+// Validate checks cross-field configuration invariants and returns a combined
+// error listing every problem, so an operator sees a misconfiguration at boot
+// (fail-fast) instead of a first-use crash or silent misbehaviour. It performs
+// no I/O — call it right after Load, before connecting to anything.
+func (c *Config) Validate() error {
+	var problems []string
+
+	// An enabled auth provider must carry the fields it cannot function without,
+	// otherwise the provider silently no-ops or panics on first login.
+	if c.Auth.OIDC.Enabled {
+		if c.Auth.OIDC.IssuerURL == "" {
+			problems = append(problems, "auth.oidc.enabled is true but auth.oidc.issuer_url is empty")
+		}
+		if c.Auth.OIDC.ClientID == "" {
+			problems = append(problems, "auth.oidc.enabled is true but auth.oidc.client_id is empty")
+		}
+	}
+	if c.Auth.LDAP.Enabled {
+		if c.Auth.LDAP.Host == "" {
+			problems = append(problems, "auth.ldap.enabled is true but auth.ldap.host is empty")
+		}
+		if c.Auth.LDAP.BaseDN == "" {
+			problems = append(problems, "auth.ldap.enabled is true but auth.ldap.base_dn is empty")
+		}
+	}
+
+	// A configured SMTP username means a password will be sent; refuse to send it
+	// over a plaintext connection (the SMTPConfig contract).
+	if c.Notifications.SMTP.Username != "" && !c.Notifications.SMTP.UseTLS {
+		problems = append(problems,
+			"notifications.smtp.username is set but notifications.smtp.use_tls is false (the SMTP password would be sent in cleartext)")
+	}
+
+	if _, ok := validSSLModes[c.Database.SSLMode]; !ok {
+		problems = append(problems, fmt.Sprintf(
+			"database.ssl_mode %q is invalid (want one of disable, allow, prefer, require, verify-ca, verify-full)", c.Database.SSLMode))
+	}
+	// identity_database inherits database.ssl_mode when unset (resolveIdentityDatabase),
+	// so only validate it when explicitly configured.
+	if c.IdentityDatabase.SSLMode != "" {
+		if _, ok := validSSLModes[c.IdentityDatabase.SSLMode]; !ok {
+			problems = append(problems, fmt.Sprintf(
+				"identity_database.ssl_mode %q is invalid (want one of disable, allow, prefer, require, verify-ca, verify-full)", c.IdentityDatabase.SSLMode))
+		}
+	}
+
+	// An empty level is fine (defaults apply); a non-empty typo must not silently
+	// coerce to info.
+	if c.Logging.Level != "" {
+		if _, ok := validLogLevels[strings.ToLower(c.Logging.Level)]; !ok {
+			problems = append(problems, fmt.Sprintf("logging.level %q is invalid (want debug, info, warn, or error)", c.Logging.Level))
+		}
+	}
+
+	if len(problems) > 0 {
+		return fmt.Errorf("invalid configuration:\n  - %s", strings.Join(problems, "\n  - "))
+	}
+	return nil
+}
+
 // setDefaults registers every key so AutomaticEnv can bind nested TSM_ overrides
 // and so a config file is entirely optional.
 func setDefaults(v *viper.Viper) {
