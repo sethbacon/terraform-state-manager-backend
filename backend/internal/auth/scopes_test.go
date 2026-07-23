@@ -118,8 +118,8 @@ func TestValidateProvisionableScopes(t *testing.T) {
 
 func TestAppRoleTemplates(t *testing.T) {
 	templates := AppRoleTemplates()
-	if len(templates) != 4 {
-		t.Fatalf("expected 4 role templates, got %d", len(templates))
+	if len(templates) != 6 {
+		t.Fatalf("expected 6 role templates, got %d", len(templates))
 	}
 
 	defined := map[string]bool{
@@ -127,6 +127,9 @@ func TestAppRoleTemplates(t *testing.T) {
 		string(ScopeStateDrift): true, string(ScopeStateExecute): true,
 		string(ScopeStateTransfer): true, string(ScopeSourcesManage): true,
 		string(ScopeSCIMProvision): true, string(ScopeAdmin): true,
+		string(ScopeOrganizationsRead): true, string(ScopeOrganizationsWrite): true,
+		string(ScopeOrganizationsCreate): true, string(ScopeUsersRead): true,
+		string(ScopeAPIKeysManage): true,
 	}
 
 	seen := map[string]bool{}
@@ -151,7 +154,7 @@ func TestAppRoleTemplates(t *testing.T) {
 		}
 	}
 
-	for _, want := range []string{"admin", "editor", "operator", "viewer"} {
+	for _, want := range []string{"admin", "editor", "operator", "viewer", "org_owner", "org_provisioner"} {
 		if !seen[want] {
 			t.Errorf("missing expected role template %q", want)
 		}
@@ -162,5 +165,52 @@ func TestAppRoleTemplates(t *testing.T) {
 	}
 	if viewer := byName["viewer"]; len(viewer.Scopes) != 1 || viewer.Scopes[0] != string(ScopeStateRead) {
 		t.Errorf("viewer role scopes = %v, want [state:read]", viewer.Scopes)
+	}
+}
+
+// TestAppRoleTemplates_OrgOwnerHasNoEscalationScopes is the app-level ceiling
+// invariant for the org-owner parity fix: org_owner must never carry the flat
+// admin wildcard, users:write, or organizations:create — otherwise an
+// org-scoped role could self-escalate to platform-admin or provision brand-new
+// organizations, defeating the point of moving org management off the admin
+// wildcard. org_provisioner is checked separately: it must carry EXACTLY
+// organizations:create + organizations:read and nothing else (no state/user
+// access at all).
+func TestAppRoleTemplates_OrgOwnerHasNoEscalationScopes(t *testing.T) {
+	templates := AppRoleTemplates()
+	byName := map[string]RoleTemplateSeed{}
+	for _, tpl := range templates {
+		byName[tpl.Name] = tpl
+	}
+
+	owner, ok := byName["org_owner"]
+	if !ok {
+		t.Fatal("org_owner role template not found")
+	}
+	forbidden := []string{string(ScopeAdmin), "users:write", string(ScopeOrganizationsCreate)}
+	for _, f := range forbidden {
+		for _, s := range owner.Scopes {
+			if s == f {
+				t.Errorf("org_owner scopes = %v, must never include %q", owner.Scopes, f)
+			}
+		}
+	}
+	if !HasScope(owner.Scopes, ScopeOrganizationsWrite) {
+		t.Errorf("org_owner scopes = %v, want organizations:write present", owner.Scopes)
+	}
+
+	provisioner, ok := byName["org_provisioner"]
+	if !ok {
+		t.Fatal("org_provisioner role template not found")
+	}
+	wantProvisioner := []string{string(ScopeOrganizationsCreate), string(ScopeOrganizationsRead)}
+	if len(provisioner.Scopes) != len(wantProvisioner) {
+		t.Fatalf("org_provisioner scopes = %v, want exactly %v", provisioner.Scopes, wantProvisioner)
+	}
+	for i, want := range wantProvisioner {
+		if provisioner.Scopes[i] != want {
+			t.Errorf("org_provisioner scopes = %v, want exactly %v", provisioner.Scopes, wantProvisioner)
+			break
+		}
 	}
 }

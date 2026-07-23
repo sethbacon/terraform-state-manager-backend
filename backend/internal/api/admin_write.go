@@ -1,7 +1,10 @@
 // admin_write.go implements the identity-management write endpoints (user CRUD +
 // GDPR data-subject actions, organization CRUD, organization member management)
 // that back the admin pages, mirroring the registry's identity API surface.
-// Every mutation writes an audit-log entry. All routes are admin-scoped.
+// Every mutation writes an audit-log entry. User routes remain gated on the
+// flat/global admin scope; organization routes require organization-tier
+// scopes instead (organizations:read/:write/:create — see admin_org_scope.go
+// and router.go).
 package api
 
 import (
@@ -294,16 +297,18 @@ func (h *AdminHandlers) CreateOrganization() gin.HandlerFunc {
 			serverError(c, err, "failed to create organization")
 			return
 		}
-		// Auto-add the caller as the new organization's first admin member. Every
+		// Auto-add the caller as the new organization's org_owner member. Every
 		// other /admin/organizations/:id* route (including member management)
-		// requires the caller to already hold admin within that exact organization
-		// (requireOrgScope, see admin_org_scope.go) — without this, a brand-new
-		// organization would have no member able to manage it at all, since
-		// nobody could pass that check for an org with zero members.
+		// requires the caller to hold organizations:write (or admin) within that
+		// exact organization (requireOrgScope, see admin_org_scope.go) — without
+		// this, a brand-new organization would have no member able to manage it
+		// at all, since nobody could pass that check for an org with zero
+		// members. org_owner carries organizations:write, so the creator can
+		// still fully administer the organization they just created.
 		if callerID, ok := c.Get("user_id"); ok {
 			if uid, _ := callerID.(string); uid != "" {
-				if err := h.orgRepo.AddMemberWithParams(ctx, org.ID, uid, "admin"); err != nil {
-					serverError(c, err, "organization created, but failed to add you as its admin")
+				if err := h.orgRepo.AddMemberWithParams(ctx, org.ID, uid, "org_owner"); err != nil {
+					serverError(c, err, "organization created, but failed to add you as its owner")
 					return
 				}
 			}

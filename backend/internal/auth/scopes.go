@@ -16,12 +16,27 @@ const (
 	ScopeSourcesManage Scope = "sources:manage"
 	ScopeSCIMProvision Scope = "scim:provision"
 	ScopeAdmin         Scope = "admin"
+
+	// Organization-management scopes (identity-core, re-exported). org_owner
+	// (see AppRoleTemplates) carries organizations:write, so a caller can
+	// administer the org they belong to without the flat admin wildcard;
+	// org_provisioner carries organizations:create/:read to stand up new
+	// organizations without any other admin rights.
+	ScopeOrganizationsRead   Scope = idauth.ScopeOrganizationsRead
+	ScopeOrganizationsWrite  Scope = idauth.ScopeOrganizationsWrite
+	ScopeOrganizationsCreate Scope = idauth.ScopeOrganizationsCreate
+	ScopeUsersRead           Scope = idauth.ScopeUsersRead
+	ScopeAPIKeysManage       Scope = idauth.ScopeAPIKeysManage
 )
 
 // rwPairs encodes write-implies-read relationships: holding the write scope
-// implicitly satisfies the paired read scope.
+// implicitly satisfies the paired read scope. organizations:create is
+// deliberately NOT paired here — it is a standalone provisioning right, not
+// implied by organizations:write, so org_owner never gains the ability to
+// create brand-new organizations just by managing its own.
 var rwPairs = idauth.ReadWritePairs{
-	string(ScopeStateRead): string(ScopeStateWrite),
+	string(ScopeStateRead):         string(ScopeStateWrite),
+	string(ScopeOrganizationsRead): string(ScopeOrganizationsWrite),
 }
 
 // HasScope reports whether userScopes satisfies the required scope.
@@ -104,6 +119,22 @@ func AppRoleTemplates() []RoleTemplateSeed {
 			DisplayName: "Viewer",
 			Description: "Read-only access to state and analysis.",
 			Scopes:      []string{string(ScopeStateRead)},
+		},
+		{
+			Name:        "org_owner",
+			DisplayName: "Organization Owner",
+			Description: "Manage an organization's membership; full state operations within it.",
+			Scopes: []string{
+				string(ScopeOrganizationsWrite), string(ScopeUsersRead), string(ScopeAPIKeysManage),
+				string(ScopeStateRead), string(ScopeStateWrite), string(ScopeStateDrift),
+				string(ScopeStateExecute), string(ScopeStateTransfer), string(ScopeSourcesManage),
+			},
+		},
+		{
+			Name:        "org_provisioner",
+			DisplayName: "Organization Provisioner",
+			Description: "Create new organizations and view the organization directory.",
+			Scopes:      []string{string(ScopeOrganizationsCreate), string(ScopeOrganizationsRead)},
 		},
 	}
 }

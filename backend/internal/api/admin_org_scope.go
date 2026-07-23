@@ -1,21 +1,22 @@
 // admin_org_scope.go implements the per-organization membership check for the
 // /admin/organizations/:id* and /admin/users/:id* routes.
 //
-// The outer /admin route group (see router.go) already requires the caller's
-// flat, GLOBAL admin scope — sourced from GetUserCombinedScopes, which unions
-// scopes across EVERY organization the caller belongs to into one org-less set.
-// That flat scope says nothing about which organization actually granted it: a
-// caller who is admin in just one (possibly low-trust, self-created)
-// organization inherits admin globally under that check alone. requireOrgScope
-// closes that gap for the routes that name a specific target organization in
-// the path, by independently re-deriving the caller's scopes within that exact
-// organization (GetUserScopesForOrg) and requiring admin there too.
-// requireSharedOrgAdminWithTargetUser closes the same gap for the routes that
-// instead name a specific TARGET USER in the path (user CRUD and the GDPR
-// export/erase endpoints): it requires the caller to hold admin scope in at
-// least one organization the target user also belongs to, rather than
-// trusting the flat scope to authorize an action against a user who may
-// belong only to a completely unrelated organization.
+// /admin/organizations/:id* sits behind organizations:read/:create at the
+// group level (see router.go) — neither of which names a specific target
+// organization — so requireOrgScope independently re-derives the caller's
+// scopes within that exact organization (GetUserScopesForOrg) and requires
+// organizations:write (or admin) there too. This lets an org_owner (holds
+// organizations:write, never the flat admin wildcard) fully manage the
+// organization it owns, while still closing the cross-org privilege escalation
+// a caller who is only organizations:write/admin in ONE organization would
+// otherwise get against every OTHER organization.
+// requireSharedOrgAdminWithTargetUser closes the analogous gap for the routes
+// that instead name a specific TARGET USER in the path (user CRUD and the GDPR
+// export/erase endpoints, still gated on the outer /admin group's flat, GLOBAL
+// admin scope — see router.go): it requires the caller to hold admin scope in
+// at least one organization the target user also belongs to, rather than
+// trusting the flat scope to authorize an action against a user who may belong
+// only to a completely unrelated organization.
 package api
 
 import (
@@ -27,12 +28,11 @@ import (
 )
 
 // requireOrgScope returns a middleware that verifies the authenticated caller
-// holds admin scope specifically within the organization named by the request's
-// :id path parameter. It re-derives the caller's per-organization scopes via
-// OrganizationRepository.GetUserScopesForOrg against the existing flat/global
-// JWT's user id — rather than trusting the token's flat scope set, which the
-// outer /admin group already checked but which cannot distinguish which
-// organization granted the scope.
+// holds organizations:write (or admin) scope specifically within the
+// organization named by the request's :id path parameter. It re-derives the
+// caller's per-organization scopes via OrganizationRepository.GetUserScopesForOrg
+// against the existing flat/global JWT's user id — rather than trusting any
+// flat scope set, which cannot distinguish which organization granted it.
 func (h *AdminHandlers) requireOrgScope() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		orgID := c.Param("id")
@@ -48,10 +48,10 @@ func (h *AdminHandlers) requireOrgScope() gin.HandlerFunc {
 			c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "failed to verify organization membership"})
 			return
 		}
-		if !auth.HasScope(scopes, auth.ScopeAdmin) {
+		if !(auth.HasScope(scopes, auth.ScopeOrganizationsWrite) || auth.HasScope(scopes, auth.ScopeAdmin)) {
 			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{
 				"error":   "Not authorized for this organization",
-				"details": "Caller must hold admin scope within the target organization",
+				"details": "Caller must hold organizations:write (or admin) scope within the target organization",
 			})
 			return
 		}
