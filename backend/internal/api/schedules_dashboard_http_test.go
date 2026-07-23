@@ -256,14 +256,14 @@ func TestDashboardOverview_SyncStatusDegraded(t *testing.T) {
 		sqlmock.NewRows([]string{"id", "name", "type", "endpoint", "config", "scope", "encrypted_credentials", "created_at", "updated_at"}).
 			AddRow("s1", "demo", "local", "", cfg, []byte(`{}`), nil, "2026-06-10", "2026-06-10").
 			AddRow("s2", "fresh", "local", "", cfg, []byte(`{}`), nil, "2026-06-10", "2026-06-10"))
+	mock.ExpectQuery("FROM source_sync_status").WillReturnRows(
+		sqlmock.NewRows([]string{"source_id", "last_sync_at", "states_listed", "read_errors", "last_error", "stored"}).
+			AddRow("s1", "2026-06-11T09:00:00Z", 165, 3, "read ws-1: 429", 162))
 	mock.ExpectQuery(`SELECT COUNT\(\*\),`).WillReturnRows(
 		sqlmock.NewRows([]string{"count", "rum", "managed", "data", "total"}).AddRow(80, 5009, 5012, 992, 6004))
 	mock.ExpectQuery(`jsonb_each_text\(providers\)`).WillReturnRows(sqlmock.NewRows([]string{"key", "sum"}))
 	mock.ExpectQuery(`jsonb_each_text\(resource_types\)`).WillReturnRows(sqlmock.NewRows([]string{"key", "sum"}))
 	mock.ExpectQuery("SELECT CASE WHEN terraform_version").WillReturnRows(sqlmock.NewRows([]string{"v", "count"}))
-	mock.ExpectQuery("FROM source_sync_status").WillReturnRows(
-		sqlmock.NewRows([]string{"source_id", "last_sync_at", "states_listed", "read_errors", "last_error", "stored"}).
-			AddRow("s1", "2026-06-11T09:00:00Z", 165, 3, "read ws-1: 429", 162))
 
 	w := env.do(http.MethodGet, "/api/v1/dashboard/overview", "")
 	if w.Code != http.StatusOK {
@@ -274,6 +274,63 @@ func TestDashboardOverview_SyncStatusDegraded(t *testing.T) {
 		if !strings.Contains(body, want) {
 			t.Errorf("overview missing %s: %s", want, body)
 		}
+	}
+}
+
+// TestDashboardOverview_AggregateCache: within the TTL and with an unchanged
+// newest last_sync_at, a second overview request reuses the cached aggregates
+// (no aggregate queries); a newer last_sync_at invalidates and recomputes.
+func TestDashboardOverview_AggregateCache(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+	h := NewSourcesHandlers(db, nil)
+	r := gin.New()
+	r.GET("/api/v1/dashboard/overview", h.DashboardOverview())
+	env := &sourcesEnv{r: r, mock: mock}
+
+	cfg, _ := json.Marshal(map[string]any{"base_path": "/tmp"})
+	sourceRows := func() *sqlmock.Rows {
+		return sqlmock.NewRows([]string{"id", "name", "type", "endpoint", "config", "scope", "encrypted_credentials", "created_at", "updated_at"}).
+			AddRow("s1", "demo", "local", "", cfg, []byte(`{}`), nil, "2026-06-10", "2026-06-10")
+	}
+	statusRows := func(syncedAt string) *sqlmock.Rows {
+		return sqlmock.NewRows([]string{"source_id", "last_sync_at", "states_listed", "read_errors", "last_error", "stored"}).
+			AddRow("s1", syncedAt, 1, 0, "", 1)
+	}
+	expectAggregates := func(rum int) {
+		mock.ExpectQuery(`SELECT COUNT\(\*\),`).WillReturnRows(
+			sqlmock.NewRows([]string{"count", "rum", "managed", "data", "total"}).AddRow(1, rum, 2, 0, 2))
+		mock.ExpectQuery(`jsonb_each_text\(providers\)`).WillReturnRows(sqlmock.NewRows([]string{"key", "sum"}))
+		mock.ExpectQuery(`jsonb_each_text\(resource_types\)`).WillReturnRows(sqlmock.NewRows([]string{"key", "sum"}))
+		mock.ExpectQuery("SELECT CASE WHEN terraform_version").WillReturnRows(sqlmock.NewRows([]string{"v", "count"}))
+	}
+
+	// First load: cold cache, aggregates computed.
+	mock.ExpectQuery("SELECT .+ FROM state_sources ORDER BY").WillReturnRows(sourceRows())
+	mock.ExpectQuery("FROM source_sync_status").WillReturnRows(statusRows("2026-06-11T09:00:00Z"))
+	expectAggregates(2)
+	// Second load, same last_sync_at: served from cache — NO aggregate queries.
+	mock.ExpectQuery("SELECT .+ FROM state_sources ORDER BY").WillReturnRows(sourceRows())
+	mock.ExpectQuery("FROM source_sync_status").WillReturnRows(statusRows("2026-06-11T09:00:00Z"))
+	// Third load, newer last_sync_at: cache invalidated, aggregates recomputed.
+	mock.ExpectQuery("SELECT .+ FROM state_sources ORDER BY").WillReturnRows(sourceRows())
+	mock.ExpectQuery("FROM source_sync_status").WillReturnRows(statusRows("2026-06-11T09:05:00Z"))
+	expectAggregates(9)
+
+	for i, wantRUM := range []string{`"rum":2`, `"rum":2`, `"rum":9`} {
+		w := env.do(http.MethodGet, "/api/v1/dashboard/overview", "")
+		if w.Code != http.StatusOK {
+			t.Fatalf("request %d: status = %d (%s)", i+1, w.Code, w.Body.String())
+		}
+		if !strings.Contains(w.Body.String(), wantRUM) {
+			t.Errorf("request %d: want %s in %s", i+1, wantRUM, w.Body.String())
+		}
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("unmet expectations: %v", err)
 	}
 }
 

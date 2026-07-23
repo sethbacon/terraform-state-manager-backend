@@ -34,6 +34,9 @@ type SourcesHandlers struct {
 	// syncer reconciles the persistent analysis store; nil in rigs that don't
 	// exercise the dashboard (handlers must nil-check).
 	syncer *statesync.Syncer
+	// overviewCache memoizes the dashboard's store-wide aggregations (see
+	// dashboard.go). Zero value ready; guarded by its own mutex.
+	overviewCache overviewAggCache
 }
 
 // NewSourcesHandlers constructs the handlers over the app (public) connection,
