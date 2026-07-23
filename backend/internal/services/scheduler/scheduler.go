@@ -19,6 +19,10 @@ import (
 // defaultInterval is how often the runner polls for due schedules.
 const defaultInterval = 60 * time.Second
 
+// fireTimeout bounds one schedule's claim + dispatch + outcome write. Each
+// firing gets its own budget so a slow dispatch cannot exhaust the batch.
+const fireTimeout = 30 * time.Second
+
 // Dispatcher executes a schedule's target. It is implemented in the api layer
 // (which can dispatch drift runs); kept here as an interface so this package does
 // not import api. runID is the id of the work item created (e.g. a drift run);
@@ -70,24 +74,43 @@ func (r *Runner) Start() {
 func (r *Runner) Stop() { close(r.stopCh) }
 
 func (r *Runner) checkDue() {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	due, err := r.repo.GetDue(ctx, time.Now())
+	cancel()
 	if err != nil {
 		r.logger.Error("failed to query due schedules", "error", err)
 		return
 	}
 	for i := range due {
-		r.fire(ctx, &due[i])
+		r.fire(&due[i])
 	}
 }
 
-// fire dispatches one schedule and records the outcome + the next fire time. A
-// schedule that is overdue (e.g. the server was down) fires once and is then
-// rescheduled from now — there is no catch-up storm.
-func (r *Runner) fire(ctx context.Context, s *repositories.Schedule) {
+// fire claims one due schedule (atomically advancing next_run_at), dispatches
+// it, and records the outcome. Claiming BEFORE dispatch makes a firing
+// at-most-once: a dispatch or outcome-write failure cannot leave the schedule
+// due and re-fire a real CI run on the next poll; a lost claim means another
+// poll or replica took this firing. A schedule that is overdue (e.g. the server
+// was down) fires once and is rescheduled from now — there is no catch-up storm.
+func (r *Runner) fire(s *repositories.Schedule) {
 	logger := r.logger.With("schedule_id", s.ID, "name", s.Name, "target", s.TargetType)
+	// Own budget per firing, independent of the poll and of other schedules.
+	ctx, cancel := context.WithTimeout(context.Background(), fireTimeout)
+	defer cancel()
+
+	if s.NextRunAt == nil { // GetDue filters these out; defensive
+		return
+	}
+	next := ComputeNextRun(s.CronExpr, time.Now())
+	claimed, err := r.repo.ClaimDue(ctx, s.ID, *s.NextRunAt, time.Now(), next)
+	if err != nil {
+		logger.Error("failed to claim schedule", "error", err)
+		return
+	}
+	if !claimed {
+		logger.Info("schedule already claimed elsewhere; skipping")
+		return
+	}
 
 	runID, status, err := r.dispatcher.Dispatch(ctx, s.TargetType, s.TargetConfig, "scheduler")
 	if err != nil {
@@ -103,9 +126,8 @@ func (r *Runner) fire(ctx context.Context, s *repositories.Schedule) {
 	if runID != "" {
 		runIDPtr = &runID
 	}
-	next := ComputeNextRun(s.CronExpr, time.Now())
-	if recErr := r.repo.RecordRun(ctx, s.ID, status, runIDPtr, time.Now(), next); recErr != nil {
-		logger.Error("failed to record schedule run", "error", recErr)
+	if recErr := r.repo.RecordOutcome(ctx, s.ID, status, runIDPtr); recErr != nil {
+		logger.Error("failed to record schedule outcome", "error", recErr)
 	}
 }
 

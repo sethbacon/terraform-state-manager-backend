@@ -571,12 +571,16 @@ func (r *StateAnalysisRepository) UpsertSyncStatus(ctx context.Context, s *Sourc
 // SyncStatuses returns the latest sync outcome per source, including the
 // number of rows currently stored for it.
 func (r *StateAnalysisRepository) SyncStatuses(ctx context.Context) (map[string]SourceSyncStatus, error) {
+	// LEFT JOIN + GROUP BY instead of a correlated per-row COUNT subquery: one
+	// aggregate pass over state_analyses rather than one probe per source.
 	rows, err := r.db.QueryContext(ctx, `
 		SELECT s.source_id,
 		       to_char(s.last_sync_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'),
 		       s.states_listed, s.read_errors, s.last_error,
-		       (SELECT COUNT(*) FROM state_analyses a WHERE a.source_id = s.source_id)
-		FROM source_sync_status s`)
+		       COUNT(a.source_id)
+		FROM source_sync_status s
+		LEFT JOIN state_analyses a ON a.source_id = s.source_id
+		GROUP BY s.source_id, s.last_sync_at, s.states_listed, s.read_errors, s.last_error`)
 	if err != nil {
 		return nil, err
 	}

@@ -38,6 +38,14 @@ func newS3(config, creds map[string]any) (*s3conn, error) {
 	accessKey, _ := creds["access_key_id"].(string)
 	secretKey, _ := creds["secret_access_key"].(string)
 
+	// A half-specified static credential (one of the two blank — a typo, or a
+	// secret that resolved to empty) must be an error, not a silent fall-back to
+	// the ambient AWS chain (the pod/instance role), which could operate against
+	// an unintended account: a confused-deputy read/write. Require both or neither.
+	if (accessKey == "") != (secretKey == "") {
+		return nil, fmt.Errorf("s3 source requires both access_key_id and secret_access_key (or neither, to use the ambient AWS credential chain)")
+	}
+
 	opts := []func(*awsconfig.LoadOptions) error{awsconfig.WithRegion(region)}
 	if accessKey != "" && secretKey != "" {
 		opts = append(opts, awsconfig.WithCredentialsProvider(
