@@ -157,12 +157,42 @@ func (r *ScheduleRepository) GetDue(ctx context.Context, now time.Time) ([]Sched
 }
 
 // RecordRun stamps the outcome of a fired schedule and schedules the next fire.
+// Used by the manual run-now path; the background scheduler claims first via
+// ClaimDue and stamps the outcome with RecordOutcome.
 func (r *ScheduleRepository) RecordRun(ctx context.Context, id, status string, runID *string, ranAt time.Time, nextRun *time.Time) error {
 	_, err := r.db.ExecContext(ctx, `
 		UPDATE schedules
 		SET last_run_at=$2, last_status=$3, last_run_id=$4, next_run_at=$5, updated_at=now()
 		WHERE id=$1`,
 		id, ranAt, status, nullStr(deref(runID)), nullTime(nextRun))
+	return err
+}
+
+// ClaimDue atomically advances a due schedule from its observed next_run_at to
+// nextRun, stamping last_run_at. False (no error) means no row matched — a
+// concurrent poll or another replica already claimed this firing, or the
+// schedule was edited/disabled in the gap — and the caller must not dispatch.
+// Advancing next_run_at BEFORE dispatch makes a firing at-most-once: a dispatch
+// or outcome-write failure can no longer leave the schedule due and re-fire it.
+func (r *ScheduleRepository) ClaimDue(ctx context.Context, id, observedNextRun string, ranAt time.Time, nextRun *time.Time) (bool, error) {
+	res, err := r.db.ExecContext(ctx, `
+		UPDATE schedules
+		SET last_run_at=$3, next_run_at=$4, updated_at=now()
+		WHERE id=$1 AND enabled AND next_run_at::text=$2`,
+		id, observedNextRun, ranAt, nullTime(nextRun))
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n > 0, err
+}
+
+// RecordOutcome stamps the result of a dispatched firing (status + run id).
+// next_run_at is deliberately untouched: it advanced at claim time (ClaimDue).
+func (r *ScheduleRepository) RecordOutcome(ctx context.Context, id, status string, runID *string) error {
+	_, err := r.db.ExecContext(ctx, `
+		UPDATE schedules SET last_status=$2, last_run_id=$3, updated_at=now() WHERE id=$1`,
+		id, status, nullStr(deref(runID)))
 	return err
 }
 
