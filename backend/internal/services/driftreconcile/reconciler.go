@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/terraform-state-manager/terraform-state-manager/internal/db/repositories"
+	"github.com/terraform-state-manager/terraform-state-manager/internal/telemetry"
 )
 
 const (
@@ -67,12 +68,14 @@ func New(repo *repositories.DriftRepository, notifier FailureNotifier, ttl, inte
 // sweep runs right away so a fresh boot reaps anything already overdue.
 func (r *Reconciler) Start() {
 	ticker := time.NewTicker(r.interval)
+	telemetry.RegisterWorker("driftreconcile", r.interval)
 	r.logger.Info("drift reconciler started", "interval", r.interval.String(), "ttl", r.ttl.String())
 	go func() {
 		r.reconcile()
 		for {
 			select {
 			case <-ticker.C:
+				telemetry.WorkerTick("driftreconcile")
 				r.reconcile()
 			case <-r.stopCh:
 				ticker.Stop()

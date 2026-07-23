@@ -14,6 +14,7 @@ import (
 	"github.com/robfig/cron/v3"
 
 	"github.com/terraform-state-manager/terraform-state-manager/internal/db/repositories"
+	"github.com/terraform-state-manager/terraform-state-manager/internal/telemetry"
 )
 
 // defaultInterval is how often the runner polls for due schedules.
@@ -50,12 +51,16 @@ func New(repo *repositories.ScheduleRepository, dispatcher Dispatcher) *Runner {
 // Start launches the polling loop in a goroutine and returns immediately.
 func (r *Runner) Start() {
 	ticker := time.NewTicker(r.interval)
+	telemetry.RegisterWorker("scheduler", r.interval)
 	r.logger.Info("scheduler started", "interval", r.interval.String())
 	go func() {
 		r.checkDue() // immediate first check on startup
 		for {
 			select {
 			case <-ticker.C:
+				// Liveness tick lives here, not in checkDue, so it measures
+				// "the loop is running" — a manual/test checkDue doesn't count.
+				telemetry.WorkerTick("scheduler")
 				r.checkDue()
 			case <-r.stopCh:
 				ticker.Stop()

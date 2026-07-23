@@ -23,6 +23,7 @@ import (
 	"github.com/terraform-state-manager/terraform-state-manager/internal/analyzer"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/db/repositories"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/statesource"
+	"github.com/terraform-state-manager/terraform-state-manager/internal/telemetry"
 )
 
 const (
@@ -30,10 +31,18 @@ const (
 	// readConcurrency is per source and kept modest: HCP rate-limits around
 	// 30 req/30s per token and every state read there is two round-trips.
 	readConcurrency = 6
+	// sourceConcurrency bounds how many sources reconcile at once, so one
+	// slow/rate-limited source (a first HCP-org backfill, a throttled backend)
+	// no longer blocks every source behind it. Kept modest — each source
+	// already runs readConcurrency reads, and backends have their own limits.
+	sourceConcurrency = 3
 	// perSourceTimeout bounds one source's full cycle (listing + changed
 	// reads). Generous on purpose — a first backfill of a large org is
 	// allowed to take minutes; nothing waits on it.
 	perSourceTimeout = 10 * time.Minute
+
+	// workerName identifies this loop in worker-liveness telemetry.
+	workerName = "statesync"
 )
 
 // Connect builds a live connector for a source. Implemented in the api layer
@@ -75,6 +84,7 @@ func New(sources *repositories.SourceRepository, store *repositories.StateAnalys
 // The first cycle runs right away so a fresh boot backfills the store.
 func (s *Syncer) Start() {
 	ticker := time.NewTicker(s.interval)
+	telemetry.RegisterWorker(workerName, s.interval)
 	s.logger.Info("statesync started", "interval", s.interval.String())
 	go func() {
 		s.syncAllLogged()
@@ -95,6 +105,9 @@ func (s *Syncer) Start() {
 func (s *Syncer) Stop() { close(s.stopCh) }
 
 func (s *Syncer) syncAllLogged() {
+	// The tick lands BEFORE the cycle: liveness telemetry measures "the loop is
+	// running", not "the cycle was fast" (a long backfill must not read as dead).
+	telemetry.WorkerTick(workerName)
 	if err := s.SyncAll(context.Background()); err != nil && err != ErrSyncInProgress {
 		s.logger.Error("sync cycle failed", "error", err)
 	}
@@ -112,17 +125,35 @@ func (s *Syncer) SyncAll(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("failed to list sources: %w", err)
 	}
-	for i := range sources {
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
-		s.syncSource(ctx, &sources[i])
-	}
+	s.syncMany(ctx, sources)
 	// Bound the history table: one cheap DELETE per cycle.
 	if err := s.store.PruneHistory(ctx); err != nil {
 		s.logger.Error("failed to prune analysis history", "error", err)
 	}
-	return nil
+	return ctx.Err()
+}
+
+// syncMany reconciles sources with bounded concurrency (sourceConcurrency in
+// flight), so a stalled source delays at most its own slot, not the fleet.
+func (s *Syncer) syncMany(ctx context.Context, sources []repositories.Source) {
+	sem := make(chan struct{}, sourceConcurrency)
+	var wg sync.WaitGroup
+	for i := range sources {
+		if ctx.Err() != nil {
+			break
+		}
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(src *repositories.Source) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			s.syncSource(ctx, src)
+			// Progress heartbeat: a long fleet cycle keeps ticking as sources
+			// complete, so liveness telemetry distinguishes busy from wedged.
+			telemetry.WorkerTick(workerName)
+		}(&sources[i])
+	}
+	wg.Wait()
 }
 
 // SyncSources reconciles only the named sources, so a filtered view (e.g. the
@@ -150,16 +181,14 @@ func (s *Syncer) SyncSources(ctx context.Context, ids []string) error {
 	if err != nil {
 		return fmt.Errorf("failed to list sources: %w", err)
 	}
+	selected := make([]repositories.Source, 0, len(ids))
 	for i := range sources {
-		if ctx.Err() != nil {
-			return ctx.Err()
+		if _, ok := want[sources[i].ID]; ok {
+			selected = append(selected, sources[i])
 		}
-		if _, ok := want[sources[i].ID]; !ok {
-			continue
-		}
-		s.syncSource(ctx, &sources[i])
 	}
-	return nil
+	s.syncMany(ctx, selected)
+	return ctx.Err()
 }
 
 // syncSource reconciles one source and records its sync status. Failures are
@@ -173,6 +202,7 @@ func (s *Syncer) syncSource(ctx context.Context, src *repositories.Source) {
 		if err := s.store.UpsertSyncStatus(context.WithoutCancel(ctx), status); err != nil {
 			s.logger.Error("failed to record sync status", "source", src.Name, "error", err)
 		}
+		telemetry.SourceSynced(src.ID, src.Name, status.ReadErrors)
 	}()
 
 	conn, err := s.connect(src)
