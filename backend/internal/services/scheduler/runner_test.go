@@ -58,10 +58,14 @@ func TestRunner_FiresDueScheduleAndReschedules(t *testing.T) {
 	r, mock := newRunner(t, d)
 
 	mock.ExpectQuery("FROM schedules WHERE enabled").WillReturnRows(dueRow())
-	// RecordRun stamps the outcome and the NEXT fire time (rescheduled from
-	// now — an overdue schedule fires once, no catch-up storm).
+	// The claim advances next_run_at (rescheduled from now — an overdue
+	// schedule fires once, no catch-up storm) BEFORE the dispatch...
 	mock.ExpectExec("UPDATE schedules").
-		WithArgs("sc1", sqlmock.AnyArg(), "success", "run-1", sqlmock.AnyArg()).
+		WithArgs("sc1", "2026-06-10 00:00:00", sqlmock.AnyArg(), sqlmock.AnyArg()).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	// ...and the outcome write stamps status + run id only.
+	mock.ExpectExec("UPDATE schedules SET last_status").
+		WithArgs("sc1", "success", "run-1").
 		WillReturnResult(sqlmock.NewResult(0, 1))
 
 	r.checkDue()
@@ -73,7 +77,45 @@ func TestRunner_FiresDueScheduleAndReschedules(t *testing.T) {
 		t.Errorf("dispatch actor/type = %s, want drift/scheduler", d.calls[0])
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
-		t.Errorf("outcome must be recorded with a next run: %v", err)
+		t.Errorf("claim then outcome must both be recorded: %v", err)
+	}
+}
+
+// TestRunner_LostClaimSkipsDispatch: when the conditional claim matches no row
+// (another poll or replica advanced next_run_at first, or the schedule was
+// edited/disabled), the dispatcher must NOT run — that would be the duplicate
+// CI dispatch this flow exists to prevent.
+func TestRunner_LostClaimSkipsDispatch(t *testing.T) {
+	d := &recordingDispatcher{runID: "run-1", status: "success"}
+	r, mock := newRunner(t, d)
+
+	mock.ExpectQuery("FROM schedules WHERE enabled").WillReturnRows(dueRow())
+	mock.ExpectExec("UPDATE schedules").
+		WithArgs("sc1", "2026-06-10 00:00:00", sqlmock.AnyArg(), sqlmock.AnyArg()).
+		WillReturnResult(sqlmock.NewResult(0, 0)) // zero rows: claim lost
+
+	r.checkDue()
+
+	if d.callCount() != 0 {
+		t.Fatalf("lost claim must not dispatch, got %d calls", d.callCount())
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("unmet expectations: %v", err)
+	}
+}
+
+// TestRunner_ClaimErrorSkipsDispatch: a claim that errors (DB down) must not
+// dispatch either — without the claim recorded, a dispatch would re-fire later.
+func TestRunner_ClaimErrorSkipsDispatch(t *testing.T) {
+	d := &recordingDispatcher{}
+	r, mock := newRunner(t, d)
+
+	mock.ExpectQuery("FROM schedules WHERE enabled").WillReturnRows(dueRow())
+	mock.ExpectExec("UPDATE schedules").WillReturnError(errors.New("db down"))
+
+	r.checkDue()
+	if d.callCount() != 0 {
+		t.Fatalf("claim error must not dispatch, got %d calls", d.callCount())
 	}
 }
 
@@ -83,7 +125,10 @@ func TestRunner_RecordsDispatchFailure(t *testing.T) {
 
 	mock.ExpectQuery("FROM schedules WHERE enabled").WillReturnRows(dueRow())
 	mock.ExpectExec("UPDATE schedules").
-		WithArgs("sc1", sqlmock.AnyArg(), "failed", nil, sqlmock.AnyArg()).
+		WithArgs("sc1", "2026-06-10 00:00:00", sqlmock.AnyArg(), sqlmock.AnyArg()).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("UPDATE schedules SET last_status").
+		WithArgs("sc1", "failed", nil).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 
 	r.checkDue()
