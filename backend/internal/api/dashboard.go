@@ -1,8 +1,11 @@
 package api
 
 import (
+	"context"
 	"net/http"
 	"sort"
+	"sync"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
@@ -11,6 +14,57 @@ import (
 	"github.com/terraform-state-manager/terraform-state-manager/internal/services/statesync"
 	semver "github.com/terraform-state-manager/terraform-state-manager/internal/version"
 )
+
+// overviewAggCache memoizes the dashboard's store-wide aggregation queries
+// (totals + provider/resource-type/version distributions) behind a short TTL,
+// keyed on the newest last_sync_at across sources: a completed sync — including
+// the one ?refresh=true runs — changes the key and recomputes immediately,
+// while repeated dashboard loads between syncs reuse the cached aggregates.
+// State edits that bypass sync are visible at worst overviewCacheTTL late.
+type overviewAggCache struct {
+	mu        sync.Mutex
+	key       string // newest last_sync_at when the aggregates were computed
+	expires   time.Time
+	totals    *repositories.AnalysisTotals
+	providers map[string]int
+	resTypes  map[string]int
+	versions  map[string]int
+}
+
+// overviewCacheTTL bounds staleness for store changes that do not go through a
+// sync cycle (state edits, deletes). Sync-driven changes invalidate via the key.
+const overviewCacheTTL = 30 * time.Second
+
+// overviewAggregates returns the four store-wide aggregates, cached. The lock
+// is held across the queries on purpose: concurrent dashboard loads coalesce
+// into one recomputation instead of racing the same four scans.
+func (h *SourcesHandlers) overviewAggregates(ctx context.Context, syncKey string) (*repositories.AnalysisTotals, map[string]int, map[string]int, map[string]int, error) {
+	c := &h.overviewCache
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.totals != nil && c.key == syncKey && time.Now().Before(c.expires) {
+		return c.totals, c.providers, c.resTypes, c.versions, nil
+	}
+	totals, err := h.analysisRepo.Totals(ctx)
+	if err != nil {
+		return nil, nil, nil, nil, err
+	}
+	providers, err := h.analysisRepo.ProviderCounts(ctx)
+	if err != nil {
+		return nil, nil, nil, nil, err
+	}
+	resTypes, err := h.analysisRepo.ResourceTypeCounts(ctx)
+	if err != nil {
+		return nil, nil, nil, nil, err
+	}
+	versions, err := h.analysisRepo.VersionCounts(ctx)
+	if err != nil {
+		return nil, nil, nil, nil, err
+	}
+	c.key, c.expires = syncKey, time.Now().Add(overviewCacheTTL)
+	c.totals, c.providers, c.resTypes, c.versions = totals, providers, resTypes, versions
+	return totals, providers, resTypes, versions, nil
+}
 
 // The dashboard aggregates the persistent state-analysis store (kept
 // reconciled by the statesync service) instead of re-reading every state file
@@ -46,29 +100,22 @@ func (h *SourcesHandlers) DashboardOverview() gin.HandlerFunc {
 			serverError(c, err, "failed to list sources")
 			return
 		}
-		totals, err := h.analysisRepo.Totals(ctx)
-		if err != nil {
-			serverError(c, err, "failed to aggregate analyses")
-			return
-		}
-		providers, err := h.analysisRepo.ProviderCounts(ctx)
-		if err != nil {
-			serverError(c, err, "failed to aggregate providers")
-			return
-		}
-		resTypes, err := h.analysisRepo.ResourceTypeCounts(ctx)
-		if err != nil {
-			serverError(c, err, "failed to aggregate resource types")
-			return
-		}
-		versions, err := h.analysisRepo.VersionCounts(ctx)
-		if err != nil {
-			serverError(c, err, "failed to aggregate versions")
-			return
-		}
+		// Statuses load first (small table, always fresh — the sync panel must
+		// not lag); their newest last_sync_at keys the aggregate cache.
 		statuses, err := h.analysisRepo.SyncStatuses(ctx)
 		if err != nil {
 			serverError(c, err, "failed to load sync status")
+			return
+		}
+		syncKey := ""
+		for _, st := range statuses {
+			if st.LastSyncAt > syncKey {
+				syncKey = st.LastSyncAt
+			}
+		}
+		totals, providers, resTypes, versions, err := h.overviewAggregates(ctx, syncKey)
+		if err != nil {
+			serverError(c, err, "failed to aggregate analyses")
 			return
 		}
 
