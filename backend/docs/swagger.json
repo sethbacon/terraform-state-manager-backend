@@ -3783,6 +3783,12 @@
                         "name": "key",
                         "in": "query",
                         "required": true
+                    },
+                    {
+                        "type": "boolean",
+                        "description": "Override the pre-decommission serial/lineage conflict check before an optional decommission (migrate only; no effect on backup)",
+                        "name": "force",
+                        "in": "query"
                     }
                 ],
                 "responses": {
@@ -4067,6 +4073,12 @@
                         "name": "key",
                         "in": "query",
                         "required": true
+                    },
+                    {
+                        "type": "boolean",
+                        "description": "Override the pre-decommission serial/lineage conflict check before an optional decommission (migrate only; no effect on backup)",
+                        "name": "force",
+                        "in": "query"
                     }
                 ],
                 "responses": {
