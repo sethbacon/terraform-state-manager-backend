@@ -28,8 +28,9 @@ type transferRequest struct {
 // @Tags         Transfer
 // @Accept       json
 // @Produce      json
-// @Param        id   path   string  true  "Source ID"
-// @Param        key  query  string  true  "State file key"
+// @Param        id     path   string  true   "Source ID"
+// @Param        key    query  string  true   "State file key"
+// @Param        force  query  bool    false  "Override the pre-decommission serial/lineage conflict check before an optional decommission (migrate only; no effect on backup)"
 // @Success      200  {object}  map[string]interface{}
 // @Security     BearerAuth
 // @Security     CookieAuth
@@ -45,8 +46,9 @@ func (h *SourcesHandlers) BackupToSource() gin.HandlerFunc {
 // @Tags         Transfer
 // @Accept       json
 // @Produce      json
-// @Param        id   path   string  true  "Source ID"
-// @Param        key  query  string  true  "State file key"
+// @Param        id     path   string  true   "Source ID"
+// @Param        key    query  string  true   "State file key"
+// @Param        force  query  bool    false  "Override the pre-decommission serial/lineage conflict check before an optional decommission (migrate only; no effect on backup)"
 // @Success      200  {object}  map[string]interface{}
 // @Failure      502  {object}  map[string]interface{}  "write to target failed"
 // @Security     BearerAuth
@@ -74,6 +76,7 @@ func (h *SourcesHandlers) doTransfer(c *gin.Context, mode string) {
 	}
 	ctx := c.Request.Context()
 	actor := userIDOf(c)
+	force := c.Query("force") == "true"
 
 	srcB, err := h.repo.GetByID(ctx, req.TargetSourceID)
 	if err != nil {
@@ -94,6 +97,16 @@ func (h *SourcesHandlers) doTransfer(c *gin.Context, mode string) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
+
+	// Lock both the source and target keys for the whole transfer, the same way
+	// EditState/StateOperation/RestoreBackup do — previously connA/connB were
+	// read and written here with no lock at all, so a concurrent editor could
+	// race a transfer and silently lose an update on either side.
+	release, locked := h.acquireTransferLocks(c, srcA.ID, connA, key, srcB.ID, connB, req.TargetKey)
+	if !locked {
+		return
+	}
+	defer release()
 
 	raw, err := connA.Read(ctx, key)
 	if err != nil {
@@ -129,9 +142,38 @@ func (h *SourcesHandlers) doTransfer(c *gin.Context, mode string) {
 		}
 		if req.Decommission && verified && srcErr == nil {
 			serial := srcAnalysis.Serial
+			// Re-check the source immediately before the irreversible decommission
+			// write. The transfer lock is held throughout, so this is defense in
+			// depth (mirroring EditState's own serial/lineage guard) rather than the
+			// primary protection — it catches drift from a lock bypassed elsewhere
+			// (e.g. a force-unlock) rather than relying on locking alone. Fails
+			// closed unless the caller passes force=true.
+			conflict := ""
+			if !force {
+				latest, rErr := connA.Read(ctx, key)
+				switch {
+				case rErr != nil && statesource.IsNotFound(rErr):
+					// The source key was read successfully moments ago (this lock has been
+					// held for the whole transfer) and is now gone — most likely a
+					// concurrent delete after a force-unlock. Nothing is left to
+					// decommission, and writing emptyState here would silently *recreate*
+					// a key something else just removed, so skip instead of proceeding.
+					conflict = "source key no longer exists (nothing to decommission)"
+				case rErr != nil:
+					conflict = "cannot verify source before decommission: " + rErr.Error()
+				case rErr == nil:
+					if latestA, aErr := analyzer.Analyze(latest.Data); aErr == nil &&
+						(latestA.Serial != serial || latestA.Lineage != srcAnalysis.Lineage) {
+						conflict = fmt.Sprintf("source changed since transfer read (serial %d→%d); pass force=true to override",
+							serial, latestA.Serial)
+					}
+				}
+			}
 			// Never empty the source without a recoverable pre-decommission backup:
 			// a failed backup here would otherwise mean unrecoverable data loss.
-			if _, err := h.editRepo.CreateBackup(ctx, srcA.ID, key, raw.Data, &serial, actor); err != nil {
+			if conflict != "" {
+				rec.Detail = detail + "; decommission skipped: " + conflict
+			} else if _, err := h.editRepo.CreateBackup(ctx, srcA.ID, key, raw.Data, &serial, actor); err != nil {
 				rec.Detail = detail + "; decommission skipped: source backup failed: " + err.Error()
 			} else if err := connA.Write(ctx, key, emptyState(srcAnalysis)); err == nil {
 				rec.Decommissioned = true
@@ -154,6 +196,48 @@ func (h *SourcesHandlers) doTransfer(c *gin.Context, mode string) {
 		"status": rec.Status, "decommissioned": rec.Decommissioned,
 	})
 	c.JSON(http.StatusOK, saved)
+}
+
+// acquireTransferLocks locks both the (source, key) and (target, targetKey)
+// pairs for the duration of a transfer/migrate, using the exact same acquireLock
+// path EditState/StateOperation/RestoreBackup use (native statesource.Locker
+// first, else the app-level DB advisory lock). Locks are taken in a
+// deterministic order — sorted by (sourceID, key) — so two transfers racing in
+// opposite directions between the same two (source, key) pairs can never
+// deadlock. If both sides name the exact same (source, key) — a self-transfer
+// — only one lock is taken, since acquiring the same native/DB lock twice from
+// one caller would otherwise conflict with itself rather than with another
+// operation.
+func (h *SourcesHandlers) acquireTransferLocks(
+	c *gin.Context,
+	sourceIDA string, connA statesource.Connector, keyA string,
+	sourceIDB string, connB statesource.Connector, keyB string,
+) (release func(), ok bool) {
+	if sourceIDA == sourceIDB && keyA == keyB {
+		return h.acquireLock(c, sourceIDA, connA, keyA)
+	}
+
+	type lockTarget struct {
+		sourceID string
+		conn     statesource.Connector
+		key      string
+	}
+	first := lockTarget{sourceIDA, connA, keyA}
+	second := lockTarget{sourceIDB, connB, keyB}
+	if second.sourceID < first.sourceID || (second.sourceID == first.sourceID && second.key < first.key) {
+		first, second = second, first
+	}
+
+	release1, locked := h.acquireLock(c, first.sourceID, first.conn, first.key)
+	if !locked {
+		return nil, false
+	}
+	release2, locked := h.acquireLock(c, second.sourceID, second.conn, second.key)
+	if !locked {
+		release1()
+		return nil, false
+	}
+	return func() { release2(); release1() }, true
 }
 
 // verifyTransfer reads the freshly written target and checks serial, lineage, and
