@@ -411,7 +411,7 @@ func (h *hcp) download(ctx context.Context, u string) ([]byte, error) {
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("state download returned %d", resp.StatusCode)
 	}
-	data, err := io.ReadAll(resp.Body)
+	data, err := readCapped(resp.Body)
 	if err != nil {
 		return nil, err
 	}
@@ -421,7 +421,7 @@ func (h *hcp) download(ctx context.Context, u string) ([]byte, error) {
 			return nil, gzErr
 		}
 		defer func() { _ = gz.Close() }()
-		return io.ReadAll(gz)
+		return readCapped(gz)
 	}
 	return data, nil
 }

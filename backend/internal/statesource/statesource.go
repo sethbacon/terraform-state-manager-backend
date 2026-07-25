@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"time"
 )
@@ -24,6 +25,33 @@ var ErrNotFound = errors.New("not found")
 // fs.ErrNotExist; the rest wrap ErrNotFound explicitly.
 func IsNotFound(err error) bool {
 	return errors.Is(err, ErrNotFound) || errors.Is(err, fs.ErrNotExist)
+}
+
+// maxStateBytes caps a single state-body read to protect the shared server heap
+// from a huge or hostile backend response — a genuinely large state, a
+// compromised/MITM'd object store, or a gzip decompression bomb (#254, #255).
+// Mirrors the 64 MiB ingest cap on the HTTP-facing edit/analyze paths.
+const maxStateBytes = 64 << 20 // 64 MiB
+
+// readCapped reads at most maxStateBytes from r, returning an error (rather than
+// silently truncating a state body) if the source exceeds the cap. Used for every
+// remote-backend body and gzip-decompressed stream so a single oversized read
+// cannot exhaust the shared process heap.
+func readCapped(r io.Reader) ([]byte, error) {
+	return readCappedTo(r, maxStateBytes)
+}
+
+// readCappedTo is readCapped with an explicit limit, so the boundary is
+// unit-testable without allocating maxStateBytes.
+func readCappedTo(r io.Reader, limit int64) ([]byte, error) {
+	data, err := io.ReadAll(io.LimitReader(r, limit+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > limit {
+		return nil, fmt.Errorf("state body exceeds the %d-byte limit", limit)
+	}
+	return data, nil
 }
 
 // StateRef identifies one state file within a source (e.g. a relative path for

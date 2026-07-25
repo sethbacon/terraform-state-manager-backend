@@ -121,7 +121,7 @@ func (k *k8s) List(ctx context.Context) ([]StateRef, error) {
 		return nil, fmt.Errorf("kubernetes list failed: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
-	body, err := io.ReadAll(resp.Body)
+	body, err := readCapped(resp.Body)
 	if err != nil {
 		return nil, fmt.Errorf("kubernetes list read failed: %w", err)
 	}
@@ -181,7 +181,7 @@ func (k *k8s) Read(ctx context.Context, key string) (*RawState, error) {
 		return nil, fmt.Errorf("kubernetes read failed: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
-	body, err := io.ReadAll(resp.Body)
+	body, err := readCapped(resp.Body)
 	if err != nil {
 		return nil, fmt.Errorf("kubernetes read body failed: %w", err)
 	}

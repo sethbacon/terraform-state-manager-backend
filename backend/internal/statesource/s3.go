@@ -5,7 +5,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -102,7 +101,7 @@ func (s *s3conn) Read(ctx context.Context, key string) (*RawState, error) {
 		return nil, fmt.Errorf("failed to read s3://%s/%s: %w", s.bucket, key, err)
 	}
 	defer func() { _ = out.Body.Close() }()
-	data, err := io.ReadAll(out.Body)
+	data, err := readCapped(out.Body)
 	if err != nil {
 		return nil, err
 	}

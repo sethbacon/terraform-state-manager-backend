@@ -150,7 +150,7 @@ func (h *httpBackend) Read(ctx context.Context, key string) (*RawState, error) {
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("http backend read returned status %d", resp.StatusCode)
 	}
-	data, err := io.ReadAll(resp.Body)
+	data, err := readCapped(resp.Body)
 	if err != nil {
 		return nil, fmt.Errorf("http backend read body failed: %w", err)
 	}

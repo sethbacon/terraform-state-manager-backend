@@ -115,7 +115,7 @@ func (g *gcsConn) Read(ctx context.Context, key string) (*RawState, error) {
 		return nil, fmt.Errorf("failed to read gs://%s/%s: %w", g.bucket, key, err)
 	}
 	defer func() { _ = r.Close() }()
-	data, err := io.ReadAll(r)
+	data, err := readCapped(r)
 	if err != nil {
 		return nil, err
 	}
