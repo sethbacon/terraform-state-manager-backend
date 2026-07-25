@@ -120,6 +120,19 @@ func TestAPIKeys_CreateValidation(t *testing.T) {
 	}
 }
 
+// TestAPIKeys_AdminScopeNotAssignable proves an admin cannot mint an
+// admin-scoped API key: ScopeAdmin is excluded from assignableKeyScopes, so
+// admin stays bound to the interactive session rather than a durable, CSRF- and
+// TTL-exempt bearer key (#252). Rejected before any INSERT (no DB expectation).
+func TestAPIKeys_AdminScopeNotAssignable(t *testing.T) {
+	e := newAPIKeysEnv(t)
+	*e.scopes = []string{"admin"}
+	w := e.do(http.MethodPost, "/api/v1/apikeys", `{"name":"k","scopes":["admin"]}`)
+	if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "admin") {
+		t.Errorf("admin scope must not be key-assignable even for an admin creator: %d (%s)", w.Code, w.Body.String())
+	}
+}
+
 func TestAPIKeys_ListOwnVsAdmin(t *testing.T) {
 	e := newAPIKeysEnv(t)
 

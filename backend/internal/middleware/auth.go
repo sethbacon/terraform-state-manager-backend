@@ -24,8 +24,10 @@ const APIKeyPrefix = "tsm"
 // auth cookie), checks revocation, loads the user, and populates the request
 // context with user_id, scopes (from claims), and jwt_claims. Header tokens that
 // are not JWTs fall through to API-key authentication (registry order: JWT is
-// stateless and tried first; keys cost a prefix lookup + bcrypt compare).
-func AuthMiddleware(userRepo *idstore.UserRepository, tokenRepo *idstore.TokenRepository, apiKeyRepo *idstore.APIKeyRepository) gin.HandlerFunc {
+// stateless and tried first; keys cost a prefix lookup + bcrypt compare). orgRepo
+// is used only on the API-key path, to cap a key's stored scopes by the owner's
+// current combined scopes (see authenticateAPIKey).
+func AuthMiddleware(userRepo *idstore.UserRepository, tokenRepo *idstore.TokenRepository, apiKeyRepo *idstore.APIKeyRepository, orgRepo *idstore.OrganizationRepository) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		// A verified mTLS client certificate (set by mtls.AuthMiddleware earlier in
 		// the chain) already authenticated this request and populated scopes.
@@ -44,7 +46,7 @@ func AuthMiddleware(userRepo *idstore.UserRepository, tokenRepo *idstore.TokenRe
 		if err != nil {
 			// API keys arrive only via the Authorization header (never cookies).
 			if !fromCookie && apiKeyRepo != nil && strings.HasPrefix(token, APIKeyPrefix+"_") &&
-				authenticateAPIKey(c, apiKeyRepo, userRepo, token) {
+				authenticateAPIKey(c, apiKeyRepo, userRepo, orgRepo, token) {
 				c.Next()
 				return
 			}
@@ -108,10 +110,13 @@ func OptionalAuthMiddleware(userRepo *idstore.UserRepository, tokenRepo *idstore
 }
 
 // authenticateAPIKey resolves a Bearer token as an API key: indexed prefix
-// lookup → bcrypt compare → expiry check → owning user must still exist →
-// context populated with the key's static scopes. Last-used is recorded
-// async so the request never blocks on the bookkeeping write.
-func authenticateAPIKey(c *gin.Context, keys *idstore.APIKeyRepository, users *idstore.UserRepository, token string) bool {
+// lookup → bcrypt compare → expiry check → owning user must still exist → the
+// key's stored scopes are capped by the owner's current combined scopes →
+// context populated. Capping (grantedSubset) makes a key's effective privileges
+// track its owner across role downgrades and de-provisioning; without it a key
+// minted while the owner held admin would keep admin after they lost it (#223).
+// Last-used is recorded async so the request never blocks on the bookkeeping write.
+func authenticateAPIKey(c *gin.Context, keys *idstore.APIKeyRepository, users *idstore.UserRepository, orgs *idstore.OrganizationRepository, token string) bool {
 	if len(token) < idauth.DisplayPrefixLength {
 		return false
 	}
@@ -143,6 +148,19 @@ func authenticateAPIKey(c *gin.Context, keys *idstore.APIKeyRepository, users *i
 		if scopes == nil {
 			scopes = []string{}
 		}
+		// Cap the key's stored scopes by the owner's CURRENT combined scopes. Keys
+		// record the scopes granted at mint time, so without this a later role
+		// downgrade, org-membership removal, or IdP/SCIM de-provisioning would leave
+		// the key authenticating at its original (possibly admin) scope (#223).
+		// Re-deriving live scopes here makes a key's privileges track its owner
+		// across every de-provisioning path. Fail closed on lookup error.
+		if orgs != nil && userID != "" {
+			live, sErr := orgs.GetUserCombinedScopes(ctx, userID)
+			if sErr != nil {
+				return false
+			}
+			scopes = grantedSubset(scopes, live)
+		}
 		c.Set("user_id", userID)
 		c.Set("scopes", scopes)
 		c.Set("auth_method", "apikey")
@@ -155,6 +173,20 @@ func authenticateAPIKey(c *gin.Context, keys *idstore.APIKeyRepository, users *i
 		return true
 	}
 	return false
+}
+
+// grantedSubset returns the key scopes still granted by the owner's live scope
+// set, using the same hierarchical HasScope semantics as the rest of authz (so
+// an admin owner still grants every finer scope, while a downgraded owner drops
+// the ones they no longer hold). Order is preserved.
+func grantedSubset(keyScopes, live []string) []string {
+	out := make([]string, 0, len(keyScopes))
+	for _, s := range keyScopes {
+		if auth.HasScope(live, auth.Scope(s)) {
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 func extractToken(c *gin.Context) (token string, fromCookie bool) {

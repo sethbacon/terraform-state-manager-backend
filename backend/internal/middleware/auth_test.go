@@ -74,7 +74,7 @@ func authRouter(userRepo *idstore.UserRepository, tokenRepo *idstore.TokenReposi
 
 func authRouterWithKeys(userRepo *idstore.UserRepository, tokenRepo *idstore.TokenRepository, keyRepo *idstore.APIKeyRepository) *gin.Engine {
 	r := gin.New()
-	r.Use(AuthMiddleware(userRepo, tokenRepo, keyRepo))
+	r.Use(AuthMiddleware(userRepo, tokenRepo, keyRepo, nil))
 	r.GET("/", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{
 			"user_id":     c.GetString("user_id"),
@@ -109,7 +109,7 @@ func TestAuthMiddleware_MTLSPreAuthPassesThrough(t *testing.T) {
 	r := gin.New()
 	// Simulates mtls.AuthMiddleware running earlier in the chain.
 	r.Use(func(c *gin.Context) { c.Set("auth_method", "mtls"); c.Next() })
-	r.Use(AuthMiddleware(nil, nil, nil))
+	r.Use(AuthMiddleware(nil, nil, nil, nil))
 	r.GET("/", func(c *gin.Context) { c.Status(http.StatusOK) })
 
 	w := httptest.NewRecorder()
@@ -309,6 +309,63 @@ func TestAuthMiddleware_APIKeyAuthenticates(t *testing.T) {
 	}
 	if !strings.Contains(w.Body.String(), `"auth_method":"apikey"`) || !strings.Contains(w.Body.String(), `"user_id":"u1"`) {
 		t.Errorf("auth context = %s", w.Body.String())
+	}
+}
+
+func newOrgRepoMW(t *testing.T) (*idstore.OrganizationRepository, sqlmock.Sqlmock) {
+	t.Helper()
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New (org): %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+	return idstore.NewOrganizationRepository(db), mock
+}
+
+// mwMembershipCols mirrors GetUserCombinedScopes' membership projection.
+var mwMembershipCols = []string{"organization_id", "organization_name", "role_template_id",
+	"created_at", "role_template_name", "role_template_display_name", "role_template_scopes"}
+
+// TestAuthMiddleware_APIKeyScopesCappedByLiveOwnerScopes proves an API key's
+// stored scopes are intersected with the owner's CURRENT combined scopes at auth
+// time, so a key minted while the owner held admin no longer carries admin after
+// the owner is downgraded (#223). The key statically carries admin+state:read,
+// but the owner's live scopes are only state:read, so admin must be dropped while
+// state:read is retained.
+func TestAuthMiddleware_APIKeyScopesCappedByLiveOwnerScopes(t *testing.T) {
+	fullKey, hash, prefix := mintTestKey(t)
+	keyRepo, keyMock := newAPIKeyRepo(t)
+	userRepo, userMock := newUserRepo(t)
+	orgRepo, orgMock := newOrgRepoMW(t)
+	keyMock.ExpectQuery("FROM api_keys").WithArgs(prefix).
+		WillReturnRows(keyRow(hash, prefix, `["admin","state:read"]`, nil))
+	keyMock.ExpectExec("UPDATE api_keys").WillReturnResult(sqlmock.NewResult(0, 1))
+	expectUserFound(userMock, "u1")
+	// Owner is now only a viewer (state:read) — admin was stripped upstream.
+	orgMock.ExpectQuery("FROM organization_members om").WithArgs("u1").
+		WillReturnRows(sqlmock.NewRows(mwMembershipCols).
+			AddRow("o1", "default", nil, time.Now(), "viewer", "Viewer", []byte(`["state:read"]`)))
+
+	r := gin.New()
+	r.Use(AuthMiddleware(userRepo, nil, keyRepo, orgRepo))
+	r.GET("/", func(c *gin.Context) {
+		sc, _ := c.Get("scopes")
+		c.JSON(http.StatusOK, gin.H{"scopes": sc})
+	})
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("Authorization", "Bearer "+fullKey)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (%s)", w.Code, w.Body.String())
+	}
+	body := w.Body.String()
+	if strings.Contains(body, "admin") {
+		t.Errorf("downgraded owner: key must not retain admin scope: %s", body)
+	}
+	if !strings.Contains(body, "state:read") {
+		t.Errorf("key should retain scopes the owner still holds: %s", body)
 	}
 }
 
