@@ -9,6 +9,7 @@ import (
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
 	"github.com/gin-gonic/gin"
 	"github.com/jmoiron/sqlx"
+	idmodels "github.com/sethbacon/terraform-suite-identity/identity/models"
 )
 
 // newAdminOrgScopeEnv wires the /admin/organizations/:id* routes the same way
@@ -420,14 +421,41 @@ func TestRequireSharedOrgAdminWithTargetUser_DoesNotGateUserListOrCreate(t *test
 	// /admin/users (list/create) names no specific target user, so it must stay
 	// gated only by the outer /admin ScopeAdmin check (exercised by the router's
 	// own middleware chain in production, not this handler-level rig) —
-	// requireSharedOrgAdminWithTargetUser must not be on its path at all.
+	// requireSharedOrgAdminWithTargetUser must not be on its path at all. ListUsers
+	// does derive the caller's admin orgs to narrow the list (#182), but that is a
+	// result filter, not a gate: an empty list still returns 200.
 	e := newAdminOrgScopeEnv(t, "caller-1")
 
+	e.mock.ExpectQuery("FROM organization_members om").WithArgs("caller-1").
+		WillReturnRows(sqlmock.NewRows(membershipCols))
 	e.mock.ExpectQuery("SELECT COUNT").WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
 	e.mock.ExpectQuery("FROM users").WillReturnRows(sqlmock.NewRows(
 		[]string{"id", "email", "name", "oidc_sub", "created_at", "updated_at"}))
 	w := e.do(http.MethodGet, "/api/v1/admin/users", "")
 	if w.Code != http.StatusOK {
-		t.Fatalf("list users: status = %d (%s), want 200 (no membership check expected)", w.Code, w.Body.String())
+		t.Fatalf("list users: status = %d (%s), want 200 (not gated by the shared-org check)", w.Code, w.Body.String())
+	}
+}
+
+// TestUsersInAdminOrgs directly exercises the #182 user-list narrowing: a user
+// is kept only if they share an org with the caller's admin orgs, except
+// membership-less users (no cross-tenant boundary) which are always kept.
+func TestUsersInAdminOrgs(t *testing.T) {
+	adminOrgs := map[string]struct{}{"org-a": {}}
+	users := []*idmodels.UserWithOrgRoles{
+		{User: idmodels.User{ID: "u-a"}, Memberships: []idmodels.UserMembership{{OrganizationID: "org-a"}}},
+		{User: idmodels.User{ID: "u-b"}, Memberships: []idmodels.UserMembership{{OrganizationID: "org-b"}}},
+		{User: idmodels.User{ID: "u-none"}, Memberships: nil},
+	}
+	got := usersInAdminOrgs(users, adminOrgs)
+	kept := map[string]bool{}
+	for _, u := range got {
+		kept[u.ID] = true
+	}
+	if !kept["u-a"] || !kept["u-none"] {
+		t.Errorf("expected u-a (shared org) and u-none (no memberships) kept, got %v", kept)
+	}
+	if kept["u-b"] {
+		t.Errorf("u-b belongs only to a non-admin org and must be excluded, got %v", kept)
 	}
 }

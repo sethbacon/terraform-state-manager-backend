@@ -79,6 +79,17 @@ func pageParams(c *gin.Context) (limit, offset int) {
 // @Router       /admin/users [get]
 func (h *AdminHandlers) ListUsers() gin.HandlerFunc {
 	return func(c *gin.Context) {
+		// Narrow the global user list to users who share an organization the caller
+		// administers. The outer /admin gate accepts any single-org admin's flat
+		// ScopeAdmin, so without this an admin of one org could enumerate every
+		// tenant's users (#182).
+		callerID, _ := c.Get("user_id")
+		uid, _ := callerID.(string)
+		adminOrgs, err := adminOrgSet(c.Request.Context(), h.orgRepo, uid)
+		if err != nil {
+			serverError(c, err, "failed to resolve caller organizations")
+			return
+		}
 		limit, offset := pageParams(c)
 		if q := c.Query("q"); q != "" {
 			users, err := h.userRepo.SearchWithMemberships(c.Request.Context(), q, limit, offset)
@@ -86,17 +97,42 @@ func (h *AdminHandlers) ListUsers() gin.HandlerFunc {
 				serverError(c, err, "failed to search users")
 				return
 			}
+			users = usersInAdminOrgs(users, adminOrgs)
 			// Search has no exact count; clients page until a short page comes back.
 			c.JSON(http.StatusOK, gin.H{"users": users, "total": offset + len(users)})
 			return
 		}
-		users, total, err := h.userRepo.ListUsersWithMemberships(c.Request.Context(), limit, offset)
+		users, _, err := h.userRepo.ListUsersWithMemberships(c.Request.Context(), limit, offset)
 		if err != nil {
 			serverError(c, err, "failed to list users")
 			return
 		}
-		c.JSON(http.StatusOK, gin.H{"users": users, "total": total})
+		users = usersInAdminOrgs(users, adminOrgs)
+		// Post-filtered per page, so the count is page-relative (like the search
+		// path) rather than the unfiltered DB total.
+		c.JSON(http.StatusOK, gin.H{"users": users, "total": offset + len(users)})
 	}
+}
+
+// usersInAdminOrgs keeps only the users the caller may see under #182: those
+// sharing at least one organization with the caller's admin orgs, plus users
+// with no memberships at all (no cross-tenant boundary to protect, mirroring
+// requireSharedOrgAdminWithTargetUser).
+func usersInAdminOrgs(users []*idmodels.UserWithOrgRoles, adminOrgs map[string]struct{}) []*idmodels.UserWithOrgRoles {
+	out := make([]*idmodels.UserWithOrgRoles, 0, len(users))
+	for _, u := range users {
+		if len(u.Memberships) == 0 {
+			out = append(out, u)
+			continue
+		}
+		for _, m := range u.Memberships {
+			if _, ok := adminOrgs[m.OrganizationID]; ok {
+				out = append(out, u)
+				break
+			}
+		}
+	}
+	return out
 }
 
 // ListOrganizations returns all organizations (paginated).
@@ -214,6 +250,13 @@ func auditLogsJSON(logs []*idmodels.AuditLog) []gin.H {
 // @Router       /admin/audit-logs [get]
 func (h *AdminHandlers) ListAuditLogs() gin.HandlerFunc {
 	return func(c *gin.Context) {
+		// NOTE(#182): unlike the user and API-key lists, the audit log is NOT
+		// narrowed to the caller's admin organizations. Audit entries are written
+		// without an organization_id (writeAuditEntry records the acting user and
+		// resource, not a tenant), so most rows are org-less and cannot be
+		// attributed to a caller's organization. Per-org audit visibility would
+		// require org-tagging every audit event first (tracked in #298); until
+		// then this stays a platform-admin view gated by the outer /admin scope.
 		limit, offset := pageParams(c)
 		logs, total, err := h.auditRepo.ListAuditLogs(c.Request.Context(), auditFiltersFromQuery(c), limit, offset)
 		if err != nil {

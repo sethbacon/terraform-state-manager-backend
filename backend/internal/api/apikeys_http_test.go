@@ -145,14 +145,34 @@ func TestAPIKeys_ListOwnVsAdmin(t *testing.T) {
 		t.Fatalf("own list: %d (%s)", w.Code, w.Body.String())
 	}
 
-	// Admin: every key.
+	// Admin: keys are narrowed to those whose OWNER shares an org the caller
+	// administers (#182). Keys are all tagged with the default org at mint time,
+	// so the owner's membership — not the key's org — is the tenant boundary. u1 is
+	// admin in org-a; key-a's owner (u-a) is in org-a (kept), key-b's owner (u-b)
+	// is only in org-b (excluded).
 	*e.scopes = []string{"admin"}
+	e.mock.ExpectQuery("FROM organization_members om").WithArgs("u1").
+		WillReturnRows(sqlmock.NewRows(membershipCols).
+			AddRow("org-a", "A", "rt-admin", time.Now(), "admin", "Admin", []byte(`["admin"]`)))
 	e.mock.ExpectQuery("FROM api_keys ak").
 		WillReturnRows(sqlmock.NewRows(append(apiKeyRowCols, "user_name")).
-			AddRow("k2", "u2", "org1", "theirs", nil, "h", "tsm_def456", []byte(`["state:read"]`), nil, nil, nil, time.Now(), "Them"))
+			AddRow("k-a", "u-a", "default", "key-a", nil, "h", "tsm_aaa111", []byte(`["state:read"]`), nil, nil, nil, time.Now(), "UserA").
+			AddRow("k-b", "u-b", "default", "key-b", nil, "h", "tsm_bbb222", []byte(`["state:read"]`), nil, nil, nil, time.Now(), "UserB"))
+	e.mock.ExpectQuery("FROM organization_members om").WithArgs("u-a").
+		WillReturnRows(sqlmock.NewRows(membershipCols).
+			AddRow("org-a", "A", "rt-x", time.Now(), "editor", "Editor", []byte(`["state:read"]`)))
+	e.mock.ExpectQuery("FROM organization_members om").WithArgs("u-b").
+		WillReturnRows(sqlmock.NewRows(membershipCols).
+			AddRow("org-b", "B", "rt-x", time.Now(), "editor", "Editor", []byte(`["state:read"]`)))
 	w = e.do(http.MethodGet, "/api/v1/apikeys", "")
-	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"theirs"`) {
+	if w.Code != http.StatusOK {
 		t.Fatalf("admin list: %d (%s)", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), `"key-a"`) {
+		t.Errorf("admin should see key-a (owner shares admin org-a): %s", w.Body.String())
+	}
+	if strings.Contains(w.Body.String(), `"key-b"`) {
+		t.Errorf("admin must NOT see key-b (owner only in non-admin org-b): %s", w.Body.String())
 	}
 }
 

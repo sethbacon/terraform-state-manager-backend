@@ -123,7 +123,7 @@ func AppRoleTemplates() []RoleTemplateSeed {
 		{
 			Name:        "org_owner",
 			DisplayName: "Organization Owner",
-			Description: "Manage an organization's membership; full state operations within it.",
+			Description: "Manage an organization's membership and API keys; full state operations across the shared global state pool (state sources are not partitioned per organization).",
 			Scopes: []string{
 				string(ScopeOrganizationsWrite), string(ScopeUsersRead), string(ScopeAPIKeysManage),
 				string(ScopeStateRead), string(ScopeStateWrite), string(ScopeStateDrift),
