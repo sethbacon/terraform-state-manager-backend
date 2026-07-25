@@ -7,6 +7,7 @@
 package api
 
 import (
+	"context"
 	"database/sql"
 	"net/http"
 	"time"
@@ -24,11 +25,14 @@ import (
 const maxRotationGraceHours = 72
 
 // assignableKeyScopes are the scopes a key may carry. SCIM provisioning keeps
-// its own token path and is deliberately not key-assignable.
+// its own token path and is deliberately not key-assignable. ScopeAdmin is
+// also excluded (#252): an admin-scoped key is a durable bearer credential —
+// it bypasses the cookie double-submit CSRF check, is not bound by the 24h
+// session TTL, and may be minted with no expiry — so admin actions must go
+// through the interactive session rather than a long-lived key.
 var assignableKeyScopes = []auth.Scope{
 	auth.ScopeStateRead, auth.ScopeStateWrite, auth.ScopeStateDrift,
 	auth.ScopeStateExecute, auth.ScopeStateTransfer, auth.ScopeSourcesManage,
-	auth.ScopeAdmin,
 }
 
 // APIKeysHandlers serves /api/v1/apikeys.
@@ -117,7 +121,22 @@ func (h *APIKeysHandlers) ListAPIKeys() gin.HandlerFunc {
 			err  error
 		)
 		if isAdmin(c) {
-			keys, err = h.keys.ListAll(c.Request.Context())
+			// A single-org admin's flat ScopeAdmin reaches this branch, so scope the
+			// admin view to keys whose OWNER shares an organization the caller
+			// administers (#182). Every key is tagged with the default org at mint
+			// time (see mintKey), so the owner's org membership — not the key's own
+			// organization_id — is the tenant boundary.
+			adminOrgs, aErr := adminOrgSet(c.Request.Context(), h.orgs, userIDOf(c))
+			if aErr != nil {
+				serverError(c, aErr, "failed to resolve caller organizations")
+				return
+			}
+			all, lErr := h.keys.ListAll(c.Request.Context())
+			if lErr != nil {
+				serverError(c, lErr, "failed to list API keys")
+				return
+			}
+			keys, err = h.keysOwnedInAdminOrgs(c.Request.Context(), all, adminOrgs)
 		} else {
 			keys, err = h.keys.ListByUser(c.Request.Context(), userIDOf(c))
 		}
@@ -130,6 +149,41 @@ func (h *APIKeysHandlers) ListAPIKeys() gin.HandlerFunc {
 		}
 		c.JSON(http.StatusOK, gin.H{"keys": keys})
 	}
+}
+
+// keysOwnedInAdminOrgs keeps only keys whose OWNER shares an organization with
+// the caller's admin orgs. Every API key is tagged with the global default org
+// at mint time, so a key's own organization_id is not a tenant boundary — the
+// owner's org membership is (#182). Owners with no membership are kept, mirroring
+// the user-list rule (usersInAdminOrgs); each distinct owner is looked up once.
+func (h *APIKeysHandlers) keysOwnedInAdminOrgs(ctx context.Context, keys []*models.APIKey, adminOrgs map[string]struct{}) ([]*models.APIKey, error) {
+	allowed := map[string]bool{}
+	out := []*models.APIKey{}
+	for _, k := range keys {
+		if k.UserID == nil {
+			continue
+		}
+		owner := *k.UserID
+		ok, seen := allowed[owner]
+		if !seen {
+			memberships, mErr := h.orgs.GetUserMemberships(ctx, owner)
+			if mErr != nil {
+				return nil, mErr
+			}
+			ok = len(memberships) == 0
+			for _, m := range memberships {
+				if _, in := adminOrgs[m.OrganizationID]; in {
+					ok = true
+					break
+				}
+			}
+			allowed[owner] = ok
+		}
+		if ok {
+			out = append(out, k)
+		}
+	}
+	return out, nil
 }
 
 type apiKeyInput struct {

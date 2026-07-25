@@ -20,9 +20,11 @@
 package api
 
 import (
+	"context"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
+	idstore "github.com/sethbacon/terraform-suite-identity/identity/store"
 
 	"github.com/terraform-state-manager/terraform-state-manager/internal/auth"
 )
@@ -111,4 +113,28 @@ func (h *AdminHandlers) requireSharedOrgAdminWithTargetUser() gin.HandlerFunc {
 			"details": "Caller must hold admin scope within at least one organization the target user belongs to",
 		})
 	}
+}
+
+// adminOrgSet returns the set of organization IDs in which callerID holds admin
+// scope. It underpins per-org narrowing of the global admin READ lists (users,
+// API keys): because being admin in a single organization yields the flat
+// ScopeAdmin that passes the outer /admin gate, those lists must be filtered to
+// the organizations the caller actually administers rather than exposing every
+// tenant's records (#182). An empty callerID or no admin membership yields an
+// empty set (the caller then sees nothing cross-org).
+func adminOrgSet(ctx context.Context, orgRepo *idstore.OrganizationRepository, callerID string) (map[string]struct{}, error) {
+	orgs := map[string]struct{}{}
+	if callerID == "" {
+		return orgs, nil
+	}
+	memberships, err := orgRepo.GetUserMemberships(ctx, callerID)
+	if err != nil {
+		return nil, err
+	}
+	for _, m := range memberships {
+		if auth.HasScope(m.RoleTemplateScopes, auth.ScopeAdmin) {
+			orgs[m.OrganizationID] = struct{}{}
+		}
+	}
+	return orgs, nil
 }

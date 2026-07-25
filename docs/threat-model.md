@@ -80,7 +80,7 @@ Unlike a registry, TSM does not warehouse the artifacts it manages: state is rea
 | Suite service token | High | Shared secret authorizing cross-app reads |
 | Setup token (hashed) | High | bcrypt-hashed first-run bootstrap credential |
 | Audit logs | High | Compliance evidence of who edited which state |
-| Pre-write state backups | High | Copies of prior state, same sensitivity as live state |
+| Pre-write state backups | High | Full copies of prior state, same sensitivity as live state; unlike the credential/secret rows above, stored **unencrypted** at rest — access-controlled only (see I-8) |
 | User PII | Medium | Emails, usernames, IdP identifiers |
 
 ## 5. STRIDE Analysis
@@ -127,6 +127,7 @@ Unlike a registry, TSM does not warehouse the artifacts it manages: state is rea
 | I-5 | `/metrics` exposes internal topology | Telemetry | Prometheus served on a separate internal port (`:9090`), off the public ingress; must be firewalled to the monitoring network | ⚙️ Operator-configured |
 | I-6 | Setup token printed to logs after use | Startup | Only the bcrypt hash is persisted; the raw token is single-use and invalidated on completion; an operator-supplied token is never echoed | ✅ Implemented |
 | I-7 | Secrets embedded in state surfaced in analysis | Analyzer | Analysis records counts/metadata, not attribute values; raw-state read is `state:read`-gated; backups inherit the same access controls | ✅ Implemented / ⚙️ |
+| I-8 | `state_backups.data` (or a raw DB backup/dump) exposes full plaintext state, including any embedded secrets | PostgreSQL / Edit pipeline | Access limited to DB credentials and the `state:read`-scoped API; unlike source/CI credentials, notification URLs, and API keys, backup contents are **not encrypted at rest** and are **not automatically pruned** (see [capacity-planning.md](capacity-planning.md#database-sizing)). Encryption at rest and a retention policy are planned — tracked in #257 | ⚠️ Partial |
 
 ### 5.5 Denial of Service (D)
 
@@ -171,6 +172,7 @@ Unlike a registry, TSM does not warehouse the artifacts it manages: state is rea
 | RR-3 | State written directly by `terraform apply` (bypassing TSM) races a TSM edit on an unlocked backend | Medium | Medium | Serial/lineage guard rejects stale writes; native locking where the backend supports it |
 | RR-4 | Compromised IdP pushes malicious group claims | Low | High | Group→scope mapping limits blast radius; reconciliation revokes on group loss; audit logging detects anomalies |
 | RR-5 | Loss of `TSM_ENCRYPTION_KEY` orphans all stored credentials | Low | High | Key custody/escrow documented in disaster-recovery; rotation procedure in secrets-rotation |
+| RR-6 | `state_backups.data` is unencrypted at rest and grows without an automatic retention/pruning policy | Low | High | Encryption at rest and a retention/pruning policy are planned, tracked in #257; today, rely on DB access control, network isolation (assumption 2), and the `state:read` API gate |
 
 ## 8. Review Schedule
 
