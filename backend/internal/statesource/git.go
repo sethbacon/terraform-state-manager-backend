@@ -3,7 +3,6 @@ package statesource
 import (
 	"context"
 	"fmt"
-	"io"
 	"log/slog"
 	"os"
 	"path"
@@ -123,7 +122,7 @@ func (g *gitConn) Read(ctx context.Context, key string) (*RawState, error) {
 		return nil, fmt.Errorf("failed to read %q from git: %w", key, err)
 	}
 	defer func() { _ = f.Close() }()
-	data, err := io.ReadAll(f)
+	data, err := readCapped(f)
 	if err != nil {
 		return nil, err
 	}

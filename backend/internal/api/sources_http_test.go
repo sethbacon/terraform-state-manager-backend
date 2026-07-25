@@ -885,7 +885,7 @@ func TestListAndRestoreBackups(t *testing.T) {
 	e := newSourcesEnv(t)
 	e.seed(t, "app.tfstate", minState(9, "lin-1", "aws_instance.web"))
 
-	e.mock.ExpectQuery("FROM state_backups").WithArgs("s1", "app.tfstate").
+	e.mock.ExpectQuery("FROM state_backups").WithArgs("s1", "app.tfstate", 100, 0).
 		WillReturnRows(sqlmock.NewRows([]string{"id", "source_id", "state_key", "serial", "created_by", "created_at"}).
 			AddRow("b1", "s1", "app.tfstate", 7, "alice", "2026-06-10"))
 	w := e.do(http.MethodGet, "/api/v1/sources/s1/state/backups?key=app.tfstate", "")

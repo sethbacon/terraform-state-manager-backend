@@ -95,7 +95,7 @@ func (c *consul) List(ctx context.Context) ([]StateRef, error) {
 	if resp.StatusCode == http.StatusNotFound {
 		return nil, nil // path does not exist yet
 	}
-	body, err := io.ReadAll(resp.Body)
+	body, err := readCapped(resp.Body)
 	if err != nil {
 		return nil, fmt.Errorf("consul list read failed: %w", err)
 	}
@@ -136,7 +136,7 @@ func (c *consul) Read(ctx context.Context, key string) (*RawState, error) {
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("consul read returned status %d", resp.StatusCode)
 	}
-	data, err := io.ReadAll(resp.Body)
+	data, err := readCapped(resp.Body)
 	if err != nil {
 		return nil, fmt.Errorf("consul read body failed: %w", err)
 	}
