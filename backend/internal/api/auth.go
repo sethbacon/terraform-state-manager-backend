@@ -81,7 +81,17 @@ func NewAuthHandlers(cfg *config.Config, identityDB *sql.DB) (*AuthHandlers, err
 		h.oidcProvider.Store(p)
 	}
 	if cfg.Auth.LDAP.Enabled {
-		p, err := ldap.NewProvider(cfg.Auth.LDAP)
+		ldapCfg := cfg.Auth.LDAP
+		if ldapCfg.InsecureSkipVerify && !auth.IsDevMode() {
+			// insecure_skip_verify disables LDAPS/StartTLS certificate verification,
+			// exposing the service-account bind credential and all directory traffic
+			// (including user passwords) to a man-in-the-middle. Honor it only in dev
+			// mode; force verification on in production (#251), mirroring the OIDC
+			// AllowInsecureIssuer=IsDevMode() gate.
+			slog.Warn("ldap.insecure_skip_verify is ignored outside dev mode; enforcing LDAP certificate verification")
+			ldapCfg.InsecureSkipVerify = false
+		}
+		p, err := ldap.NewProvider(ldapCfg)
 		if err != nil {
 			return nil, err
 		}

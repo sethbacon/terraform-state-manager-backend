@@ -15,8 +15,10 @@ import (
 // user, reconciles org/role memberships from the user's LDAP groups, and issues
 // an HttpOnly session cookie (cookie-only, like the OIDC flow).
 //
-// NOTE: this is a password endpoint and should sit behind rate limiting at the
-// proxy/gateway; the LDAP directory's own lockout policy also applies.
+// NOTE: this password endpoint is protected by an app-layer per-IP rate limit
+// (middleware.LoginRateLimit, wired on the route in router.go) to blunt online
+// brute-force before the directory bind; a proxy/gateway limit and the LDAP
+// directory's own lockout policy apply as additional defense-in-depth.
 // @Summary      LDAP login
 // @Description  Search-bind authentication against the configured LDAP directory. Sets the session cookie on success.
 // @Tags         Auth

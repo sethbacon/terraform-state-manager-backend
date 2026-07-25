@@ -69,6 +69,34 @@ func TestValidateJWTSecret(t *testing.T) {
 	}
 }
 
+// TestJWTSecretPolicyError covers the fail-closed production policy (#249): an
+// empty or sub-32-char secret is rejected in production, while dev mode tolerates
+// both (an ephemeral secret is generated / a warning is logged by the caller).
+func TestJWTSecretPolicyError(t *testing.T) {
+	long := strings.Repeat("a", 32)
+	cases := []struct {
+		name    string
+		secret  string
+		dev     bool
+		wantErr bool
+	}{
+		{"empty prod rejected", "", false, true},
+		{"short prod rejected", "too-short", false, true},
+		{"31 chars prod rejected", strings.Repeat("a", 31), false, true},
+		{"32 chars prod ok", long, false, false},
+		{"empty dev ok", "", true, false},
+		{"short dev ok", "too-short", true, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := jwtSecretPolicyError(tc.secret, tc.dev)
+			if (err != nil) != tc.wantErr {
+				t.Errorf("jwtSecretPolicyError(%q, dev=%v) err=%v, wantErr=%v", tc.secret, tc.dev, err, tc.wantErr)
+			}
+		})
+	}
+}
+
 func TestGenerateAndValidateJWT(t *testing.T) {
 	scopes := []string{"state:read", "sources:manage"}
 	token, err := GenerateJWT("user-123", "user@example.com", scopes, time.Hour)

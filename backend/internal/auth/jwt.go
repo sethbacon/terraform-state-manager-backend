@@ -56,26 +56,54 @@ func generateRandomSecret() (string, error) {
 }
 
 // ValidateJWTSecret resolves the signing secret and constructs the TokenManager.
+// minJWTSecretLen is the minimum acceptable TSM_JWT_SECRET length in production.
+// A shorter HS256 secret is brute-forceable offline, after which an attacker can
+// forge a JWT for any user (including admin) and bypass auth entirely (#249).
+const minJWTSecretLen = 32
+
+// jwtSecretPolicyError reports why a resolved secret is unacceptable for the
+// given mode, or nil if acceptable. Production requires a non-empty secret of at
+// least minJWTSecretLen; dev mode tolerates an empty secret (an ephemeral one is
+// generated) and a short one (allowed with a warning). Pure so the fail-closed
+// policy is unit-testable independent of the startup sync.Once.
+func jwtSecretPolicyError(secret string, devMode bool) error {
+	if devMode {
+		return nil
+	}
+	if secret == "" {
+		return errors.New("TSM_JWT_SECRET is required in production (generate with: openssl rand -hex 32)")
+	}
+	if len(secret) < minJWTSecretLen {
+		return errors.New("TSM_JWT_SECRET must be at least 32 characters in production (generate with: openssl rand -hex 32)")
+	}
+	return nil
+}
+
 // In production TSM_JWT_SECRET is required; in dev mode an ephemeral secret is
 // generated (sessions reset on restart). Call once at startup.
 func ValidateJWTSecret() error {
 	jwtSecretOnce.Do(func() {
 		secret := os.Getenv("TSM_JWT_SECRET")
+		dev := IsDevMode()
+		// Fail closed on a missing or weak production secret before building the
+		// TokenManager (#249).
+		if err := jwtSecretPolicyError(secret, dev); err != nil {
+			jwtSecretErr = err
+			return
+		}
 		if secret == "" {
-			if IsDevMode() {
-				rnd, err := generateRandomSecret()
-				if err != nil {
-					jwtSecretErr = err
-					return
-				}
-				secret = rnd
-				log.Println("WARNING: TSM_JWT_SECRET not set; using an ephemeral dev secret (sessions reset on restart).")
-			} else {
-				jwtSecretErr = errors.New("TSM_JWT_SECRET is required in production (generate with: openssl rand -hex 32)")
+			// Policy passed with an empty secret => dev mode: use an ephemeral
+			// secret (sessions reset on restart).
+			rnd, err := generateRandomSecret()
+			if err != nil {
+				jwtSecretErr = err
 				return
 			}
-		} else if len(secret) < 32 {
-			log.Println("WARNING: TSM_JWT_SECRET is shorter than the recommended 32 characters.")
+			secret = rnd
+			log.Println("WARNING: TSM_JWT_SECRET not set; using an ephemeral dev secret (sessions reset on restart).")
+		} else if len(secret) < minJWTSecretLen {
+			// Policy passed with a short secret => dev mode: allow with a warning.
+			log.Println("WARNING: TSM_JWT_SECRET is shorter than the recommended 32 characters (allowed in dev mode only).")
 		}
 		tokenManager = idauth.NewTokenManager(secret, jwtIssuer)
 		// Pin validation to the trusted issuer set (this app plus the sibling
