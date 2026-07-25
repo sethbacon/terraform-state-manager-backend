@@ -36,6 +36,10 @@ jobs:
   drift:
     runs-on: ubuntu-latest
     steps:
+      - name: Mask callback token in logs
+        env:
+          CALLBACK_TOKEN: ${{ inputs.callback_token }}
+        run: echo "::add-mask::$CALLBACK_TOKEN"
       - uses: actions/checkout@v4
       - uses: hashicorp/setup-terraform@v3
       # Configure cloud credentials here, preferably via OIDC, e.g.:
@@ -91,6 +95,10 @@ pool:
   vmImage: ubuntu-latest
 steps:
   - checkout: self
+  - bash: echo "##vso[task.setvariable variable=TSM_CALLBACK_TOKEN;issecret=true]$CALLBACK_TOKEN"
+    displayName: Mask callback token in logs
+    env:
+      CALLBACK_TOKEN: ${{ parameters.callback_token }}
   - task: TerraformInstaller@1
     inputs:
       terraformVersion: latest
@@ -165,6 +173,10 @@ jobs:
   drift:
     runs-on: ubuntu-latest
     steps:
+      - name: Mask callback token in logs
+        env:
+          CALLBACK_TOKEN: ${{ inputs.callback_token }}
+        run: echo "::add-mask::$CALLBACK_TOKEN"
       - uses: actions/checkout@v4
       - uses: sethbacon/setup-terraform-hardened@v1
         with:
@@ -207,6 +219,10 @@ pool:
   vmImage: ubuntu-latest
 steps:
   - checkout: self
+  - bash: echo "##vso[task.setvariable variable=TSM_CALLBACK_TOKEN;issecret=true]$CALLBACK_TOKEN"
+    displayName: Mask callback token in logs
+    env:
+      CALLBACK_TOKEN: ${{ parameters.callback_token }}
   - task: PipelineTerraformInstaller@1
     displayName: Install Terraform
     inputs:
