@@ -12,7 +12,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"time"
 )
 
 // consul reads Terraform state stored by the consul backend in the Consul KV
@@ -46,7 +45,7 @@ func newConsul(config, credentials map[string]any) (*consul, error) {
 	dc, _ := config["datacenter"].(string)
 	token, _ := credentials["token"].(string)
 	return &consul{
-		client:     &http.Client{Timeout: 30 * time.Second},
+		client:     safeHTTPClient(),
 		scheme:     scheme,
 		address:    addr,
 		datacenter: dc,

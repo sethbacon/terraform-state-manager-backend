@@ -43,7 +43,7 @@ func newHCP(config, credentials map[string]any) (*hcp, error) {
 		return nil, fmt.Errorf("hcp source requires a credentials.token (HCP Terraform API token)")
 	}
 	return &hcp{
-		client:  &http.Client{Timeout: 30 * time.Second},
+		client:  safeHTTPClient(),
 		baseURL: "https://" + host,
 		org:     org,
 		token:   token,

@@ -45,7 +45,14 @@ func newS3(config, creds map[string]any) (*s3conn, error) {
 		return nil, fmt.Errorf("s3 source requires both access_key_id and secret_access_key (or neither, to use the ambient AWS credential chain)")
 	}
 
-	opts := []func(*awsconfig.LoadOptions) error{awsconfig.WithRegion(region)}
+	// Route the SDK's dials through the SSRF egress guard so an operator-supplied
+	// endpoint override (for S3-compatible stores) cannot point at cloud metadata
+	// or a loopback/link-local address (#256). Default AWS endpoints resolve to
+	// public IPs and are unaffected.
+	opts := []func(*awsconfig.LoadOptions) error{
+		awsconfig.WithRegion(region),
+		awsconfig.WithHTTPClient(safeHTTPClient()),
+	}
 	if accessKey != "" && secretKey != "" {
 		opts = append(opts, awsconfig.WithCredentialsProvider(
 			credentials.NewStaticCredentialsProvider(accessKey, secretKey, ""),
