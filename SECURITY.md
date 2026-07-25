@@ -63,6 +63,29 @@ We will credit reporters in the release notes unless anonymity is requested.
 - The application follows common OWASP mitigations: parameterised queries, input
   validation, CSRF protection, security headers, and audit logging
 
+## Known Limitations
+
+- **Pre-write state backups (`state_backups.data`) are not encrypted at rest.**
+  Every edit, `rm`/`mv`, or restore takes a full backup of the prior state so
+  the change is one-click reversible (see
+  [docs/architecture.md](docs/architecture.md#state-edit-pipeline)). Transfer
+  is the exception: it always overwrites the target with no backup of the
+  target's prior content, and only creates a backup — of the **source**, not
+  the target — when a migrate runs with `decommission` and the post-write
+  verification succeeds. Unlike source/CI credentials, notification target
+  URLs, and API keys, these backups are stored as plaintext and rely only on
+  database access control and the `state:read`-scoped API — any secret that
+  can appear in live state can appear in a backup row.
+- **Backups have no automatic retention or pruning.** The table grows with
+  every edit/restore, plus a migrate transfer that decommissions its source —
+  the only transfer path that writes a backup row; a plain backup or a
+  non-decommissioning migrate adds none. It is only cleared by purging a
+  state object outright (`purge=true` on delete); there is no size- or
+  age-based pruning today (see
+  [docs/capacity-planning.md](docs/capacity-planning.md#database-sizing)).
+- Encryption at rest and a retention policy for state backups are planned and
+  tracked in #257.
+
 ## Encryption Key Custody
 
 `TSM_ENCRYPTION_KEY` protects all stored source and CI credentials and has **no

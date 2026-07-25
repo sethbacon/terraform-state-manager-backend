@@ -25,11 +25,14 @@ import (
 const maxRotationGraceHours = 72
 
 // assignableKeyScopes are the scopes a key may carry. SCIM provisioning keeps
-// its own token path and is deliberately not key-assignable.
+// its own token path and is deliberately not key-assignable. ScopeAdmin is
+// also excluded (#252): an admin-scoped key is a durable bearer credential —
+// it bypasses the cookie double-submit CSRF check, is not bound by the 24h
+// session TTL, and may be minted with no expiry — so admin actions must go
+// through the interactive session rather than a long-lived key.
 var assignableKeyScopes = []auth.Scope{
 	auth.ScopeStateRead, auth.ScopeStateWrite, auth.ScopeStateDrift,
 	auth.ScopeStateExecute, auth.ScopeStateTransfer, auth.ScopeSourcesManage,
-	auth.ScopeAdmin,
 }
 
 // APIKeysHandlers serves /api/v1/apikeys.
