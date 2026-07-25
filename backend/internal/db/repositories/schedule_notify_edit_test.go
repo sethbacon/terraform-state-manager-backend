@@ -130,10 +130,10 @@ func TestStateEditRepository(t *testing.T) {
 		t.Fatalf("CreateBackup: %v %q", err, id)
 	}
 
-	mock.ExpectQuery("FROM state_backups").WithArgs("s1", "k").
+	mock.ExpectQuery("FROM state_backups").WithArgs("s1", "k", 100, 0).
 		WillReturnRows(sqlmock.NewRows([]string{"id", "source_id", "state_key", "serial", "created_by", "created_at"}).
 			AddRow("b1", "s1", "k", 7, "alice", "2026-06-10"))
-	backups, err := r.ListBackups(ctx, "s1", "k")
+	backups, err := r.ListBackups(ctx, "s1", "k", 100, 0)
 	if err != nil || len(backups) != 1 || backups[0].Serial == nil || *backups[0].Serial != 7 {
 		t.Fatalf("ListBackups: %v %+v", err, backups)
 	}

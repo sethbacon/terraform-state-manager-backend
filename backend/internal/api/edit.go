@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 
 	"github.com/gin-gonic/gin"
 
@@ -320,7 +321,10 @@ func (h *SourcesHandlers) deleteState(c *gin.Context, src *repositories.Source, 
 	c.JSON(http.StatusOK, resp)
 }
 
-// ListBackups returns the backup history for a state file (?key=).
+// ListBackups returns the backup history for a state file (?key=), paginated via
+// ?page (1-indexed) and ?per_page (default 100, max 500) so a frequently-edited
+// key with an unbounded backup history is never returned in full in one response
+// (#262).
 func (h *SourcesHandlers) ListBackups() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		key := c.Query("key")
@@ -328,7 +332,16 @@ func (h *SourcesHandlers) ListBackups() gin.HandlerFunc {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "key query parameter is required"})
 			return
 		}
-		backups, err := h.editRepo.ListBackups(c.Request.Context(), c.Param("id"), key)
+		perPage := 100
+		if v, err := strconv.Atoi(c.Query("per_page")); err == nil && v > 0 && v <= 500 {
+			perPage = v
+		}
+		page := 1
+		// Bound page so (page-1)*perPage cannot overflow int on a crafted value.
+		if v, err := strconv.Atoi(c.Query("page")); err == nil && v > 0 && v <= 1_000_000 {
+			page = v
+		}
+		backups, err := h.editRepo.ListBackups(c.Request.Context(), c.Param("id"), key, perPage, (page-1)*perPage)
 		if err != nil {
 			serverError(c, err, "failed to list backups")
 			return

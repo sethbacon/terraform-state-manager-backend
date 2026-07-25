@@ -48,12 +48,15 @@ func (r *StateEditRepository) CreateBackup(ctx context.Context, sourceID, key st
 	return id, err
 }
 
-// ListBackups returns backup metadata (no data) for a source+key, newest first.
-func (r *StateEditRepository) ListBackups(ctx context.Context, sourceID, key string) ([]Backup, error) {
+// ListBackups returns backup metadata (no data) for a source+key, newest first,
+// bounded by limit/offset so a key with an unbounded backup history cannot be
+// returned in full in a single response (#262).
+func (r *StateEditRepository) ListBackups(ctx context.Context, sourceID, key string, limit, offset int) ([]Backup, error) {
 	rows, err := r.db.QueryContext(ctx, `
 		SELECT id, source_id, state_key, serial, COALESCE(created_by, ''), created_at::text
 		FROM state_backups WHERE source_id = $1 AND state_key = $2
-		ORDER BY created_at DESC`, sourceID, key)
+		ORDER BY created_at DESC
+		LIMIT $3 OFFSET $4`, sourceID, key, limit, offset)
 	if err != nil {
 		return nil, err
 	}

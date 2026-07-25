@@ -3,7 +3,6 @@ package statesource
 import (
 	"context"
 	"fmt"
-	"io"
 	"strings"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob"
@@ -82,7 +81,7 @@ func (a *azureConn) Read(ctx context.Context, key string) (*RawState, error) {
 	}
 	body := resp.Body
 	defer func() { _ = body.Close() }()
-	data, err := io.ReadAll(body)
+	data, err := readCapped(body)
 	if err != nil {
 		return nil, err
 	}
