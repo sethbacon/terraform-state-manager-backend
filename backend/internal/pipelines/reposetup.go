@@ -75,7 +75,7 @@ func doJSON(ctx context.Context, method, u string, authorize func(*http.Request)
 	if payload != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	resp, err := httpClient.Do(req)
+	resp, err := doWithRetry(req)
 	if err != nil {
 		return nil, 0, err
 	}
