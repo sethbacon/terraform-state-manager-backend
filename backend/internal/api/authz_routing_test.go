@@ -60,9 +60,9 @@ func TestForceUnlock_NonAdminScopeForbidden(t *testing.T) {
 	if w.Code != http.StatusForbidden {
 		t.Fatalf("non-admin force-unlock: status = %d (%s), want 403", w.Code, w.Body.String())
 	}
-	if err := e.mock.ExpectationsWereMet(); err != nil {
-		t.Errorf("ForceUnlock handler must NOT be reached without admin scope: %v", err)
-	}
+	// If the ScopeAdmin gate were dropped, the request (which carries key=) would
+	// reach ForceUnlock, query the unexpectant mock, and return 500 — so the 403
+	// assertion above is what actually guards the gate.
 }
 
 // TestForceUnlock_AdminScopePassesGate proves the gate is wired to admin rather

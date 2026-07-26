@@ -25,6 +25,9 @@ fail=0
 for entry in "${PACKAGES[@]}"; do
   pkg="${entry%%|*}"
   min="${entry##*|}"
+  # Fresh profile each iteration: a package that fails to compile must not be
+  # scored against the previous package's (stale) coverage profile.
+  rm -f /tmp/pkg-coverage.out
   # Test the exact package only (not sub-packages) and discard test output.
   go test -coverprofile=/tmp/pkg-coverage.out "${pkg}" >/dev/null 2>&1 || true
   coverage=$(go tool cover -func=/tmp/pkg-coverage.out | grep "^total:" | awk '{print $3}' | tr -d '%')

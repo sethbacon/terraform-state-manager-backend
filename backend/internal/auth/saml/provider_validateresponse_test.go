@@ -157,6 +157,21 @@ func testSession(now time.Time) *saml.Session {
 	}
 }
 
+// assertSAMLRejected fails unless err is a crewjam rejection
+// (*saml.InvalidResponseError), so a reject-path test cannot pass because
+// ValidateResponse errored for some UNRELATED reason (a panic recover, a setup
+// mistake) rather than the security check under test.
+func assertSAMLRejected(t *testing.T, err error, what string) {
+	t.Helper()
+	if err == nil {
+		t.Fatalf("%s: response was accepted, want rejected", what)
+	}
+	var ivr *saml.InvalidResponseError
+	if !errors.As(err, &ivr) {
+		t.Fatalf("%s: rejected with %T, want *saml.InvalidResponseError", what, err)
+	}
+}
+
 func TestValidateResponse_ValidSignatureAccepted(t *testing.T) {
 	now := time.Now().UTC()
 	defer overrideSAMLClock(now)()
@@ -203,9 +218,8 @@ func TestValidateResponse_TamperedSignatureRejected(t *testing.T) {
 	}
 	bad := base64.StdEncoding.EncodeToString([]byte(tampered))
 
-	if _, err := p.ValidateResponse(acsRequest(bad), []string{reqID}, testGroupAttr); err == nil {
-		t.Fatal("tampered SAML response was accepted; signature is not enforced")
-	}
+	_, verr := p.ValidateResponse(acsRequest(bad), []string{reqID}, testGroupAttr)
+	assertSAMLRejected(t, verr, "tampered signature")
 }
 
 func TestValidateResponse_WrongInResponseToRejected(t *testing.T) {
@@ -218,9 +232,8 @@ func TestValidateResponse_WrongInResponseToRejected(t *testing.T) {
 
 	// A validly-signed response whose InResponseTo does not match any pending
 	// AuthnRequest is a replay / unsolicited response and must be rejected.
-	if _, err := p.ValidateResponse(acsRequest(resp), []string{"id-some-other-request"}, testGroupAttr); err == nil {
-		t.Fatal("response with unmatched InResponseTo was accepted (replay protection missing)")
-	}
+	_, verr := p.ValidateResponse(acsRequest(resp), []string{"id-some-other-request"}, testGroupAttr)
+	assertSAMLRejected(t, verr, "unmatched InResponseTo (replay)")
 }
 
 func TestValidateResponse_IDPInitiatedRejectedWhenDisabled(t *testing.T) {
@@ -232,9 +245,8 @@ func TestValidateResponse_IDPInitiatedRejectedWhenDisabled(t *testing.T) {
 	// Unsolicited response: empty InResponseTo.
 	resp := ti.mintResponse(t, p.sp.Metadata(), "", now, testSession(now))
 
-	if _, err := p.ValidateResponse(acsRequest(resp), nil, testGroupAttr); err == nil {
-		t.Fatal("IdP-initiated response was accepted while AllowIDPInitiated is false")
-	}
+	_, verr := p.ValidateResponse(acsRequest(resp), nil, testGroupAttr)
+	assertSAMLRejected(t, verr, "IdP-initiated while disabled")
 }
 
 func TestValidateResponse_MalformedRejected(t *testing.T) {
