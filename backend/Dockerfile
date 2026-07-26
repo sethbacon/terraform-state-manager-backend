@@ -22,7 +22,7 @@ RUN CLEAN_VERSION="${VERSION#v}" && \
     ./cmd/server
 
 # Stage 2: minimal runtime image.
-FROM alpine:3.23
+FROM alpine:3.24
 
 # apk upgrade: apply the latest Alpine 3.23 security patches at build time (the
 # base is tag-pinned, so a rebuild picks up backports).
