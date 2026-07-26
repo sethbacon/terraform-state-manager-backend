@@ -87,6 +87,14 @@ jobs:
             print "PASS: " cov "% meets the " thr "% floor."
           }'
 
+      - name: Check per-package coverage floors
+        working-directory: backend
+        # Complements the blended-total gate above with named minimums for
+        # security-critical packages (auth/*, middleware, statesource,
+        # db/repositories), so a regression concentrated in one sensitive package
+        # cannot hide behind the repo-wide average (#269).
+        run: bash scripts/check_package_coverage.sh
+
       - name: Upload Go coverage
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:

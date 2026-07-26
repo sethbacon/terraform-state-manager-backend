@@ -257,6 +257,42 @@ func TestDriftRunsReadAndCallback(t *testing.T) {
 	}
 }
 
+// TestCallback_GhostRun_Returns401NotOracle verifies the drift and health-lab
+// result callbacks return a uniform 401 (never 404) when the run ID does not
+// exist at all — identical to the wrong-token response — so the endpoint cannot
+// be used as a run-ID existence oracle (drift.go:426-431 / health.go:240-243,
+// CWE-203). GetByID maps sql.ErrNoRows to (nil, nil), so a ghost run reaches the
+// run == nil arm of the uniform-401 guard rather than a 404/500 that would leak
+// existence. Guards against a future refactor silently reintroducing the oracle.
+func TestCallback_GhostRun_Returns401NotOracle(t *testing.T) {
+	t.Run("drift", func(t *testing.T) {
+		e := newDriftEnv(t)
+		e.mock.ExpectQuery("SELECT .+ FROM drift_runs WHERE id").WithArgs("ghost").
+			WillReturnError(sql.ErrNoRows)
+		w := e.doWithHeader(http.MethodPost, "/api/v1/drift/runs/ghost/results",
+			`{"status":"completed"}`, "X-TSM-Callback-Token", "any-token")
+		if w.Code != http.StatusUnauthorized {
+			t.Fatalf("ghost drift run: status = %d, want 401 (missing run must be indistinguishable from a wrong token)", w.Code)
+		}
+		if err := e.mock.ExpectationsWereMet(); err != nil {
+			t.Errorf("expected a GetByID lookup for the ghost run: %v", err)
+		}
+	})
+	t.Run("health-lab", func(t *testing.T) {
+		e := newDriftEnv(t)
+		e.mock.ExpectQuery("SELECT .+ FROM health_runs WHERE id").WithArgs("ghost").
+			WillReturnError(sql.ErrNoRows)
+		w := e.doWithHeader(http.MethodPost, "/api/v1/health-lab/runs/ghost/results",
+			`{"status":"completed"}`, "X-TSM-Callback-Token", "any-token")
+		if w.Code != http.StatusUnauthorized {
+			t.Fatalf("ghost health run: status = %d, want 401 (missing run must be indistinguishable from a wrong token)", w.Code)
+		}
+		if err := e.mock.ExpectationsWereMet(); err != nil {
+			t.Errorf("expected a GetByID lookup for the ghost run: %v", err)
+		}
+	})
+}
+
 func TestWorkflowTemplates(t *testing.T) {
 	e := newDriftEnv(t)
 	for _, tc := range []struct{ path, want string }{
