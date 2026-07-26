@@ -1,0 +1,194 @@
+name: Weekly Security Scan
+
+# Complements the event-triggered scans in ci.yml (gosec, Trivy fs+image) by
+# re-running the full CI plus reachability/known-vuln scanners on a fixed weekly
+# cadence, so newly-disclosed CVEs in already-pinned dependencies are surfaced
+# even when no code change triggers CI. Findings open tracking issues.
+on:
+  schedule:
+    - cron: "0 8 * * 1" # Every Monday 08:00 UTC
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  # Re-run the full CI suite (build, tests, gosec, Trivy fs+image) on schedule.
+  ci:
+    name: CI
+    secrets: inherit
+    uses: ./.github/workflows/ci.yml
+
+  # ── OSV Vulnerability Scan ────────────────────────────
+  osv-scan:
+    name: OSV Vulnerability Scan
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - name: Run OSV-Scanner
+        id: osv
+        uses: google/osv-scanner-action/osv-scanner-action@9a498708959aeaef5ef730655706c5a1df1edbc2 # v2.3.8
+        continue-on-error: true
+        with:
+          scan-args: |-
+            --recursive
+            ./backend
+            --format=table
+
+      - name: Create issue on new vulnerabilities
+        if: steps.osv.outcome == 'failure'
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
+        with:
+          script: |
+            const marker = 'OSV-Scanner: vulnerabilities found';
+            const { data: open } = await github.rest.issues.listForRepo({
+              owner: context.repo.owner, repo: context.repo.repo,
+              state: 'open', labels: 'security,dependencies',
+            });
+            if (open.some(i => i.title.startsWith(marker))) {
+              core.info('An open OSV-Scanner issue already exists — skipping duplicate.');
+              return;
+            }
+            const title = `${marker} — ${new Date().toISOString().slice(0,10)}`;
+            const body = [
+              '## OSV-Scanner Vulnerability Report',
+              '',
+              `**Workflow run:** ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+              '',
+              'OSV-Scanner found known vulnerabilities in `go.sum`. Please review the workflow logs and update affected dependencies.',
+            ].join('\n');
+
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title,
+              body,
+              labels: ['security', 'dependencies'],
+            });
+
+  # ── govulncheck (reachability-aware scan) ─────────────
+  # OSV-Scanner flags every known-vulnerable version in go.sum regardless of whether
+  # this binary actually calls the vulnerable code path. govulncheck performs
+  # call-graph reachability analysis so genuinely exploitable findings aren't lost
+  # in the noise of unreachable transitive-dependency CVEs.
+  govulncheck:
+    name: govulncheck (reachability scan)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - name: Set up Go toolchain
+        uses: ./.github/actions/setup-backend
+
+      - name: Install govulncheck
+        run: go install golang.org/x/vuln/cmd/govulncheck@v1.1.4
+
+      - name: Run govulncheck
+        id: govulncheck
+        working-directory: backend
+        continue-on-error: true
+        run: govulncheck ./...
+
+      - name: Create issue on new vulnerabilities
+        if: steps.govulncheck.outcome == 'failure'
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
+        with:
+          script: |
+            const marker = 'govulncheck: reachable vulnerabilities found';
+            const { data: open } = await github.rest.issues.listForRepo({
+              owner: context.repo.owner, repo: context.repo.repo,
+              state: 'open', labels: 'security,dependencies',
+            });
+            if (open.some(i => i.title.startsWith(marker))) {
+              core.info('An open govulncheck issue already exists — skipping duplicate.');
+              return;
+            }
+            const title = `${marker} — ${new Date().toISOString().slice(0,10)}`;
+            const body = [
+              '## govulncheck Vulnerability Report',
+              '',
+              `**Workflow run:** ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+              '',
+              'govulncheck found known vulnerabilities that are reachable from this codebase (call-graph analysis). Please review the workflow logs and update affected dependencies.',
+            ].join('\n');
+
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title,
+              body,
+              labels: ['security', 'dependencies'],
+            });
+
+  # ── CodeQL Analysis ───────────────────────────────────
+  codeql:
+    name: CodeQL Analysis (Go)
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read # CodeQL reads workflow-run metadata (required on private repos)
+      contents: read
+      security-events: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - name: Set up Go toolchain
+        uses: ./.github/actions/setup-backend
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@dc73d59c2d7bd4f8194098a91219eeee6d8a1719 # v4
+        with:
+          languages: go
+
+      - name: Build for CodeQL
+        working-directory: backend
+        run: go build ./...
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@dc73d59c2d7bd4f8194098a91219eeee6d8a1719 # v4
+        with:
+          category: /language:go
+
+  notify-on-failure:
+    name: Create issue on failure
+    runs-on: ubuntu-latest
+    needs: [ci, osv-scan, govulncheck, codeql]
+    if: failure() && github.event_name == 'schedule'
+    permissions:
+      issues: write
+    steps:
+      - name: Create failure issue
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
+        with:
+          script: |
+            const title = `Weekly security scan failed — ${new Date().toISOString().slice(0,10)}`;
+            const body = [
+              '## Weekly Security Scan Failure',
+              '',
+              `**Workflow run:** ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+              '',
+              'The scheduled weekly security scan failed. Please investigate before the next release.',
+              '',
+              'Common causes:',
+              '- A transitive Go dependency published a breaking change or new CVE',
+              '- The Docker base image changed in a breaking way',
+              '- A gosec, Trivy, OSV, or govulncheck finding was introduced',
+              '- CodeQL detected a new issue',
+            ].join('\n');
+
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title,
+              body,
+              labels: ['bug', 'ci'],
+            });

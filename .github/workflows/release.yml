@@ -209,6 +209,30 @@ jobs:
           subject-digest: ${{ steps.build.outputs.digest }}
           push-to-registry: true
 
+      - name: Generate image SBOM (syft)
+        # The binary archives already ship a goreleaser SBOM; the published
+        # container image (Go binary + Alpine OS packages) had none. Generate an
+        # SPDX SBOM from the pushed digest so consumers can enumerate its
+        # components for CVE triage.
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        with:
+          image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.build.outputs.digest }}
+          format: spdx-json
+          output-file: image-sbom.spdx.json
+          upload-artifact: false
+          # Attaching to the GitHub Release needs contents:write, which this job
+          # does not (and should not) hold; the attestation below is pushed to the
+          # registry instead.
+          upload-release-assets: false
+
+      - name: Attest image SBOM
+        uses: actions/attest-sbom@c604332985a26aa8cf1bdc465b92731239ec6b9e # v4.1.0
+        with:
+          subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          sbom-path: image-sbom.spdx.json
+          push-to-registry: true
+
       - name: Print verification commands
         run: |
           echo "## Supply-chain verification" >> $GITHUB_STEP_SUMMARY
@@ -226,6 +250,14 @@ jobs:
           echo "gh attestation verify \\\\" >> $GITHUB_STEP_SUMMARY
           echo "  oci://${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.build.outputs.digest }} \\\\" >> $GITHUB_STEP_SUMMARY
           echo "  --repo ${{ github.repository }}" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Verify image SBOM attestation" >> $GITHUB_STEP_SUMMARY
+          echo '```bash' >> $GITHUB_STEP_SUMMARY
+          echo "gh attestation verify \\\\" >> $GITHUB_STEP_SUMMARY
+          echo "  oci://${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.build.outputs.digest }} \\\\" >> $GITHUB_STEP_SUMMARY
+          echo "  --repo ${{ github.repository }} \\\\" >> $GITHUB_STEP_SUMMARY
+          echo "  --predicate-type https://spdx.dev/Document" >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
 
   # ── Publish the GitHub Release ────────────────────────────────────────────

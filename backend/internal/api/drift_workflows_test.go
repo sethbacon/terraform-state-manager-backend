@@ -162,3 +162,35 @@ func TestHealthWorkflowTemplates_FailureReportStep(t *testing.T) {
 		}
 	}
 }
+
+// TestWorkflowTemplates_MaskCallbackToken guards that every dispatched CI template
+// masks the one-shot callback token in job logs before any other step runs (#258,
+// CWE-532). GitHub Actions does not auto-mask workflow_dispatch inputs and Azure
+// DevOps does not auto-mask template parameters, so the token — which authenticates
+// the result callback — would otherwise be recoverable from verbose / step-debug
+// logs. GitHub uses the ::add-mask:: workflow command; Azure registers the value as
+// a secret variable (issecret=true) so the agent scrubs it from subsequent output.
+func TestWorkflowTemplates_MaskCallbackToken(t *testing.T) {
+	github := map[string]string{
+		"github drift":            githubDriftWorkflow,
+		"github drift suite":      githubDriftWorkflowSuite,
+		"github versionlab":       githubHealthWorkflow,
+		"github versionlab suite": githubHealthWorkflowSuite,
+	}
+	azure := map[string]string{
+		"azure drift":            azureDriftPipeline,
+		"azure drift suite":      azureDriftPipelineSuite,
+		"azure versionlab":       azureHealthPipeline,
+		"azure versionlab suite": azureHealthPipelineSuite,
+	}
+	for name, tmpl := range github {
+		if !strings.Contains(tmpl, `echo "::add-mask::$CALLBACK_TOKEN"`) {
+			t.Errorf("%s template does not mask the callback token via ::add-mask::", name)
+		}
+	}
+	for name, tmpl := range azure {
+		if !strings.Contains(tmpl, "issecret=true]$CALLBACK_TOKEN") {
+			t.Errorf("%s template does not register the callback token as a secret variable", name)
+		}
+	}
+}

@@ -1,0 +1,67 @@
+version: 2
+
+updates:
+  # ---------------------------------------------------------------------------
+  # Go modules (backend/)
+  # ---------------------------------------------------------------------------
+  - package-ecosystem: gomod
+    directory: /backend
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:00"
+      timezone: UTC
+    labels:
+      - dependencies
+      - go
+    commit-message:
+      prefix: "chore(deps)"
+    # Group all Go module updates into a single PR per cycle to reduce noise.
+    groups:
+      go-dependencies:
+        patterns:
+          - "*"
+    # Major bumps of the web framework need manual review (breaking changes).
+    ignore:
+      - dependency-name: "github.com/gin-gonic/gin"
+        update-types: ["version-update:semver-major"]
+
+  # ---------------------------------------------------------------------------
+  # Docker base images (backend/Dockerfile: golang builder + alpine runtime)
+  # ---------------------------------------------------------------------------
+  - package-ecosystem: docker
+    directory: /backend
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:00"
+      timezone: UTC
+    labels:
+      - dependencies
+      - docker
+    commit-message:
+      prefix: "chore(deps)"
+    groups:
+      docker-dependencies:
+        patterns:
+          - "*"
+
+  # ---------------------------------------------------------------------------
+  # GitHub Actions (SHA-pinned uses: across .github/workflows and .github/actions)
+  # ---------------------------------------------------------------------------
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:00"
+      timezone: UTC
+    labels:
+      - dependencies
+      - github-actions
+    commit-message:
+      prefix: "chore(ci)"
+    groups:
+      github-actions-dependencies:
+        patterns:
+          - "*"
