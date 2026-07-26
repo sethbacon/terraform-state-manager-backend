@@ -81,7 +81,7 @@ func newHTTPBackendBase(config, credentials map[string]any) (*httpBackend, error
 	username, _ := credentials["username"].(string)
 	password, _ := credentials["password"].(string)
 	return &httpBackend{
-		client:        &http.Client{Timeout: 30 * time.Second},
+		client:        safeHTTPClient(),
 		address:       address,
 		lockAddress:   lockAddress,
 		unlockAddress: unlockAddress,

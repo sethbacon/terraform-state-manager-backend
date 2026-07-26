@@ -74,8 +74,17 @@ func newK8s(config, credentials map[string]any) (*k8s, error) {
 	}
 	return &k8s{
 		client: &http.Client{
-			Timeout:   30 * time.Second,
-			Transport: &http.Transport{TLSClientConfig: tlsCfg},
+			Timeout: connectorHTTPTimeout,
+			// SSRF egress guard: dial only validated IPs (resolve-and-pin) and
+			// re-validate redirects, while keeping the cluster CA's TLS config
+			// (#256). The k8s API server is typically at a private IP, which the
+			// guard allow-lists, so in-cluster reads keep working.
+			Transport: &http.Transport{
+				TLSClientConfig:   tlsCfg,
+				DialContext:       egressGuard.DialContext,
+				ForceAttemptHTTP2: true,
+			},
+			CheckRedirect: egressGuard.CheckRedirect,
 		},
 		server:    strings.TrimRight(server, "/"),
 		token:     token,

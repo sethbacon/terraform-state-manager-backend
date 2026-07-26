@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"os"
 	"path"
 	"path/filepath"
@@ -38,10 +39,36 @@ type gitConn struct {
 // gitLog tags mutation logs from this connector.
 var gitLog = slog.With("component", "statesource.git")
 
+// validateGitURL restricts a git repo URL to https or ssh and rejects the SSRF
+// and local-file vectors go-git would otherwise accept (file:// reads local
+// files; http:// and git:// are plaintext and internal-reachable). For https it
+// also runs the egress guard's config-time host check so a repo URL resolving to
+// a denied range (cloud metadata / loopback) is rejected at save. This is a
+// config-time check only (it fails open on a DNS error and does not resolve-and-
+// pin the actual clone dial); giving go-git clones the same dial-time guard via
+// transport/client.InstallProtocol is tracked as a follow-up (#256).
+func validateGitURL(raw string) error {
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		return fmt.Errorf("invalid git repo_url %q", raw)
+	}
+	switch u.Scheme {
+	case "https":
+		return egressGuard.ValidateURL(raw)
+	case "ssh":
+		return nil
+	default:
+		return fmt.Errorf("git repo_url scheme %q not allowed (use https or ssh)", u.Scheme)
+	}
+}
+
 func newGit(config, creds map[string]any) (*gitConn, error) {
 	repoURL, _ := config["repo_url"].(string)
 	if repoURL == "" {
 		return nil, fmt.Errorf("git source requires config.repo_url")
+	}
+	if err := validateGitURL(repoURL); err != nil {
+		return nil, err
 	}
 	ref, _ := config["ref"].(string)
 	prefix, _ := config["prefix"].(string)

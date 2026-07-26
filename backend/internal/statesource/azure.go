@@ -3,12 +3,18 @@ package statesource
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"strings"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/bloberror"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/container"
 )
+
+// azureAccountRe is the Azure storage-account name charset (3-24 lowercase
+// letters and digits). account is interpolated into the service-URL host, so
+// restricting it prevents host/path injection (#256).
+var azureAccountRe = regexp.MustCompile(`^[a-z0-9]{3,24}$`)
 
 // azureConn reads state from an Azure Blob Storage container using a shared
 // account key.
@@ -23,6 +29,9 @@ func newAzure(config, creds map[string]any) (*azureConn, error) {
 	containerName, _ := config["container"].(string)
 	if account == "" || containerName == "" {
 		return nil, fmt.Errorf("azureblob source requires config.account and config.container")
+	}
+	if !azureAccountRe.MatchString(account) {
+		return nil, fmt.Errorf("invalid azure account %q (3-24 lowercase letters and digits)", account)
 	}
 	prefix, _ := config["prefix"].(string)
 	accountKey, _ := creds["account_key"].(string)
