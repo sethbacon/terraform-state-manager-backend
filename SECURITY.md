@@ -58,7 +58,10 @@ We will credit reporters in the release notes unless anonymity is requested.
   (keyless, Sigstore)
 - A software bill of materials (SBOM) is generated for release archives via syft
 - Static analysis via `gosec` runs on every PR with baseline drift detection
-  (`backend/scripts/gosec-compare.py`); a Trivy filesystem scan runs report-only on the image
+  (`backend/scripts/gosec-compare.py`); Trivy scans **fail** CI and the release on
+  HIGH/CRITICAL vulnerabilities that have an available fix (`exit-code: 1`,
+  `ignore-unfixed: true`) — a filesystem scan of `backend/` pre-merge and a scan
+  of the published image digest at release
 - Dependency review runs on every PR and fails on high-severity advisories
 - The application follows common OWASP mitigations: parameterised queries, input
   validation, CSRF protection, security headers, and audit logging
