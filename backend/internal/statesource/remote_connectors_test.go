@@ -194,6 +194,23 @@ func TestGit_NewValidation(t *testing.T) {
 	if _, err := newGit(map[string]any{}, nil); err == nil {
 		t.Error("missing repo_url must error")
 	}
+	// newGit must reject dangerous / non-git-fetchable URL schemes end-to-end (not
+	// only via the validateGitURL helper): file:// reads local files, while http://
+	// and git:// are plaintext / internal-reachable SSRF vectors (#271). This
+	// mirrors the scheme rejection the httpbackend and consul connectors enforce.
+	for _, bad := range []string{
+		"file:///etc/passwd",
+		"git://internal.example.com/r.git",
+		"http://example.com/r.git",
+	} {
+		if _, err := newGit(map[string]any{"repo_url": bad}, map[string]any{"token": "tok"}); err == nil {
+			t.Errorf("newGit(%q) must be rejected: scheme not allowed", bad)
+		}
+	}
+	// ssh:// is a legitimate git transport and must be accepted.
+	if _, err := newGit(map[string]any{"repo_url": "ssh://git@example.com/r.git"}, map[string]any{"token": "tok"}); err != nil {
+		t.Errorf("newGit(ssh://...) must be allowed, got %v", err)
+	}
 	g, err := newGit(map[string]any{"repo_url": "https://example.com/r.git"}, map[string]any{"token": "tok"})
 	if err != nil {
 		t.Fatalf("valid: %v", err)
