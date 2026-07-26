@@ -67,7 +67,7 @@ func discoveryGET(ctx context.Context, u string, authorize func(*http.Request)) 
 	}
 	authorize(req)
 	req.Header.Set("Accept", "application/json")
-	resp, err := httpClient.Do(req)
+	resp, err := doWithRetry(req)
 	if err != nil {
 		return nil, 0, nil, err
 	}

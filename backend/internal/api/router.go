@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/jmoiron/sqlx"
@@ -189,7 +190,9 @@ func NewRouter(cfg *config.Config, database *sql.DB, identityDB *sql.DB) (*gin.E
 
 		// Phase 1 read plane: state sources + analysis.
 		sources := NewSourcesHandlers(database, identityDB)
-		s := v1.Group("/sources", requireAuth)
+		// Bound state-operation requests so a hung or slow backend cannot block the
+		// handler goroutine (and any per-key lock it holds) indefinitely (#263).
+		s := v1.Group("/sources", requireAuth, middleware.RequestTimeout(5*time.Minute))
 		{
 			s.GET("", middleware.RequireScope(auth.ScopeStateRead), sources.ListSources())
 			s.POST("", middleware.RequireScope(auth.ScopeSourcesManage), sources.CreateSource())
