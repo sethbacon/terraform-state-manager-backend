@@ -9,6 +9,7 @@ package telemetry
 
 import (
 	"database/sql"
+	"sync"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -59,16 +60,27 @@ var (
 )
 
 // StartDBStatsCollector polls the connection pool every 30 seconds and exports
-// its statistics as Prometheus gauges. Runs for the lifetime of the process.
-func StartDBStatsCollector(database *sql.DB) {
+// its statistics as Prometheus gauges. It returns a stop function that halts the
+// collector goroutine; callers should defer it (or invoke it during graceful
+// shutdown) so the goroutine does not outlive the pool it observes. The stop
+// function is idempotent and safe to call from any goroutine.
+func StartDBStatsCollector(database *sql.DB) (stop func()) {
+	done := make(chan struct{})
 	go func() {
 		ticker := time.NewTicker(30 * time.Second)
 		defer ticker.Stop()
-		for range ticker.C {
-			stats := database.Stats()
-			dbConnectionsOpen.Set(float64(stats.OpenConnections))
-			dbConnectionsInUse.Set(float64(stats.InUse))
-			dbConnectionsIdle.Set(float64(stats.Idle))
+		for {
+			select {
+			case <-done:
+				return
+			case <-ticker.C:
+				stats := database.Stats()
+				dbConnectionsOpen.Set(float64(stats.OpenConnections))
+				dbConnectionsInUse.Set(float64(stats.InUse))
+				dbConnectionsIdle.Set(float64(stats.Idle))
+			}
 		}
 	}()
+	var once sync.Once
+	return func() { once.Do(func() { close(done) }) }
 }

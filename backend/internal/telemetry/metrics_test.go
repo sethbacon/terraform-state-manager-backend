@@ -47,7 +47,10 @@ func TestStartDBStatsCollector(t *testing.T) {
 	}
 	defer db.Close()
 
-	// StartDBStatsCollector should not panic; we don't wait for the goroutine
-	// to tick (30s) — the test verifies the function launches cleanly.
-	StartDBStatsCollector(db)
+	// StartDBStatsCollector should not panic and should return a stop function
+	// that halts the collector goroutine; the returned stop must be safe to call
+	// more than once (idempotent).
+	stop := StartDBStatsCollector(db)
+	stop()
+	stop()
 }
