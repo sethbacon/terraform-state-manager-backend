@@ -25,6 +25,11 @@ import (
 // service token in its webhook shipper config; absent is tolerated.
 const suiteSourceAppHeader = "X-Suite-Source-App"
 
+// maxAuditIngestBytes caps the /audit/ingest request body. A federated audit
+// entry is small JSON, so 1 MiB is generous while bounding a malformed or hostile
+// caller's memory use (#284, CWE-770).
+const maxAuditIngestBytes = 1 << 20
+
 // federatedAuditEntry is the wire shape a sibling app POSTs to /audit/ingest. It
 // mirrors the registry's audit.LogEntry (its internal/audit/shipper.go) field
 // for field so the registry's existing webhook shipper federates with no code
@@ -87,6 +92,9 @@ func (h *AuditIngestHandlers) Ingest() gin.HandlerFunc {
 		}
 
 		var req federatedAuditEntry
+		// A federated audit entry is small JSON; cap the body so a malformed or
+		// hostile caller cannot force unbounded buffering (#284, CWE-770).
+		c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxAuditIngestBytes)
 		if err := c.ShouldBindJSON(&req); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid audit entry"})
 			return
