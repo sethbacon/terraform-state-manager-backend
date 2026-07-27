@@ -18,4 +18,6 @@ deployments/ @sethbacon
 # Security policy and credential-handling code define how stored source/CI
 # credentials and state-write guards are protected — changes require a
 # security-aware owner before merging.
-SECURITY.md @sethbaconbackend/internal/crypto/ @sethbaconbackend/internal/auth/ @sethbacon
+SECURITY.md @sethbacon
+backend/internal/crypto/ @sethbacon
+backend/internal/auth/ @sethbacon
