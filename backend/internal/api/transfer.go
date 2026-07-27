@@ -110,7 +110,7 @@ func (h *SourcesHandlers) doTransfer(c *gin.Context, mode string) {
 
 	raw, err := connA.Read(ctx, key)
 	if err != nil {
-		c.JSON(http.StatusBadGateway, gin.H{"error": "failed to read source state: " + err.Error()})
+		upstreamError(c, http.StatusBadGateway, err, "failed to read source state")
 		return
 	}
 	srcAnalysis, srcErr := analyzer.Analyze(raw.Data)
@@ -121,8 +121,9 @@ func (h *SourcesHandlers) doTransfer(c *gin.Context, mode string) {
 	}
 
 	if err := connB.Write(ctx, req.TargetKey, raw.Data); err != nil {
+		_ = c.Error(err) // log the raw connector error; keep it out of the client body/record (#286)
 		rec.Status = "failed"
-		rec.Detail = "write to target failed: " + err.Error()
+		rec.Detail = "write to target failed"
 		saved, _ := h.transferRepo.Create(ctx, rec)
 		if saved == nil {
 			saved = rec
@@ -160,7 +161,8 @@ func (h *SourcesHandlers) doTransfer(c *gin.Context, mode string) {
 					// a key something else just removed, so skip instead of proceeding.
 					conflict = "source key no longer exists (nothing to decommission)"
 				case rErr != nil:
-					conflict = "cannot verify source before decommission: " + rErr.Error()
+					_ = c.Error(rErr)
+					conflict = "cannot verify source before decommission"
 				case rErr == nil:
 					if latestA, aErr := analyzer.Analyze(latest.Data); aErr == nil &&
 						(latestA.Serial != serial || latestA.Lineage != srcAnalysis.Lineage) {
