@@ -94,18 +94,15 @@ func newK8s(config, credentials map[string]any) (*k8s, error) {
 }
 
 func (k *k8s) do(ctx context.Context, method, rawURL, contentType string, body io.Reader) (*http.Response, error) {
-	req, err := http.NewRequestWithContext(ctx, method, rawURL, body)
-	if err != nil {
-		return nil, err
-	}
-	if k.token != "" {
-		req.Header.Set("Authorization", "Bearer "+k.token)
-	}
-	req.Header.Set("Accept", "application/json")
-	if contentType != "" {
-		req.Header.Set("Content-Type", contentType)
-	}
-	return k.client.Do(req)
+	return httpDo(ctx, k.client, method, rawURL, body, func(req *http.Request) {
+		if k.token != "" {
+			req.Header.Set("Authorization", "Bearer "+k.token)
+		}
+		req.Header.Set("Accept", "application/json")
+		if contentType != "" {
+			req.Header.Set("Content-Type", contentType)
+		}
+	})
 }
 
 type k8sSecret struct {

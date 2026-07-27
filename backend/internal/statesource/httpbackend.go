@@ -100,14 +100,11 @@ func validateHTTPURL(raw string) error {
 }
 
 func (h *httpBackend) do(ctx context.Context, method, rawURL string, body io.Reader) (*http.Response, error) {
-	req, err := http.NewRequestWithContext(ctx, method, rawURL, body)
-	if err != nil {
-		return nil, err
-	}
-	if h.username != "" || h.password != "" {
-		req.SetBasicAuth(h.username, h.password)
-	}
-	return h.client.Do(req)
+	return httpDo(ctx, h.client, method, rawURL, body, func(req *http.Request) {
+		if h.username != "" || h.password != "" {
+			req.SetBasicAuth(h.username, h.password)
+		}
+	})
 }
 
 // List probes the address with HEAD: the http backend serves exactly one state,
