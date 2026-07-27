@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"time"
 )
 
@@ -103,7 +104,7 @@ func (r *HealthRepository) Create(ctx context.Context, h *HealthRun) (*HealthRun
 func (r *HealthRepository) GetByID(ctx context.Context, id string) (*HealthRun, error) {
 	row := r.db.QueryRowContext(ctx, `SELECT `+healthColumns+` FROM health_runs WHERE id = $1`, id)
 	h, err := scanHealth(row)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {

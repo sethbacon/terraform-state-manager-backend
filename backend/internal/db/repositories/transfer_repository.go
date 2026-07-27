@@ -3,6 +3,7 @@ package repositories
 import (
 	"context"
 	"database/sql"
+	"errors"
 )
 
 // Transfer records a cross-source backup (copy) or migrate (move + verify).
@@ -62,7 +63,7 @@ func (r *TransferRepository) Create(ctx context.Context, t *Transfer) (*Transfer
 func (r *TransferRepository) GetByID(ctx context.Context, id string) (*Transfer, error) {
 	row := r.db.QueryRowContext(ctx, `SELECT `+transferColumns+` FROM state_transfers WHERE id = $1`, id)
 	t, err := scanTransfer(row)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {

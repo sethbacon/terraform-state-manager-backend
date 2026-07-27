@@ -3,6 +3,7 @@ package repositories
 import (
 	"context"
 	"database/sql"
+	"errors"
 )
 
 // WorkflowTemplate is an operator-managed CI workflow template, keyed by
@@ -47,7 +48,7 @@ func (r *WorkflowTemplateRepository) GetByKey(ctx context.Context, provider, kin
 		`SELECT `+workflowTemplateColumns+` FROM workflow_templates WHERE provider = $1 AND kind = $2 AND profile = $3`,
 		provider, kind, profile)
 	t, err := scanWorkflowTemplate(row)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {
@@ -59,7 +60,7 @@ func (r *WorkflowTemplateRepository) GetByKey(ctx context.Context, provider, kin
 func (r *WorkflowTemplateRepository) GetByID(ctx context.Context, id string) (*WorkflowTemplate, error) {
 	row := r.db.QueryRowContext(ctx, `SELECT `+workflowTemplateColumns+` FROM workflow_templates WHERE id = $1`, id)
 	t, err := scanWorkflowTemplate(row)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {
@@ -103,7 +104,7 @@ func (r *WorkflowTemplateRepository) Update(ctx context.Context, t *WorkflowTemp
 		RETURNING `+workflowTemplateColumns,
 		t.ID, t.Name, t.Description, t.Content)
 	updated, err := scanWorkflowTemplate(row)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {

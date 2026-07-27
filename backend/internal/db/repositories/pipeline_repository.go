@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 )
 
 // PipelineConnection is a CI integration used to dispatch drift/version runs.
@@ -60,7 +61,7 @@ func (r *PipelineRepository) List(ctx context.Context) ([]PipelineConnection, er
 func (r *PipelineRepository) GetByID(ctx context.Context, id string) (*PipelineConnection, error) {
 	row := r.db.QueryRowContext(ctx, `SELECT `+pipelineColumns+` FROM pipeline_connections WHERE id = $1`, id)
 	p, err := scanPipeline(row)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {
@@ -108,7 +109,7 @@ func (r *PipelineRepository) Update(ctx context.Context, p *PipelineConnection, 
 		RETURNING `+pipelineColumns,
 		p.ID, p.Name, string(configJSON), updateToken, token)
 	updated, err := scanPipeline(row)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {
