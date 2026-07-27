@@ -504,14 +504,25 @@ func TestEditState_SerialRegressionConflicts(t *testing.T) {
 		t.Error("conflicting edit must not touch the file")
 	}
 
-	// force=true overrides, still backing up first.
+	// force=true overrides, still backing up first, and the edit-ledger row must
+	// carry the forced-override marker (#280) so a bypass of the serial/lineage
+	// guards is distinguishable from an ordinary guarded write.
 	e.expectSource("s1", e.dir)
 	e.mock.ExpectQuery("INSERT INTO state_backups").
 		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("b2"))
-	e.mock.ExpectExec("INSERT INTO state_edits").WillReturnResult(sqlmock.NewResult(0, 1))
+	e.mock.ExpectExec("INSERT INTO state_edits").
+		WithArgs(
+			sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(),
+			sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(),
+			"success", "forced: serial/lineage checks overridden",
+		).
+		WillReturnResult(sqlmock.NewResult(0, 1))
 	w = e.do(http.MethodPut, "/api/v1/sources/s1/state/raw?key=app.tfstate&force=true", minState(3, "lin-1", "aws_instance.web"))
 	if w.Code != http.StatusOK {
 		t.Fatalf("forced edit: status = %d (%s)", w.Code, w.Body.String())
+	}
+	if err := e.mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("forced edit must record the override marker: %v", err)
 	}
 }
 

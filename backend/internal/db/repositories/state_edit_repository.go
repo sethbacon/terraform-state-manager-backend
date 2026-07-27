@@ -3,6 +3,7 @@ package repositories
 import (
 	"context"
 	"database/sql"
+	"errors"
 )
 
 // Backup is a pre-edit copy of a state file. Data is omitted from JSON responses.
@@ -86,7 +87,7 @@ func (r *StateEditRepository) GetBackup(ctx context.Context, id string) (*Backup
 		SELECT id, source_id, state_key, data, serial, COALESCE(created_by, ''), created_at::text
 		FROM state_backups WHERE id = $1`, id).
 		Scan(&b.ID, &b.SourceID, &b.StateKey, &b.Data, &serial, &b.CreatedBy, &b.CreatedAt)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {

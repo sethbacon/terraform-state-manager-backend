@@ -7,6 +7,7 @@ package repositories
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"time"
 )
 
@@ -34,7 +35,7 @@ func NewSystemSettingsRepository(db *sql.DB) *SystemSettingsRepository {
 func (r *SystemSettingsRepository) IsSetupCompleted(ctx context.Context) (bool, error) {
 	var done bool
 	err := r.db.QueryRowContext(ctx, `SELECT setup_completed FROM system_settings WHERE id = 1`).Scan(&done)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
 	}
 	return done, err
@@ -51,7 +52,7 @@ func (r *SystemSettingsRepository) HasPendingFeatureSetup(_ context.Context) (bo
 func (r *SystemSettingsRepository) GetSetupTokenHash(ctx context.Context) (string, error) {
 	var hash sql.NullString
 	err := r.db.QueryRowContext(ctx, `SELECT setup_token_hash FROM system_settings WHERE id = 1`).Scan(&hash)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return "", nil
 	}
 	if err != nil {
@@ -109,7 +110,7 @@ func (r *SystemSettingsRepository) GetStatus(ctx context.Context) (SetupStatus, 
 		`SELECT setup_completed, admin_configured, oidc_configured, ldap_configured, sources_configured, auth_method
 		   FROM system_settings WHERE id = 1`).
 		Scan(&s.SetupCompleted, &s.AdminConfigured, &s.OIDCConfigured, &s.LDAPConfigured, &s.SourcesConfigured, &auth)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return SetupStatus{}, nil
 	}
 	if err != nil {
@@ -125,7 +126,7 @@ func (r *SystemSettingsRepository) GetStatus(ctx context.Context) (SetupStatus, 
 func (r *SystemSettingsRepository) GetNotificationsConfig(ctx context.Context) ([]byte, error) {
 	var configJSON []byte
 	err := r.db.QueryRowContext(ctx, `SELECT notifications_config FROM system_settings WHERE id = 1`).Scan(&configJSON)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {
@@ -149,7 +150,7 @@ func (r *SystemSettingsRepository) SetNotificationsConfig(ctx context.Context, c
 func (r *SystemSettingsRepository) GetUIThemeConfig(ctx context.Context) ([]byte, error) {
 	var configJSON []byte
 	err := r.db.QueryRowContext(ctx, `SELECT ui_theme_config FROM system_settings WHERE id = 1`).Scan(&configJSON)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {

@@ -159,7 +159,7 @@ func (r *DriftRecordRepository) GetByExternalRef(ctx context.Context, sourceID, 
 		`SELECT `+driftRecordColumns+` FROM drift_records WHERE source_id = $1 AND external_ref = $2`,
 		sourceID, externalRef)
 	rec, err := scanDriftRecord(row)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {
@@ -255,7 +255,7 @@ func (r *DriftRecordRepository) CountRecords(ctx context.Context, statuses []str
 func (r *DriftRecordRepository) GetByID(ctx context.Context, id string) (*DriftRecord, error) {
 	row := r.db.QueryRowContext(ctx, `SELECT `+driftRecordColumns+` FROM drift_records WHERE id = $1`, id)
 	rec, err := scanDriftRecord(row)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {
@@ -275,7 +275,7 @@ func (r *DriftRecordRepository) Acknowledge(ctx context.Context, id, actor, note
 		RETURNING `+driftRecordColumns,
 		id, actor, note)
 	rec, err := scanDriftRecord(row)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {
@@ -292,7 +292,7 @@ func (r *DriftRecordRepository) Resolve(ctx context.Context, id string) (*DriftR
 		WHERE id = $1 AND status <> 'resolved'
 		RETURNING `+driftRecordColumns, id)
 	rec, err := scanDriftRecord(row)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {

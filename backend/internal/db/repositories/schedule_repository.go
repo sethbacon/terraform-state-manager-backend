@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"time"
 )
 
@@ -98,7 +99,7 @@ func (r *ScheduleRepository) List(ctx context.Context) ([]Schedule, error) {
 func (r *ScheduleRepository) GetByID(ctx context.Context, id string) (*Schedule, error) {
 	row := r.db.QueryRowContext(ctx, `SELECT `+scheduleColumns+` FROM schedules WHERE id = $1`, id)
 	s, err := scanSchedule(row)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {
@@ -122,7 +123,7 @@ func (r *ScheduleRepository) Update(ctx context.Context, id string, s *Schedule,
 		RETURNING `+scheduleColumns,
 		id, s.Name, s.CronExpr, s.TargetType, string(cfg), s.Enabled, nullTime(nextRun))
 	sc, err := scanSchedule(row)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {

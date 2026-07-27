@@ -7,6 +7,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"time"
 )
 
@@ -68,7 +69,7 @@ func (r *OIDCConfigRepository) GetActiveOIDCConfig(ctx context.Context) (*OIDCCo
 		`SELECT issuer_url, client_id, client_secret_encrypted, redirect_url, scopes
 		   FROM oidc_configs WHERE is_active = true`).
 		Scan(&c.IssuerURL, &c.ClientID, &c.ClientSecretEncrypted, &c.RedirectURL, &scopesJSON)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {
