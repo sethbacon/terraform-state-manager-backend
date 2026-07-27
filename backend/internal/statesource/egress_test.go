@@ -1,6 +1,8 @@
 package statesource
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"testing"
 
@@ -28,7 +30,7 @@ func TestEgressGuard_Policy(t *testing.T) {
 
 	for _, u := range []string{
 		"https://169.254.169.254/latest/meta-data/", // cloud metadata (link-local)
-		"https://127.0.0.1/state",                    // loopback
+		"https://127.0.0.1/state",                   // loopback
 	} {
 		if err := g.ValidateURL(u); err == nil {
 			t.Errorf("expected %q to be blocked by the egress policy", u)
@@ -92,5 +94,58 @@ func TestNewAzure_AccountValidation(t *testing.T) {
 	if _, err := newAzure(map[string]any{"account": "validacct123", "container": "c"},
 		map[string]any{"account_key": key}); err != nil {
 		t.Errorf("valid azure account should be accepted, got %v", err)
+	}
+}
+
+// TestConsulSafeClient_StripsTokenCrossHost verifies the consul client removes the
+// non-standard X-Consul-Token header when a redirect crosses to a different host
+// (net/http forwards unknown headers across redirects, which would leak the ACL
+// token) while preserving it on a same-host redirect (#302). Literal private IPs
+// keep the guard's own re-validation passing (so the strip path is exercised) and
+// avoid any DNS lookup.
+func TestConsulSafeClient_StripsTokenCrossHost(t *testing.T) {
+	check := consulSafeClient().CheckRedirect
+	orig := httptest.NewRequest(http.MethodGet, "https://10.1.2.3/v1/kv/x", nil)
+
+	cross := httptest.NewRequest(http.MethodGet, "https://10.9.9.9/v1/kv/x", nil)
+	cross.Header.Set("X-Consul-Token", "secret")
+	_ = check(cross, []*http.Request{orig})
+	if cross.Header.Get("X-Consul-Token") != "" {
+		t.Error("X-Consul-Token must be stripped on a cross-host redirect")
+	}
+
+	same := httptest.NewRequest(http.MethodGet, "https://10.1.2.3/v1/kv/y", nil)
+	same.Header.Set("X-Consul-Token", "secret")
+	_ = check(same, []*http.Request{orig})
+	if same.Header.Get("X-Consul-Token") != "secret" {
+		t.Error("X-Consul-Token must be preserved on a same-host redirect")
+	}
+}
+
+// TestSafeGitHTTPClient_NoTimeout guards that the git-clone client carries no
+// fixed request timeout — clone duration is bounded by the clone context, and a
+// connector-length cap would truncate a large upload-pack (#302).
+func TestSafeGitHTTPClient_NoTimeout(t *testing.T) {
+	if got := safeGitHTTPClient().Timeout; got != 0 {
+		t.Errorf("git clone client timeout = %v, want 0", got)
+	}
+}
+
+// TestInstallGuardedGitTransport installs the process-global guarded git https
+// transport; it must not panic (dial-time guard follow-up to #256, #302).
+func TestInstallGuardedGitTransport(t *testing.T) {
+	InstallGuardedGitTransport()
+}
+
+// TestEgressGuard_AllowsIPv6ULA verifies the default connector allow-list also
+// exempts the IPv6 ULA range (fc00::/7) so IPv6-only internal backends work,
+// mirroring the IPv4 RFC1918 exemption, while IPv6 link-local stays blocked (#302).
+func TestEgressGuard_AllowsIPv6ULA(t *testing.T) {
+	g := identityhttpsafe.MustGuard(defaultEgressAllowlist...)
+	if err := g.ValidateURL("https://[fd00::1]/state"); err != nil {
+		t.Errorf("expected IPv6 ULA backend to be allowed, got %v", err)
+	}
+	if err := g.ValidateURL("https://[fe80::1]/state"); err == nil {
+		t.Error("expected IPv6 link-local to be blocked")
 	}
 }

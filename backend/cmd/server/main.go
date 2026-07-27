@@ -59,6 +59,7 @@ import (
 	"github.com/terraform-state-manager/terraform-state-manager/internal/config"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/db"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/db/repositories"
+	"github.com/terraform-state-manager/terraform-state-manager/internal/statesource"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/telemetry"
 )
 
@@ -115,6 +116,18 @@ func serve(cfg *config.Config) error {
 	// Initialise structured logging as early as possible so all later output uses
 	// the configured format/level.
 	telemetry.SetupLogger(cfg.Logging.Format, cfg.Logging.Level)
+
+	// Apply the operator's SSRF egress allow-list to the state-source connectors
+	// (empty leaves the built-in private-range default) and pin the git-clone
+	// transport to the same dial-time guard. Must run before any connector is
+	// constructed (the guard is a package global).
+	if len(cfg.Security.Egress.Allowlist) > 0 {
+		if err := statesource.ConfigureEgress(cfg.Security.Egress.Allowlist); err != nil {
+			return fmt.Errorf("invalid security.egress.allowlist: %w", err)
+		}
+		slog.Info("state-source egress allow-list applied", "entries", len(cfg.Security.Egress.Allowlist))
+	}
+	statesource.InstallGuardedGitTransport()
 
 	// Export build information as a Prometheus metric for fleet inventory queries.
 	telemetry.AppInfo.WithLabelValues(Version, runtime.Version(), BuildDate).Set(1)
