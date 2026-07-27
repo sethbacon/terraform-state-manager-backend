@@ -30,7 +30,7 @@ func TestEgressGuard_Policy(t *testing.T) {
 
 	for _, u := range []string{
 		"https://169.254.169.254/latest/meta-data/", // cloud metadata (link-local)
-		"https://127.0.0.1/state",                    // loopback
+		"https://127.0.0.1/state",                   // loopback
 	} {
 		if err := g.ValidateURL(u); err == nil {
 			t.Errorf("expected %q to be blocked by the egress policy", u)
