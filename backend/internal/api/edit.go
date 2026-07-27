@@ -8,6 +8,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"strconv"
 
@@ -76,7 +77,7 @@ func (h *SourcesHandlers) EditState() gin.HandlerFunc {
 		// backend is flaky.
 		cur, readErr := conn.Read(ctx, key)
 		if readErr != nil && !statesource.IsNotFound(readErr) {
-			c.JSON(http.StatusBadGateway, gin.H{"error": "cannot verify current state before writing: " + readErr.Error()})
+			upstreamError(c, http.StatusBadGateway, readErr, "cannot verify current state before writing")
 			return
 		}
 		if readErr == nil && cur != nil {
@@ -106,7 +107,7 @@ func (h *SourcesHandlers) EditState() gin.HandlerFunc {
 		after := newAnalysis.Serial
 		if err := conn.Write(ctx, key, newData); err != nil {
 			h.recordEdit(ctx, src.ID, key, "raw_replace", actor, backupID, beforeSerial, &after, "failed", err.Error())
-			c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+			upstreamError(c, http.StatusBadGateway, err, "failed to write state to the backend")
 			return
 		}
 		detail := ""
@@ -201,7 +202,7 @@ func (h *SourcesHandlers) StateOperation() gin.HandlerFunc {
 
 		cur, err := conn.Read(ctx, key)
 		if err != nil {
-			c.JSON(http.StatusBadGateway, gin.H{"error": "failed to read current state: " + err.Error()})
+			upstreamError(c, http.StatusBadGateway, err, "failed to read current state")
 			return
 		}
 
@@ -243,7 +244,7 @@ func (h *SourcesHandlers) StateOperation() gin.HandlerFunc {
 		after := newAnalysis.Serial
 		if err := conn.Write(ctx, key, newData); err != nil {
 			h.recordEdit(ctx, src.ID, key, req.Op, actor, &backupID, beforeSerial, &after, "failed", err.Error())
-			c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+			upstreamError(c, http.StatusBadGateway, err, "failed to write state to the backend")
 			return
 		}
 		detail := req.Address
@@ -273,7 +274,7 @@ func (h *SourcesHandlers) deleteState(c *gin.Context, src *repositories.Source, 
 			c.JSON(http.StatusNotFound, gin.H{"error": "state not found"})
 			return
 		}
-		c.JSON(http.StatusBadGateway, gin.H{"error": "failed to read current state: " + err.Error()})
+		upstreamError(c, http.StatusBadGateway, err, "failed to read current state")
 		return
 	}
 
@@ -295,7 +296,7 @@ func (h *SourcesHandlers) deleteState(c *gin.Context, src *repositories.Source, 
 			return
 		}
 		h.recordEdit(ctx, src.ID, key, "delete", actor, &backupID, beforeSerial, nil, "failed", err.Error())
-		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+		upstreamError(c, http.StatusBadGateway, err, "failed to delete state from the backend")
 		return
 	}
 
@@ -435,7 +436,7 @@ func (h *SourcesHandlers) DiffBackup() gin.HandlerFunc {
 		var currentSerial *int64
 		cur, readErr := conn.Read(ctx, backup.StateKey)
 		if readErr != nil && !statesource.IsNotFound(readErr) {
-			c.JSON(http.StatusBadGateway, gin.H{"error": "cannot read current state: " + readErr.Error()})
+			upstreamError(c, http.StatusBadGateway, readErr, "cannot read current state")
 			return
 		}
 		if readErr == nil && cur != nil {
@@ -550,7 +551,7 @@ func (h *SourcesHandlers) RestoreBackup() gin.HandlerFunc {
 		// not-found proceeds without a pre-restore backup.
 		cur, readErr := conn.Read(ctx, backup.StateKey)
 		if readErr != nil && !statesource.IsNotFound(readErr) {
-			c.JSON(http.StatusBadGateway, gin.H{"error": "cannot verify current state before restoring: " + readErr.Error()})
+			upstreamError(c, http.StatusBadGateway, readErr, "cannot verify current state before restoring")
 			return
 		}
 		if readErr == nil && cur != nil {
@@ -568,7 +569,7 @@ func (h *SourcesHandlers) RestoreBackup() gin.HandlerFunc {
 
 		if err := conn.Write(ctx, backup.StateKey, backup.Data); err != nil {
 			h.recordEdit(ctx, src.ID, backup.StateKey, "restore", actor, preBackupID, beforeSerial, backup.Serial, "failed", err.Error())
-			c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+			upstreamError(c, http.StatusBadGateway, err, "failed to restore state to the backend")
 			return
 		}
 		h.recordEdit(ctx, src.ID, backup.StateKey, "restore", actor, preBackupID, beforeSerial, backup.Serial, "success", "restored backup "+backup.ID)
@@ -704,7 +705,7 @@ func userIDOf(c *gin.Context) string {
 }
 
 func (h *SourcesHandlers) recordEdit(ctx context.Context, sourceID, key, op, actor string, backupID *string, before, after *int64, result, detail string) {
-	_ = h.editRepo.RecordEdit(ctx, &repositories.Edit{
+	if err := h.editRepo.RecordEdit(ctx, &repositories.Edit{
 		SourceID:     sourceID,
 		StateKey:     key,
 		Operation:    op,
@@ -714,5 +715,9 @@ func (h *SourcesHandlers) recordEdit(ctx context.Context, sourceID, key, op, act
 		AfterSerial:  after,
 		Result:       result,
 		Detail:       detail,
-	})
+	}); err != nil {
+		// Best-effort history, but a silent drop hides tampering/troubleshooting
+		// signal — record the failure (#285, CWE-390).
+		slog.Warn("failed to record edit history", "source_id", sourceID, "state_key", key, "operation", op, "error", err)
+	}
 }
