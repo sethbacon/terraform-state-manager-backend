@@ -110,9 +110,17 @@ func (h *SourcesHandlers) EditState() gin.HandlerFunc {
 			upstreamError(c, http.StatusBadGateway, err, "failed to write state to the backend")
 			return
 		}
-		h.recordEdit(ctx, src.ID, key, "raw_replace", actor, backupID, beforeSerial, &after, "success", "")
+		detail := ""
+		if force {
+			// Record the override so a forced write (serial/lineage checks
+			// bypassed) is distinguishable in the edit ledger and audit log from
+			// an ordinary guarded write — the accountability marker that makes
+			// force=true acceptable under state:write (#280).
+			detail = "forced: serial/lineage checks overridden"
+		}
+		h.recordEdit(ctx, src.ID, key, "raw_replace", actor, backupID, beforeSerial, &after, "success", detail)
 		h.audit.write(c, "state.edit", "state", src.ID,
-			map[string]interface{}{"key": key, "op": "raw_replace"})
+			map[string]interface{}{"key": key, "op": "raw_replace", "force": force})
 		h.refreshAnalysisAsync(src, key)
 		c.JSON(http.StatusOK, gin.H{"status": "written", "backup_id": backupID, "serial": after})
 	}
