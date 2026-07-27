@@ -45,7 +45,7 @@ func newConsul(config, credentials map[string]any) (*consul, error) {
 	dc, _ := config["datacenter"].(string)
 	token, _ := credentials["token"].(string)
 	return &consul{
-		client:     safeHTTPClient(),
+		client:     consulSafeClient(),
 		scheme:     scheme,
 		address:    addr,
 		datacenter: dc,

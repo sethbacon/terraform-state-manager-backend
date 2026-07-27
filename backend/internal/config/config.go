@@ -34,6 +34,7 @@ type Config struct {
 	Suite            SuiteConfig         `mapstructure:"suite"`
 	Notifications    NotificationsConfig `mapstructure:"notifications"`
 	Drift            DriftConfig         `mapstructure:"drift"`
+	Security         SecurityConfig      `mapstructure:"security"`
 }
 
 // DriftConfig tunes the background reconciler that expires drift runs stuck in
@@ -50,6 +51,29 @@ type Config struct {
 type DriftConfig struct {
 	RunTTL            time.Duration `mapstructure:"run_ttl"`
 	ReconcileInterval time.Duration `mapstructure:"reconcile_interval"`
+}
+
+// SecurityConfig groups defense-in-depth controls. Egress governs the SSRF guard
+// applied to the state-source connectors that dial operator-supplied hosts.
+type SecurityConfig struct {
+	Egress EgressConfig `mapstructure:"egress"`
+}
+
+// EgressConfig controls the SSRF egress allow-list for the state-source
+// connectors (http, consul, k8s, git) that dial an operator-supplied backend host
+// with an attached credential. By default the connectors block loopback,
+// link-local (including the 169.254.169.254 cloud metadata endpoint), and other
+// non-private reserved ranges while ALLOWING the RFC1918 / IPv6-ULA private
+// ranges so legitimate internal backends keep working. Setting Allowlist REPLACES
+// that private-range default with exactly the entries given, letting an operator
+// tighten egress to only their own internal ranges (blocking the rest of the
+// private space) without breaking those backends.
+// Env: TSM_SECURITY_EGRESS_ALLOWLIST (comma-separated).
+type EgressConfig struct {
+	// Allowlist is the set of hostnames, IPs, or CIDR ranges the connectors may
+	// dial in addition to public addresses. Empty = the built-in private-range
+	// default (RFC1918 + IPv6-ULA allowed; metadata/loopback/link-local blocked).
+	Allowlist []string `mapstructure:"allowlist"`
 }
 
 // NotificationsConfig configures outbound alert delivery. The webhook/Slack/Teams
@@ -586,4 +610,8 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("suite.role_seed_owner", "self")
 	v.SetDefault("suite.identity_shared_store", false)
 	v.SetDefault("suite.service_token", "")
+
+	// SSRF egress allow-list for the state-source connectors; empty = the
+	// built-in private-range default (see statesource/egress.go).
+	v.SetDefault("security.egress.allowlist", []string{})
 }

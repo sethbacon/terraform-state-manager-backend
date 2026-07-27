@@ -19,6 +19,7 @@ import (
 	billyutil "github.com/go-git/go-billy/v5/util"
 	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
+	gitclient "github.com/go-git/go-git/v5/plumbing/transport/client"
 	githttp "github.com/go-git/go-git/v5/plumbing/transport/http"
 	"github.com/go-git/go-git/v5/storage/memory"
 )
@@ -60,6 +61,15 @@ func validateGitURL(raw string) error {
 	default:
 		return fmt.Errorf("git repo_url scheme %q not allowed (use https or ssh)", u.Scheme)
 	}
+}
+
+// InstallGuardedGitTransport registers a process-global go-git https transport
+// that dials through the SSRF egress guard (resolve-and-pin), closing the
+// config-time-only TOCTOU / DNS-rebind window that validateGitURL leaves between
+// a repo URL being saved and the actual clone dial (#302). Call once at startup,
+// AFTER ConfigureEgress, so the installed client captures the final guard.
+func InstallGuardedGitTransport() {
+	gitclient.InstallProtocol("https", githttp.NewClient(safeGitHTTPClient()))
 }
 
 func newGit(config, creds map[string]any) (*gitConn, error) {
