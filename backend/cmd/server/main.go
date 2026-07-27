@@ -137,7 +137,8 @@ func serve(cfg *config.Config) error {
 	defer func() { _ = database.Close() }()
 	slog.Info("connected to database")
 
-	telemetry.StartDBStatsCollector(database)
+	stopDBStats := telemetry.StartDBStatsCollector(database)
+	defer stopDBStats()
 
 	slog.Info("running database migrations")
 	if err := db.RunMigrations(database, "up"); err != nil {
