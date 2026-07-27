@@ -20,10 +20,11 @@ import (
 	idstore "github.com/sethbacon/terraform-suite-identity/identity/store"
 )
 
-// writeAuditEntry records a mutation in the audit log with the acting user and
-// client IP (best-effort — an audit write failure is logged, never blocks the
-// mutation response). Shared by the admin, CI source, and pipeline handlers.
-func writeAuditEntry(c *gin.Context, repo *idstore.AuditRepository, action, resourceType, resourceID string, metadata map[string]interface{}) {
+// buildAuditLog assembles an AuditLog from the request context (acting user,
+// client IP) and the given fields. A non-empty orgID stamps the owning
+// organization so the admin audit view can be narrowed to that tenant (#298); an
+// empty orgID leaves the entry org-less (a platform-level event).
+func buildAuditLog(c *gin.Context, action, resourceType, resourceID, orgID string, metadata map[string]interface{}) *idmodels.AuditLog {
 	entry := &idmodels.AuditLog{
 		Action:       action,
 		ResourceType: &resourceType,
@@ -31,6 +32,9 @@ func writeAuditEntry(c *gin.Context, repo *idstore.AuditRepository, action, reso
 	}
 	if resourceID != "" {
 		entry.ResourceID = &resourceID
+	}
+	if orgID != "" {
+		entry.OrganizationID = &orgID
 	}
 	if v, ok := c.Get("user_id"); ok {
 		if uid, ok := v.(string); ok && uid != "" {
@@ -40,6 +44,22 @@ func writeAuditEntry(c *gin.Context, repo *idstore.AuditRepository, action, reso
 	if ip := c.ClientIP(); ip != "" {
 		entry.IPAddress = &ip
 	}
+	return entry
+}
+
+// writeAuditEntry records a platform-level mutation (no owning organization) in
+// the audit log with the acting user and client IP (best-effort — an audit write
+// failure is logged, never blocks the mutation response). Shared by the admin, CI
+// source, and pipeline handlers.
+func writeAuditEntry(c *gin.Context, repo *idstore.AuditRepository, action, resourceType, resourceID string, metadata map[string]interface{}) {
+	writeAuditEntryOrg(c, repo, action, resourceType, resourceID, "", metadata)
+}
+
+// writeAuditEntryOrg is writeAuditEntry that also attributes the entry to an
+// organization (#298), so an audit event for a specific tenant is shown only to
+// that tenant's admins by ListAuditLogs.
+func writeAuditEntryOrg(c *gin.Context, repo *idstore.AuditRepository, action, resourceType, resourceID, orgID string, metadata map[string]interface{}) {
+	entry := buildAuditLog(c, action, resourceType, resourceID, orgID, metadata)
 	if err := repo.CreateAuditLog(c.Request.Context(), entry); err != nil {
 		slog.Warn("failed to write audit entry", "action", action, "error", err)
 	}
@@ -47,6 +67,12 @@ func writeAuditEntry(c *gin.Context, repo *idstore.AuditRepository, action, reso
 
 func (h *AdminHandlers) writeAudit(c *gin.Context, action, resourceType, resourceID string, metadata map[string]interface{}) {
 	writeAuditEntry(c, h.auditRepo, action, resourceType, resourceID, metadata)
+}
+
+// writeOrgAudit records a mutation scoped to a known organization, stamping the
+// audit entry with orgID so it is visible only to that org's admins (#298).
+func (h *AdminHandlers) writeOrgAudit(c *gin.Context, action, resourceType, resourceID, orgID string, metadata map[string]interface{}) {
+	writeAuditEntryOrg(c, h.auditRepo, action, resourceType, resourceID, orgID, metadata)
 }
 
 // --- Users ---
@@ -313,7 +339,7 @@ func (h *AdminHandlers) CreateOrganization() gin.HandlerFunc {
 				}
 			}
 		}
-		h.writeAudit(c, "organization.create", "organization", org.ID, map[string]interface{}{"name": org.Name})
+		h.writeOrgAudit(c, "organization.create", "organization", org.ID, org.ID, map[string]interface{}{"name": org.Name})
 		c.JSON(http.StatusCreated, org)
 	}
 }
@@ -363,7 +389,7 @@ func (h *AdminHandlers) UpdateOrganization() gin.HandlerFunc {
 			serverError(c, err, "failed to update organization")
 			return
 		}
-		h.writeAudit(c, "organization.update", "organization", org.ID, nil)
+		h.writeOrgAudit(c, "organization.update", "organization", org.ID, org.ID, nil)
 		c.JSON(http.StatusOK, org)
 	}
 }
@@ -391,7 +417,7 @@ func (h *AdminHandlers) DeleteOrganization() gin.HandlerFunc {
 			serverError(c, err, "failed to delete organization")
 			return
 		}
-		h.writeAudit(c, "organization.delete", "organization", id, nil)
+		h.writeOrgAudit(c, "organization.delete", "organization", id, id, nil)
 		c.Status(http.StatusNoContent)
 	}
 }
@@ -464,7 +490,7 @@ func (h *AdminHandlers) AddOrganizationMember() gin.HandlerFunc {
 			serverError(c, err, "failed to add member")
 			return
 		}
-		h.writeAudit(c, "organization.member.add", "organization", orgID, map[string]interface{}{"user_id": req.UserID})
+		h.writeOrgAudit(c, "organization.member.add", "organization", orgID, orgID, map[string]interface{}{"user_id": req.UserID})
 		c.JSON(http.StatusCreated, gin.H{"status": "added"})
 	}
 }
@@ -500,7 +526,7 @@ func (h *AdminHandlers) UpdateOrganizationMember() gin.HandlerFunc {
 			serverError(c, err, "failed to update member")
 			return
 		}
-		h.writeAudit(c, "organization.member.update", "organization", orgID, map[string]interface{}{"user_id": userID})
+		h.writeOrgAudit(c, "organization.member.update", "organization", orgID, orgID, map[string]interface{}{"user_id": userID})
 		c.JSON(http.StatusOK, gin.H{"status": "updated"})
 	}
 }
@@ -520,7 +546,7 @@ func (h *AdminHandlers) RemoveOrganizationMember() gin.HandlerFunc {
 			serverError(c, err, "failed to remove member")
 			return
 		}
-		h.writeAudit(c, "organization.member.remove", "organization", orgID, map[string]interface{}{"user_id": userID})
+		h.writeOrgAudit(c, "organization.member.remove", "organization", orgID, orgID, map[string]interface{}{"user_id": userID})
 		c.Status(http.StatusNoContent)
 	}
 }

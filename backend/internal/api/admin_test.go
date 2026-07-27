@@ -194,3 +194,48 @@ func TestAdminListAuditLogs_DBError(t *testing.T) {
 		t.Errorf("status = %d, want 500 on repository failure", w.Code)
 	}
 }
+
+// TestBuildAuditLog_OrgTagging verifies an organization-scoped audit event is
+// stamped with its owning org while a platform-level event is left org-less (#298).
+func TestBuildAuditLog_OrgTagging(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = httptest.NewRequest(http.MethodPost, "/x", nil)
+	c.Set("user_id", "u-1")
+
+	org := buildAuditLog(c, "organization.member.add", "organization", "org-9", "org-9", nil)
+	if org.OrganizationID == nil || *org.OrganizationID != "org-9" {
+		t.Errorf("OrganizationID = %v, want org-9", org.OrganizationID)
+	}
+	if org.UserID == nil || *org.UserID != "u-1" {
+		t.Errorf("UserID = %v, want u-1", org.UserID)
+	}
+
+	plat := buildAuditLog(c, "state.edit", "state", "s-1", "", nil)
+	if plat.OrganizationID != nil {
+		t.Errorf("platform event OrganizationID = %v, want nil (org-less)", plat.OrganizationID)
+	}
+}
+
+// TestAuditLogsInAdminOrgs verifies the admin audit view keeps org-less platform
+// events and the caller's own-org events while filtering out another org's
+// entries (#298/#182).
+func TestAuditLogsInAdminOrgs(t *testing.T) {
+	orgless := &idmodels.AuditLog{ID: "l0", Action: "state.edit"} // OrganizationID nil
+	myOrg, otherOrg := "org-a", "org-b"
+	mine := &idmodels.AuditLog{ID: "l1", Action: "organization.member.add", OrganizationID: &myOrg}
+	other := &idmodels.AuditLog{ID: "l2", Action: "organization.member.add", OrganizationID: &otherOrg}
+
+	got := auditLogsInAdminOrgs([]*idmodels.AuditLog{orgless, mine, other}, map[string]struct{}{"org-a": {}})
+
+	if len(got) != 2 {
+		t.Fatalf("kept %d entries, want 2 (org-less + own-org)", len(got))
+	}
+	kept := map[string]bool{got[0].ID: true, got[1].ID: true}
+	if !kept["l0"] || !kept["l1"] {
+		t.Errorf("kept %v, want the org-less (l0) and own-org (l1) entries", kept)
+	}
+	if kept["l2"] {
+		t.Error("another org's entry (l2) must be filtered out")
+	}
+}
