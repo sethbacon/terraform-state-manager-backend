@@ -1,0 +1,19 @@
+# OSV-Scanner configuration for the backend Go module.
+#
+# osv-scanner (v2, used by .github/workflows/weekly-security.yml with
+# `--recursive ./backend`) automatically discovers this file next to go.mod and
+# applies the suppressions below. It only silences specific, justified findings;
+# the scan (and the reachability-aware govulncheck job) stay active for everything
+# else so genuinely exploitable issues are never hidden.
+
+[[IgnoredVulns]]
+id = "GO-2026-5932"
+# golang.org/x/crypto/openpgp is deprecated and unmaintained ("unsafe by design")
+# and has NO fixed version — the advisory range is `introduced: 0` with no fix
+# event, so no dependency bump resolves it. This module does not use the package:
+#   * `go mod why golang.org/x/crypto/openpgp` => "main module does not need" it
+#   * there are no `crypto/openpgp` imports anywhere in the source
+#   * govulncheck (call-graph reachability) reports it as uncalled
+# So this is an unreachable, unfixable transitive advisory. Suppressing only this
+# ID keeps osv-scanner and govulncheck fully active for all other findings.
+reason = "x/crypto/openpgp not imported (go mod why: not needed; no crypto/openpgp imports; govulncheck: uncalled) and has no fixed version — unreachable, unfixable transitive advisory."
