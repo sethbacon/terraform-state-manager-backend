@@ -209,6 +209,7 @@ func NewRouter(cfg *config.Config, database *sql.DB, identityDB *sql.DB) (*gin.E
 
 			// Phase 2 edit plane (validate → backup → write → audit; restore).
 			s.PUT("/:id/state/raw", middleware.RequireScope(auth.ScopeStateWrite), sources.EditState())
+			s.POST("/:id/state/diff", middleware.RequireScope(auth.ScopeStateWrite), sources.EditDiff())
 			s.POST("/:id/state/operations", middleware.RequireScope(auth.ScopeStateWrite), sources.StateOperation())
 			s.GET("/:id/state/backups", middleware.RequireScope(auth.ScopeStateRead), sources.ListBackups())
 			s.GET("/:id/state/backups/:backupId", middleware.RequireScope(auth.ScopeStateRead), sources.GetBackupContent())
@@ -236,6 +237,11 @@ func NewRouter(cfg *config.Config, database *sql.DB, identityDB *sql.DB) (*gin.E
 		// Home dashboard: cross-source aggregated overview.
 		v1.GET("/dashboard/overview", requireAuth, middleware.RequireScope(auth.ScopeStateRead), sources.DashboardOverview())
 		v1.GET("/dashboard/states-by-version", requireAuth, middleware.RequireScope(auth.ScopeStateRead), sources.StatesByVersion())
+
+		// State-store reconcile. A POST (CSRF-protected) so the state-changing
+		// re-read cannot be triggered by a replayable cross-site GET (#215); the
+		// dashboard/report GETs stay pure reads that serve the current store.
+		v1.POST("/reconcile", requireAuth, middleware.RequireScope(auth.ScopeStateRead), sources.ReconcileSources())
 
 		// Reports: cross-fleet state-file query, preview, and multi-format export.
 		v1.GET("/reports/states", requireAuth, middleware.RequireScope(auth.ScopeStateRead), sources.ReportStates())

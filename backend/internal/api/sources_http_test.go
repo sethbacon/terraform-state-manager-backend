@@ -75,6 +75,7 @@ func newSourcesEnv(t *testing.T) *sourcesEnv {
 	v1.GET("/sources/:id/state/analysis", h.AnalyzeState())
 	v1.GET("/sources/:id/state/raw", h.RawState())
 	v1.PUT("/sources/:id/state/raw", h.EditState())
+	v1.POST("/sources/:id/state/diff", h.EditDiff())
 	v1.GET("/sources/:id/state/resources", h.ListStateResources())
 	v1.GET("/sources/:id/state/outputs", h.StateOutputs())
 	v1.GET("/sources/:id/state/history", h.StateHistory())
@@ -971,6 +972,102 @@ func TestGetBackupContent(t *testing.T) {
 	e.mock.ExpectQuery("FROM state_backups WHERE id").WithArgs("ghost").WillReturnError(sql.ErrNoRows)
 	if w := e.do(http.MethodGet, "/api/v1/sources/s1/state/backups/ghost", ""); w.Code != http.StatusNotFound {
 		t.Errorf("missing backup: status = %d, want 404", w.Code)
+	}
+}
+
+func TestEditDiff(t *testing.T) {
+	e := newSourcesEnv(t)
+	// Current state: web (2 instances) + vpc. Draft: web (1 instance) + s3.
+	// Saving the draft would add s3, drop vpc, and change web's instance count.
+	current := `{"version":4,"terraform_version":"1.9.5","serial":9,"lineage":"lin-1","resources":[
+		{"module":"","mode":"managed","type":"aws_instance","name":"web",
+		 "provider":"provider[\"registry.terraform.io/hashicorp/aws\"]",
+		 "instances":[{"index_key":0},{"index_key":1}]},
+		{"module":"","mode":"managed","type":"aws_vpc","name":"main",
+		 "provider":"provider[\"registry.terraform.io/hashicorp/aws\"]","instances":[{}]}
+	]}`
+	draft := minState(7, "lin-1", "aws_instance.web", "aws_s3_bucket.logs")
+	e.seed(t, "app.tfstate", current)
+
+	e.expectSource("s1", e.dir)
+	w := e.do(http.MethodPost, "/api/v1/sources/s1/state/diff?key=app.tfstate", draft)
+	if w.Code != http.StatusOK {
+		t.Fatalf("diff: status = %d (%s)", w.Code, w.Body.String())
+	}
+	var diff struct {
+		DraftSerial   *int64 `json:"draft_serial"`
+		CurrentSerial *int64 `json:"current_serial"`
+		Added         []struct {
+			Type string `json:"type"`
+		} `json:"added"`
+		Removed []struct {
+			Type string `json:"type"`
+		} `json:"removed"`
+		Changed []struct {
+			Type string `json:"type"`
+		} `json:"changed"`
+		ApproximateChanged bool `json:"approximate_changed"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &diff); err != nil {
+		t.Fatalf("invalid diff json: %v (%s)", err, w.Body.String())
+	}
+	if diff.DraftSerial == nil || *diff.DraftSerial != 7 || diff.CurrentSerial == nil || *diff.CurrentSerial != 9 {
+		t.Errorf("serials = %v/%v, want draft 7 / current 9", diff.DraftSerial, diff.CurrentSerial)
+	}
+	if len(diff.Added) != 1 || diff.Added[0].Type != "aws_s3_bucket" {
+		t.Errorf("added = %+v, want the draft-only aws_s3_bucket", diff.Added)
+	}
+	if len(diff.Removed) != 1 || diff.Removed[0].Type != "aws_vpc" {
+		t.Errorf("removed = %+v, want the current-only aws_vpc", diff.Removed)
+	}
+	if len(diff.Changed) != 1 || diff.Changed[0].Type != "aws_instance" {
+		t.Errorf("changed = %+v, want aws_instance (instance-count delta)", diff.Changed)
+	}
+	if !diff.ApproximateChanged {
+		t.Error("approximate_changed must be true (instance-level heuristic)")
+	}
+}
+
+func TestEditDiff_CurrentMissing(t *testing.T) {
+	e := newSourcesEnv(t)
+	// No seeded file: the connector reports not-found, so saving the draft would
+	// create everything - the whole draft lands in "added" and current_serial is nil.
+	draft := minState(7, "lin-1", "aws_instance.web")
+	e.expectSource("s1", e.dir)
+	w := e.do(http.MethodPost, "/api/v1/sources/s1/state/diff?key=ghost.tfstate", draft)
+	if w.Code != http.StatusOK {
+		t.Fatalf("diff: status = %d (%s)", w.Code, w.Body.String())
+	}
+	var diff struct {
+		CurrentSerial *int64 `json:"current_serial"`
+		Added         []struct {
+			Type string `json:"type"`
+		} `json:"added"`
+		Removed []json.RawMessage `json:"removed"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &diff); err != nil {
+		t.Fatalf("invalid diff json: %v (%s)", err, w.Body.String())
+	}
+	if diff.CurrentSerial != nil {
+		t.Errorf("current_serial = %v, want nil (no current state)", *diff.CurrentSerial)
+	}
+	if len(diff.Added) != 1 || diff.Added[0].Type != "aws_instance" {
+		t.Errorf("added = %+v, want the whole draft", diff.Added)
+	}
+	if len(diff.Removed) != 0 {
+		t.Errorf("removed = %+v, want empty (nothing to drop)", diff.Removed)
+	}
+}
+
+func TestEditDiff_Validation(t *testing.T) {
+	e := newSourcesEnv(t)
+	// Missing key -> 400.
+	if w := e.do(http.MethodPost, "/api/v1/sources/s1/state/diff", minState(1, "lin-1")); w.Code != http.StatusBadRequest {
+		t.Errorf("missing key: status = %d, want 400", w.Code)
+	}
+	// Invalid draft JSON -> 422.
+	if w := e.do(http.MethodPost, "/api/v1/sources/s1/state/diff?key=k", "not json"); w.Code != http.StatusUnprocessableEntity {
+		t.Errorf("invalid draft: status = %d, want 422", w.Code)
 	}
 }
 

@@ -11,14 +11,13 @@ import (
 
 	"github.com/terraform-state-manager/terraform-state-manager/internal/analyzer"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/db/repositories"
-	"github.com/terraform-state-manager/terraform-state-manager/internal/services/statesync"
 	semver "github.com/terraform-state-manager/terraform-state-manager/internal/version"
 )
 
 // overviewAggCache memoizes the dashboard's store-wide aggregation queries
 // (totals + provider/resource-type/version distributions) behind a short TTL,
 // keyed on the newest last_sync_at across sources: a completed sync — including
-// the one ?refresh=true runs — changes the key and recomputes immediately,
+// one triggered via POST /reconcile — changes the key and recomputes immediately,
 // while repeated dashboard loads between syncs reuse the cached aggregates.
 // State edits that bypass sync are visible at worst overviewCacheTTL late.
 type overviewAggCache struct {
@@ -70,15 +69,15 @@ func (h *SourcesHandlers) overviewAggregates(ctx context.Context, syncKey string
 // reconciled by the statesync service) instead of re-reading every state file
 // from its backend per request. That keeps the endpoint O(store rows) no
 // matter how many state files the backends hold, and the numbers stable
-// between loads. ?refresh=true runs a reconcile cycle first (steady state:
-// one listing call per source plus reads for changed states only); if a cycle
-// is already running the current store is served as-is.
+// between loads. A reconcile is triggered out-of-band via POST /reconcile
+// (steady state: one listing call per source plus reads for changed states
+// only); this endpoint always serves the current store.
 
 // DashboardOverview aggregates analyzer metrics across every configured source
 // for the home page: totals (RUM, managed, data), provider / resource-type /
 // Terraform-version distributions, and per-source sync freshness.
 // @Summary      Dashboard overview
-// @Description  Aggregates RUM and resource/provider/Terraform-version breakdowns from the persistent analysis store, with per-source sync status. ?refresh=true reconciles first. Requires state:read.
+// @Description  Aggregates RUM and resource/provider/Terraform-version breakdowns from the persistent analysis store, with per-source sync status. Use POST /reconcile to refresh the store first. Requires state:read.
 // @Tags         Dashboard
 // @Produce      json
 // @Success      200  {object}  map[string]interface{}
@@ -88,12 +87,6 @@ func (h *SourcesHandlers) overviewAggregates(ctx context.Context, syncKey string
 func (h *SourcesHandlers) DashboardOverview() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		ctx := c.Request.Context()
-		if c.Query("refresh") == "true" && h.syncer != nil {
-			if err := h.syncer.SyncAll(ctx); err != nil && err != statesync.ErrSyncInProgress {
-				// Refresh is best-effort: serve the store either way.
-				_ = err
-			}
-		}
 
 		sources, err := h.repo.List(ctx)
 		if err != nil {
