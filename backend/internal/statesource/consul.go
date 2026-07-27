@@ -66,14 +66,11 @@ func (c *consul) kvURL(key string, query url.Values) string {
 }
 
 func (c *consul) do(ctx context.Context, method, rawURL string, body io.Reader) (*http.Response, error) {
-	req, err := http.NewRequestWithContext(ctx, method, rawURL, body)
-	if err != nil {
-		return nil, err
-	}
-	if c.token != "" {
-		req.Header.Set("X-Consul-Token", c.token)
-	}
-	return c.client.Do(req)
+	return httpDo(ctx, c.client, method, rawURL, body, func(req *http.Request) {
+		if c.token != "" {
+			req.Header.Set("X-Consul-Token", c.token)
+		}
+	})
 }
 
 // consulKVEntry is one KV pair from the non-raw GET endpoint (Value is base64).
