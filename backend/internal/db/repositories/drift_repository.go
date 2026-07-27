@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"time"
 )
 
@@ -94,7 +95,7 @@ func (r *DriftRepository) Create(ctx context.Context, d *DriftRun) (*DriftRun, e
 func (r *DriftRepository) GetByID(ctx context.Context, id string) (*DriftRun, error) {
 	row := r.db.QueryRowContext(ctx, `SELECT `+driftColumns+` FROM drift_runs WHERE id = $1`, id)
 	d, err := scanDrift(row)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {

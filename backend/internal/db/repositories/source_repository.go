@@ -7,6 +7,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 )
 
@@ -79,7 +80,7 @@ func (r *SourceRepository) List(ctx context.Context) ([]Source, error) {
 func (r *SourceRepository) GetByID(ctx context.Context, id string) (*Source, error) {
 	row := r.db.QueryRowContext(ctx, `SELECT `+sourceColumns+` FROM state_sources WHERE id = $1`, id)
 	s, err := scanSource(row)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {
@@ -146,7 +147,7 @@ func (r *SourceRepository) Update(ctx context.Context, s *Source) (*Source, erro
 		RETURNING `+sourceColumns,
 		s.ID, s.Name, endpoint, string(configJSON), string(scopeJSON), nullableBytes(s.EncryptedCredentials))
 	updated, err := scanSource(row)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {
