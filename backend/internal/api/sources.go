@@ -415,7 +415,7 @@ func (h *SourcesHandlers) ListStates() gin.HandlerFunc {
 		}
 		refs, err := conn.List(c.Request.Context())
 		if err != nil {
-			c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+			upstreamError(c, http.StatusBadGateway, err, "failed to list states from the backend")
 			return
 		}
 		// Some backends list no byte size (HCP workspaces); overlay the sizes
@@ -731,7 +731,7 @@ func (h *SourcesHandlers) readState(c *gin.Context) (*statesource.RawState, bool
 	}
 	rs, err := conn.Read(c.Request.Context(), key)
 	if err != nil {
-		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+		upstreamError(c, http.StatusBadGateway, err, "failed to read state from the backend")
 		return nil, false
 	}
 	return rs, true
