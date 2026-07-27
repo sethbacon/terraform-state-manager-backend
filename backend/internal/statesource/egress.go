@@ -27,11 +27,12 @@ import (
 
 const connectorHTTPTimeout = 30 * time.Second
 
-// defaultEgressAllowlist exempts the RFC1918 private ranges from the deny-list so
-// internal state backends (an in-cluster Kubernetes API, an internal Consul, a
-// private HTTP backend) keep working, while cloud metadata, loopback, and
+// defaultEgressAllowlist exempts the RFC1918 (IPv4) and ULA (IPv6, fc00::/7)
+// private ranges from the deny-list so internal state backends (an in-cluster
+// Kubernetes API, an internal Consul, a private HTTP backend) keep working —
+// including IPv6-only internal deployments — while cloud metadata, loopback, and
 // link-local addresses stay blocked.
-var defaultEgressAllowlist = []string{"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"}
+var defaultEgressAllowlist = []string{"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "fc00::/7"}
 
 // egressGuard denies loopback and link-local (including the 169.254.169.254 cloud
 // metadata endpoint) and other non-private reserved ranges, while allow-listing
@@ -56,4 +57,33 @@ func ConfigureEgress(allowlist []string) error {
 // custom transport of their own (http backend, consul).
 func safeHTTPClient() *http.Client {
 	return identityhttpsafe.NewClient(connectorHTTPTimeout, egressGuard)
+}
+
+// consulSafeClient is safeHTTPClient plus a redirect hook that strips consul's
+// non-standard X-Consul-Token header on a cross-host hop. net/http auto-strips
+// the credential headers it knows about (Authorization, Cookie, …) when a
+// redirect crosses to a different host, but forwards unknown ones like
+// X-Consul-Token — so without this the ACL token could ride a backend 302 to
+// another host and leak (#302). The guard's own per-hop re-validation still runs.
+func consulSafeClient() *http.Client {
+	c := safeHTTPClient()
+	guardCheck := c.CheckRedirect
+	c.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		if len(via) > 0 && req.URL.Host != via[0].URL.Host {
+			req.Header.Del("X-Consul-Token")
+		}
+		if guardCheck != nil {
+			return guardCheck(req, via)
+		}
+		return nil
+	}
+	return c
+}
+
+// safeGitHTTPClient is the git-clone variant of safeHTTPClient: the same
+// dial-time egress guard, but no fixed request timeout. A clone's duration is
+// bounded by the caller's context (the /sources RequestTimeout middleware), and
+// a fixed connector timeout would truncate a large upload-pack.
+func safeGitHTTPClient() *http.Client {
+	return identityhttpsafe.NewClient(0, egressGuard)
 }
