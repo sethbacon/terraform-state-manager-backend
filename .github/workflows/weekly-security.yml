@@ -14,8 +14,16 @@ permissions:
 
 jobs:
   # Re-run the full CI suite (build, tests, gosec, Trivy fs+image) on schedule.
+  # ci.yml's gosec job opens an issue on new findings, so it declares issues:write.
+  # A reusable-workflow call fails at startup if the caller grants less than any
+  # called job requests, and this workflow's top-level default is contents:read
+  # only — so grant issues:write on the calling job to satisfy ci.yml's permission
+  # union (contents:read + issues:write) and avoid a startup_failure.
   ci:
     name: CI
+    permissions:
+      contents: read
+      issues: write
     secrets: inherit
     uses: ./.github/workflows/ci.yml
 
