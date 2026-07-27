@@ -18,3 +18,16 @@ func serverError(c *gin.Context, err error, msg string) {
 	}
 	c.JSON(http.StatusInternalServerError, gin.H{"error": msg})
 }
+
+// upstreamError is serverError for non-500 faults: it records the raw err
+// server-side (via c.Error, surfaced in the request-keyed access log) but replies
+// with the given status and a generic, client-safe msg. Use it at connector /
+// backend failure sites (e.g. 502) so a driver/SDK error string — which can carry
+// endpoints, hostnames, or other internal detail — never reaches the client
+// (#286, CWE-209), while keeping the status more accurate than a bare 500.
+func upstreamError(c *gin.Context, status int, err error, msg string) {
+	if err != nil {
+		_ = c.Error(err)
+	}
+	c.JSON(status, gin.H{"error": msg})
+}
