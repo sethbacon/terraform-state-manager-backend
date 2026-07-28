@@ -1,5 +1,41 @@
 # Changelog
 
+## [2.7.0](https://github.com/sethbacon/terraform-state-manager-backend/compare/v2.6.0...v2.7.0) (2026-07-28)
+
+
+### Features
+
+* **admin:** org-narrow the admin audit-log view and tag org events ([#298](https://github.com/sethbacon/terraform-state-manager-backend/issues/298)) ([#319](https://github.com/sethbacon/terraform-state-manager-backend/issues/319)) ([d30b6c5](https://github.com/sethbacon/terraform-state-manager-backend/commit/d30b6c5aa1bea6396bbe9532194b8376e9493660))
+* CSRF-safe POST /reconcile + state-edit diff endpoint (FE [#214](https://github.com/sethbacon/terraform-state-manager-backend/issues/214), [#215](https://github.com/sethbacon/terraform-state-manager-backend/issues/215)) ([#324](https://github.com/sethbacon/terraform-state-manager-backend/issues/324)) ([dc88dfe](https://github.com/sethbacon/terraform-state-manager-backend/commit/dc88dfec2c17e4ed5caf6c36fb6b66fa0a68c7a3))
+* **edit:** mark forced state writes in the audit trail and edit ledger ([#280](https://github.com/sethbacon/terraform-state-manager-backend/issues/280)) ([#317](https://github.com/sethbacon/terraform-state-manager-backend/issues/317)) ([46864a0](https://github.com/sethbacon/terraform-state-manager-backend/commit/46864a0c6221c527c3d2c139a4e0921de418ee21))
+* **statesource:** SSRF egress residuals - config allow-list, git dial-pin, consul token strip ([#302](https://github.com/sethbacon/terraform-state-manager-backend/issues/302)) ([#318](https://github.com/sethbacon/terraform-state-manager-backend/issues/318)) ([28d6579](https://github.com/sethbacon/terraform-state-manager-backend/commit/28d6579da7035305600bb0646423c328e2c52fd8))
+* **telemetry:** return a stop function from StartDBStatsCollector ([#289](https://github.com/sethbacon/terraform-state-manager-backend/issues/289)) ([#316](https://github.com/sethbacon/terraform-state-manager-backend/issues/316)) ([ff68ffe](https://github.com/sethbacon/terraform-state-manager-backend/commit/ff68ffe8ed2a6f10dd17a36b82353fab7cc4c826))
+
+
+### Bug Fixes
+
+* **admin:** narrow admin user/API-key lists to the caller's orgs; correct org_owner state claim ([#182](https://github.com/sethbacon/terraform-state-manager-backend/issues/182), [#253](https://github.com/sethbacon/terraform-state-manager-backend/issues/253)) ([#299](https://github.com/sethbacon/terraform-state-manager-backend/issues/299)) ([1ea62ab](https://github.com/sethbacon/terraform-state-manager-backend/commit/1ea62ab06afefd0927a9ede4754b124544ffdec9))
+* **api:** cap audit-ingest body, log edit-history write failures, stop leaking raw connector errors ([#284](https://github.com/sethbacon/terraform-state-manager-backend/issues/284), [#285](https://github.com/sethbacon/terraform-state-manager-backend/issues/285), [#286](https://github.com/sethbacon/terraform-state-manager-backend/issues/286)) ([#312](https://github.com/sethbacon/terraform-state-manager-backend/issues/312)) ([8e79b7c](https://github.com/sethbacon/terraform-state-manager-backend/commit/8e79b7c0a029cbffb102a0af92f762d95e1f2e3c))
+* **auth:** cap API-key scopes by the owner's live privileges; bar admin-scoped keys ([#223](https://github.com/sethbacon/terraform-state-manager-backend/issues/223), [#252](https://github.com/sethbacon/terraform-state-manager-backend/issues/252)) ([#297](https://github.com/sethbacon/terraform-state-manager-backend/issues/297)) ([6d279ad](https://github.com/sethbacon/terraform-state-manager-backend/commit/6d279ad6f93e722acf0aa6f5077c0d57b00cde71))
+* **auth:** enforce JWT secret strength, rate-limit LDAP login, gate LDAP insecure TLS ([#249](https://github.com/sethbacon/terraform-state-manager-backend/issues/249), [#250](https://github.com/sethbacon/terraform-state-manager-backend/issues/250), [#251](https://github.com/sethbacon/terraform-state-manager-backend/issues/251)) ([#300](https://github.com/sethbacon/terraform-state-manager-backend/issues/300)) ([5b9aa36](https://github.com/sethbacon/terraform-state-manager-backend/commit/5b9aa36d632d39c5d0f8fa0e6d43db435318965a))
+* **resilience:** bound state requests with a timeout; retry idempotent pipeline GETs ([#263](https://github.com/sethbacon/terraform-state-manager-backend/issues/263), [#264](https://github.com/sethbacon/terraform-state-manager-backend/issues/264)) ([#304](https://github.com/sethbacon/terraform-state-manager-backend/issues/304)) ([1d8e82a](https://github.com/sethbacon/terraform-state-manager-backend/commit/1d8e82aacd15a5514535d3b3e3396bcdd2fa2fd1))
+* **state:** cap connector state reads and gzip output; paginate the backups list ([#254](https://github.com/sethbacon/terraform-state-manager-backend/issues/254), [#255](https://github.com/sethbacon/terraform-state-manager-backend/issues/255), [#262](https://github.com/sethbacon/terraform-state-manager-backend/issues/262)) ([#301](https://github.com/sethbacon/terraform-state-manager-backend/issues/301)) ([19a9332](https://github.com/sethbacon/terraform-state-manager-backend/commit/19a933203d6900a57d2965cac940ec9350d4e8e0))
+* **state:** lock transfer/migrate plane to prevent silent lost-update ([#247](https://github.com/sethbacon/terraform-state-manager-backend/issues/247)) ([#294](https://github.com/sethbacon/terraform-state-manager-backend/issues/294)) ([7806546](https://github.com/sethbacon/terraform-state-manager-backend/commit/7806546155998a3224abdf1884109b75b90c1db0))
+* **state:** route state-source connectors through an SSRF egress guard ([#256](https://github.com/sethbacon/terraform-state-manager-backend/issues/256)) ([#303](https://github.com/sethbacon/terraform-state-manager-backend/issues/303)) ([4ac2694](https://github.com/sethbacon/terraform-state-manager-backend/commit/4ac26942c88026b33912345e0227927a0206c859))
+
+
+### Documentation
+
+* add suite-token rotation, correct Trivy gate wording, fix CODEOWNERS rules ([#273](https://github.com/sethbacon/terraform-state-manager-backend/issues/273), [#291](https://github.com/sethbacon/terraform-state-manager-backend/issues/291), [#278](https://github.com/sethbacon/terraform-state-manager-backend/issues/278)) ([#311](https://github.com/sethbacon/terraform-state-manager-backend/issues/311)) ([c734c78](https://github.com/sethbacon/terraform-state-manager-backend/commit/c734c781bb6624bd430547a3858f9059b297a9ee))
+* **state:** document that pre-write state backups are persisted, unencrypted, unbounded ([#248](https://github.com/sethbacon/terraform-state-manager-backend/issues/248), [#272](https://github.com/sethbacon/terraform-state-manager-backend/issues/272)) ([#296](https://github.com/sethbacon/terraform-state-manager-backend/issues/296)) ([e5f7c92](https://github.com/sethbacon/terraform-state-manager-backend/commit/e5f7c92bfdb1b282a24dd5df52e472d80009b099))
+
+
+### Refactor
+
+* **api:** extract leader-elected background workers from NewRouter into a testable constructor ([#265](https://github.com/sethbacon/terraform-state-manager-backend/issues/265)) ([#310](https://github.com/sethbacon/terraform-state-manager-backend/issues/310)) ([b56613c](https://github.com/sethbacon/terraform-state-manager-backend/commit/b56613c8176dbcd38db4c943dd57b34ad0c890c4))
+* **repos:** standardize on errors.Is(err, sql.ErrNoRows) across the repository layer ([#287](https://github.com/sethbacon/terraform-state-manager-backend/issues/287)) ([#314](https://github.com/sethbacon/terraform-state-manager-backend/issues/314)) ([1b12e97](https://github.com/sethbacon/terraform-state-manager-backend/commit/1b12e97de7bcd835bb4a00b8787140d166ef8d5a))
+* **statesource:** extract shared httpDo core for the HTTP connectors ([#266](https://github.com/sethbacon/terraform-state-manager-backend/issues/266)) ([#315](https://github.com/sethbacon/terraform-state-manager-backend/issues/315)) ([ee5e205](https://github.com/sethbacon/terraform-state-manager-backend/commit/ee5e205cad9c8d357a368bd184f2fdb553610b2c))
+
 ## [2.6.0](https://github.com/sethbacon/terraform-state-manager-backend/compare/v2.5.0...v2.6.0) (2026-07-23)
 
 
