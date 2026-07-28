@@ -3,8 +3,10 @@ package api
 import (
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
@@ -52,9 +54,42 @@ func newRefreshEnv(t *testing.T) *refreshEnv {
 		connect,
 	))
 	r := gin.New()
+	r.POST("/api/v1/reconcile", h.ReconcileSources())
 	r.GET("/api/v1/reports/states", h.ReportStates())
 	env.r = r
 	return env
+}
+
+// reconcile POSTs the optional JSON body to the reconcile endpoint and returns
+// the recorder.
+func (env *refreshEnv) reconcile(body string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/reconcile", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	env.r.ServeHTTP(w, req)
+	return w
+}
+
+// TestReportStates_RefreshQueryIsInert locks in the #215 fix: the report GET is a
+// pure read, so a legacy ?refresh=true query must NOT run a reconcile (that moved
+// to the CSRF-protected POST /reconcile). If a source connects here, the GET is
+// still triggering the state-changing sync a cross-site request could replay.
+func TestReportStates_RefreshQueryIsInert(t *testing.T) {
+	env := newRefreshEnv(t)
+	// Only the store read is expected — no source listing / analysis writes, which a
+	// reconcile would perform.
+	env.mock.ExpectQuery("FROM state_analyses a").WillReturnRows(previewRows())
+
+	w := doGet(env.r, "/api/v1/reports/states?refresh=true")
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d (%s)", w.Code, w.Body.String())
+	}
+	if len(env.connected) != 0 {
+		t.Errorf("GET ?refresh=true reconciled %v; the report GET must stay a pure read (#215)", env.connected)
+	}
+	if err := env.mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("unmet expectations: %v", err)
+	}
 }
 
 func localSourceRows(rows ...[2]string) *sqlmock.Rows {
@@ -67,7 +102,7 @@ func localSourceRows(rows ...[2]string) *sqlmock.Rows {
 	return out
 }
 
-func TestReportStates_Refresh(t *testing.T) {
+func TestReconcileSources(t *testing.T) {
 	t.Run("scoped to the selected source", func(t *testing.T) {
 		env := newRefreshEnv(t)
 		dir1, dir2 := t.TempDir(), t.TempDir()
@@ -86,10 +121,8 @@ func TestReportStates_Refresh(t *testing.T) {
 		env.mock.ExpectExec("INSERT INTO state_analysis_history").WillReturnResult(sqlmock.NewResult(0, 1))
 		env.mock.ExpectExec("DELETE FROM state_analyses WHERE source_id").WillReturnResult(sqlmock.NewResult(0, 0))
 		env.mock.ExpectExec("INSERT INTO source_sync_status").WillReturnResult(sqlmock.NewResult(0, 1))
-		// Then the report read aggregates the store.
-		env.mock.ExpectQuery("FROM state_analyses a").WillReturnRows(previewRows())
 
-		w := doGet(env.r, "/api/v1/reports/states?refresh=true&source_id=s1")
+		w := env.reconcile(`{"source_ids":["s1"]}`)
 		if w.Code != http.StatusOK {
 			t.Fatalf("status = %d (%s)", w.Code, w.Body.String())
 		}
@@ -122,9 +155,8 @@ func TestReportStates_Refresh(t *testing.T) {
 		env.mock.ExpectExec("DELETE FROM state_analyses WHERE source_id").WillReturnResult(sqlmock.NewResult(0, 0))
 		env.mock.ExpectExec("DELETE FROM state_analysis_history").WillReturnResult(sqlmock.NewResult(0, 0))
 		env.mock.ExpectExec("INSERT INTO source_sync_status").WillReturnResult(sqlmock.NewResult(0, 1))
-		env.mock.ExpectQuery("FROM state_analyses a").WillReturnRows(previewRows())
 
-		w := doGet(env.r, "/api/v1/reports/states?refresh=true")
+		w := env.reconcile("")
 		if w.Code != http.StatusOK {
 			t.Fatalf("status = %d (%s)", w.Code, w.Body.String())
 		}

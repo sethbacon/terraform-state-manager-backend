@@ -1,7 +1,6 @@
 package api
 
 import (
-	"context"
 	"fmt"
 	"math"
 	"net/http"
@@ -13,7 +12,6 @@ import (
 
 	"github.com/terraform-state-manager/terraform-state-manager/internal/db/repositories"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/reporting"
-	"github.com/terraform-state-manager/terraform-state-manager/internal/services/statesync"
 )
 
 // reportPreviewCap bounds the rows returned to the live Reports table; the
@@ -255,11 +253,11 @@ type reportPreviewRow struct {
 }
 
 // ReportStates lists the analyzed state files matching the filter query, with a
-// summary over the full match and a capped row slice for the live table.
-// ?refresh=true reconciles first, scoped to the selected source(s) when the
-// filter names any (else a full cycle). Requires state:read.
+// summary over the full match and a capped row slice for the live table. Use
+// POST /reconcile (scoped to source_ids) to refresh the store first.
+// Requires state:read.
 // @Summary      Query state files for reporting
-// @Description  Lists analyzed state files matching optional filters (source_id[], q, version+op, provider, resource_type, and rum/managed/data/total/size min-max). Returns a summary over the full match plus up to 500 rows for the table. ?refresh=true reconciles first, scoped to the selected source(s). Requires state:read.
+// @Description  Lists analyzed state files matching optional filters (source_id[], q, version+op, provider, resource_type, and rum/managed/data/total/size min-max). Returns a summary over the full match plus up to 500 rows for the table. Use POST /reconcile (scoped to source_ids) to refresh the store first. Requires state:read.
 // @Tags         Reports
 // @Produce      json
 // @Success      200  {object}  map[string]interface{}
@@ -274,9 +272,6 @@ func (h *SourcesHandlers) ReportStates() gin.HandlerFunc {
 		if err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
-		}
-		if c.Query("refresh") == "true" && h.syncer != nil {
-			h.refreshForReport(ctx, f.sourceIDs)
 		}
 
 		// Fast path: with no residual predicate, the SQL WHERE fully captures the
@@ -328,18 +323,6 @@ func (h *SourcesHandlers) ReportStates() gin.HandlerFunc {
 // data instead of the whole fleet (which matters for backend rate limits); an
 // unscoped report falls back to a full cycle. Best-effort: a cycle already in
 // progress (ErrSyncInProgress) or any error leaves the existing store served.
-func (h *SourcesHandlers) refreshForReport(ctx context.Context, sourceIDs []string) {
-	var err error
-	if len(sourceIDs) > 0 {
-		err = h.syncer.SyncSources(ctx, sourceIDs)
-	} else {
-		err = h.syncer.SyncAll(ctx)
-	}
-	if err != nil && err != statesync.ErrSyncInProgress {
-		_ = err
-	}
-}
-
 // ReportStatesExport downloads the filtered state files as a report in the
 // requested format (json, md, or csv). The filter set is the same as
 // ReportStates. Requires state:read.

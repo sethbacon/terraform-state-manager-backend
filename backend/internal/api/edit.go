@@ -450,37 +450,133 @@ func (h *SourcesHandlers) DiffBackup() gin.HandlerFunc {
 			}
 		}
 
-		// Identity is module+mode+type+name (ResourceSummary carries no address).
-		key := func(r analyzer.ResourceSummary) string {
-			return r.Module + "\x00" + r.Mode + "\x00" + r.Type + "\x00" + r.Name
-		}
-		currentBy := make(map[string]analyzer.ResourceSummary, len(currentRes))
-		for _, r := range currentRes {
-			currentBy[key(r)] = r
-		}
-		added := make([]analyzer.ResourceSummary, 0)
-		changed := make([]analyzer.ResourceSummary, 0)
-		removed := make([]analyzer.ResourceSummary, 0)
-		inBackup := make(map[string]struct{}, len(backupRes))
-		for _, b := range backupRes {
-			inBackup[key(b)] = struct{}{}
-			cr, exists := currentBy[key(b)]
-			switch {
-			case !exists:
-				added = append(added, b)
-			case cr.Instances != b.Instances || fmt.Sprint(cr.InstanceKeys) != fmt.Sprint(b.InstanceKeys):
-				changed = append(changed, b) // reported as the post-restore shape
-			}
-		}
-		for _, r := range currentRes {
-			if _, exists := inBackup[key(r)]; !exists {
-				removed = append(removed, r)
-			}
-		}
+		// Diff phrased as what restoring the backup would do (the backup is the
+		// "proposed" state). Same instance-count/key approximation as the edit
+		// preview — see diffResources.
+		added, changed, removed := diffResources(backupRes, currentRes)
 
 		c.JSON(http.StatusOK, gin.H{
 			"key":                 backup.StateKey,
 			"backup_serial":       backup.Serial,
+			"current_serial":      currentSerial,
+			"added":               added,
+			"removed":             removed,
+			"changed":             changed,
+			"approximate_changed": true,
+		})
+	}
+}
+
+// diffResources computes a resource-level diff of proposed against current,
+// phrased as what applying proposed would do: added = present in proposed but
+// not current, removed = present in current but not proposed, changed = present
+// in both but the instance count or keys differ (an approximation, not an
+// attribute diff). Shared by the backup-restore preview (DiffBackup) and the
+// edit preview (EditDiff).
+func diffResources(proposed, current []analyzer.ResourceSummary) (added, changed, removed []analyzer.ResourceSummary) {
+	// Identity is module+mode+type+name (ResourceSummary carries no address).
+	key := func(r analyzer.ResourceSummary) string {
+		return r.Module + "\x00" + r.Mode + "\x00" + r.Type + "\x00" + r.Name
+	}
+	currentBy := make(map[string]analyzer.ResourceSummary, len(current))
+	for _, r := range current {
+		currentBy[key(r)] = r
+	}
+	added = make([]analyzer.ResourceSummary, 0)
+	changed = make([]analyzer.ResourceSummary, 0)
+	removed = make([]analyzer.ResourceSummary, 0)
+	inProposed := make(map[string]struct{}, len(proposed))
+	for _, p := range proposed {
+		inProposed[key(p)] = struct{}{}
+		cr, exists := currentBy[key(p)]
+		switch {
+		case !exists:
+			added = append(added, p)
+		case cr.Instances != p.Instances || fmt.Sprint(cr.InstanceKeys) != fmt.Sprint(p.InstanceKeys):
+			changed = append(changed, p)
+		}
+	}
+	for _, r := range current {
+		if _, exists := inProposed[key(r)]; !exists {
+			removed = append(removed, r)
+		}
+	}
+	return added, changed, removed
+}
+
+// EditDiff previews what saving the request-body draft would do to the state at
+// ?key=: which resources it would add, remove, or change relative to the current
+// server state. It runs no write and takes no lock — it lets an operator see what
+// a force-overwrite would clobber (e.g. after a 409 serial/lineage conflict)
+// before confirming (#214). The changed bucket is an instance-count/key
+// approximation, not an attribute diff (same basis as the backup diff).
+// @Summary      Preview a state edit
+// @Description  Resource-level diff of the request-body draft against the current state, phrased as what saving the draft would do. Read-only; takes no lock and writes nothing. The changed bucket is an instance-count/key approximation, not an attribute diff. Requires state:write.
+// @Tags         Edit
+// @Accept       json
+// @Produce      json
+// @Param        id   path   string  true  "Source ID"
+// @Param        key  query  string  true  "State file key"
+// @Success      200  {object}  map[string]interface{}
+// @Failure      404  {object}  map[string]interface{}
+// @Failure      422  {object}  map[string]interface{}  "draft or current state is not valid state JSON"
+// @Security     BearerAuth
+// @Security     CookieAuth
+// @Router       /sources/{id}/state/diff [post]
+func (h *SourcesHandlers) EditDiff() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		key := c.Query("key")
+		if key == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "key query parameter is required"})
+			return
+		}
+		draftData, err := io.ReadAll(io.LimitReader(c.Request.Body, maxUploadBytes))
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "failed to read request body"})
+			return
+		}
+		draftRes, err := analyzer.ListResources(draftData)
+		if err != nil {
+			c.JSON(http.StatusUnprocessableEntity, gin.H{"error": "draft is not valid state JSON: " + err.Error()})
+			return
+		}
+		var draftSerial *int64
+		if da, e := analyzer.Analyze(draftData); e == nil {
+			s := da.Serial
+			draftSerial = &s
+		}
+
+		_, conn, ok := h.sourceAndConnector(c)
+		if !ok {
+			return
+		}
+		ctx := c.Request.Context()
+
+		// Fail-closed read, same rule as EditState/DiffBackup: a transient read
+		// failure means the current state is unknown; only a genuine not-found
+		// diffs against an empty state (saving the draft would create everything).
+		var currentRes []analyzer.ResourceSummary
+		var currentSerial *int64
+		cur, readErr := conn.Read(ctx, key)
+		if readErr != nil && !statesource.IsNotFound(readErr) {
+			upstreamError(c, http.StatusBadGateway, readErr, "cannot read current state")
+			return
+		}
+		if readErr == nil && cur != nil {
+			if currentRes, err = analyzer.ListResources(cur.Data); err != nil {
+				c.JSON(http.StatusUnprocessableEntity, gin.H{"error": "current state is not valid state JSON: " + err.Error()})
+				return
+			}
+			if curA, aErr := analyzer.Analyze(cur.Data); aErr == nil {
+				s := curA.Serial
+				currentSerial = &s
+			}
+		}
+
+		added, changed, removed := diffResources(draftRes, currentRes)
+		c.JSON(http.StatusOK, gin.H{
+			"key":                 key,
+			"draft_serial":        draftSerial,
 			"current_serial":      currentSerial,
 			"added":               added,
 			"removed":             removed,

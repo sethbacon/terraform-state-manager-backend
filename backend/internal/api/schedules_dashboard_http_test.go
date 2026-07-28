@@ -162,9 +162,10 @@ func TestSchedules_RunNow(t *testing.T) {
 // Dashboard overview over the persistent analysis store
 // ---------------------------------------------------------------------------
 
-// TestDashboardOverview_StoreAggregation drives the full new flow end to end:
-// ?refresh=true runs a statesync cycle over a real local source (sqlmock store),
-// then the handler aggregates the store and reports per-source sync status.
+// TestDashboardOverview_StoreAggregation drives the full flow end to end: POST
+// /reconcile runs a statesync cycle over a real local source (sqlmock store),
+// then GET /dashboard/overview aggregates the store and reports per-source sync
+// status.
 func TestDashboardOverview_StoreAggregation(t *testing.T) {
 	t.Setenv("TSM_ENCRYPTION_KEY", "0123456789abcdef0123456789abcdef")
 	db, mock, err := sqlmock.New()
@@ -185,6 +186,7 @@ func TestDashboardOverview_StoreAggregation(t *testing.T) {
 	)
 	h.AttachSyncer(syncer)
 	r := gin.New()
+	r.POST("/api/v1/reconcile", h.ReconcileSources())
 	r.GET("/api/v1/dashboard/overview", h.DashboardOverview())
 
 	env := &sourcesEnv{r: r, mock: mock, dir: dir}
@@ -219,7 +221,12 @@ func TestDashboardOverview_StoreAggregation(t *testing.T) {
 		sqlmock.NewRows([]string{"source_id", "last_sync_at", "states_listed", "read_errors", "last_error", "stored"}).
 			AddRow("s1", "2026-06-11T09:00:00Z", 1, 0, "", 1))
 
-	w := env.do(http.MethodGet, "/api/v1/dashboard/overview?refresh=true", "")
+	// Reconcile (POST) runs the sync cycle; the dashboard GET then aggregates the
+	// store it produced.
+	if rc := env.do(http.MethodPost, "/api/v1/reconcile", ""); rc.Code != http.StatusOK {
+		t.Fatalf("reconcile: status = %d (%s)", rc.Code, rc.Body.String())
+	}
+	w := env.do(http.MethodGet, "/api/v1/dashboard/overview", "")
 	if w.Code != http.StatusOK {
 		t.Fatalf("overview: status = %d (%s)", w.Code, w.Body.String())
 	}
