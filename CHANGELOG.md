@@ -1,5 +1,15 @@
 # Changelog
 
+## [2.7.1](https://github.com/sethbacon/terraform-state-manager-backend/compare/v2.7.0...v2.7.1) (2026-07-31)
+
+
+### Bug Fixes
+
+* add CSRF-protected POST /auth/logout alongside the GET route ([#328](https://github.com/sethbacon/terraform-state-manager-backend/issues/328)) ([03221db](https://github.com/sethbacon/terraform-state-manager-backend/commit/03221db753e036e43f5c6d79b95fac061d77de55))
+* bound GET /sources so it cannot serialize the whole table ([#326](https://github.com/sethbacon/terraform-state-manager-backend/issues/326)) ([8928898](https://github.com/sethbacon/terraform-state-manager-backend/commit/892889848db4e8e90cb90a5925528dc00e6d7979))
+* bound state_backups with an age-capped retention sweep ([#325](https://github.com/sethbacon/terraform-state-manager-backend/issues/325)) ([249aa36](https://github.com/sethbacon/terraform-state-manager-backend/commit/249aa36845a43a9429d6a43dcb0cf97fd033e0d1))
+* remove the forgeable GET /auth/logout route ([#329](https://github.com/sethbacon/terraform-state-manager-backend/issues/329)) ([50bb4e4](https://github.com/sethbacon/terraform-state-manager-backend/commit/50bb4e41f1a499c49a6b82967fde9adb46890ce1))
+
 ## [2.7.0](https://github.com/sethbacon/terraform-state-manager-backend/compare/v2.6.0...v2.7.0) (2026-07-28)
 
 
