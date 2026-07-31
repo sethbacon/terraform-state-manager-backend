@@ -49,3 +49,23 @@ drift:
   # are reaped by their own reconciler using these same knobs.
   run_ttl: 2h
   reconcile_interval: 5m
+
+backup_retention:
+  # Every state edit, rm/mv, restore, and decommissioning migrate snapshots the
+  # full pre-edit state into state_backups, so the table grows for the lifetime
+  # of a source. This sweep bounds it: a backup is deleted only if it is older
+  # than max_age AND is not among the newest `keep` backups for its state.
+  #
+  # The keep floor is what makes the age cap safe — without it, a state that
+  # simply hasn't been edited in 90 days would lose every restore point. Raising
+  # `keep` costs disk (each row holds a full state copy); lowering max_age
+  # reclaims it faster. Disable entirely if you have retention obligations that
+  # forbid automatic deletion, and plan for unbounded growth instead.
+  #
+  # Runs once per sync cycle, so like the other periodic sweeps it only runs
+  # when workers.enabled is true (one leader replica). Override via
+  # TSM_BACKUP_RETENTION_ENABLED / TSM_BACKUP_RETENTION_KEEP /
+  # TSM_BACKUP_RETENTION_MAX_AGE.
+  enabled: true
+  keep: 20
+  max_age: 2160h # 90 days

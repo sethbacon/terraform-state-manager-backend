@@ -1,6 +1,9 @@
 package config
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 func TestLoadDefaults(t *testing.T) {
 	cfg, err := Load("")
@@ -238,6 +241,75 @@ func TestValidate(t *testing.T) {
 		{"bad identity ssl_mode", func(c *Config) { c.IdentityDatabase.SSLMode = "nope" }, true},
 		{"bad log level", func(c *Config) { c.Logging.Level = "verbose" }, true},
 		{"empty log level ok", func(c *Config) { c.Logging.Level = "" }, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c, _ := Load("")
+			tc.mutate(c)
+			err := c.Validate()
+			if tc.wantErr && err == nil {
+				t.Error("expected a validation error, got nil")
+			}
+			if !tc.wantErr && err != nil {
+				t.Errorf("unexpected validation error: %v", err)
+			}
+		})
+	}
+}
+
+func TestBackupRetentionDefaults(t *testing.T) {
+	cfg, err := Load("")
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	// Prune defaults ON: an install that never touches config still gets a
+	// bounded state_backups table (#257).
+	if !cfg.BackupRetention.Enabled {
+		t.Error("backup retention must default to enabled")
+	}
+	if cfg.BackupRetention.Keep != 20 {
+		t.Errorf("default keep = %d, want 20", cfg.BackupRetention.Keep)
+	}
+	if cfg.BackupRetention.MaxAge != 90*24*time.Hour {
+		t.Errorf("default max_age = %s, want 2160h", cfg.BackupRetention.MaxAge)
+	}
+}
+
+func TestBackupRetentionEnvOverride(t *testing.T) {
+	t.Setenv("TSM_BACKUP_RETENTION_ENABLED", "false")
+	t.Setenv("TSM_BACKUP_RETENTION_KEEP", "5")
+	t.Setenv("TSM_BACKUP_RETENTION_MAX_AGE", "24h")
+	cfg, err := Load("")
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if cfg.BackupRetention.Enabled {
+		t.Error("TSM_BACKUP_RETENTION_ENABLED=false must disable the prune")
+	}
+	if cfg.BackupRetention.Keep != 5 {
+		t.Errorf("keep = %d, want 5", cfg.BackupRetention.Keep)
+	}
+	if cfg.BackupRetention.MaxAge != 24*time.Hour {
+		t.Errorf("max_age = %s, want 24h", cfg.BackupRetention.MaxAge)
+	}
+}
+
+// A keep floor of 0 would let the age cap delete a state's last restore point,
+// so Validate rejects it.
+func TestBackupRetentionValidation(t *testing.T) {
+	cases := []struct {
+		name    string
+		mutate  func(*Config)
+		wantErr bool
+	}{
+		{"keep zero", func(c *Config) { c.BackupRetention.Keep = 0 }, true},
+		{"keep negative", func(c *Config) { c.BackupRetention.Keep = -1 }, true},
+		{"max_age zero", func(c *Config) { c.BackupRetention.MaxAge = 0 }, true},
+		{"keep one ok", func(c *Config) { c.BackupRetention.Keep = 1 }, false},
+		{"disabled skips checks", func(c *Config) {
+			c.BackupRetention.Enabled = false
+			c.BackupRetention.Keep = 0
+		}, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

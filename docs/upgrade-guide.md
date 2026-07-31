@@ -28,6 +28,28 @@ terraform-state-manager migrate down    # one step back (verify the matching .do
 Rollback = redeploy the previous tag. Schema rollbacks are rarely needed
 (additive migrations); if a release notes otherwise, it ships explicit steps.
 
+## One-time notice: automatic state-backup retention
+
+Installs upgrading **to the release that introduced `backup_retention`** get the
+sweep **enabled by default**, and its first worker cycle after the upgrade will
+delete existing backups that fall outside the policy — older than 90 days *and*
+not among the newest 20 for their state. On an install that has been accumulating
+backups since day one, that first sweep can remove a large number of rows.
+
+Deletion is permanent; the sweep has no undo. Before rolling this release:
+
+- Confirm your DB backup (step 1 of the procedure above) is current — that is the
+  only recovery path for pruned rows.
+- If you have retention obligations that forbid automatic deletion, set
+  `TSM_BACKUP_RETENTION_ENABLED=false` **before** rolling the worker replica.
+- To keep the sweep but start gentler, raise `TSM_BACKUP_RETENTION_KEEP` or
+  `TSM_BACKUP_RETENTION_MAX_AGE` for the first cycle, then tighten.
+
+The sweep runs only on the worker leader (`workers.enabled=true`), so an
+API-only replica rolling first changes nothing. See
+[configuration.md](configuration.md#workers) and
+[capacity-planning.md](capacity-planning.md).
+
 ## Version pinning
 
 Always pin image tags in production (`v1.0.0`, never `latest`); the chart's
