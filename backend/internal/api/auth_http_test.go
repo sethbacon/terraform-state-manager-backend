@@ -2,7 +2,6 @@ package api
 
 import (
 	"net/http"
-	"net/http/httptest"
 	"os"
 	"strings"
 	"testing"
@@ -48,7 +47,6 @@ func newAuthEnv(t *testing.T, userID string, mutate func(*config.Config)) *sourc
 	v1.GET("/login", h.LoginHandler())
 	v1.GET("/me", h.MeHandler())
 	v1.POST("/refresh", h.RefreshHandler())
-	v1.GET("/logout", h.LogoutHandler())
 	v1.POST("/logout", h.LogoutPostHandler())
 	return &sourcesEnv{r: r, mock: mock}
 }
@@ -169,30 +167,17 @@ func TestRefreshHandler(t *testing.T) {
 	}
 }
 
-func TestLogoutHandler(t *testing.T) {
+// The GET verb is gone (#274). CSRFProtect skips safe methods, so a GET logout
+// sits outside the double-submit check and a cross-site link can force a
+// victim's session to be revoked. This asserts the route is absent rather than
+// merely unused — re-adding it reopens the vector.
+func TestLogoutGetRouteRemoved(t *testing.T) {
 	e := newAuthEnv(t, "", func(cfg *config.Config) {
 		cfg.Server.PublicURL = "https://tsm.example.com"
 	})
 	w := e.do(http.MethodGet, "/api/v1/auth/logout", "")
-	if w.Code != http.StatusFound {
-		t.Fatalf("logout: status = %d, want 302", w.Code)
-	}
-	if loc := w.Header().Get("Location"); loc != "https://tsm.example.com/" {
-		t.Errorf("logout redirect = %q, want the frontend root", loc)
-	}
-
-	var authCleared bool
-	for _, ck := range w.Result().Cookies() {
-		if ck.Name == "tsm_auth_token" && ck.MaxAge < 0 {
-			authCleared = true
-			// Secure must match how it was set (https public URL → secure).
-			if !ck.Secure {
-				t.Error("clearing cookie lost the Secure attribute")
-			}
-		}
-	}
-	if !authCleared {
-		t.Error("logout did not expire the auth cookie")
+	if w.Code != http.StatusNotFound && w.Code != http.StatusMethodNotAllowed {
+		t.Errorf("GET logout: status = %d, want 404/405 — the forgeable verb must not exist", w.Code)
 	}
 }
 
@@ -246,36 +231,5 @@ func TestLogoutPostHandler(t *testing.T) {
 	}
 	if !authCleared {
 		t.Error("logout POST did not expire the auth cookie")
-	}
-}
-
-// Both methods must tear the session down identically — the POST route exists to
-// change the CSRF posture, not the logout semantics. A drift here would mean the
-// frontend gets a different outcome depending on which verb it used.
-func TestLogoutPostMatchesGetTeardown(t *testing.T) {
-	cookieSet := func(w *httptest.ResponseRecorder) map[string]int {
-		out := map[string]int{}
-		for _, ck := range w.Result().Cookies() {
-			out[ck.Name] = ck.MaxAge
-		}
-		return out
-	}
-	mutate := func(cfg *config.Config) { cfg.Server.PublicURL = "https://tsm.example.com" }
-
-	get := newAuthEnv(t, "", mutate).do(http.MethodGet, "/api/v1/auth/logout", "")
-	post := newAuthEnv(t, "", mutate).do(http.MethodPost, "/api/v1/auth/logout", "")
-
-	gotGet, gotPost := cookieSet(get), cookieSet(post)
-	if len(gotGet) != len(gotPost) {
-		t.Fatalf("cookie teardown differs: GET %v vs POST %v", gotGet, gotPost)
-	}
-	for name, age := range gotGet {
-		if gotPost[name] != age {
-			t.Errorf("cookie %q: GET MaxAge=%d, POST MaxAge=%d", name, age, gotPost[name])
-		}
-	}
-	// The GET's redirect target and the POST's redirect_url must agree.
-	if loc := get.Header().Get("Location"); !strings.Contains(post.Body.String(), loc) {
-		t.Errorf("POST redirect_url does not match GET Location %q: %s", loc, post.Body.String())
 	}
 }

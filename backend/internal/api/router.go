@@ -155,12 +155,11 @@ func NewRouter(cfg *config.Config, database *sql.DB, identityDB *sql.DB) (*gin.E
 			// Authenticated session endpoints.
 			a.GET("/me", requireAuth, authHandlers.MeHandler())
 			a.POST("/refresh", requireAuth, authHandlers.RefreshHandler())
-			// POST is the CSRF-protected logout (#274): v1 mounts CSRFProtect,
-			// which skips safe methods, so only the POST form is covered by the
-			// double-submit check. GET is retained until the shared suite
-			// frontend moves over — it drives logout for this app and the
-			// sibling registry, so both backends must accept POST first.
-			a.GET("/logout", optionalAuth, authHandlers.LogoutHandler())
+			// Logout is POST-only (#274). v1 mounts CSRFProtect, which skips
+			// safe methods, so a GET logout sat outside the double-submit check
+			// and a cross-site link could force a victim's session to be
+			// revoked. There is deliberately no GET route: re-adding one
+			// reopens the forced-logout vector.
 			a.POST("/logout", optionalAuth, authHandlers.LogoutPostHandler())
 		}
 
