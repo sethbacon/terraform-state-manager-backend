@@ -464,29 +464,62 @@ func (h *AuthHandlers) RefreshHandler() gin.HandlerFunc {
 // end-session endpoint when available so the IdP SSO session is also terminated.
 func (h *AuthHandlers) LogoutHandler() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		h.revokeCurrent(c)
-		// The route is optionalAuth: only an authenticated logout is auditable —
-		// an anonymous hit must not fabricate an unattributed entry.
-		if uid := userIDOf(c); uid != "" {
-			h.audit.write(c, "auth.logout", "user", uid, nil)
-		}
-		h.clearSessionCookies(c)
+		c.Redirect(http.StatusFound, h.endSession(c))
+	}
+}
 
-		postLogout := deriveFrontendURL(h.cfg) + "/"
-		if op := h.oidcProvider.Load(); op != nil {
-			if endSession := op.GetEndSessionEndpoint(); endSession != "" {
-				if u, err := url.Parse(endSession); err == nil {
-					q := u.Query()
-					q.Set("post_logout_redirect_uri", postLogout)
-					q.Set("client_id", h.cfg.Auth.OIDC.ClientID)
-					u.RawQuery = q.Encode()
-					c.Redirect(http.StatusFound, u.String())
-					return
-				}
+// LogoutPostHandler ends the session under CSRF protection.
+// @Summary      Log out (CSRF-safe)
+// @Description  Revokes the session JWT, clears the auth and CSRF cookies, and returns where the client should navigate next — the OIDC end-session endpoint when one is configured, otherwise the frontend root. Unlike GET /auth/logout this is subject to the double-submit CSRF check, so it cannot be triggered by a cross-site navigation. Returns 200 with a redirect_url rather than a 302 because an XHR cannot follow a cross-origin redirect to the IdP.
+// @Tags         Authentication
+// @Produce      json
+// @Success      200  {object}  map[string]interface{}
+// @Router       /auth/logout [post]
+//
+// LogoutPostHandler is the CSRF-safe counterpart to LogoutHandler (#274). The
+// GET route is reachable by a cross-site top-level navigation — SameSite=Lax
+// still sends the auth cookie — so an attacker-controlled link can force a
+// logout. CSRFProtect deliberately skips safe methods, so the only way to bring
+// logout under the double-submit check is to make it a POST.
+//
+// It answers 200 with the post-logout destination in the body rather than a 302:
+// under OIDC that destination is the provider's end-session endpoint, and an XHR
+// cannot usefully follow a cross-origin redirect, so the SPA must navigate
+// itself. The GET route stays for now — the shared frontend drives logout for
+// this app and the sibling registry, so both backends have to accept POST before
+// either can drop GET.
+func (h *AuthHandlers) LogoutPostHandler() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{"redirect_url": h.endSession(c)})
+	}
+}
+
+// endSession performs the session teardown both logout routes share — revoke,
+// audit, clear cookies — and returns where the caller should end up. Kept as one
+// function so the two verbs cannot drift apart: the POST route exists to change
+// the CSRF posture, not the logout semantics.
+func (h *AuthHandlers) endSession(c *gin.Context) string {
+	h.revokeCurrent(c)
+	// The routes are optionalAuth: only an authenticated logout is auditable —
+	// an anonymous hit must not fabricate an unattributed entry.
+	if uid := userIDOf(c); uid != "" {
+		h.audit.write(c, "auth.logout", "user", uid, nil)
+	}
+	h.clearSessionCookies(c)
+
+	postLogout := deriveFrontendURL(h.cfg) + "/"
+	if op := h.oidcProvider.Load(); op != nil {
+		if endSession := op.GetEndSessionEndpoint(); endSession != "" {
+			if u, err := url.Parse(endSession); err == nil {
+				q := u.Query()
+				q.Set("post_logout_redirect_uri", postLogout)
+				q.Set("client_id", h.cfg.Auth.OIDC.ClientID)
+				u.RawQuery = q.Encode()
+				return u.String()
 			}
 		}
-		c.Redirect(http.StatusFound, postLogout)
 	}
+	return postLogout
 }
 
 func (h *AuthHandlers) revokeCurrent(c *gin.Context) {
