@@ -460,14 +460,6 @@ func (h *AuthHandlers) RefreshHandler() gin.HandlerFunc {
 	}
 }
 
-// LogoutHandler revokes the JWT, clears cookies, and redirects to the OIDC
-// end-session endpoint when available so the IdP SSO session is also terminated.
-func (h *AuthHandlers) LogoutHandler() gin.HandlerFunc {
-	return func(c *gin.Context) {
-		c.Redirect(http.StatusFound, h.endSession(c))
-	}
-}
-
 // LogoutPostHandler ends the session under CSRF protection.
 // @Summary      Log out (CSRF-safe)
 // @Description  Revokes the session JWT, clears the auth and CSRF cookies, and returns where the client should navigate next — the OIDC end-session endpoint when one is configured, otherwise the frontend root. Unlike GET /auth/logout this is subject to the double-submit CSRF check, so it cannot be triggered by a cross-site navigation. Returns 200 with a redirect_url rather than a 302 because an XHR cannot follow a cross-origin redirect to the IdP.

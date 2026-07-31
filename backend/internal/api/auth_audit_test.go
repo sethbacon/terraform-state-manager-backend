@@ -32,12 +32,12 @@ func TestLogout_AuditsAuthenticatedUser(t *testing.T) {
 	).WillReturnResult(sqlmock.NewResult(0, 1))
 
 	r := gin.New()
-	r.GET("/logout", func(c *gin.Context) { c.Set("user_id", "u1") }, h.LogoutHandler())
+	r.POST("/logout", func(c *gin.Context) { c.Set("user_id", "u1") }, h.LogoutPostHandler())
 	w := httptest.NewRecorder()
-	r.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/logout", nil))
+	r.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/logout", nil))
 
-	if w.Code != http.StatusFound {
-		t.Fatalf("logout: status = %d, want 302 (%s)", w.Code, w.Body.String())
+	if w.Code != http.StatusOK {
+		t.Fatalf("logout: status = %d, want 200 (%s)", w.Code, w.Body.String())
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Errorf("logout must write an auth.logout audit entry: %v", err)
@@ -49,12 +49,12 @@ func TestLogout_AnonymousWritesNoAudit(t *testing.T) {
 	// No INSERT expectation queued: an unauthenticated logout (the route is
 	// optionalAuth) must not fabricate an unattributed audit entry.
 	r := gin.New()
-	r.GET("/logout", h.LogoutHandler())
+	r.POST("/logout", h.LogoutPostHandler())
 	w := httptest.NewRecorder()
-	r.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/logout", nil))
+	r.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/logout", nil))
 
-	if w.Code != http.StatusFound {
-		t.Fatalf("anonymous logout: status = %d, want 302", w.Code)
+	if w.Code != http.StatusOK {
+		t.Fatalf("anonymous logout: status = %d, want 200", w.Code)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Errorf("anonymous logout hit the database: %v", err)
