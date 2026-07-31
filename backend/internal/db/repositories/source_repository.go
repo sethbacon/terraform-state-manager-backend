@@ -57,7 +57,10 @@ func scanSource(scanner interface {
 	return &s, nil
 }
 
-// List returns all configured sources, newest first.
+// List returns all configured sources, newest first. Deliberately unbounded:
+// its callers are the statesync reconcile loop and dashboard aggregation, which
+// must see EVERY source — capping here would silently stop syncing the fleet
+// past the cap. HTTP responses use ListPage instead (#282).
 func (r *SourceRepository) List(ctx context.Context) ([]Source, error) {
 	rows, err := r.db.QueryContext(ctx, `SELECT `+sourceColumns+` FROM state_sources ORDER BY created_at DESC`)
 	if err != nil {
@@ -65,6 +68,32 @@ func (r *SourceRepository) List(ctx context.Context) ([]Source, error) {
 	}
 	defer rows.Close()
 
+	return scanSources(rows)
+}
+
+// ListPage returns one page of sources, newest first, so an HTTP response can
+// never serialize the whole table at once (#282).
+func (r *SourceRepository) ListPage(ctx context.Context, limit, offset int) ([]Source, error) {
+	rows, err := r.db.QueryContext(ctx, `SELECT `+sourceColumns+`
+		FROM state_sources ORDER BY created_at DESC
+		LIMIT $1 OFFSET $2`, limit, offset)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	return scanSources(rows)
+}
+
+// Count returns the total number of configured sources, so a paginated response
+// can report how many exist beyond the page it returned.
+func (r *SourceRepository) Count(ctx context.Context) (int, error) {
+	var n int
+	err := r.db.QueryRowContext(ctx, `SELECT count(*) FROM state_sources`).Scan(&n)
+	return n, err
+}
+
+func scanSources(rows *sql.Rows) ([]Source, error) {
 	sources := []Source{}
 	for rows.Next() {
 		s, err := scanSource(rows)

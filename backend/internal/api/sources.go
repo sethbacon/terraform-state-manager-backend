@@ -68,11 +68,20 @@ func ConnectSource(s *repositories.Source) (statesource.Connector, error) {
 	return statesource.New(s.Type, s.Config, creds)
 }
 
-// ListSources returns all configured state sources.
+// sourcePageSize is both the default and the maximum number of sources returned
+// by ListSources. It bounds the response (#282) while sitting far above any
+// realistic install — state_sources is operator-provisioned, so no existing
+// client loses rows by gaining this cap. A client that wants smaller pages can
+// ask for them; it cannot ask for a bigger one.
+const sourcePageSize = 500
+
+// ListSources returns the configured state sources, newest first.
 // @Summary      List state sources
-// @Description  Returns all configured state-source connections (secrets are never included). Requires state:read.
+// @Description  Returns configured state-source connections (secrets are never included), newest first. Bounded to 500 per response; use ?page/?per_page to walk larger fleets and compare `total` against the returned count. Requires state:read.
 // @Tags         Sources
 // @Produce      json
+// @Param        page      query  int  false  "Page number, 1-indexed (default 1)"
+// @Param        per_page  query  int  false  "Items per page (max 500, default 500)"
 // @Success      200  {object}  map[string]interface{}
 // @Failure      401  {object}  map[string]interface{}
 // @Security     BearerAuth
@@ -80,12 +89,30 @@ func ConnectSource(s *repositories.Source) (statesource.Connector, error) {
 // @Router       /sources [get]
 func (h *SourcesHandlers) ListSources() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		sources, err := h.repo.List(c.Request.Context())
+		perPage := sourcePageSize
+		if v, err := strconv.Atoi(c.Query("per_page")); err == nil && v > 0 && v <= sourcePageSize {
+			perPage = v
+		}
+		page := 1
+		// Bound page so (page-1)*perPage cannot overflow int on a crafted value.
+		if v, err := strconv.Atoi(c.Query("page")); err == nil && v > 0 && v <= 1_000_000 {
+			page = v
+		}
+		ctx := c.Request.Context()
+		sources, err := h.repo.ListPage(ctx, perPage, (page-1)*perPage)
 		if err != nil {
 			serverError(c, err, "failed to list sources")
 			return
 		}
-		c.JSON(http.StatusOK, gin.H{"sources": sources})
+		// total lets a client detect that the page it got is not the whole
+		// fleet; without it the cap would truncate silently. The legacy
+		// `sources` key is unchanged, so existing clients are unaffected.
+		total, err := h.repo.Count(ctx)
+		if err != nil {
+			serverError(c, err, "failed to list sources")
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"sources": sources, "total": total, "page": page, "per_page": perPage})
 	}
 }
 
