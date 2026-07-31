@@ -4,6 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
+	"time"
 )
 
 // Backup is a pre-edit copy of a state file. Data is omitted from JSON responses.
@@ -107,6 +109,43 @@ func (r *StateEditRepository) GetBackup(ctx context.Context, id string) (*Backup
 func (r *StateEditRepository) DeleteBackups(ctx context.Context, sourceID, key string) (int64, error) {
 	res, err := r.db.ExecContext(ctx,
 		`DELETE FROM state_backups WHERE source_id = $1 AND state_key = $2`, sourceID, key)
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
+}
+
+// PruneBackups bounds the state_backups table (#257): it deletes backups older
+// than maxAge EXCEPT the newest keep per (source_id, state_key). The keep floor
+// is what makes an age cap safe here — a plain age DELETE would wipe every
+// restore point for a state that simply has not been edited lately, so the
+// floor guarantees a rarely-edited state keeps its most recent backups
+// regardless of age. Returns the number of backups removed.
+//
+// keep must be >= 1 and maxAge > 0; the repository refuses anything else rather
+// than trusting the caller, since a zero floor turns this into a full purge.
+func (r *StateEditRepository) PruneBackups(ctx context.Context, keep int, maxAge time.Duration) (int64, error) {
+	if keep < 1 {
+		return 0, fmt.Errorf("backup retention keep must be >= 1, got %d", keep)
+	}
+	if maxAge <= 0 {
+		return 0, fmt.Errorf("backup retention max age must be > 0, got %s", maxAge)
+	}
+	// The age is passed as seconds and turned into an interval by make_interval
+	// server-side, so no interval literal is ever built by string concatenation.
+	res, err := r.db.ExecContext(ctx, `
+		DELETE FROM state_backups b
+		USING (
+			SELECT id, row_number() OVER (
+				PARTITION BY source_id, state_key ORDER BY created_at DESC
+			) AS rn
+			FROM state_backups
+		) r
+		WHERE b.id = r.id
+		  AND r.rn > $1
+		  AND b.created_at < now() - make_interval(secs => $2)`,
+		keep, maxAge.Seconds())
 	if err != nil {
 		return 0, err
 	}

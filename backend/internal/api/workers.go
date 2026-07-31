@@ -54,6 +54,15 @@ func newBackgroundWorkers(d backgroundWorkerDeps) (stop func()) {
 		repositories.NewStateAnalysisRepository(d.database),
 		ConnectSource,
 	)
+	// Bound state_backups (#257). Attached before the leader gate below because
+	// the sweep itself rides the periodic cycle, which only the leader runs.
+	if d.cfg.BackupRetention.Enabled {
+		syncer.EnableBackupRetention(
+			repositories.NewStateEditRepository(d.database),
+			d.cfg.BackupRetention.Keep,
+			d.cfg.BackupRetention.MaxAge,
+		)
+	}
 	d.sources.AttachSyncer(syncer)
 	if !d.cfg.Workers.Enabled {
 		slog.Info("background workers disabled on this replica (workers.enabled=false); " +

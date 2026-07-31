@@ -534,3 +534,98 @@ func TestAnalysisMarker(t *testing.T) {
 		t.Errorf("analysisMarker(no metadata) = %q, want \"\"", got)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Backup retention (#257)
+// ---------------------------------------------------------------------------
+
+// The prune runs on the PERIODIC path only. SyncAll is also invoked on demand
+// (post-write refresh, source-create backfill) on every replica including
+// non-worker ones, so pruning there would take a destructive sweep outside the
+// leader gate.
+func TestBackupRetentionPrunesOnPeriodicCycleOnly(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+
+	s := newSyncer(db, func(*repositories.Source) (statesource.Connector, error) {
+		return &fakeConn{}, nil
+	})
+	s.EnableBackupRetention(repositories.NewStateEditRepository(db), 20, 90*24*time.Hour)
+
+	// On-demand SyncAll: sources listing + history prune, but NO backup prune.
+	mock.ExpectQuery("SELECT .+ FROM state_sources ORDER BY").
+		WillReturnRows(sqlmock.NewRows([]string{"id"}))
+	mock.ExpectExec("DELETE FROM state_analysis_history").
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	if err := s.SyncAll(context.Background()); err != nil {
+		t.Fatalf("SyncAll: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("on-demand SyncAll must not prune backups: %v", err)
+	}
+
+	// Periodic cycle: the backup prune follows the same cycle's history prune.
+	mock.ExpectQuery("SELECT .+ FROM state_sources ORDER BY").
+		WillReturnRows(sqlmock.NewRows([]string{"id"}))
+	mock.ExpectExec("DELETE FROM state_analysis_history").
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec("DELETE FROM state_backups").
+		WithArgs(20, 90*24*time.Hour.Seconds()).
+		WillReturnResult(sqlmock.NewResult(0, 3))
+	s.syncAllLogged()
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("periodic cycle must prune backups: %v", err)
+	}
+}
+
+// With retention unconfigured (operator set backup_retention.enabled=false) the
+// periodic cycle must issue no backup DELETE at all.
+func TestBackupRetentionDisabledIssuesNoDelete(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+
+	s := newSyncer(db, func(*repositories.Source) (statesource.Connector, error) {
+		return &fakeConn{}, nil
+	})
+
+	mock.ExpectQuery("SELECT .+ FROM state_sources ORDER BY").
+		WillReturnRows(sqlmock.NewRows([]string{"id"}))
+	mock.ExpectExec("DELETE FROM state_analysis_history").
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	s.syncAllLogged()
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("disabled retention must issue no backup DELETE: %v", err)
+	}
+}
+
+// A failing prune must not abort the cycle — it is a bounded cleanup, not part
+// of the reconcile contract.
+func TestBackupRetentionErrorDoesNotFailCycle(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+
+	s := newSyncer(db, func(*repositories.Source) (statesource.Connector, error) {
+		return &fakeConn{}, nil
+	})
+	s.EnableBackupRetention(repositories.NewStateEditRepository(db), 20, time.Hour)
+
+	mock.ExpectQuery("SELECT .+ FROM state_sources ORDER BY").
+		WillReturnRows(sqlmock.NewRows([]string{"id"}))
+	mock.ExpectExec("DELETE FROM state_analysis_history").
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec("DELETE FROM state_backups").
+		WillReturnError(errors.New("db down"))
+	s.syncAllLogged() // must not panic
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Error(err)
+	}
+}

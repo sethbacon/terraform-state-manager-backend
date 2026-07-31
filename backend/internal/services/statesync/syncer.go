@@ -65,6 +65,11 @@ type Syncer struct {
 	stopCh     chan struct{}
 	logger     *slog.Logger
 	runMu      sync.Mutex
+
+	// Backup retention (#257); nil edits means the sweep is disabled.
+	edits           *repositories.StateEditRepository
+	retentionKeep   int
+	retentionMaxAge time.Duration
 }
 
 // New constructs a Syncer. Call Start to begin the background loop.
@@ -113,12 +118,43 @@ func (s *Syncer) Stop() {
 	telemetry.UnregisterWorker(workerName)
 }
 
+// EnableBackupRetention turns on the periodic state_backups sweep (#257).
+// Unset, no sweep runs — the wiring layer calls this only when
+// backup_retention.enabled is true. Call before Start.
+func (s *Syncer) EnableBackupRetention(edits *repositories.StateEditRepository, keep int, maxAge time.Duration) {
+	s.edits = edits
+	s.retentionKeep = keep
+	s.retentionMaxAge = maxAge
+}
+
 func (s *Syncer) syncAllLogged() {
 	// The tick lands BEFORE the cycle: liveness telemetry measures "the loop is
 	// running", not "the cycle was fast" (a long backfill must not read as dead).
 	telemetry.WorkerTick(workerName)
 	if err := s.SyncAll(context.Background()); err != nil && err != ErrSyncInProgress {
 		s.logger.Error("sync cycle failed", "error", err)
+	}
+	s.pruneBackups(context.Background())
+}
+
+// pruneBackups bounds the state_backups table once per PERIODIC cycle. It lives
+// here rather than in SyncAll on purpose: SyncAll is also called on demand
+// (post-write refresh, source-create backfill) on every replica, including
+// workers-disabled ones, and a destructive sweep must stay inside the
+// leader-elected periodic path. A failure is logged, never fatal — cleanup is
+// not part of the reconcile contract.
+func (s *Syncer) pruneBackups(ctx context.Context) {
+	if s.edits == nil {
+		return
+	}
+	n, err := s.edits.PruneBackups(ctx, s.retentionKeep, s.retentionMaxAge)
+	if err != nil {
+		s.logger.Error("failed to prune state backups", "error", err)
+		return
+	}
+	if n > 0 {
+		s.logger.Info("pruned state backups",
+			"deleted", n, "keep_per_state", s.retentionKeep, "max_age", s.retentionMaxAge.String())
 	}
 }
 

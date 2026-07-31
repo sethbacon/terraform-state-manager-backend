@@ -86,17 +86,19 @@ since each row holds a full state-file copy rather than a small metadata row.
   therefore tracks how often your states change, not the sync interval. Fleets
   with frequent applies grow this table fastest.
 - **`state_backups` grows with every edit, `rm`/`mv`, or restore, plus a
-  decommissioning migrate — and does not self-prune.** Transfer is the only
-  operation that doesn't always add a row: a plain backup, and a migrate
-  without `decommission` (or one whose verification fails), write zero
-  `state_backups` rows, since the target's prior content is never backed up.
-  Unlike `state_analysis_history` (auto-pruned after 180 days by the sync
-  worker's `PruneHistory`), `state_backups` has **no automatic retention or
-  pruning** today. The only way to remove backups is an admin purge
-  (`purge=true` on delete), which also removes the state object itself —
-  there is no "prune old backups, keep the state" operation. Plan for
-  unbounded growth (or a manual pruning process) until the planned retention
-  policy ships (tracked in #257).
+  decommissioning migrate.** Transfer is the only operation that doesn't always
+  add a row: a plain backup, and a migrate without `decommission` (or one whose
+  verification fails), write zero `state_backups` rows, since the target's prior
+  content is never backed up. The table is **bounded by an automatic retention
+  sweep** (on by default): once per sync cycle the worker deletes backups older
+  than `backup_retention.max_age` (default 90 days) **except** the newest
+  `backup_retention.keep` (default 20) for each state, so a rarely-edited state
+  always keeps recent restore points regardless of age. Steady-state size
+  therefore tracks `keep × avg_state_size × state_count` rather than total edit
+  volume. Operators with retention obligations can disable the sweep
+  (`TSM_BACKUP_RETENTION_ENABLED=false`) and plan for unbounded growth instead.
+  An admin purge (`purge=true` on delete) still removes a state's backups
+  outright, along with the state object itself.
 - **`audit_logs`** (logins, source changes, state edits, transfers, drift acks,
   API-key lifecycle) lives in the **shared `identity` schema**. In a coupled
   suite with a federated registry, it also receives the registry's federated
@@ -122,20 +124,18 @@ edit/restore/transfer rate should add `backup_count × avg_state_size` on top.
 
 Most of the long-tail growth is `state_analysis_history`, `drift_runs`,
 `audit_logs`, and `state_backups`. `state_analysis_history` is auto-pruned
-after 180 days by the sync worker; `drift_runs` and `audit_logs` are not pruned
+after 180 days by the sync worker, and `state_backups` is auto-pruned by the
+retention sweep described above; `drift_runs` and `audit_logs` are not pruned
 by the application, so plan periodic pruning of old run/history rows per your
-retention policy. **`state_backups` is not pruned by the application either**,
-and unlike the others there is no way to prune it while keeping the state
-itself — only a full state-object purge (`purge=true` on delete) removes its
-backups. Plan capacity for unbounded backup growth until the planned retention
-policy ships (tracked in #257).
+retention policy.
 
-`state_backups` is also stored **unencrypted** at rest today, protected only by
+`state_backups` is still stored **unencrypted** at rest, protected only by
 database access control and the `state:read`-scoped API — unlike source/CI
 credentials and other secrets, which are AES-256-GCM encrypted (see
 [threat-model.md § Assets](threat-model.md#4-assets) and
-[../SECURITY.md](../SECURITY.md)). Encryption at rest is planned alongside the
-retention policy (tracked in #257).
+[../SECURITY.md](../SECURITY.md)). Encryption at rest is still planned
+(tracked in #257); the retention sweep bounds how much plaintext accumulates
+but does not protect what is stored.
 
 ---
 

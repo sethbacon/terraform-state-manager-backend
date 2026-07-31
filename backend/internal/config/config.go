@@ -35,6 +35,8 @@ type Config struct {
 	Notifications    NotificationsConfig `mapstructure:"notifications"`
 	Drift            DriftConfig         `mapstructure:"drift"`
 	Security         SecurityConfig      `mapstructure:"security"`
+	// BackupRetention bounds the state_backups table (#257).
+	BackupRetention BackupRetentionConfig `mapstructure:"backup_retention"`
 }
 
 // DriftConfig tunes the background reconciler that expires drift runs stuck in
@@ -134,6 +136,25 @@ type SMTPConfig struct {
 // replica regardless.
 type WorkersConfig struct {
 	Enabled bool `mapstructure:"enabled"`
+}
+
+// BackupRetentionConfig bounds the state_backups table, which otherwise grows
+// without limit for the lifetime of a source (#257) — every state edit snapshots
+// the full pre-edit state, and those snapshots commonly embed credentials.
+//
+// The policy is an age cap with a keep floor: a backup is deleted only if it is
+// older than MaxAge AND is not among the newest Keep backups for its
+// (source_id, state_key). The floor is what makes the age cap safe — a plain age
+// DELETE would wipe every restore point for a state that has simply not been
+// edited lately. Enabled by default so an install that never touches config
+// still gets a bounded table; the prune runs once per statesync cycle and is
+// therefore gated by Workers.Enabled like the other periodic sweeps.
+// Env: TSM_BACKUP_RETENTION_ENABLED, TSM_BACKUP_RETENTION_KEEP,
+// TSM_BACKUP_RETENTION_MAX_AGE.
+type BackupRetentionConfig struct {
+	Enabled bool          `mapstructure:"enabled"`
+	Keep    int           `mapstructure:"keep"`
+	MaxAge  time.Duration `mapstructure:"max_age"`
 }
 
 // ServerConfig holds HTTP server settings.
@@ -486,6 +507,19 @@ func (c *Config) Validate() error {
 			"notifications.smtp.username is set but notifications.smtp.use_tls is false (the SMTP password would be sent in cleartext)")
 	}
 
+	// A zero keep floor or non-positive max age would turn the retention sweep
+	// into a purge that can delete a state's last restore point.
+	if c.BackupRetention.Enabled {
+		if c.BackupRetention.Keep < 1 {
+			problems = append(problems, fmt.Sprintf(
+				"backup_retention.keep must be >= 1 when backup_retention.enabled is true, got %d", c.BackupRetention.Keep))
+		}
+		if c.BackupRetention.MaxAge <= 0 {
+			problems = append(problems, fmt.Sprintf(
+				"backup_retention.max_age must be > 0 when backup_retention.enabled is true, got %s", c.BackupRetention.MaxAge))
+		}
+	}
+
 	if _, ok := validSSLModes[c.Database.SSLMode]; !ok {
 		problems = append(problems, fmt.Sprintf(
 			"database.ssl_mode %q is invalid (want one of disable, allow, prefer, require, verify-ca, verify-full)", c.Database.SSLMode))
@@ -560,6 +594,12 @@ func setDefaults(v *viper.Viper) {
 	// after run_ttl, sweeping every reconcile_interval.
 	v.SetDefault("drift.run_ttl", 2*time.Hour)
 	v.SetDefault("drift.reconcile_interval", 5*time.Minute)
+
+	// Backup retention: keep the newest 20 backups per state regardless of age,
+	// and drop anything older than 90 days beyond that floor.
+	v.SetDefault("backup_retention.enabled", true)
+	v.SetDefault("backup_retention.keep", 20)
+	v.SetDefault("backup_retention.max_age", 90*24*time.Hour)
 
 	v.SetDefault("auth.oidc.enabled", false)
 	v.SetDefault("auth.oidc.issuer_url", "")
