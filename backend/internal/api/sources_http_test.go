@@ -143,6 +143,9 @@ func TestListSources(t *testing.T) {
 		WillReturnRows(sqlmock.NewRows(
 			[]string{"id", "name", "type", "endpoint", "config", "scope", "encrypted_credentials", "created_at", "updated_at"}).
 			AddRow("s1", "demo", "local", "", cfg, []byte(`{}`), nil, "2026-06-10", "2026-06-10"))
+	// The listing is paginated, so the handler also asks for the total (#282).
+	e.mock.ExpectQuery("SELECT count").
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
 
 	w := e.do(http.MethodGet, "/api/v1/sources", "")
 	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"demo"`) {
@@ -1203,5 +1206,50 @@ func TestTransfer_BackupAndMigrate(t *testing.T) {
 	if w := e.do(http.MethodPost, "/api/v1/sources/s1/state/backup?key=app.tfstate",
 		`{"target_source_id":"ghost","target_key":"k"}`); w.Code != http.StatusNotFound {
 		t.Errorf("missing target source: status = %d, want 404", w.Code)
+	}
+}
+
+// GET /sources is bounded so the whole table can never be serialized in one
+// response (#282). The default page is wide enough that no realistic install
+// truncates, and `total` makes any truncation detectable rather than silent.
+func TestListSourcesIsBounded(t *testing.T) {
+	e := newSourcesEnv(t)
+	cfg, _ := json.Marshal(map[string]any{"base_path": e.dir})
+	row := func() *sqlmock.Rows {
+		return sqlmock.NewRows(
+			[]string{"id", "name", "type", "endpoint", "config", "scope", "encrypted_credentials", "created_at", "updated_at"}).
+			AddRow("s1", "demo", "local", "", cfg, []byte(`{}`), nil, "2026-06-10", "2026-06-10")
+	}
+
+	// No params: capped at the 500 default, offset 0.
+	e.mock.ExpectQuery("SELECT .+ FROM state_sources ORDER BY").WithArgs(500, 0).WillReturnRows(row())
+	e.mock.ExpectQuery("SELECT count").WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
+	w := e.do(http.MethodGet, "/api/v1/sources", "")
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"demo"`) {
+		t.Fatalf("status = %d (%s)", w.Code, w.Body.String())
+	}
+	// The legacy `sources` key must survive — existing clients read it.
+	if !strings.Contains(w.Body.String(), `"sources"`) || !strings.Contains(w.Body.String(), `"total":1`) {
+		t.Errorf("response must keep `sources` and add `total`: %s", w.Body.String())
+	}
+
+	// Explicit paging.
+	e.mock.ExpectQuery("SELECT .+ FROM state_sources ORDER BY").WithArgs(2, 4).WillReturnRows(row())
+	e.mock.ExpectQuery("SELECT count").WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(9))
+	if w := e.do(http.MethodGet, "/api/v1/sources?page=3&per_page=2", ""); w.Code != http.StatusOK {
+		t.Errorf("paged: status = %d (%s)", w.Code, w.Body.String())
+	}
+
+	// Over-cap and junk per_page fall back to the default rather than erroring,
+	// so a hostile value cannot widen the response.
+	for _, q := range []string{"?per_page=100000", "?per_page=-1", "?per_page=abc", "?page=0"} {
+		e.mock.ExpectQuery("SELECT .+ FROM state_sources ORDER BY").WithArgs(500, 0).WillReturnRows(row())
+		e.mock.ExpectQuery("SELECT count").WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
+		if w := e.do(http.MethodGet, "/api/v1/sources"+q, ""); w.Code != http.StatusOK {
+			t.Errorf("%s: status = %d (%s)", q, w.Code, w.Body.String())
+		}
+	}
+	if err := e.mock.ExpectationsWereMet(); err != nil {
+		t.Error(err)
 	}
 }

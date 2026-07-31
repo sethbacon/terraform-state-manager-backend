@@ -430,3 +430,45 @@ func TestSSOSettingsRepository(t *testing.T) {
 		t.Errorf("Upsert: %v", err)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// SourceRepository — bounded listing (#282)
+// ---------------------------------------------------------------------------
+
+func TestSourceListPage(t *testing.T) {
+	db, mock := newMock(t)
+	r := NewSourceRepository(db)
+
+	mock.ExpectQuery(`SELECT .+ FROM state_sources ORDER BY created_at DESC\s+LIMIT`).
+		WithArgs(500, 0).
+		WillReturnRows(sqlmock.NewRows(
+			[]string{"id", "name", "type", "endpoint", "config", "scope", "encrypted_credentials", "created_at", "updated_at"}).
+			AddRow("s1", "demo", "local", "", []byte(`{}`), []byte(`{}`), nil, "2026-06-10", "2026-06-10"))
+
+	got, err := r.ListPage(ctx, 500, 0)
+	if err != nil {
+		t.Fatalf("ListPage: %v", err)
+	}
+	if len(got) != 1 || got[0].Name != "demo" {
+		t.Errorf("unexpected page: %+v", got)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Error(err)
+	}
+}
+
+func TestSourceCount(t *testing.T) {
+	db, mock := newMock(t)
+	r := NewSourceRepository(db)
+
+	mock.ExpectQuery(`SELECT count\(\*\) FROM state_sources`).
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(42))
+
+	n, err := r.Count(ctx)
+	if err != nil {
+		t.Fatalf("Count: %v", err)
+	}
+	if n != 42 {
+		t.Errorf("count = %d, want 42", n)
+	}
+}

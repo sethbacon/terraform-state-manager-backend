@@ -3410,7 +3410,7 @@
                         "CookieAuth": []
                     }
                 ],
-                "description": "Returns all configured state-source connections (secrets are never included). Requires state:read.",
+                "description": "Returns configured state-source connections (secrets are never included), newest first. Bounded to 500 per response; use ?page/?per_page to walk larger fleets and compare `total` against the returned count. Requires state:read.",
                 "produces": [
                     "application/json"
                 ],
@@ -3418,6 +3418,20 @@
                     "Sources"
                 ],
                 "summary": "List state sources",
+                "parameters": [
+                    {
+                        "type": "integer",
+                        "description": "Page number, 1-indexed (default 1)",
+                        "name": "page",
+                        "in": "query"
+                    },
+                    {
+                        "type": "integer",
+                        "description": "Items per page (max 500, default 500)",
+                        "name": "per_page",
+                        "in": "query"
+                    }
+                ],
                 "responses": {
                     "200": {
                         "description": "OK",

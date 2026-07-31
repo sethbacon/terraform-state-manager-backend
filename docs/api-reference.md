@@ -149,7 +149,7 @@ Covers admin bootstrap, OIDC test/save, and source test/save.
 
 | Path                                                                                   | Scope                           | Purpose                                                     |
 | -------------------------------------------------------------------------------------- | ------------------------------- | ----------------------------------------------------------- |
-| `GET /sources` · `POST /sources`                                                       | `state:read` · `sources:manage` | List / create state sources                                 |
+| `GET /sources` · `POST /sources`                                                       | `state:read` · `sources:manage` | List / create state sources. List supports `page`/`per_page` (max 500, default 500) and returns `total` alongside `sources` |
 | `GET/PUT/DELETE /sources/{id}`                                                         | `state:read` · `sources:manage` | Source CRUD                                                 |
 | `POST /sources/{id}/test`                                                              | `state:read`                    | Test connectivity                                           |
 | `GET /sources/{id}/states`                                                             | `state:read`                    | List state files in the source                              |
