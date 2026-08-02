@@ -233,25 +233,6 @@ func auditLogsJSON(logs []*idmodels.AuditLog) []gin.H {
 	return out
 }
 
-// auditLogsInAdminOrgs keeps only the audit entries the caller may see (#298):
-// entries with no organization_id are platform-level (state/source actions on the
-// single shared pool, login, startup) and stay visible to every admin; org-tagged
-// entries (organization and member mutations) are shown only when the caller
-// administers that organization. Mirrors usersInAdminOrgs.
-func auditLogsInAdminOrgs(logs []*idmodels.AuditLog, adminOrgs map[string]struct{}) []*idmodels.AuditLog {
-	out := make([]*idmodels.AuditLog, 0, len(logs))
-	for _, l := range logs {
-		if l.OrganizationID == nil || *l.OrganizationID == "" {
-			out = append(out, l)
-			continue
-		}
-		if _, ok := adminOrgs[*l.OrganizationID]; ok {
-			out = append(out, l)
-		}
-	}
-	return out
-}
-
 // ListAuditLogs returns audit-log entries (paginated, filterable).
 // @Summary      List audit log
 // @Tags         Admin
@@ -269,31 +250,27 @@ func auditLogsInAdminOrgs(logs []*idmodels.AuditLog, adminOrgs map[string]struct
 // @Router       /admin/audit-logs [get]
 func (h *AdminHandlers) ListAuditLogs() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		// Narrow the audit trail to the caller's admin organizations (#298/#182).
-		// The outer /admin gate accepts any single-org admin's flat ScopeAdmin, so
-		// without this an admin of one org could read another tenant's
-		// member-management trail. Org-tagged events (organization + member
-		// mutations) are shown only to an admin of that org; genuinely org-less
-		// platform events (login, and state/source actions — state_sources are a
-		// single shared pool with no per-tenant owner) carry no organization_id and
-		// remain visible to every admin.
-		callerID, _ := c.Get("user_id")
-		uid, _ := callerID.(string)
-		adminOrgs, err := adminOrgSet(c.Request.Context(), h.orgRepo, uid)
+		// GUARD audit-scope-list (#298/#182): narrow the audit trail to the
+		// caller's admin organizations plus org-less platform events. The outer
+		// /admin gate accepts any single-org admin's flat ScopeAdmin, so without
+		// this an admin of one org could read another tenant's member-management
+		// trail. The narrowing is a SQL predicate rather than a post-filter, so
+		// the database never returns another tenant's rows in the first place.
+		scope, err := h.callerAuditScope(c)
 		if err != nil {
 			serverError(c, err, "failed to resolve caller organizations")
 			return
 		}
 		limit, offset := pageParams(c)
-		logs, _, err := h.auditRepo.ListAuditLogs(c.Request.Context(), auditFiltersFromQuery(c), limit, offset)
+		logs, total, err := h.auditRepo.ListAuditLogs(c.Request.Context(), auditFiltersFromQuery(c), scope, limit, offset)
 		if err != nil {
 			serverError(c, err, "failed to list audit logs")
 			return
 		}
-		logs = auditLogsInAdminOrgs(logs, adminOrgs)
-		// Post-filtered per page, so the count is page-relative (like ListUsers)
-		// rather than the unfiltered DB total.
-		c.JSON(http.StatusOK, gin.H{"logs": auditLogsJSON(logs), "total": offset + len(logs)})
+		// total is now the scoped count straight from the repository: with the
+		// tenant predicate pushed into SQL there is no post-filter to make it
+		// disagree with the rows returned.
+		c.JSON(http.StatusOK, gin.H{"logs": auditLogsJSON(logs), "total": total})
 	}
 }
 

@@ -94,7 +94,7 @@
                         "CookieAuth": []
                     }
                 ],
-                "description": "Full filtered audit trail as a file attachment. Capped at 10000 rows (X-Truncated: true when hit). Requires admin.",
+                "description": "Filtered audit trail as a file attachment, limited to the caller's admin organizations plus org-less platform events. Capped at 10000 rows (X-Truncated: true when hit). Requires admin.",
                 "produces": [
                     "text/csv",
                     "application/json"

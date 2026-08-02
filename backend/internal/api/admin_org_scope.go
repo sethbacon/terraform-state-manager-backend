@@ -22,6 +22,7 @@ package api
 import (
 	"context"
 	"net/http"
+	"sort"
 
 	"github.com/gin-gonic/gin"
 	idstore "github.com/sethbacon/terraform-suite-identity/identity/store"
@@ -137,4 +138,43 @@ func adminOrgSet(ctx context.Context, orgRepo *idstore.OrganizationRepository, c
 		}
 	}
 	return orgs, nil
+}
+
+// callerAuditScope resolves the tenant constraint every audit-log READ must
+// carry (identity v0.21.0's store.AuditScope): the organizations the caller
+// actually administers, plus rows that have no owning organization at all.
+//
+// Applies to every audit read axis behind the flat /admin gate — the paginated
+// list, the CSV/JSON export, and the GDPR per-user export. That gate accepts
+// any single-org admin's flat ScopeAdmin, so it is not a tenant boundary and
+// each axis has to narrow for itself (#182/#298, and #331 for the export that
+// did not).
+//
+// The unowned axis is not a widening. TSM deliberately writes platform-level
+// events with a NULL organization_id: logins, state-file and source actions
+// (state_sources are a single shared pool with no per-tenant owner), and
+// federated entries whose sibling-provisioned actor cannot be resolved locally
+// (audit_ingest.go). Those events belong to no tenant and every admin is their
+// intended reviewer. AuditScopeOrganizations alone would hide them from the
+// people meant to review them; AuditScopeAllOrganizations would hand the
+// caller every other tenant's rows. This reproduces exactly what the
+// in-memory auditLogsInAdminOrgs filter used to do, as a SQL predicate.
+//
+// A caller who administers no organization gets "unowned rows only" — the same
+// result the in-memory filter produced from an empty admin set.
+func (h *AdminHandlers) callerAuditScope(c *gin.Context) (idstore.AuditScope, error) {
+	callerID, _ := c.Get("user_id")
+	uid, _ := callerID.(string)
+	adminOrgs, err := adminOrgSet(c.Request.Context(), h.orgRepo, uid)
+	if err != nil {
+		// The zero AuditScope matches nothing, so a caller that ignored this
+		// error would still read no rows rather than every tenant's.
+		return idstore.AuditScope{}, err
+	}
+	orgIDs := make([]string, 0, len(adminOrgs))
+	for id := range adminOrgs {
+		orgIDs = append(orgIDs, id)
+	}
+	sort.Strings(orgIDs) // map order is random; keep the query args stable
+	return idstore.AuditScopeOrganizationsAndUnowned(orgIDs...), nil
 }

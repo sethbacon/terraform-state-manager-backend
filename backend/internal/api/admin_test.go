@@ -217,25 +217,7 @@ func TestBuildAuditLog_OrgTagging(t *testing.T) {
 	}
 }
 
-// TestAuditLogsInAdminOrgs verifies the admin audit view keeps org-less platform
-// events and the caller's own-org events while filtering out another org's
-// entries (#298/#182).
-func TestAuditLogsInAdminOrgs(t *testing.T) {
-	orgless := &idmodels.AuditLog{ID: "l0", Action: "state.edit"} // OrganizationID nil
-	myOrg, otherOrg := "org-a", "org-b"
-	mine := &idmodels.AuditLog{ID: "l1", Action: "organization.member.add", OrganizationID: &myOrg}
-	other := &idmodels.AuditLog{ID: "l2", Action: "organization.member.add", OrganizationID: &otherOrg}
-
-	got := auditLogsInAdminOrgs([]*idmodels.AuditLog{orgless, mine, other}, map[string]struct{}{"org-a": {}})
-
-	if len(got) != 2 {
-		t.Fatalf("kept %d entries, want 2 (org-less + own-org)", len(got))
-	}
-	kept := map[string]bool{got[0].ID: true, got[1].ID: true}
-	if !kept["l0"] || !kept["l1"] {
-		t.Errorf("kept %v, want the org-less (l0) and own-org (l1) entries", kept)
-	}
-	if kept["l2"] {
-		t.Error("another org's entry (l2) must be filtered out")
-	}
-}
+// The in-memory auditLogsInAdminOrgs filter this file used to cover was
+// replaced by the store.AuditScope SQL predicate in identity v0.21.0; its
+// semantics are asserted end-to-end, per read axis, in
+// admin_audit_scope_test.go.
