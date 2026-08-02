@@ -22,7 +22,7 @@ var (
 // rather than silently truncated at one page. Collection stops at
 // exportAuditMaxRows, flagged via the X-Truncated response header.
 // @Summary      Export audit log
-// @Description  Full filtered audit trail as a file attachment. Capped at 10000 rows (X-Truncated: true when hit). Requires admin.
+// @Description  Filtered audit trail as a file attachment, limited to the caller's admin organizations plus org-less platform events. Capped at 10000 rows (X-Truncated: true when hit). Requires admin.
 // @Tags         Admin
 // @Produce      text/csv,json
 // @Param        format         query  string  false  "Export format: csv or json (default csv)"  Enums(csv, json)
@@ -44,11 +44,21 @@ func (h *AdminHandlers) ExportAuditLogs() gin.HandlerFunc {
 			return
 		}
 		filters := auditFiltersFromQuery(c)
+		// GUARD audit-scope-export (#331): the export reads the SAME table as
+		// ListAuditLogs through a different access axis, and until identity
+		// v0.21.0 made the scope a required parameter it carried no tenant
+		// predicate at all — so a caller refused rows by the list path could
+		// collect them in bulk here. It must narrow identically to the list.
+		scope, err := h.callerAuditScope(c)
+		if err != nil {
+			serverError(c, err, "failed to resolve caller organizations")
+			return
+		}
 
 		var collected []*idmodels.AuditLog
 		truncated := false
 		for offset := 0; ; offset += exportAuditPageSize {
-			logs, total, err := h.auditRepo.ListAuditLogs(c.Request.Context(), filters, exportAuditPageSize, offset)
+			logs, total, err := h.auditRepo.ListAuditLogs(c.Request.Context(), filters, scope, exportAuditPageSize, offset)
 			if err != nil {
 				serverError(c, err, "failed to export audit logs")
 				return

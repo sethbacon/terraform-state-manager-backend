@@ -216,9 +216,21 @@ func (h *AdminHandlers) ExportUserData() gin.HandlerFunc {
 			serverError(c, err, "failed to load memberships")
 			return
 		}
-		// All audit entries attributed to the user (capped — exports are not a
+		// Audit entries attributed to the user (capped — exports are not a
 		// general audit-archival mechanism).
-		logs, _, err := h.auditRepo.ListAuditLogs(ctx, auditFiltersForUser(id), 1000, 0)
+		//
+		// GUARD audit-scope-user-export (#331): scoped to the CALLER, not the
+		// target. requireSharedOrgAdminWithTargetUser only proves the caller
+		// administers at least ONE organization the target belongs to, so an
+		// unscoped read would hand the caller the target's trail from every
+		// OTHER tenant the target also belongs to — the same leak as the bulk
+		// export, reached through the per-user axis.
+		scope, err := h.callerAuditScope(c)
+		if err != nil {
+			serverError(c, err, "failed to resolve caller organizations")
+			return
+		}
+		logs, _, err := h.auditRepo.ListAuditLogs(ctx, auditFiltersForUser(id), scope, 1000, 0)
 		if err != nil {
 			serverError(c, err, "failed to load audit entries")
 			return
