@@ -142,6 +142,8 @@ A source is a connection to a backend where Terraform state already lives. The b
 
 The example below registers a `local` source (no credentials required) pointing at a directory of state files. Creating a source requires the `sources:manage` scope.
 
+> `local` sources are confined to the directories the operator listed in `TSM_STATESOURCE_LOCAL_ROOTS` (comma-separated absolute paths), and that list is empty by default — so start the backend with e.g. `TSM_STATESOURCE_LOCAL_ROOTS=/path/to/your/state/dir` or the call below is rejected. See [configuration.md](configuration.md#state-sources).
+
 ```bash
 curl -s -X POST http://localhost:8080/api/v1/sources \
   -H "Authorization: Bearer ${TOKEN}" \

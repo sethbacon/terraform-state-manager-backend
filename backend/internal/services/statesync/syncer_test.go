@@ -22,6 +22,15 @@ import (
 
 var ctx = context.Background()
 
+// TestMain permits the OS temp directory as a local state-source root: the sync
+// tests drive real local connectors over t.TempDir() directories, and local
+// sources are confined to configured roots (internal/statesource/roots.go),
+// which are empty — and therefore permit nothing — by default.
+func TestMain(m *testing.M) {
+	_ = statesource.ConfigureLocalRoots([]string{os.TempDir()})
+	os.Exit(m.Run())
+}
+
 func newMock(t *testing.T) (*sql.DB, sqlmock.Sqlmock) {
 	t.Helper()
 	db, mock, err := sqlmock.New()

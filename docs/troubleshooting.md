@@ -37,6 +37,8 @@
 | HCP 429s during backfill | rate limiting | the syncer retries paced; transient |
 | Source shows decrypt errors | `TSM_ENCRYPTION_KEY` changed/lost | re-enter credentials ([disaster-recovery.md](disaster-recovery.md)) |
 | local source empty | PVC/mount path mismatch with the source's base_path | `localStates.mountPath` vs source config |
+| local source rejected: "base_path is outside the permitted local state-source roots" / "no permitted base_path roots are configured" | `TSM_STATESOURCE_LOCAL_ROOTS` doesn't list the directory (it is empty by default and permits nothing) | add the mounted directory to `TSM_STATESOURCE_LOCAL_ROOTS` and restart ([configuration.md](configuration.md#state-sources)) |
+| kubernetes source rejected: "kubeconfig path is outside the permitted roots" | same boundary for `config.kubeconfig` | list its directory in `TSM_STATESOURCE_KUBECONFIG_ROOTS`, or configure `config.server` + `credentials.token` instead |
 
 ## Suite / shared identity
 

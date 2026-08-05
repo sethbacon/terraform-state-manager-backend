@@ -21,3 +21,7 @@ TSM_LOGGING_FORMAT=json
 DEV_MODE=false
 # Single host runs the workers in-process.
 TSM_WORKERS_ENABLED=true
+
+# Directories a "local" state source may read state from (comma-separated
+# absolute paths). Empty permits none, so set it if you use local sources.
+#TSM_STATESOURCE_LOCAL_ROOTS=/var/lib/terraform-state-manager/states

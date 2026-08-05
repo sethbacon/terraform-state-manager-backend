@@ -58,6 +58,12 @@ spec:
           env:
             - name: TSM_WORKERS_ENABLED
               value: "true"
+            {{- if .Values.localStates.enabled }}
+            # "local" sources may only read state from directories listed here;
+            # the mounted PVC is the one this chart provides.
+            - name: TSM_STATESOURCE_LOCAL_ROOTS
+              value: {{ .Values.localStates.mountPath | quote }}
+            {{- end }}
             {{- with .Values.backend.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}

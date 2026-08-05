@@ -28,6 +28,33 @@ terraform-state-manager migrate down    # one step back (verify the matching .do
 Rollback = redeploy the previous tag. Schema rollbacks are rarely needed
 (additive migrations); if a release notes otherwise, it ships explicit steps.
 
+## One-time notice: state sources are confined to configured roots
+
+The release that introduces `statesource.local_roots` confines the two connector
+types that name a path on the **server's own filesystem** — `local` (`base_path`)
+and `kubernetes` when it is given a `kubeconfig` file — to directories the
+operator lists. The lists **fail closed**: empty (the default) permits nothing,
+so an existing `local` source stops resolving the moment the new binary boots
+unless its directory is listed.
+
+Before rolling this release, if you use `local` sources (or a kubeconfig-based
+`kubernetes` source):
+
+- Note each source's `base_path` (`GET /api/v1/sources`).
+- Set `TSM_STATESOURCE_LOCAL_ROOTS` to the directory (or directories) that
+  contain them — the mount point is usually the right entry, e.g.
+  `/data/states`, not each individual sub-path. Helm sets this automatically
+  from `localStates.mountPath` when `localStates.enabled=true`.
+- Set `TSM_STATESOURCE_KUBECONFIG_ROOTS` likewise for a mounted kubeconfig, or
+  switch that source to `config.server` + `credentials.token`.
+- Roll, then confirm the source lists states (`POST /api/v1/sources/{id}/test`).
+
+Nothing is deleted and no source record changes — a source whose root is missing
+simply reports that its `base_path` is outside the permitted roots until you add
+it. Deployments that read state only from remote backends (HCP, S3, Azure Blob,
+GCS, Consul, PG, HTTP, Git) need no action. See
+[configuration.md](configuration.md#state-sources).
+
 ## One-time notice: automatic state-backup retention
 
 Installs upgrading **to the release that introduced `backup_retention`** get the

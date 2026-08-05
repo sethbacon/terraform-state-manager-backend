@@ -35,6 +35,9 @@ type Config struct {
 	Notifications    NotificationsConfig `mapstructure:"notifications"`
 	Drift            DriftConfig         `mapstructure:"drift"`
 	Security         SecurityConfig      `mapstructure:"security"`
+	// StateSource confines the server-local filesystem paths a state source may
+	// name (see StateSourceConfig).
+	StateSource StateSourceConfig `mapstructure:"statesource"`
 	// BackupRetention bounds the state_backups table (#257).
 	BackupRetention BackupRetentionConfig `mapstructure:"backup_retention"`
 }
@@ -76,6 +79,29 @@ type EgressConfig struct {
 	// dial in addition to public addresses. Empty = the built-in private-range
 	// default (RFC1918 + IPv6-ULA allowed; metadata/loopback/link-local blocked).
 	Allowlist []string `mapstructure:"allowlist"`
+}
+
+// StateSourceConfig confines the state-source connectors whose configuration
+// names a path on THIS server's filesystem — the local connector's base_path and
+// the kubernetes connector's kubeconfig. Those paths arrive with the source
+// record (created by an API caller holding sources:manage), so the operator, not
+// the caller, decides which directories the server will serve state from.
+//
+// Both lists FAIL CLOSED: empty (the default) means no source may name a
+// server-local path at all, rather than any path being acceptable. Set them to
+// exactly the directories the deployment mounts for this purpose — e.g.
+// TSM_STATESOURCE_LOCAL_ROOTS=/data/states. A base_path is accepted when it is a
+// permitted root or lies beneath one, compared on path-segment boundaries and
+// after symlink resolution on both sides.
+// Env: TSM_STATESOURCE_LOCAL_ROOTS, TSM_STATESOURCE_KUBECONFIG_ROOTS
+// (comma-separated absolute paths).
+type StateSourceConfig struct {
+	// LocalRoots are the directories a "local" source's base_path may live in.
+	LocalRoots []string `mapstructure:"local_roots"`
+	// KubeconfigRoots are the directories (or exact files) a "kubernetes"
+	// source's config.kubeconfig may name. Empty leaves server + token the only
+	// way to configure that connector.
+	KubeconfigRoots []string `mapstructure:"kubeconfig_roots"`
 }
 
 // NotificationsConfig configures outbound alert delivery. The webhook/Slack/Teams
@@ -654,4 +680,10 @@ func setDefaults(v *viper.Viper) {
 	// SSRF egress allow-list for the state-source connectors; empty = the
 	// built-in private-range default (see statesource/egress.go).
 	v.SetDefault("security.egress.allowlist", []string{})
+
+	// Roots the state sources that name a server-local path are confined to.
+	// Empty = fail closed: no such source can be created (see
+	// statesource/roots.go).
+	v.SetDefault("statesource.local_roots", []string{})
+	v.SetDefault("statesource.kubeconfig_roots", []string{})
 }

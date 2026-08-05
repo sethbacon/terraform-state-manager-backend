@@ -283,7 +283,11 @@ setup:
 
 # -- Optional PVC for "local"-type state sources (host-path state files). Most
 # production installs read state from remote backends (Azure Blob/S3/HCP/...)
-# and don't need this.
+# and don't need this. When enabled, `mountPath` is also passed to the backend
+# and worker as TSM_STATESOURCE_LOCAL_ROOTS — the only directory a "local"
+# source may read state from. A source whose base_path is elsewhere is refused
+# (the setting is empty, and therefore permits nothing, when this is disabled);
+# add extra directories via `backend.extraEnv` if you mount your own.
 localStates:
   enabled: false
   mountPath: "/data/states"

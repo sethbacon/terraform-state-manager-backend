@@ -10,12 +10,17 @@ import (
 // TestMain allows loopback in the state-source egress guard for this package's
 // tests: the migrate/transfer integration tests point an http backend connector
 // at a 127.0.0.1 httptest stub server, which the production guard (which blocks
-// loopback, see internal/statesource/egress.go) would otherwise refuse. The
-// production egress policy is asserted in the statesource package.
+// loopback, see internal/statesource/egress.go) would otherwise refuse. It also
+// permits the OS temp directory as a local state-source root, so the handler
+// tests that register a local source over t.TempDir() clear the containment
+// check in internal/statesource/roots.go. Both production policies (loopback
+// blocked, no roots permitted until configured) are asserted in the statesource
+// package.
 func TestMain(m *testing.M) {
 	_ = statesource.ConfigureEgress([]string{
 		"127.0.0.1", "::1",
 		"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16",
 	})
+	_ = statesource.ConfigureLocalRoots([]string{os.TempDir()})
 	os.Exit(m.Run())
 }
