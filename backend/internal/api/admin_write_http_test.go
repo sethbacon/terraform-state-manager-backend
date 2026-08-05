@@ -9,6 +9,10 @@ import (
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
 	"github.com/gin-gonic/gin"
 	"github.com/jmoiron/sqlx"
+	idstore "github.com/sethbacon/terraform-suite-identity/identity/store"
+
+	"github.com/terraform-state-manager/terraform-state-manager/internal/credlifecycle"
+	"github.com/terraform-state-manager/terraform-state-manager/internal/db/repositories"
 )
 
 // newAdminWriteEnv wires AdminHandlers' write routes over a sqlmock identity DB.
@@ -22,7 +26,13 @@ func newAdminWriteEnv(t *testing.T) *sourcesEnv {
 	}
 	t.Cleanup(func() { db.Close() })
 
-	h := NewAdminHandlers(sqlx.NewDb(db, "sqlmock"))
+	// The credential sweeper is wired exactly as the router wires it, so the
+	// offboarding routes are exercised on their production path (#330).
+	h := NewAdminHandlers(sqlx.NewDb(db, "sqlmock"), WithAdminCredentialSweeper(
+		credlifecycle.NewSweeper(
+			repositories.NewUserTokenRevocationRepository(db),
+			idstore.NewAPIKeyRepository(db),
+			idstore.NewOrganizationRepository(db))))
 	r := gin.New()
 	admin := r.Group("/api/v1/admin")
 	admin.POST("/users", h.CreateUser())
@@ -87,7 +97,11 @@ func TestAdminUpdateUser(t *testing.T) {
 
 func TestAdminDeleteUser(t *testing.T) {
 	e := newAdminWriteEnv(t)
-	// Keys are revoked before the account is removed (none here).
+	// Both credential families are invalidated before the account is removed:
+	// the revoke-all watermark retires live sessions, then the key rows go
+	// (none here).
+	e.mock.ExpectExec("INSERT INTO user_token_revocations").WithArgs("u1").
+		WillReturnResult(sqlmock.NewResult(0, 1))
 	e.mock.ExpectQuery("FROM api_keys").WithArgs("u1").WillReturnRows(sqlmock.NewRows([]string{"id"}))
 	e.mock.ExpectExec("DELETE FROM users").WithArgs("u1").WillReturnResult(sqlmock.NewResult(0, 1))
 	if w := e.do(http.MethodDelete, "/api/v1/admin/users/u1", ""); w.Code != http.StatusNoContent {
@@ -103,7 +117,10 @@ var apiKeyListCols = []string{
 
 func TestAdminDeleteUserRevokesAPIKeys(t *testing.T) {
 	e := newAdminWriteEnv(t)
-	// The offboarded user owns two keys; both must be deleted before the account.
+	// The offboarded user owns two keys; both must be deleted before the account,
+	// and their live sessions retired with them.
+	e.mock.ExpectExec("INSERT INTO user_token_revocations").WithArgs("u1").
+		WillReturnResult(sqlmock.NewResult(0, 1))
 	e.mock.ExpectQuery("FROM api_keys").WithArgs("u1").WillReturnRows(
 		sqlmock.NewRows(apiKeyListCols).
 			AddRow("k1", "u1", "o1", "CI", nil, "h", "tsm_a", []byte(`["admin"]`), nil, nil, nil, time.Now(), "Alice").
@@ -184,8 +201,10 @@ func TestAdminEraseUser(t *testing.T) {
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	e.mock.ExpectExec("DELETE FROM organization_members").WithArgs("u1").
 		WillReturnResult(sqlmock.NewResult(0, 2))
-	// Erasure also revokes the user's API keys (tombstone would otherwise keep
-	// them valid); the one key here is deleted.
+	// Erasure also revokes the user's sessions and API keys (the tombstone would
+	// otherwise keep both valid); the one key here is deleted.
+	e.mock.ExpectExec("INSERT INTO user_token_revocations").WithArgs("u1").
+		WillReturnResult(sqlmock.NewResult(0, 1))
 	e.mock.ExpectQuery("FROM api_keys").WithArgs("u1").WillReturnRows(
 		sqlmock.NewRows(apiKeyListCols).
 			AddRow("k1", "u1", "o1", "CI", nil, "h", "tsm_a", []byte(`["admin"]`), nil, nil, nil, time.Now(), "Alice"))
@@ -245,6 +264,10 @@ func TestAdminOrganizationCRUD(t *testing.T) {
 		t.Errorf("missing org: status = %d, want 404", w.Code)
 	}
 
+	// Members are snapshotted BEFORE the delete: organization_members cascades,
+	// so afterwards there is nobody left to sweep (none here).
+	e.mock.ExpectQuery("FROM organization_members").WithArgs("o1").
+		WillReturnRows(sqlmock.NewRows([]string{"organization_id", "user_id", "role_template_id", "created_at"}))
 	e.mock.ExpectExec("DELETE FROM organizations").WithArgs("o1").WillReturnResult(sqlmock.NewResult(0, 1))
 	if w := e.do(http.MethodDelete, "/api/v1/admin/organizations/o1", ""); w.Code != http.StatusNoContent {
 		t.Errorf("delete org: status = %d, want 204", w.Code)

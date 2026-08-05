@@ -155,18 +155,22 @@ func (h *AdminHandlers) DeleteUser() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		ctx := c.Request.Context()
 		id := c.Param("id")
-		// Revoke the user's API keys before removing the account so no key row is
-		// orphaned and nothing can keep authenticating as the deleted user.
-		revoked, err := h.revokeUserAPIKeys(ctx, id)
-		if err != nil {
-			serverError(c, err, "failed to revoke api keys")
+		// Invalidate every credential family before removing the account: the
+		// API-key rows (which outlive the owner — user_id is ON DELETE SET NULL —
+		// and would otherwise keep authenticating at their frozen scopes) and the
+		// user's live JWT sessions, whose scopes were embedded at login and which
+		// the JTI denylist cannot reach because no JTI is recorded (#330).
+		out := h.creds.UserDeprovisioned(ctx, id, "admin: user deleted")
+		if out.Incomplete {
+			serverError(c, errCredentialSweepIncomplete, "failed to revoke credentials")
 			return
 		}
 		if err := h.userRepo.DeleteUser(ctx, id); err != nil {
 			serverError(c, err, "failed to delete user")
 			return
 		}
-		h.writeAudit(c, "user.delete", "user", id, map[string]interface{}{"api_keys_revoked": revoked})
+		h.writeAudit(c, "user.delete", "user", id, map[string]interface{}{
+			"api_keys_revoked": out.KeysRevoked, "sessions_revoked": out.TokensRevoked})
 		c.Status(http.StatusNoContent)
 	}
 }
@@ -284,15 +288,17 @@ func (h *AdminHandlers) EraseUser() gin.HandlerFunc {
 			serverError(c, err, "failed to revoke memberships")
 			return
 		}
-		// GDPR erasure keeps the user row as a resolvable tombstone, so a
-		// still-valid API key would keep authenticating at its stored scopes.
-		// Revoke every key the user owns as part of the erasure.
-		revoked, err := h.revokeUserAPIKeys(ctx, id)
-		if err != nil {
-			serverError(c, err, "failed to revoke api keys")
+		// GDPR erasure keeps the user row as a resolvable tombstone, so both
+		// credential families survive it: a still-valid API key would keep
+		// authenticating at its stored scopes, and a live session would keep
+		// serving the scope union the memberships just removed (#330).
+		out := h.creds.UserDeprovisioned(ctx, id, "admin: user erased (GDPR)")
+		if out.Incomplete {
+			serverError(c, errCredentialSweepIncomplete, "failed to revoke credentials")
 			return
 		}
-		h.writeAudit(c, "user.erase", "user", id, map[string]interface{}{"api_keys_revoked": revoked})
+		h.writeAudit(c, "user.erase", "user", id, map[string]interface{}{
+			"api_keys_revoked": out.KeysRevoked, "sessions_revoked": out.TokensRevoked})
 		c.JSON(http.StatusOK, gin.H{
 			"message": "User data has been erased. Audit log entries are preserved with anonymized identifiers.",
 			"user_id": id,
@@ -424,10 +430,23 @@ func nilIfEmpty(s string) *string {
 // @Router       /admin/organizations/{id} [delete]
 func (h *AdminHandlers) DeleteOrganization() gin.HandlerFunc {
 	return func(c *gin.Context) {
+		ctx := c.Request.Context()
 		id := c.Param("id")
-		if err := h.orgRepo.Delete(c.Request.Context(), id); err != nil {
+		// organization_members.organization_id is ON DELETE CASCADE, so dropping
+		// the organization silently reduces every member's authority — a
+		// reduction with no membership statement of its own. Snapshot the members
+		// FIRST: after the delete there is nobody left to sweep (#330).
+		members, err := h.orgRepo.ListMembers(ctx, id)
+		if err != nil {
+			serverError(c, err, "failed to list organization members")
+			return
+		}
+		if err := h.orgRepo.Delete(ctx, id); err != nil {
 			serverError(c, err, "failed to delete organization")
 			return
+		}
+		for _, m := range members {
+			h.creds.AuthorityReduced(ctx, m.UserID, "admin: organization deleted")
 		}
 		h.writeOrgAudit(c, "organization.delete", "organization", id, id, nil)
 		c.Status(http.StatusNoContent)
@@ -534,10 +553,15 @@ func (h *AdminHandlers) UpdateOrganizationMember() gin.HandlerFunc {
 			return
 		}
 		orgID, userID := c.Param("id"), c.Param("user_id")
-		if err := h.orgRepo.UpdateMemberRoleTemplate(c.Request.Context(), orgID, userID, roleID); err != nil {
+		ctx := c.Request.Context()
+		if err := h.orgRepo.UpdateMemberRoleTemplate(ctx, orgID, userID, roleID); err != nil {
 			serverError(c, err, "failed to update member")
 			return
 		}
+		// A reassignment can narrow what the member holds, and both credential
+		// families froze the previous scope set. Run after the write so the
+		// retained authority is re-derived from the new role template (#330).
+		h.creds.AuthorityReduced(ctx, userID, "admin: organization member role changed")
 		h.writeOrgAudit(c, "organization.member.update", "organization", orgID, orgID, map[string]interface{}{"user_id": userID})
 		c.JSON(http.StatusOK, gin.H{"status": "updated"})
 	}
@@ -554,10 +578,15 @@ func (h *AdminHandlers) UpdateOrganizationMember() gin.HandlerFunc {
 func (h *AdminHandlers) RemoveOrganizationMember() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		orgID, userID := c.Param("id"), c.Param("user_id")
-		if err := h.orgRepo.RemoveMember(c.Request.Context(), orgID, userID); err != nil {
+		ctx := c.Request.Context()
+		if err := h.orgRepo.RemoveMember(ctx, orgID, userID); err != nil {
 			serverError(c, err, "failed to remove member")
 			return
 		}
+		// The membership is gone; the credentials minted while it existed are
+		// not. Sweep both families against the authority the user retains in
+		// their remaining organizations (#330).
+		h.creds.AuthorityReduced(ctx, userID, "admin: organization membership removed")
 		h.writeOrgAudit(c, "organization.member.remove", "organization", orgID, orgID, map[string]interface{}{"user_id": userID})
 		c.Status(http.StatusNoContent)
 	}

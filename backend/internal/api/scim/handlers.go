@@ -27,6 +27,7 @@ import (
 	idstore "github.com/sethbacon/terraform-suite-identity/identity/store"
 
 	"github.com/terraform-state-manager/terraform-state-manager/internal/config"
+	"github.com/terraform-state-manager/terraform-state-manager/internal/credlifecycle"
 )
 
 // SCIM schema URIs.
@@ -43,16 +44,69 @@ type Handlers struct {
 	cfg      *config.Config
 	userRepo *idstore.UserRepository
 	orgRepo  *idstore.OrganizationRepository
+	// creds invalidates the credential families that snapshot a deprovisioned
+	// user's authority.
+	//
+	// SCIM is the primary IdP-driven offboarding channel: it is what fires when
+	// HR disables an account. Every deactivation path here used to strip
+	// organization memberships and nothing else (#330) — the deactivated user
+	// kept a working session for the remainder of the 24h JWT lifetime and kept
+	// their API-key rows permanently, because both families snapshot their
+	// authority at issue time.
+	//
+	// May be nil (no sweep) so the handler set stays constructible without the
+	// revocation subsystem.
+	creds *credlifecycle.Sweeper
+}
+
+// Option configures optional Handlers construction behaviour.
+type Option func(*Handlers)
+
+// WithCredentialSweeper wires the credential sweep every deprovisioning path
+// performs (DELETE /Users/{id}, and active=false via PUT or PATCH).
+func WithCredentialSweeper(s *credlifecycle.Sweeper) Option {
+	return func(h *Handlers) { h.creds = s }
 }
 
 // NewHandlers creates a SCIM handler set. identityDB resolves to the identity
 // schema (search_path), like the other identity-backed handlers.
-func NewHandlers(cfg *config.Config, identityDB *sql.DB) *Handlers {
-	return &Handlers{
+func NewHandlers(cfg *config.Config, identityDB *sql.DB, opts ...Option) *Handlers {
+	h := &Handlers{
 		cfg:      cfg,
 		userRepo: idstore.NewUserRepository(identityDB),
 		orgRepo:  idstore.NewOrganizationRepository(identityDB),
 	}
+	for _, opt := range opts {
+		opt(h)
+	}
+	return h
+}
+
+// deprovisionUser is the ONE way this package deactivates a principal: it
+// removes every organization membership AND invalidates every credential family
+// that carries a snapshot of the authority those memberships granted.
+//
+// The pairing is structural on purpose (#330). Four endpoints deactivate a user
+// — DELETE /Users/:id, PUT with active=false, and both PATCH "replace" forms —
+// and each of them previously called RemoveAllMembershipsForUser directly. A
+// convention that every one of those call sites must also remember to sweep is
+// the weakest possible guard: it held at three sites and was forgotten at the
+// fourth, which is exactly how this class regresses. Removing the memberships
+// without sweeping is now unspellable in this package.
+//
+// The sweep is best-effort and never fails the request: the membership strip has
+// already committed, and SCIM clients retry aggressively on 5xx, so a sweep
+// failure is logged rather than turned into an error the IdP would replay.
+func (h *Handlers) deprovisionUser(ctx context.Context, userID, reason string) error {
+	if err := h.orgRepo.RemoveAllMembershipsForUser(ctx, userID); err != nil {
+		return err
+	}
+	out := h.creds.UserDeprovisioned(ctx, userID, reason)
+	slog.Info("scim: credentials revoked for deprovisioned user",
+		"id", userID, "reason", reason,
+		"tokens_revoked", out.TokensRevoked, "api_keys_revoked", out.KeysRevoked,
+		"incomplete", out.Incomplete)
+	return nil
 }
 
 // --- SCIM resource types ---
@@ -65,8 +119,18 @@ type SCIMUser struct {
 	UserName   string      `json:"userName"`
 	Name       *SCIMName   `json:"name,omitempty"`
 	Emails     []SCIMEmail `json:"emails,omitempty"`
-	Active     bool        `json:"active"`
-	Meta       SCIMMeta    `json:"meta"`
+	// Active is a POINTER so an omitted "active" is distinguishable from an
+	// explicit "active": false.
+	//
+	// As a plain bool it zero-valued to false on every PUT that did not mention
+	// the attribute, and PutUser reads false as "deprovision" — which since #330
+	// means removing every organization membership AND irreversibly revoking
+	// every API key the user holds, plus every live session. A partial PUT from
+	// an IdP (or any client updating only a display name) would silently destroy
+	// the user's credentials. Deprovisioning must require the IdP to actually say
+	// active=false.
+	Active *bool    `json:"active,omitempty"`
+	Meta   SCIMMeta `json:"meta"`
 }
 
 // SCIMName is the SCIM name sub-object.
@@ -363,8 +427,10 @@ func (h *Handlers) PutUser() gin.HandlerFunc {
 			}
 		}
 
-		if !req.Active {
-			_ = h.orgRepo.RemoveAllMembershipsForUser(ctx, userID)
+		// Only an EXPLICIT active=false deprovisions. An omitted attribute leaves
+		// the user's authority — and their credentials — untouched.
+		if req.Active != nil && !*req.Active {
+			_ = h.deprovisionUser(ctx, userID, "scim: user deactivated via PUT")
 			slog.Info("scim: user deactivated via PUT", "id", userID)
 		}
 
@@ -400,7 +466,7 @@ func (h *Handlers) DeleteUser() gin.HandlerFunc {
 			return
 		}
 
-		if err := h.orgRepo.RemoveAllMembershipsForUser(ctx, userID); err != nil {
+		if err := h.deprovisionUser(ctx, userID, "scim: user deleted"); err != nil {
 			slog.Error("scim: deactivate user failed", "id", userID, "error", err)
 			scimError(c, http.StatusInternalServerError, "Failed to deactivate user")
 			return
@@ -481,7 +547,7 @@ func (h *Handlers) applyReplaceOp(ctx context.Context, user *models.User, op SCI
 			active = strings.EqualFold(v, "true")
 		}
 		if !active {
-			_ = h.orgRepo.RemoveAllMembershipsForUser(ctx, user.ID)
+			_ = h.deprovisionUser(ctx, user.ID, "scim: user deactivated via PATCH")
 			slog.Info("scim: user deactivated via PATCH", "id", user.ID)
 		}
 	case "username", "emails[type eq \"work\"].value":
@@ -496,7 +562,7 @@ func (h *Handlers) applyReplaceOp(ctx context.Context, user *models.User, op SCI
 		// No path — the value is a map of attributes.
 		if m, ok := op.Value.(map[string]interface{}); ok {
 			if v, ok := m["active"].(bool); ok && !v {
-				_ = h.orgRepo.RemoveAllMembershipsForUser(ctx, user.ID)
+				_ = h.deprovisionUser(ctx, user.ID, "scim: user deactivated via pathless PATCH")
 			}
 			if v, ok := m["userName"].(string); ok && v != "" {
 				user.Email = v
@@ -532,6 +598,7 @@ func userToSCIM(u *models.User, baseURL string) SCIMUser {
 		emails = append(emails, SCIMEmail{Value: u.Email, Type: "work", Primary: true})
 	}
 
+	active := true
 	return SCIMUser{
 		Schemas:    []string{SchemaUser},
 		ID:         u.ID,
@@ -540,7 +607,7 @@ func userToSCIM(u *models.User, baseURL string) SCIMUser {
 		Name:       &SCIMName{Formatted: u.Name},
 		Emails:     emails,
 		// Active is always true for existing users; deactivated users have no memberships.
-		Active: true,
+		Active: &active,
 		Meta: SCIMMeta{
 			ResourceType: "User",
 			Created:      u.CreatedAt.Format(time.RFC3339),

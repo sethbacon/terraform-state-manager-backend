@@ -1,7 +1,7 @@
 package api
 
 import (
-	"context"
+	"errors"
 	"net/http"
 	"strconv"
 	"time"
@@ -10,47 +10,55 @@ import (
 	"github.com/jmoiron/sqlx"
 	idmodels "github.com/sethbacon/terraform-suite-identity/identity/models"
 	idstore "github.com/sethbacon/terraform-suite-identity/identity/store"
+
+	"github.com/terraform-state-manager/terraform-state-manager/internal/credlifecycle"
 )
 
 // AdminHandlers serves the identity-management read views (users, organizations,
 // roles, audit log) backed by the shared terraform-suite-identity repositories.
 // All routes are gated by the admin scope in the router.
 type AdminHandlers struct {
-	userRepo   *idstore.UserRepository
-	orgRepo    *idstore.OrganizationRepository
-	roleRepo   *idstore.RoleTemplateRepository
-	auditRepo  *idstore.AuditRepository
-	apiKeyRepo *idstore.APIKeyRepository
+	userRepo  *idstore.UserRepository
+	orgRepo   *idstore.OrganizationRepository
+	roleRepo  *idstore.RoleTemplateRepository
+	auditRepo *idstore.AuditRepository
+	// creds invalidates the credential families that snapshot a principal's
+	// derived authority whenever an admin action reduces it (#330). May be nil
+	// (no sweep) so the handler set stays constructible without the revocation
+	// subsystem.
+	creds *credlifecycle.Sweeper
+}
+
+// AdminOption configures optional AdminHandlers construction behaviour.
+type AdminOption func(*AdminHandlers)
+
+// WithAdminCredentialSweeper wires the credential sweep the user- and
+// membership-lifecycle routes perform.
+func WithAdminCredentialSweeper(s *credlifecycle.Sweeper) AdminOption {
+	return func(h *AdminHandlers) { h.creds = s }
 }
 
 // NewAdminHandlers builds the admin handlers over the identity-schema connection.
-func NewAdminHandlers(identityDB *sqlx.DB) *AdminHandlers {
-	return &AdminHandlers{
-		userRepo:   idstore.NewUserRepository(identityDB.DB),
-		orgRepo:    idstore.NewOrganizationRepository(identityDB.DB),
-		roleRepo:   idstore.NewRoleTemplateRepository(identityDB),
-		auditRepo:  idstore.NewAuditRepository(identityDB.DB),
-		apiKeyRepo: idstore.NewAPIKeyRepository(identityDB.DB),
+func NewAdminHandlers(identityDB *sqlx.DB, opts ...AdminOption) *AdminHandlers {
+	h := &AdminHandlers{
+		userRepo:  idstore.NewUserRepository(identityDB.DB),
+		orgRepo:   idstore.NewOrganizationRepository(identityDB.DB),
+		roleRepo:  idstore.NewRoleTemplateRepository(identityDB),
+		auditRepo: idstore.NewAuditRepository(identityDB.DB),
 	}
+	for _, opt := range opts {
+		opt(h)
+	}
+	return h
 }
 
-// revokeUserAPIKeys deletes every API key owned by userID. API keys carry static
-// scopes validated only against the key row (the owner's live scopes are never
-// re-derived), and have no natural expiry, so an offboarded or erased user's key
-// keeps authenticating at its original — possibly admin — scope unless revoked
-// here. Returns the number revoked so callers can record it in the audit trail.
-func (h *AdminHandlers) revokeUserAPIKeys(ctx context.Context, userID string) (int, error) {
-	keys, err := h.apiKeyRepo.ListAPIKeysByUser(ctx, userID)
-	if err != nil {
-		return 0, err
-	}
-	for _, k := range keys {
-		if err := h.apiKeyRepo.RevokeAPIKey(ctx, k.ID); err != nil {
-			return 0, err
-		}
-	}
-	return len(keys), nil
-}
+// errCredentialSweepIncomplete reports that an offboarding sweep could not
+// invalidate every credential family. The user-lifecycle routes treat it as
+// fatal and answer 500 BEFORE the destructive step, because a half-swept
+// principal whose account is then deleted leaves credentials nothing can find
+// again: identity.api_keys.user_id is ON DELETE SET NULL, so the rows outlive
+// the owner with no user_id left to select them by.
+var errCredentialSweepIncomplete = errors.New("credential sweep incomplete")
 
 func pageParams(c *gin.Context) (limit, offset int) {
 	limit = 50

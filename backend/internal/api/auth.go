@@ -25,6 +25,7 @@ import (
 	"github.com/terraform-state-manager/terraform-state-manager/internal/auth/ldap"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/auth/saml"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/config"
+	"github.com/terraform-state-manager/terraform-state-manager/internal/credlifecycle"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/db/repositories"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/middleware"
 )
@@ -47,12 +48,24 @@ type AuthHandlers struct {
 	// lives in the app schema; the identity connection's search_path resolves it.
 	ssoSettings *repositories.SSOSettingsRepository
 	audit       auditor
+	// creds invalidates credentials the IdP group-mapping reconciliation has
+	// just made too broad. May be nil (no sweep).
+	creds *credlifecycle.Sweeper
+}
+
+// AuthOption configures optional AuthHandlers construction behaviour.
+type AuthOption func(*AuthHandlers)
+
+// WithAuthCredentialSweeper wires the credential sweep the IdP group-mapping
+// reconciliation performs when a login reduces a user's memberships or roles.
+func WithAuthCredentialSweeper(s *credlifecycle.Sweeper) AuthOption {
+	return func(h *AuthHandlers) { h.creds = s }
 }
 
 // NewAuthHandlers constructs the auth handlers. identityDB must resolve to the
 // identity schema (search_path=identity,public). The OIDC provider is initialised
 // only when OIDC is enabled in config.
-func NewAuthHandlers(cfg *config.Config, identityDB *sql.DB) (*AuthHandlers, error) {
+func NewAuthHandlers(cfg *config.Config, identityDB *sql.DB, opts ...AuthOption) (*AuthHandlers, error) {
 	// The login state store must be shared across replicas: the login redirect
 	// (Save) and the callback (Load) are separate HTTP requests, and behind a
 	// load balancer they land on different pods — a per-process map fails
@@ -72,6 +85,9 @@ func NewAuthHandlers(cfg *config.Config, identityDB *sql.DB) (*AuthHandlers, err
 		stateStore:  stateStore,
 		ssoSettings: repositories.NewSSOSettingsRepository(identityDB),
 		audit:       newAuditor(identityDB),
+	}
+	for _, opt := range opts {
+		opt(h)
 	}
 	if cfg.Auth.OIDC.Enabled {
 		p, err := auth.NewOIDCProvider(&cfg.Auth.OIDC)
@@ -638,6 +654,12 @@ func (h *AuthHandlers) reconcileManagedMemberships(ctx context.Context, userID s
 				if err := h.orgRepo.UpdateMemberRole(ctx, org.ID, userID, role); err != nil {
 					return fmt.Errorf("update member role org=%s user=%s: %w", org.ID, userID, err)
 				}
+				// A reassignment is a REDUCTION whenever the new template grants
+				// less than the old one — an IdP group change can demote owner to
+				// viewer. This arm commits that reduction, so it sweeps in its own
+				// right; a sweep on the sibling (removal) arm alone would leave it
+				// uncovered (#330).
+				h.sweepIdPReduction(ctx, userID, "idp group mapping: role reassigned")
 			} else if err := h.orgRepo.AddMemberWithParams(ctx, org.ID, userID, role); err != nil {
 				return fmt.Errorf("add member org=%s user=%s: %w", org.ID, userID, err)
 			}
@@ -647,6 +669,7 @@ func (h *AuthHandlers) reconcileManagedMemberships(ctx context.Context, userID s
 			if err := h.orgRepo.RemoveMember(ctx, org.ID, userID); err != nil {
 				return fmt.Errorf("revoke membership org=%s user=%s: %w", org.ID, userID, err)
 			}
+			h.sweepIdPReduction(ctx, userID, "idp group mapping: membership revoked")
 			slog.Info("group mapping: revoked membership (no matching group)", "user_id", userID, "org", orgName)
 		}
 	}
@@ -671,6 +694,33 @@ func (h *AuthHandlers) reconcileManagedMemberships(ctx context.Context, userID s
 		}
 	}
 	return nil
+}
+
+// sweepIdPReduction invalidates the API keys an IdP-driven membership or role
+// change has just made too broad. Best-effort: the authority change has already
+// committed, and a login must not fail because a credential sweep did (#330).
+//
+// It deliberately sweeps only the API-key family. The JWT half is left to the
+// session this very request is about to mint: reconciliation runs microseconds
+// before auth.GenerateJWT, the revoke-all watermark is written at full
+// precision while a JWT's iat is floored to the second (RFC 7519), and
+// TokensRevokedSince resolves that same-second ambiguity toward "revoked" — so
+// moving the watermark here would revoke the token being issued and the user
+// could never log in. The new token is derived from GetUserCombinedScopes AFTER
+// the change committed, so it already carries the reduced authority. The
+// residual is the user's OTHER live sessions from earlier logins, which keep
+// the pre-reduction scope union until their 24h TTL expires; an operator who
+// needs those retired immediately must use the admin membership routes, which
+// call AuthorityReduced and do move the watermark. See
+// credlifecycle.Sweeper.KeysOnly.
+func (h *AuthHandlers) sweepIdPReduction(ctx context.Context, userID, reason string) {
+	out := h.creds.KeysOnly(ctx, userID, reason)
+	if out.KeysRevoked > 0 || out.Incomplete {
+		slog.Info("idp reconciliation: credential sweep",
+			"user_id", userID, "reason", reason,
+			"api_keys_revoked", out.KeysRevoked, "api_keys_retained", out.KeysRetained,
+			"incomplete", out.Incomplete)
+	}
 }
 
 // assignRole adds the user to the default organization with the given role

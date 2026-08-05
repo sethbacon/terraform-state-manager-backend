@@ -11,6 +11,7 @@ import (
 	idstore "github.com/sethbacon/terraform-suite-identity/identity/store"
 
 	"github.com/terraform-state-manager/terraform-state-manager/internal/auth"
+	"github.com/terraform-state-manager/terraform-state-manager/internal/db/repositories"
 )
 
 // AuthCookieName is the HttpOnly cookie carrying the session JWT.
@@ -26,8 +27,10 @@ const APIKeyPrefix = "tsm"
 // are not JWTs fall through to API-key authentication (registry order: JWT is
 // stateless and tried first; keys cost a prefix lookup + bcrypt compare). orgRepo
 // is used only on the API-key path, to cap a key's stored scopes by the owner's
-// current combined scopes (see authenticateAPIKey).
-func AuthMiddleware(userRepo *idstore.UserRepository, tokenRepo *idstore.TokenRepository, apiKeyRepo *idstore.APIKeyRepository, orgRepo *idstore.OrganizationRepository) gin.HandlerFunc {
+// current combined scopes (see authenticateAPIKey). userRevocations enforces the
+// per-user revoke-all watermark an authority reduction writes (#330); nil skips
+// that check.
+func AuthMiddleware(userRepo *idstore.UserRepository, tokenRepo *idstore.TokenRepository, apiKeyRepo *idstore.APIKeyRepository, orgRepo *idstore.OrganizationRepository, userRevocations *repositories.UserTokenRevocationRepository) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		// A verified mTLS client certificate (set by mtls.AuthMiddleware earlier in
 		// the chain) already authenticated this request and populated scopes.
@@ -66,6 +69,23 @@ func AuthMiddleware(userRepo *idstore.UserRepository, tokenRepo *idstore.TokenRe
 			}
 		}
 
+		// Per-user revoke-all watermark (#330). A JWT freezes its scopes at
+		// login, so an authority reduction that happened after this token was
+		// minted is invisible to it; the JTI denylist above cannot help because
+		// the reduction knows no JTIs. Fail closed on a lookup error: a token
+		// whose revocation status cannot be established must not be honoured.
+		if userRevocations != nil && claims.IssuedAt != nil {
+			revoked, rErr := userRevocations.TokensRevokedSince(c.Request.Context(), claims.UserID, claims.IssuedAt.Time)
+			if rErr != nil {
+				c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "Auth check failed"})
+				return
+			}
+			if revoked {
+				c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "Token has been revoked"})
+				return
+			}
+		}
+
 		user, err := userRepo.GetUserByID(c.Request.Context(), claims.UserID)
 		if err != nil {
 			c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "Failed to load user"})
@@ -83,8 +103,10 @@ func AuthMiddleware(userRepo *idstore.UserRepository, tokenRepo *idstore.TokenRe
 
 // OptionalAuthMiddleware populates the auth context when a valid session token is
 // present but never aborts. Used for endpoints like logout that are idempotent
-// and must work even without (or with an expired) session.
-func OptionalAuthMiddleware(userRepo *idstore.UserRepository, tokenRepo *idstore.TokenRepository) gin.HandlerFunc {
+// and must work even without (or with an expired) session. It honours the same
+// revoke-all watermark as AuthMiddleware (#330), so a revoked session is treated
+// as no session rather than as an authenticated one.
+func OptionalAuthMiddleware(userRepo *idstore.UserRepository, tokenRepo *idstore.TokenRepository, userRevocations *repositories.UserTokenRevocationRepository) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		token, fromCookie := extractToken(c)
 		if token == "" {
@@ -98,6 +120,12 @@ func OptionalAuthMiddleware(userRepo *idstore.UserRepository, tokenRepo *idstore
 		}
 		if claims.JTI != "" && tokenRepo != nil {
 			if revoked, rErr := tokenRepo.IsTokenRevoked(c.Request.Context(), claims.JTI); rErr == nil && revoked {
+				c.Next()
+				return
+			}
+		}
+		if userRevocations != nil && claims.IssuedAt != nil {
+			if revoked, rErr := userRevocations.TokensRevokedSince(c.Request.Context(), claims.UserID, claims.IssuedAt.Time); rErr != nil || revoked {
 				c.Next()
 				return
 			}
