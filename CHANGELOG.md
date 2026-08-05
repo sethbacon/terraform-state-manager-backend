@@ -1,5 +1,20 @@
 # Changelog
 
+## [3.0.0](https://github.com/sethbacon/terraform-state-manager-backend/compare/v2.7.1...v3.0.0) (2026-08-05)
+
+
+### ⚠ BREAKING CHANGES
+
+* **auth:** Authority-reduction events now end the affected user's live sessions. Removing or re-roling an organization member, deleting an organization, deleting or erasing a user, and every SCIM deactivation path move that user's revocation watermark, so their existing sessions are rejected on the next request and they must log in again. Refresh sits behind requireAuth, so this is a re-login rather than a token refresh. API keys are revoked irreversibly where they over-ask against retained authority, and offboarding revokes all of them; secrets are shown once, so affected keys must be recreated. SCIM PUT no longer deprovisions unless "active": false is explicit. User delete and erase now answer 500 without performing the destructive step if the credential sweep could not complete. See docs/upgrade-guide.md.
+* local and kubernetes state sources now require TSM_STATESOURCE_LOCAL_ROOTS / TSM_STATESOURCE_KUBECONFIG_ROOTS. Existing installs that use them will refuse to construct those sources until the roots are configured. Defaulting to the previous behaviour would preserve the defect for every install that never reads the release notes, so this fails closed and says so at the point of failure -- the rejection names both the path and the configured roots. Helm users with localStates.enabled=true are handled by the chart automatically; see docs/upgrade-guide.md.
+
+### Bug Fixes
+
+* **auth:** announce that authority changes now end live sessions ([56827e2](https://github.com/sethbacon/terraform-state-manager-backend/commit/56827e229c3f26f7d40296cab89aa8499f2f5ecd))
+* **auth:** invalidate every credential family when authority is reduced ([#330](https://github.com/sethbacon/terraform-state-manager-backend/issues/330)) ([#338](https://github.com/sethbacon/terraform-state-manager-backend/issues/338)) ([75750a7](https://github.com/sethbacon/terraform-state-manager-backend/commit/75750a7b73a68af71d1cae69184db208c2e85883))
+* confine server-local source paths to configured roots ([#337](https://github.com/sethbacon/terraform-state-manager-backend/issues/337)) ([518c771](https://github.com/sethbacon/terraform-state-manager-backend/commit/518c7713d6c566d2882658e7e79e5664bdc0684d))
+* scope audit log reads to the caller's organizations ([#332](https://github.com/sethbacon/terraform-state-manager-backend/issues/332)) ([eb55c6f](https://github.com/sethbacon/terraform-state-manager-backend/commit/eb55c6f6aa3079610f0cc1c0c8be272dcf56f11f))
+
 ## [2.7.1](https://github.com/sethbacon/terraform-state-manager-backend/compare/v2.7.0...v2.7.1) (2026-07-31)
 
 
