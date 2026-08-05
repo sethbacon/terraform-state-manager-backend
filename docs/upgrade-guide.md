@@ -77,6 +77,27 @@ API-only replica rolling first changes nothing. See
 [configuration.md](configuration.md#workers) and
 [capacity-planning.md](capacity-planning.md).
 
+## One-time notice: authority changes now end sessions
+
+Starting with the release that adds the `user_token_revocations` table, an event
+that **reduces** a principal's authority invalidates the credentials that froze
+the old authority, instead of leaving them working:
+
+- **Sessions.** Removing a member from an organization, changing a member's role
+  template, deleting an organization, deleting or erasing a user, and every SCIM
+  deactivation now retire that user's existing JWT sessions immediately. The
+  affected user sees a `401` and must log in again — including after a *promotion*,
+  because the session is retired whichever way the role moved. Nobody else is
+  affected; the watermark is per user.
+- **API keys.** The same events revoke API keys whose stored scopes the user's
+  remaining authority no longer grants (offboarding revokes all of them). This is
+  **permanent** — a key's secret is displayed once at creation — so a key revoked
+  by a role change must be re-created, not recovered.
+
+No configuration is involved and nothing needs to be set before rolling: the
+migration is additive and the behaviour is on as soon as the new backend serves.
+Expect a burst of re-logins if you roll during a bulk membership or role change.
+
 ## Version pinning
 
 Always pin image tags in production (`v1.0.0`, never `latest`); the chart's

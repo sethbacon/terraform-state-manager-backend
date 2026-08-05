@@ -17,6 +17,7 @@ import (
 	"github.com/jmoiron/sqlx"
 
 	identitycrypto "github.com/sethbacon/terraform-suite-identity/identity/crypto"
+	idstore "github.com/sethbacon/terraform-suite-identity/identity/store"
 	"github.com/sethbacon/terraform-suite-identity/identity/suite"
 
 	"github.com/terraform-state-manager/terraform-state-manager/docs"
@@ -25,6 +26,7 @@ import (
 	"github.com/terraform-state-manager/terraform-state-manager/internal/auth"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/auth/mtls"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/config"
+	"github.com/terraform-state-manager/terraform-state-manager/internal/credlifecycle"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/crypto"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/db/repositories"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/middleware"
@@ -72,7 +74,19 @@ func NewRouter(cfg *config.Config, database *sql.DB, identityDB *sql.DB) (*gin.E
 		c.Data(http.StatusOK, "application/yaml; charset=utf-8", docs.SwaggerYAML)
 	})
 
-	authHandlers, err := NewAuthHandlers(cfg, identityDB)
+	// One sweeper, shared by every route that can reduce a principal's derived
+	// authority (#330). The revoke-all watermark lives on the app connection so
+	// it works whether identity data shares the app database (the default) or
+	// lives in its own (TSM_IDENTITY_DATABASE_*); the API-key and organization
+	// repositories live on the identity connection that owns those tables.
+	userRevocationRepo := repositories.NewUserTokenRevocationRepository(database)
+	credSweeper := credlifecycle.NewSweeper(
+		userRevocationRepo,
+		idstore.NewAPIKeyRepository(identityDB),
+		idstore.NewOrganizationRepository(identityDB),
+	)
+
+	authHandlers, err := NewAuthHandlers(cfg, identityDB, WithAuthCredentialSweeper(credSweeper))
 	if err != nil {
 		return nil, stop, err
 	}
@@ -100,8 +114,8 @@ func NewRouter(cfg *config.Config, database *sql.DB, identityDB *sql.DB) (*gin.E
 			}
 		}
 	}
-	requireAuth := middleware.AuthMiddleware(authHandlers.UserRepo(), authHandlers.TokenRepo(), authHandlers.APIKeyRepo(), authHandlers.OrgRepo())
-	optionalAuth := middleware.OptionalAuthMiddleware(authHandlers.UserRepo(), authHandlers.TokenRepo())
+	requireAuth := middleware.AuthMiddleware(authHandlers.UserRepo(), authHandlers.TokenRepo(), authHandlers.APIKeyRepo(), authHandlers.OrgRepo(), userRevocationRepo)
+	optionalAuth := middleware.OptionalAuthMiddleware(authHandlers.UserRepo(), authHandlers.TokenRepo(), userRevocationRepo)
 
 	var suiteClient *suite.DiscoveryClient
 
@@ -253,7 +267,7 @@ func NewRouter(cfg *config.Config, database *sql.DB, identityDB *sql.DB) (*gin.E
 		v1.GET("/reports/states/export", requireAuth, middleware.RequireScope(auth.ScopeStateRead), sources.ReportStatesExport())
 
 		// Identity management (admin scope): users, organizations, roles, audit log.
-		admin := NewAdminHandlers(sqlx.NewDb(identityDB, "postgres"))
+		admin := NewAdminHandlers(sqlx.NewDb(identityDB, "postgres"), WithAdminCredentialSweeper(credSweeper))
 		ag := v1.Group("/admin", requireAuth, middleware.RequireScope(auth.ScopeAdmin))
 		{
 			ag.GET("/stats", admin.Stats())
@@ -486,7 +500,7 @@ func NewRouter(cfg *config.Config, database *sql.DB, identityDB *sql.DB) (*gin.E
 	// (admin satisfies it); no cookie auth, so it is outside the CSRF-protected
 	// /api/v1 group. IdP clients present Authorization: Bearer <token>.
 	if cfg.Auth.SCIM.Enabled {
-		scimHandlers := scim.NewHandlers(cfg, identityDB)
+		scimHandlers := scim.NewHandlers(cfg, identityDB, scim.WithCredentialSweeper(credSweeper))
 		sc := r.Group("/scim/v2", requireAuth, middleware.RequireScope(auth.ScopeSCIMProvision))
 		{
 			sc.GET("/Users", scimHandlers.ListUsers())

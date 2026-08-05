@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"database/sql"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -14,6 +15,7 @@ import (
 	idstore "github.com/sethbacon/terraform-suite-identity/identity/store"
 
 	"github.com/terraform-state-manager/terraform-state-manager/internal/auth"
+	"github.com/terraform-state-manager/terraform-state-manager/internal/db/repositories"
 )
 
 // The signing secret is resolved once per process; set it before any test can
@@ -74,7 +76,7 @@ func authRouter(userRepo *idstore.UserRepository, tokenRepo *idstore.TokenReposi
 
 func authRouterWithKeys(userRepo *idstore.UserRepository, tokenRepo *idstore.TokenRepository, keyRepo *idstore.APIKeyRepository) *gin.Engine {
 	r := gin.New()
-	r.Use(AuthMiddleware(userRepo, tokenRepo, keyRepo, nil))
+	r.Use(AuthMiddleware(userRepo, tokenRepo, keyRepo, nil, nil))
 	r.GET("/", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{
 			"user_id":     c.GetString("user_id"),
@@ -109,7 +111,7 @@ func TestAuthMiddleware_MTLSPreAuthPassesThrough(t *testing.T) {
 	r := gin.New()
 	// Simulates mtls.AuthMiddleware running earlier in the chain.
 	r.Use(func(c *gin.Context) { c.Set("auth_method", "mtls"); c.Next() })
-	r.Use(AuthMiddleware(nil, nil, nil, nil))
+	r.Use(AuthMiddleware(nil, nil, nil, nil, nil))
 	r.GET("/", func(c *gin.Context) { c.Status(http.StatusOK) })
 
 	w := httptest.NewRecorder()
@@ -200,7 +202,7 @@ func TestAuthMiddleware_UserNotFound(t *testing.T) {
 
 func TestOptionalAuthMiddleware_NoToken(t *testing.T) {
 	r := gin.New()
-	r.Use(OptionalAuthMiddleware(nil, nil))
+	r.Use(OptionalAuthMiddleware(nil, nil, nil))
 	r.GET("/", func(c *gin.Context) {
 		_, authed := c.Get("user_id")
 		c.JSON(http.StatusOK, gin.H{"authed": authed})
@@ -218,7 +220,7 @@ func TestOptionalAuthMiddleware_NoToken(t *testing.T) {
 
 func TestOptionalAuthMiddleware_InvalidTokenStillPasses(t *testing.T) {
 	r := gin.New()
-	r.Use(OptionalAuthMiddleware(nil, nil))
+	r.Use(OptionalAuthMiddleware(nil, nil, nil))
 	r.GET("/", func(c *gin.Context) { c.Status(http.StatusOK) })
 
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
@@ -237,7 +239,7 @@ func TestOptionalAuthMiddleware_ValidToken(t *testing.T) {
 	expectUserFound(userMock, "user-1")
 
 	r := gin.New()
-	r.Use(OptionalAuthMiddleware(userRepo, tokenRepo))
+	r.Use(OptionalAuthMiddleware(userRepo, tokenRepo, nil))
 	r.GET("/", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"user_id": c.GetString("user_id")})
 	})
@@ -347,7 +349,7 @@ func TestAuthMiddleware_APIKeyScopesCappedByLiveOwnerScopes(t *testing.T) {
 			AddRow("o1", "default", nil, time.Now(), "viewer", "Viewer", []byte(`["state:read"]`)))
 
 	r := gin.New()
-	r.Use(AuthMiddleware(userRepo, nil, keyRepo, orgRepo))
+	r.Use(AuthMiddleware(userRepo, nil, keyRepo, orgRepo, nil))
 	r.GET("/", func(c *gin.Context) {
 		sc, _ := c.Get("scopes")
 		c.JSON(http.StatusOK, gin.H{"scopes": sc})
@@ -424,5 +426,123 @@ func TestAuthMiddleware_APIKeyRejections(t *testing.T) {
 	r4.ServeHTTP(w4, req4)
 	if w4.Code != http.StatusUnauthorized {
 		t.Errorf("cookie-presented key: status = %d, want 401", w4.Code)
+	}
+}
+
+// --- Per-user revoke-all watermark (#330) ---
+//
+// A JWT freezes its scopes at login, so an authority reduction that happens
+// afterwards is invisible to it, and the JTI denylist cannot help because a
+// membership removal knows no JTIs. These tests cover the use-time half of the
+// fix: the watermark the credential sweep writes must actually stop a
+// pre-existing session.
+
+func newUserRevocationRepo(t *testing.T) (*repositories.UserTokenRevocationRepository, sqlmock.Sqlmock) {
+	t.Helper()
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New (revocations): %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+	return repositories.NewUserTokenRevocationRepository(db), mock
+}
+
+// expectWatermark queues the per-user revoke-all lookup.
+func expectWatermark(mock sqlmock.Sqlmock, revoked bool) {
+	mock.ExpectQuery("FROM user_token_revocations").
+		WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(revoked))
+}
+
+func watermarkRouter(userRepo *idstore.UserRepository, tokenRepo *idstore.TokenRepository, rev *repositories.UserTokenRevocationRepository) *gin.Engine {
+	r := gin.New()
+	r.Use(AuthMiddleware(userRepo, tokenRepo, nil, nil, rev))
+	r.GET("/", func(c *gin.Context) { c.JSON(http.StatusOK, gin.H{"user_id": c.GetString("user_id")}) })
+	return r
+}
+
+func TestAuthMiddleware_WatermarkRevokesPreExistingSession(t *testing.T) {
+	userRepo, _ := newUserRepo(t)
+	tokenRepo, tokenMock := newTokenRepo(t)
+	revRepo, revMock := newUserRevocationRepo(t)
+	expectNotRevoked(tokenMock, false) // the JTI itself was never denylisted
+	expectWatermark(revMock, true)     // ...but the user's authority was reduced
+
+	r := watermarkRouter(userRepo, tokenRepo, revRepo)
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("Authorization", "Bearer "+generateTestJWT(t, "user-1"))
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401 (a session predating the watermark must be rejected): %s", w.Code, w.Body.String())
+	}
+	if err := revMock.ExpectationsWereMet(); err != nil {
+		t.Errorf("watermark was never consulted: %v", err)
+	}
+}
+
+func TestAuthMiddleware_WatermarkNotSetAllowsSession(t *testing.T) {
+	userRepo, userMock := newUserRepo(t)
+	tokenRepo, tokenMock := newTokenRepo(t)
+	revRepo, revMock := newUserRevocationRepo(t)
+	expectNotRevoked(tokenMock, false)
+	expectWatermark(revMock, false)
+	expectUserFound(userMock, "user-1")
+
+	r := watermarkRouter(userRepo, tokenRepo, revRepo)
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("Authorization", "Bearer "+generateTestJWT(t, "user-1"))
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (no reduction, session stands): %s", w.Code, w.Body.String())
+	}
+}
+
+// A watermark lookup that errors must not be read as "not revoked": the
+// revocation status is unknown, so the request fails closed.
+func TestAuthMiddleware_WatermarkLookupErrorFailsClosed(t *testing.T) {
+	userRepo, _ := newUserRepo(t)
+	tokenRepo, tokenMock := newTokenRepo(t)
+	revRepo, revMock := newUserRevocationRepo(t)
+	expectNotRevoked(tokenMock, false)
+	revMock.ExpectQuery("FROM user_token_revocations").WillReturnError(sql.ErrConnDone)
+
+	r := watermarkRouter(userRepo, tokenRepo, revRepo)
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("Authorization", "Bearer "+generateTestJWT(t, "user-1"))
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500 (unknown revocation status must not authenticate)", w.Code)
+	}
+}
+
+func TestOptionalAuthMiddleware_WatermarkLeavesRequestUnauthenticated(t *testing.T) {
+	userRepo, _ := newUserRepo(t)
+	tokenRepo, tokenMock := newTokenRepo(t)
+	revRepo, revMock := newUserRevocationRepo(t)
+	expectNotRevoked(tokenMock, false)
+	expectWatermark(revMock, true)
+
+	r := gin.New()
+	r.Use(OptionalAuthMiddleware(userRepo, tokenRepo, revRepo))
+	r.GET("/", func(c *gin.Context) {
+		_, authed := c.Get("user_id")
+		c.JSON(http.StatusOK, gin.H{"authed": authed})
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("Authorization", "Bearer "+generateTestJWT(t, "user-1"))
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (optional auth never aborts)", w.Code)
+	}
+	if !contains(w.Body.String(), `"authed":false`) {
+		t.Errorf("a revoked session must not be treated as authenticated: %s", w.Body.String())
 	}
 }

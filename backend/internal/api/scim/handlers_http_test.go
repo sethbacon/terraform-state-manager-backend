@@ -119,7 +119,7 @@ func TestGetUser(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &u); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if u.UserName != "a@b.c" || !u.Active || u.Schemas[0] != SchemaUser {
+	if u.UserName != "a@b.c" || u.Active == nil || !*u.Active || u.Schemas[0] != SchemaUser {
 		t.Errorf("SCIM user shape wrong: %+v", u)
 	}
 	if !strings.HasPrefix(u.Meta.Location, "https://tsm.example.com/") {

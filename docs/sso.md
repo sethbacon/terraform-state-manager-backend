@@ -107,6 +107,19 @@ from a mapped IdP group is **deprovisioned** from the corresponding organization
 on their next login. This means the IdP is the single source of truth — do not
 hand-edit memberships that a mapping owns.
 
+A login that **reduces** what the user holds — losing a mapped group, or a group
+now mapping to a weaker role — also **revokes any API key of theirs whose stored
+scopes the reduced authority no longer grants**. Keys still covered by what the
+user retains are left alone. Revocation is permanent: an API key's secret is
+shown once at creation and cannot be recovered, so the affected key must be
+re-created after the user's access is restored.
+
+Their **other live browser sessions** (from earlier logins) are not retired by
+this path — they expire on their own 24h TTL. The session minted by the login
+doing the reconciliation already carries the reduced scopes. To end every
+session immediately, use the admin membership routes (**Administration →
+Organizations → Members**), which do.
+
 > For OIDC specifically, group mappings can also be edited at runtime in the UI
 > (**Administration → OIDC groups**) as an overlay; SAML/LDAP mappings are
 > config-driven.
@@ -372,8 +385,21 @@ clients present `Authorization: Bearer <token>` (a `tsm_…` API key with the
 `scim:provision` scope).
 
 Endpoints mounted under `/scim/v2`: `Users` (list/get/create/put/patch/delete)
-and `Groups` (list/get). Deletes/deactivations are **soft** (membership removal),
-never hard-deletes.
+and `Groups` (list/get). Deletes/deactivations are **soft** (the user row
+survives), never hard-deletes.
+
+**Deactivation revokes credentials, not just memberships.** `DELETE /Users/{id}`,
+`PUT` with `"active": false`, and either `PATCH` `replace` form all remove every
+organization membership *and* invalidate both credential families the user
+holds: their live sessions (rejected from the next request onward) and every API
+key they own. Without this a "deactivated" user kept a working session for the
+rest of its 24h lifetime and kept their API keys indefinitely, because both
+freeze their scopes at issue time.
+
+> **Only an explicit `"active": false` deprovisions.** A `PUT` that omits the
+> attribute entirely updates the named fields and leaves the user's authority and
+> credentials untouched — API-key revocation is irreversible, so a partial `PUT`
+> from an IdP must not trigger it.
 
 > **Rate-limit SCIM at the proxy.** As with the other token endpoints, request
 > rate-limiting belongs at the gateway/proxy in front of the API.

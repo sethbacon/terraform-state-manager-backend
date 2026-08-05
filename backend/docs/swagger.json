@@ -4945,6 +4945,7 @@
             "type": "object",
             "properties": {
                 "active": {
+                    "description": "Active is a POINTER so an omitted \"active\" is distinguishable from an\nexplicit \"active\": false.\n\nAs a plain bool it zero-valued to false on every PUT that did not mention\nthe attribute, and PutUser reads false as \"deprovision\" — which since #330\nmeans removing every organization membership AND irreversibly revoking\nevery API key the user holds, plus every live session. A partial PUT from\nan IdP (or any client updating only a display name) would silently destroy\nthe user's credentials. Deprovisioning must require the IdP to actually say\nactive=false.",
                     "type": "boolean"
                 },
                 "emails": {

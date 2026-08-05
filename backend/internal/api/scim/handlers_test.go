@@ -54,7 +54,7 @@ func TestUserToSCIM(t *testing.T) {
 	if len(scimUser.Emails) != 1 || scimUser.Emails[0].Value != "jane@example.com" {
 		t.Errorf("Emails = %v", scimUser.Emails)
 	}
-	if !scimUser.Active {
+	if scimUser.Active == nil || !*scimUser.Active {
 		t.Error("Active should be true")
 	}
 	if scimUser.Meta.Location != "https://tsm.example.com/scim/v2/Users/user-1" {
