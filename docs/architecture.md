@@ -125,8 +125,9 @@ type Locker interface {
 
 `statesource.New(sourceType, config, credentials)` is a factory switch over the ten types: `local`, `hcp`, `s3`, `azureblob`, `gcs`, `git`, `consul`, `pg`, `kubernetes`, `http`. Config holds non-secret connection details; `credentials` is the decrypted secret map (nil for backends that need none, e.g. `local`).
 
-Two cross-cutting contracts make the abstraction safe:
+Three cross-cutting contracts make the abstraction safe:
 
+- **Server-local paths are confined to configured roots.** Source config is written by whoever holds `sources:manage`, so the two connectors that name a path on the server's own filesystem — `local`'s `base_path` and `kubernetes`' optional `kubeconfig` — are checked against operator-configured roots (`TSM_STATESOURCE_LOCAL_ROOTS`, `TSM_STATESOURCE_KUBECONFIG_ROOTS`) when the connector is constructed, so every later list/read/write/delete inherits the boundary. The lists are empty by default and permit nothing — see [configuration.md](configuration.md#state-sources).
 - **`ErrNotFound` is load-bearing.** `IsNotFound(err)` distinguishes "the state does not exist" (safe to treat as a first write) from "the backend failed" (must abort). This underpins the fail-closed write guard — see [ADR 002](adr/002-fail-closed-state-writes.md).
 - **Locking is per-connector.** Backends that implement `Locker` (HCP workspace lock-then-verify, Consul session locks, local lock files, `http` backends with a lock address) use native locks; the rest (S3, GCS, Azure Blob, git) fall back to an application-level advisory lock in PostgreSQL with a 15-minute stale TTL — see [ADR 003](adr/003-advisory-lock-ttl.md). Consul's lock is a session (TTL 15m, auto-released on crash) acquiring `<key>/.lock` — the **same key Terraform's consul backend locks** — so an edit and a concurrent `terraform apply` mutually exclude. HCP and Consul additionally guard against TOCTOU races: HCP verifies serial/lineage *under* the workspace lock, and Consul writes with `?cas=<ModifyIndex>` under its lock as defense-in-depth against writers that bypass locking.
 

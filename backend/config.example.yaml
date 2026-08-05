@@ -65,6 +65,23 @@ telemetry:
 workers:
   enabled: true
 
+# Directories on THIS server that a state source may reference. Two connector
+# types name a server-local path in their source config: "local" (base_path) and
+# "kubernetes" (an optional kubeconfig file). That config is supplied by whoever
+# creates the source, so the operator declares the boundary here.
+#
+# Both lists FAIL CLOSED — empty (the default) permits nothing rather than
+# everything, so a local source cannot be created until its root is listed. A
+# base_path is accepted when it is a permitted root or lies beneath one (compared
+# on whole path segments, with symlinks resolved on both sides). Entries must be
+# absolute paths; TSM_STATESOURCE_LOCAL_ROOTS / TSM_STATESOURCE_KUBECONFIG_ROOTS
+# take a comma-separated list.
+statesource:
+  local_roots: []
+  #   - /data/states
+  kubeconfig_roots: []
+  #   - /etc/tsm/kubeconfigs
+
 auth:
   oidc:
     enabled: false

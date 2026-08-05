@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -316,7 +317,7 @@ func resolveKubeconfig(explicit string) (kubeClusterInfo, error) {
 	if err != nil {
 		return kubeClusterInfo{}, err
 	}
-	data, err := os.ReadFile(path) // #nosec G304 -- path is operator-configured or a standard kubeconfig location
+	data, err := os.ReadFile(path) // #nosec G304 -- findKubeconfigPath confined the path to the configured kubeconfig roots
 	if err != nil {
 		return kubeClusterInfo{}, fmt.Errorf("failed to read kubeconfig %q: %w", path, err)
 	}
@@ -372,10 +373,11 @@ func resolveKubeconfig(explicit string) (kubeClusterInfo, error) {
 				ci.caCert = decoded
 			}
 		} else if cl.Cluster.CertificateAuthority != "" {
-			// The CA path comes from the operator-trusted kubeconfig file itself
-			// (same trust boundary as its token/server); the bytes are only used
-			// as a TLS root CA, never echoed.
-			if caData, rErr := os.ReadFile(cl.Cluster.CertificateAuthority); rErr == nil { // #nosec G304 G703 -- operator-trusted kubeconfig
+			// The CA path comes from the kubeconfig file itself, which lives in a
+			// permitted root and is therefore operator-authored (same trust
+			// boundary as its token/server); the bytes are only used as a TLS
+			// root CA, never echoed.
+			if caData, rErr := os.ReadFile(cl.Cluster.CertificateAuthority); rErr == nil { // #nosec G304 G703 -- kubeconfig is confined to the configured roots
 				ci.caCert = caData
 			}
 		}
@@ -397,12 +399,30 @@ func resolveKubeconfig(explicit string) (kubeClusterInfo, error) {
 // (and the original scanner), the server deliberately does NOT probe $KUBECONFIG
 // or ~/.kube/config: a service should never pick up ambient credentials that the
 // operator didn't knowingly hand it.
+//
+// The path travels with the source record, so like the local connector's
+// base_path it is confined to the operator's permitted roots (roots.go) —
+// checked before the file is touched, and again once symlinks are resolved.
 func findKubeconfigPath(explicit string) (string, error) {
 	if explicit == "" {
 		return "", fmt.Errorf("no config.kubeconfig path set")
 	}
-	if _, err := os.Stat(explicit); err != nil {
+	abs, err := filepath.Abs(explicit)
+	if err != nil {
+		return "", fmt.Errorf("invalid kubeconfig path: %w", err)
+	}
+	if err := ensureKubeconfigPermitted(abs); err != nil {
+		return "", err
+	}
+	if _, err := os.Stat(abs); err != nil {
 		return "", fmt.Errorf("kubeconfig %q not found: %w", explicit, err)
 	}
-	return explicit, nil
+	real, err := filepath.EvalSymlinks(abs)
+	if err != nil {
+		return "", fmt.Errorf("kubeconfig %q not found: %w", explicit, err)
+	}
+	if err := ensureKubeconfigPermitted(real); err != nil {
+		return "", err
+	}
+	return real, nil
 }

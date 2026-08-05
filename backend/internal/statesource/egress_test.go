@@ -11,14 +11,18 @@ import (
 
 // TestMain relaxes the connector egress guard to also allow loopback so the
 // connector tests (which dial httptest.NewServer on 127.0.0.1) can reach their
-// stub servers. The production guard blocks loopback (see egress.go); that policy
-// is asserted on a fresh guard in TestEgressGuard_Policy, independent of this
-// relaxation.
+// stub servers, and permits the OS temp directory as a local state-source root
+// so tests that build a local connector over t.TempDir() clear the containment
+// check in roots.go. The production guard blocks loopback (see egress.go) and
+// permits no roots at all; both policies are asserted independently — in
+// TestEgressGuard_Policy on a fresh guard, and in TestLocalBasePathContainment
+// on roots configured per case.
 func TestMain(m *testing.M) {
 	_ = ConfigureEgress([]string{
 		"127.0.0.1", "::1",
 		"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16",
 	})
+	_ = ConfigureLocalRoots([]string{os.TempDir()})
 	os.Exit(m.Run())
 }
 

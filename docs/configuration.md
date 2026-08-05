@@ -20,6 +20,7 @@ and a non-empty `logging.level` outside `debug|info|warn|error`.
 **Sections:** [Server](#server) · [Database](#database) ·
 [Identity database](#identity-database-shared--standalone) ·
 [Core secrets](#core-secrets) · [Workers](#workers) ·
+[State sources](#state-sources) ·
 [OIDC](#authentication--oidc) · [LDAP](#authentication--ldap--active-directory) ·
 [SAML](#authentication--saml-20) · [mTLS & SCIM](#authentication--mtls-and-scim) ·
 [Logging & telemetry](#logging--telemetry) · [Suite coupling](#suite-coupling) ·
@@ -100,6 +101,37 @@ they overwrite each other's role scopes on every restart.
 | `TSM_BACKUP_RETENTION_ENABLED` | `true` | | | Bounds `state_backups`, which otherwise grows for the lifetime of a source. Runs once per sync cycle on the worker leader. Set `false` if you have retention obligations that forbid automatic deletion — then plan for unbounded growth ([capacity-planning](capacity-planning.md)) |
 | `TSM_BACKUP_RETENTION_KEEP` | `20` | | | Backups always retained per state (`source_id` + `state_key`), newest first, **regardless of age**. This floor is what makes the age cap safe: a state that hasn't been edited in months still keeps its most recent restore points. Must be ≥ 1 |
 | `TSM_BACKUP_RETENTION_MAX_AGE` | `2160h` (90d) | | | Age past which a backup is eligible for deletion — but only once it falls outside the `KEEP` floor. Must be > 0 |
+
+## State sources
+
+Two connector types are configured with a path on the **server's own
+filesystem**: `local` (its `base_path` directory of `.tfstate` files) and
+`kubernetes` (an optional `kubeconfig` file, when the connector is not given a
+`server` + token). Those paths travel with the source record, which any caller
+holding `sources:manage` can create — so the operator, not the caller, declares
+which directories the server may use, with the variables below.
+
+| Variable | Default | Required | Secret | Description |
+|---|---|---|---|---|
+| `TSM_STATESOURCE_LOCAL_ROOTS` | (empty) | for `local` sources | | Comma-separated **absolute** directories a `local` source's `base_path` may be, or live under. Empty = no `local` source can be created |
+| `TSM_STATESOURCE_KUBECONFIG_ROOTS` | (empty) | for kubeconfig-based `kubernetes` sources | | Comma-separated absolute directories (or exact file paths) a `kubernetes` source's `config.kubeconfig` may name. Empty = configure that connector with `config.server` + `credentials.token` instead |
+
+**Both fail closed.** Unset means *nothing is permitted*, not *anything is
+permitted*: a `local` source is refused at creation (and an existing one stops
+resolving) until its root is listed. Set each to exactly the directory your
+deployment mounts for the purpose — e.g. `TSM_STATESOURCE_LOCAL_ROOTS=/data/states`
+alongside the Helm chart's `localStates.mountPath` (the chart sets this for you
+when `localStates.enabled=true`), or the compose/host path you bind-mount.
+
+A `base_path` is accepted when it **is** a permitted root or lies **beneath**
+one. Comparison is on whole path segments and after resolving symlinks on both
+sides, so `/data/states-evil` is not accepted under a root of `/data/states`, and
+neither is a symlink planted inside a permitted root that points out of it. The
+check runs when the connector is built, so every list/read/write/delete inherits
+it. Entries must be absolute — a relative entry is a boot-time error. Remote
+backends (HCP, S3, Azure Blob, GCS, Consul, PG, HTTP, Git) touch no server-local
+path and are unaffected; the hosts they dial are governed separately by the
+connector egress guard.
 
 ## Authentication — OIDC
 

@@ -129,6 +129,21 @@ func serve(cfg *config.Config) error {
 	}
 	statesource.InstallGuardedGitTransport()
 
+	// Confine the state sources that name a path on this server's filesystem (the
+	// local connector's base_path, the kubernetes connector's kubeconfig) to the
+	// operator's permitted roots. Empty configuration fails closed — such sources
+	// simply cannot be created. Like the egress guard these are package globals,
+	// so this must run before any connector is constructed.
+	if err := statesource.ConfigureLocalRoots(cfg.StateSource.LocalRoots); err != nil {
+		return fmt.Errorf("invalid statesource.local_roots: %w", err)
+	}
+	if err := statesource.ConfigureKubeconfigRoots(cfg.StateSource.KubeconfigRoots); err != nil {
+		return fmt.Errorf("invalid statesource.kubeconfig_roots: %w", err)
+	}
+	slog.Info("state-source filesystem roots applied",
+		"local_roots", len(cfg.StateSource.LocalRoots),
+		"kubeconfig_roots", len(cfg.StateSource.KubeconfigRoots))
+
 	// Export build information as a Prometheus metric for fleet inventory queries.
 	telemetry.AppInfo.WithLabelValues(Version, runtime.Version(), BuildDate).Set(1)
 

@@ -325,3 +325,36 @@ func TestBackupRetentionValidation(t *testing.T) {
 		})
 	}
 }
+
+func TestStateSourceRootsEnvBinding(t *testing.T) {
+	// Default: no roots at all — the connectors that name a server-local path
+	// (local base_path, kubernetes kubeconfig) are unavailable until an operator
+	// says which directories they may use.
+	cfg, err := Load("")
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if len(cfg.StateSource.LocalRoots) != 0 || len(cfg.StateSource.KubeconfigRoots) != 0 {
+		t.Errorf("state-source roots must default to empty, got %v / %v",
+			cfg.StateSource.LocalRoots, cfg.StateSource.KubeconfigRoots)
+	}
+
+	t.Setenv("TSM_STATESOURCE_LOCAL_ROOTS", "/data/states,/srv/tfstate")
+	t.Setenv("TSM_STATESOURCE_KUBECONFIG_ROOTS", "/etc/tsm/kubeconfigs")
+	cfg, err = Load("")
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	want := []string{"/data/states", "/srv/tfstate"}
+	if len(cfg.StateSource.LocalRoots) != len(want) {
+		t.Fatalf("local roots = %v, want %v", cfg.StateSource.LocalRoots, want)
+	}
+	for i, w := range want {
+		if cfg.StateSource.LocalRoots[i] != w {
+			t.Errorf("local root %d = %q, want %q", i, cfg.StateSource.LocalRoots[i], w)
+		}
+	}
+	if len(cfg.StateSource.KubeconfigRoots) != 1 || cfg.StateSource.KubeconfigRoots[0] != "/etc/tsm/kubeconfigs" {
+		t.Errorf("kubeconfig roots = %v, want [/etc/tsm/kubeconfigs]", cfg.StateSource.KubeconfigRoots)
+	}
+}

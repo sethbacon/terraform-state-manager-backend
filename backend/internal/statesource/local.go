@@ -12,8 +12,9 @@ import (
 )
 
 // local reads .tfstate files from a base directory on the server. The base path
-// is operator-configured (creating a source requires the sources:manage scope);
-// keys are validated to stay within the base directory.
+// comes from the source record (creating a source requires the sources:manage
+// scope) and must sit inside a root the operator permitted (roots.go); keys are
+// then validated to stay within that base directory.
 type local struct {
 	basePath string
 }
@@ -27,6 +28,11 @@ func newLocal(config map[string]any) (*local, error) {
 	if err != nil {
 		return nil, fmt.Errorf("invalid base_path: %w", err)
 	}
+	// Containment before contact: a base_path outside every permitted root is
+	// refused here, so the server never probes it.
+	if err := ensureLocalBasePathPermitted(abs); err != nil {
+		return nil, err
+	}
 	info, err := os.Stat(abs)
 	if err != nil {
 		return nil, fmt.Errorf("base_path %q is not accessible: %w", abs, err)
@@ -34,11 +40,17 @@ func newLocal(config map[string]any) (*local, error) {
 	if !info.IsDir() {
 		return nil, fmt.Errorf("base_path %q is not a directory", abs)
 	}
-	// Canonicalize so symlink containment checks in resolve() compare real paths.
-	if real, evErr := filepath.EvalSymlinks(abs); evErr == nil {
-		abs = real
+	// Canonicalize so symlink containment checks in resolve() compare real paths,
+	// and re-check the boundary on the resolved path: a base_path that is (or
+	// runs through) a symlink must not land outside its permitted root.
+	real, err := filepath.EvalSymlinks(abs)
+	if err != nil {
+		return nil, fmt.Errorf("base_path %q is not accessible: %w", abs, err)
 	}
-	return &local{basePath: abs}, nil
+	if err := ensureLocalBasePathPermitted(real); err != nil {
+		return nil, err
+	}
+	return &local{basePath: real}, nil
 }
 
 func (l *local) List(_ context.Context) ([]StateRef, error) {
