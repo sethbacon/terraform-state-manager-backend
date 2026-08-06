@@ -6,6 +6,7 @@ package api
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/mail"
@@ -14,6 +15,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	identitycrypto "github.com/sethbacon/terraform-suite-identity/identity/crypto"
+	idstore "github.com/sethbacon/terraform-suite-identity/identity/store"
 
 	"github.com/terraform-state-manager/terraform-state-manager/internal/config"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/crypto"
@@ -223,13 +225,16 @@ func (h *NotificationHandlers) UpdateChannel() gin.HandlerFunc {
 			}
 		}
 		enabled := req.Enabled == nil || *req.Enabled
+		// identity/notify reports a zero-row update with identity/store's
+		// ErrNotFound (one sentinel across both packages), so the 404 below is
+		// reached through the error rather than a nil row.
 		updated, err := h.repo.Update(c.Request.Context(), c.Param("id"), req.Name, req.Type, req.events(), enabled, enc)
-		if err != nil {
-			serverError(c, err, "failed to update channel")
+		if errors.Is(err, idstore.ErrNotFound) || (err == nil && updated == nil) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "channel not found"})
 			return
 		}
-		if updated == nil {
-			c.JSON(http.StatusNotFound, gin.H{"error": "channel not found"})
+		if err != nil {
+			serverError(c, err, "failed to update channel")
 			return
 		}
 		h.audit.write(c, "notification_channel.update", "notification_channel", updated.ID,
@@ -242,7 +247,10 @@ func (h *NotificationHandlers) UpdateChannel() gin.HandlerFunc {
 func (h *NotificationHandlers) DeleteChannel() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		id := c.Param("id")
-		if err := h.repo.Delete(c.Request.Context(), id); err != nil {
+		// Idempotent DELETE: an already-absent channel answered 204 before the
+		// identity bump and keeps answering 204.
+		if err := h.repo.Delete(c.Request.Context(), id); err != nil &&
+			!errors.Is(err, idstore.ErrNotFound) {
 			serverError(c, err, "failed to delete channel")
 			return
 		}

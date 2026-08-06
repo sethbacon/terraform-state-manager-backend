@@ -9,6 +9,7 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -19,6 +20,17 @@ import (
 	idmodels "github.com/sethbacon/terraform-suite-identity/identity/models"
 	idstore "github.com/sethbacon/terraform-suite-identity/identity/store"
 )
+
+// notFound reports whether err is the identity store's not-found sentinel.
+//
+// Since terraform-suite-identity v0.24.0 a by-id read that misses, and a by-id
+// UPDATE/DELETE that matches zero rows, both report an error wrapping
+// store.ErrNotFound instead of succeeding silently. Every handler below that
+// used to lean on "nil error means it happened" therefore has to say which of
+// the two answers it wants: 404 (the resource is gone, and the caller asked
+// about a specific one) or "already in the desired state" (idempotent DELETE).
+// One helper so the choice is visible at each site rather than re-derived.
+func notFound(err error) bool { return errors.Is(err, idstore.ErrNotFound) }
 
 // buildAuditLog assembles an AuditLog from the request context (acting user,
 // client IP) and the given fields. A non-empty orgID stamps the owning
@@ -134,7 +146,15 @@ func (h *AdminHandlers) UpdateUser() gin.HandlerFunc {
 		if strings.TrimSpace(req.Name) != "" {
 			user.Name = strings.TrimSpace(req.Name)
 		}
+		// The row was read a moment ago, so a zero-row UPDATE means it was
+		// deleted in between. Answer the same 404 the read above would have —
+		// not a 500, and not the silent 200 this returned before v0.24.0 made
+		// the zero-row write distinguishable.
 		if err := h.userRepo.UpdateUser(c.Request.Context(), user); err != nil {
+			if notFound(err) {
+				c.JSON(http.StatusNotFound, gin.H{"error": "user not found"})
+				return
+			}
 			serverError(c, err, "failed to update user")
 			return
 		}
@@ -165,7 +185,13 @@ func (h *AdminHandlers) DeleteUser() gin.HandlerFunc {
 			serverError(c, errCredentialSweepIncomplete, "failed to revoke credentials")
 			return
 		}
-		if err := h.userRepo.DeleteUser(ctx, id); err != nil {
+		// DELETE is idempotent here and stays that way: this route has never
+		// pre-checked existence, so deleting an already-absent user answered 204
+		// before v0.24.0 and must keep answering 204. ErrNotFound is exactly
+		// that case ("nothing to delete"), so it is absorbed rather than turned
+		// into the 500 a bare `err != nil` would now produce on every repeat
+		// call. A real failure still 500s.
+		if err := h.userRepo.DeleteUser(ctx, id); err != nil && !notFound(err) {
 			serverError(c, err, "failed to delete user")
 			return
 		}
@@ -280,11 +306,20 @@ func (h *AdminHandlers) EraseUser() gin.HandlerFunc {
 		user.Email = "erased-" + id + "@anonymized.invalid"
 		user.Name = "Erased User"
 		user.OIDCSub = nil
+		// Raced delete between the read above and this write: 404, matching the
+		// read's own answer. Anonymization reporting success when it wrote no
+		// row is the exact GDPR-relevant lie v0.24.0 makes detectable.
 		if err := h.userRepo.UpdateUser(ctx, user); err != nil {
+			if notFound(err) {
+				c.JSON(http.StatusNotFound, gin.H{"error": "user not found"})
+				return
+			}
 			serverError(c, err, "failed to anonymize user")
 			return
 		}
-		if err := h.orgRepo.RemoveAllMembershipsForUser(ctx, id); err != nil {
+		// The bulk sweep reports an affected-row count rather than ErrNotFound:
+		// a user who holds no memberships is already in the erased end state.
+		if _, err := h.orgRepo.RemoveAllMembershipsForUser(ctx, id); err != nil {
 			serverError(c, err, "failed to revoke memberships")
 			return
 		}
@@ -388,6 +423,10 @@ func (h *AdminHandlers) UpdateOrganization() gin.HandlerFunc {
 		}
 		if name := strings.TrimSpace(req.Name); name != "" && name != org.Name {
 			if err := h.orgRepo.Rename(ctx, org.ID, name); err != nil {
+				if notFound(err) {
+					c.JSON(http.StatusNotFound, gin.H{"error": "organization not found"})
+					return
+				}
 				serverError(c, err, "failed to rename organization")
 				return
 			}
@@ -404,6 +443,10 @@ func (h *AdminHandlers) UpdateOrganization() gin.HandlerFunc {
 			org.IdpName = nilIfEmpty(*req.IdpName)
 		}
 		if err := h.orgRepo.Update(ctx, org); err != nil {
+			if notFound(err) {
+				c.JSON(http.StatusNotFound, gin.H{"error": "organization not found"})
+				return
+			}
 			serverError(c, err, "failed to update organization")
 			return
 		}
@@ -441,7 +484,9 @@ func (h *AdminHandlers) DeleteOrganization() gin.HandlerFunc {
 			serverError(c, err, "failed to list organization members")
 			return
 		}
-		if err := h.orgRepo.Delete(ctx, id); err != nil {
+		// Idempotent DELETE (see DeleteUser): an already-absent organization
+		// answered 204 before v0.24.0 and keeps answering 204.
+		if err := h.orgRepo.Delete(ctx, id); err != nil && !notFound(err) {
 			serverError(c, err, "failed to delete organization")
 			return
 		}
@@ -554,7 +599,14 @@ func (h *AdminHandlers) UpdateOrganizationMember() gin.HandlerFunc {
 		}
 		orgID, userID := c.Param("id"), c.Param("user_id")
 		ctx := c.Request.Context()
-		if err := h.orgRepo.UpdateMemberRoleTemplate(ctx, orgID, userID, roleID); err != nil {
+		// Absorbed, not 404'd: this route has never pre-checked membership, so a
+		// PUT naming a non-member answered 200 before v0.24.0 and keeps
+		// answering 200 (rule: no silent status-code changes in this bump).
+		// The AuthorityReduced sweep below is safe either way — it re-derives
+		// the user's retained scopes rather than assuming a change happened.
+		// Whether this endpoint SHOULD 404 on a non-member is a deliberate API
+		// decision, tracked separately from the identity upgrade.
+		if err := h.orgRepo.UpdateMemberRoleTemplate(ctx, orgID, userID, roleID); err != nil && !notFound(err) {
 			serverError(c, err, "failed to update member")
 			return
 		}
@@ -579,7 +631,11 @@ func (h *AdminHandlers) RemoveOrganizationMember() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		orgID, userID := c.Param("id"), c.Param("user_id")
 		ctx := c.Request.Context()
-		if err := h.orgRepo.RemoveMember(ctx, orgID, userID); err != nil {
+		// Idempotent DELETE (see DeleteUser): removing a user who is not a
+		// member answered 204 before v0.24.0 and keeps answering 204. The sweep
+		// below still runs, which is the safe direction — it recomputes the
+		// authority the user retains rather than trusting that a row moved.
+		if err := h.orgRepo.RemoveMember(ctx, orgID, userID); err != nil && !notFound(err) {
 			serverError(c, err, "failed to remove member")
 			return
 		}

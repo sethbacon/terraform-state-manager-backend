@@ -222,9 +222,15 @@ func serve(cfg *config.Config) error {
 		ticker := time.NewTicker(24 * time.Hour)
 		defer ticker.Stop()
 		for range ticker.C {
-			if err := tokenRepo.CleanupExpiredRevocations(context.Background()); err != nil {
+			// The sweep reports how many denylist rows it removed: zero is a
+			// normal outcome (nothing had expired), not a miss, so it is a count
+			// rather than an error.
+			removed, err := tokenRepo.CleanupExpiredRevocations(context.Background())
+			if err != nil {
 				slog.Error("failed to clean up expired token revocations", "error", err)
+				continue
 			}
+			slog.Debug("expired token revocations cleaned up", "rows", removed)
 		}
 	}()
 

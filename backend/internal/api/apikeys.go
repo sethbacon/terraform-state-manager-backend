@@ -9,6 +9,8 @@ package api
 import (
 	"context"
 	"database/sql"
+	"errors"
+	"fmt"
 	"net/http"
 	"time"
 
@@ -89,13 +91,17 @@ func validateGrantedScopes(c *gin.Context, requested []string) (ok bool, bad str
 // ownsOrAdmin loads the key and authorizes the caller (owner or admin),
 // answering 404/403/500 itself when access is denied.
 func (h *APIKeysHandlers) ownsOrAdmin(c *gin.Context) (*models.APIKey, bool) {
+	// Sentinel first: an unknown key id keeps answering 404. A bare `err != nil`
+	// would 500 here since v0.24.0 and leave the 404 below unreachable — which
+	// would also leak existence, since the "hide other users' keys" branch just
+	// below deliberately answers 404 too.
 	key, err := h.keys.GetByID(c.Request.Context(), c.Param("id"))
-	if err != nil {
-		serverError(c, err, "failed to load API key")
+	if errors.Is(err, idstore.ErrNotFound) || (err == nil && key == nil) {
+		c.JSON(http.StatusNotFound, gin.H{"error": "API key not found"})
 		return nil, false
 	}
-	if key == nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "API key not found"})
+	if err != nil {
+		serverError(c, err, "failed to load API key")
 		return nil, false
 	}
 	if !isAdmin(c) && (key.UserID == nil || *key.UserID != userIDOf(c)) {
@@ -254,9 +260,19 @@ func (h *APIKeysHandlers) CreateAPIKey() gin.HandlerFunc {
 // mintKey generates and persists a key owned by userID, returning the
 // plaintext secret (shown once) and the stored row.
 func (h *APIKeysHandlers) mintKey(c *gin.Context, req apiKeyInput, expires *time.Time, userID string) (string, *models.APIKey, error) {
+	// Every key is stamped with the default organization, so a deployment
+	// without one cannot mint keys at all. Before v0.24.0 that arrived as
+	// (nil, nil) and this function dereferenced org.ID into a panic; naming the
+	// sentinel turns it into an explicit, greppable 500.
 	org, err := h.orgs.GetDefaultOrganization(c.Request.Context())
+	if errors.Is(err, idstore.ErrNotFound) {
+		return "", nil, fmt.Errorf("default organization not found: %w", err)
+	}
 	if err != nil {
 		return "", nil, err
+	}
+	if org == nil {
+		return "", nil, fmt.Errorf("default organization not found")
 	}
 	fullKey, hash, prefix, err := idauth.GenerateAPIKey(middleware.APIKeyPrefix)
 	if err != nil {
@@ -323,7 +339,13 @@ func (h *APIKeysHandlers) UpdateAPIKey() gin.HandlerFunc {
 		}
 		key.Scopes = req.Scopes
 		key.ExpiresAt = expires
+		// ownsOrAdmin read the row a moment ago, so a zero-row UPDATE means it
+		// was deleted in between: same 404 the read would have given.
 		if err := h.keys.Update(c.Request.Context(), key); err != nil {
+			if errors.Is(err, idstore.ErrNotFound) {
+				c.JSON(http.StatusNotFound, gin.H{"error": "API key not found"})
+				return
+			}
 			serverError(c, err, "failed to update API key")
 			return
 		}
@@ -340,7 +362,11 @@ func (h *APIKeysHandlers) DeleteAPIKey() gin.HandlerFunc {
 		if !ok {
 			return
 		}
-		if err := h.keys.Delete(c.Request.Context(), key.ID); err != nil {
+		// Idempotent: a key already destroyed by a concurrent rotation or sweep
+		// is the desired end state of a DELETE, so it keeps its 204 rather than
+		// becoming the 500 a bare `err != nil` would now yield.
+		if err := h.keys.Delete(c.Request.Context(), key.ID); err != nil &&
+			!errors.Is(err, idstore.ErrNotFound) {
 			serverError(c, err, "failed to delete API key")
 			return
 		}
@@ -392,15 +418,22 @@ func (h *APIKeysHandlers) RotateAPIKey() gin.HandlerFunc {
 			return
 		}
 
+		// The replacement is already minted and its secret is in this response
+		// only. Both arms therefore treat "the old key is already gone" as the
+		// goal having been met — a 500 here would leave the caller believing the
+		// rotation failed while holding the only copy of the new secret. A real
+		// failure still 500s.
 		if req.GracePeriodHours == 0 {
-			if err := h.keys.Delete(c.Request.Context(), key.ID); err != nil {
+			if err := h.keys.Delete(c.Request.Context(), key.ID); err != nil &&
+				!errors.Is(err, idstore.ErrNotFound) {
 				serverError(c, err, "rotated, but failed to revoke the old key")
 				return
 			}
 		} else {
 			cutoff := time.Now().Add(time.Duration(req.GracePeriodHours) * time.Hour)
 			key.ExpiresAt = &cutoff
-			if err := h.keys.Update(c.Request.Context(), key); err != nil {
+			if err := h.keys.Update(c.Request.Context(), key); err != nil &&
+				!errors.Is(err, idstore.ErrNotFound) {
 				serverError(c, err, "rotated, but failed to schedule the old key's expiry")
 				return
 			}

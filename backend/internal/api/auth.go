@@ -8,6 +8,7 @@ import (
 	"crypto/rand"
 	"database/sql"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -400,13 +401,17 @@ func (h *AuthHandlers) MeHandler() gin.HandlerFunc {
 		}
 		uid, _ := userID.(string)
 
+		// Sentinel first: a token naming a deleted user must keep answering 404,
+		// not 500. GetUserWithOrgRoles propagates GetUserByID's ErrNotFound, and
+		// a user with no memberships is NOT a miss (it returns an empty slice),
+		// so this cannot swallow a legitimately membership-less account.
 		userWithRoles, err := h.userRepo.GetUserWithOrgRoles(c.Request.Context(), uid)
-		if err != nil {
-			serverError(c, err, "Failed to get user information")
+		if errors.Is(err, idstore.ErrNotFound) || (err == nil && userWithRoles == nil) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "User not found"})
 			return
 		}
-		if userWithRoles == nil {
-			c.JSON(http.StatusNotFound, gin.H{"error": "User not found"})
+		if err != nil {
+			serverError(c, err, "Failed to get user information")
 			return
 		}
 
@@ -651,8 +656,21 @@ func (h *AuthHandlers) reconcileManagedMemberships(ctx context.Context, userID s
 				continue
 			}
 			if isMember {
-				if err := h.orgRepo.UpdateMemberRole(ctx, org.ID, userID, role); err != nil {
-					return fmt.Errorf("update member role org=%s user=%s: %w", org.ID, userID, err)
+				// ErrNotFound means the membership went away between the
+				// CheckMembership above and this write (a concurrent admin
+				// removal, or a parallel login reconciling the same user). The
+				// reconciliation is a per-organization loop over the whole
+				// managed set: aborting it here would leave every LATER
+				// organization unreconciled and fail the login outright, for an
+				// element that is already in a settled state. Skip and continue.
+				updErr := h.orgRepo.UpdateMemberRole(ctx, org.ID, userID, role)
+				if errors.Is(updErr, idstore.ErrNotFound) {
+					slog.Info("group mapping: membership vanished before the role update; skipping",
+						"user_id", userID, "org", orgName)
+					continue
+				}
+				if updErr != nil {
+					return fmt.Errorf("update member role org=%s user=%s: %w", org.ID, userID, updErr)
 				}
 				// A reassignment is a REDUCTION whenever the new template grants
 				// less than the old one — an IdP group change can demote owner to
@@ -666,7 +684,14 @@ func (h *AuthHandlers) reconcileManagedMemberships(ctx context.Context, userID s
 			slog.Info("group mapping applied", "user_id", userID, "org", orgName, "role", role)
 		} else if isMember {
 			// Deprovision: member of an IdP-managed org with no matching current group.
-			if err := h.orgRepo.RemoveMember(ctx, org.ID, userID); err != nil {
+			//
+			// ErrNotFound means the membership is ALREADY gone — the desired end
+			// state of this very branch. Treat it as applied and carry on
+			// reconciling the remaining organizations rather than aborting the
+			// login; a deprovisioning loop that stops at the first
+			// already-deprovisioned element leaves the rest provisioned.
+			if err := h.orgRepo.RemoveMember(ctx, org.ID, userID); err != nil &&
+				!errors.Is(err, idstore.ErrNotFound) {
 				return fmt.Errorf("revoke membership org=%s user=%s: %w", org.ID, userID, err)
 			}
 			h.sweepIdPReduction(ctx, userID, "idp group mapping: membership revoked")

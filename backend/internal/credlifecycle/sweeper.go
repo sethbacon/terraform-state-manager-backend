@@ -34,6 +34,7 @@ package credlifecycle
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 
 	idstore "github.com/sethbacon/terraform-suite-identity/identity/store"
@@ -188,6 +189,11 @@ func (s *Sweeper) UserDeprovisioned(ctx context.Context, userID, reason string) 
 	}
 	for _, k := range keys {
 		if err := s.apiKeys.RevokeAPIKey(ctx, k.ID); err != nil {
+			if alreadyGone(err) {
+				slog.Info("credlifecycle: API key already gone", "api_key_id", k.ID,
+					"user_id", userID, "reason", reason)
+				continue
+			}
 			slog.Error("credlifecycle: failed to revoke API key",
 				"api_key_id", k.ID, "user_id", userID, "reason", reason, "error", err)
 			out.Incomplete = true
@@ -198,6 +204,19 @@ func (s *Sweeper) UserDeprovisioned(ctx context.Context, userID, reason string) 
 	}
 	return out
 }
+
+// alreadyGone reports whether a revocation failed because the key had already
+// been deleted — by a concurrent rotation, a parallel sweep, or an admin acting
+// between the ListAPIKeysByUser above and the delete below.
+//
+// It must NOT count as Incomplete. Outcome.Incomplete is a hard failure signal:
+// AdminHandlers.DeleteUser and EraseUser turn it into a 500 and refuse to
+// proceed, so treating a raced key as a failure would make offboarding a user
+// fail precisely because one of their credentials was already destroyed — the
+// desired end state. Since identity v0.24.0 RevokeAPIKey reports the zero-row
+// delete as ErrNotFound instead of nil, so this arm is what keeps the sweep
+// idempotent across the bump.
+func alreadyGone(err error) bool { return errors.Is(err, idstore.ErrNotFound) }
 
 func (s *Sweeper) revokeTokens(ctx context.Context, userID, reason string) Outcome {
 	if s.userRevocations == nil {
@@ -253,6 +272,11 @@ func (s *Sweeper) revokeOverAskingKeys(ctx context.Context, userID, reason strin
 			continue
 		}
 		if err := s.apiKeys.RevokeAPIKey(ctx, k.ID); err != nil {
+			if alreadyGone(err) {
+				slog.Info("credlifecycle: over-asking API key already gone",
+					"api_key_id", k.ID, "user_id", userID, "reason", reason)
+				continue
+			}
 			slog.Error("credlifecycle: failed to revoke over-asking API key",
 				"api_key_id", k.ID, "user_id", userID, "reason", reason, "error", err)
 			out.Incomplete = true
