@@ -2,6 +2,7 @@ package middleware
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"strings"
 	"time"
@@ -86,13 +87,18 @@ func AuthMiddleware(userRepo *idstore.UserRepository, tokenRepo *idstore.TokenRe
 			}
 		}
 
+		// A token naming a user who no longer exists is an AUTHENTICATION
+		// failure (401), not a server fault. The sentinel is matched before the
+		// generic error arm: since identity v0.24.0 a missing user arrives as an
+		// error rather than (nil, nil), so a plain `if err != nil` would answer
+		// 500 to every deleted-user token and leave the 401 below unreachable.
 		user, err := userRepo.GetUserByID(c.Request.Context(), claims.UserID)
-		if err != nil {
-			c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "Failed to load user"})
+		if errors.Is(err, idstore.ErrNotFound) || (err == nil && user == nil) {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "User not found"})
 			return
 		}
-		if user == nil {
-			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "User not found"})
+		if err != nil {
+			c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "Failed to load user"})
 			return
 		}
 

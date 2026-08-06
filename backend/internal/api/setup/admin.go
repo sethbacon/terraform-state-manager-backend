@@ -1,6 +1,7 @@
 package setup
 
 import (
+	"errors"
 	"net/http"
 	"strings"
 
@@ -52,8 +53,22 @@ func (h *Handlers) ConfigureAdmin(c *gin.Context) {
 		user = existing
 	}
 	if err := orgRepo.AddMemberWithParams(ctx, defaultOrg.ID, user.ID, "admin"); err != nil {
-		// Already a member: promote to admin.
-		if uerr := orgRepo.UpdateMemberRole(ctx, defaultOrg.ID, user.ID, "admin"); uerr != nil {
+		// Already a member (the insert is a plain INSERT, so a re-run of the
+		// wizard hits the unique constraint): promote to admin.
+		//
+		// FAILS CLOSED on ErrNotFound. Before identity v0.24.0 an UPDATE that
+		// matched no membership row returned nil, so this handler answered 200
+		// and went on to record SetAdminConfigured — marking the deployment
+		// "owner configured" when nobody had been granted anything and the
+		// wizard could never be re-entered. The sentinel makes that case
+		// distinguishable, and the only safe answer for a privilege grant that
+		// wrote no row is to refuse.
+		uerr := orgRepo.UpdateMemberRole(ctx, defaultOrg.ID, user.ID, "admin")
+		if errors.Is(uerr, idstore.ErrNotFound) {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to grant the owner the admin role: no membership to promote"})
+			return
+		}
+		if uerr != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to grant the owner the admin role"})
 			return
 		}

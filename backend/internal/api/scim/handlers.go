@@ -13,6 +13,7 @@ package scim
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math"
@@ -98,12 +99,17 @@ func NewHandlers(cfg *config.Config, identityDB *sql.DB, opts ...Option) *Handle
 // already committed, and SCIM clients retry aggressively on 5xx, so a sweep
 // failure is logged rather than turned into an error the IdP would replay.
 func (h *Handlers) deprovisionUser(ctx context.Context, userID, reason string) error {
-	if err := h.orgRepo.RemoveAllMembershipsForUser(ctx, userID); err != nil {
+	// A bulk sweep reports its affected-row count, not ErrNotFound: a user with
+	// no memberships left to strip is an already-deprovisioned user, which is the
+	// desired end state and must not fail an IdP-driven deactivation that the
+	// client will replay.
+	removed, err := h.orgRepo.RemoveAllMembershipsForUser(ctx, userID)
+	if err != nil {
 		return err
 	}
 	out := h.creds.UserDeprovisioned(ctx, userID, reason)
 	slog.Info("scim: credentials revoked for deprovisioned user",
-		"id", userID, "reason", reason,
+		"id", userID, "reason", reason, "memberships_removed", removed,
 		"tokens_revoked", out.TokensRevoked, "api_keys_revoked", out.KeysRevoked,
 		"incomplete", out.Incomplete)
 	return nil
@@ -260,14 +266,18 @@ func (h *Handlers) ListUsers() gin.HandlerFunc {
 func (h *Handlers) GetUser() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		userID := c.Param("id")
+		// Sentinel first: an unknown id keeps answering 404. A bare `err != nil`
+		// would 500 every miss since v0.24.0, and SCIM clients retry 5xx
+		// aggressively — a provisioning loop would hammer this route forever
+		// over a user that simply does not exist.
 		user, err := h.userRepo.GetUserByID(c.Request.Context(), userID)
+		if errors.Is(err, idstore.ErrNotFound) || (err == nil && user == nil) {
+			scimError(c, http.StatusNotFound, fmt.Sprintf("User %q not found", userID))
+			return
+		}
 		if err != nil {
 			slog.Error("scim: get user failed", "id", userID, "error", err)
 			scimError(c, http.StatusInternalServerError, "Failed to get user")
-			return
-		}
-		if user == nil {
-			scimError(c, http.StatusNotFound, fmt.Sprintf("User %q not found", userID))
 			return
 		}
 		c.JSON(http.StatusOK, userToSCIM(user, h.baseURL(c)))
@@ -373,7 +383,13 @@ func (h *Handlers) PatchUser() gin.HandlerFunc {
 			// Unsupported ops are ignored per the SCIM spec.
 		}
 
+		// Raced delete between the read above and this write: 404, matching the
+		// read's own answer, so a SCIM client stops rather than retrying a 5xx.
 		if err := h.userRepo.UpdateUser(ctx, user); err != nil {
+			if errors.Is(err, idstore.ErrNotFound) {
+				scimError(c, http.StatusNotFound, fmt.Sprintf("User %q not found", userID))
+				return
+			}
 			slog.Error("scim: update user failed", "id", userID, "error", err)
 			scimError(c, http.StatusInternalServerError, "Failed to update user")
 			return
@@ -434,7 +450,13 @@ func (h *Handlers) PutUser() gin.HandlerFunc {
 			slog.Info("scim: user deactivated via PUT", "id", userID)
 		}
 
+		// Raced delete between the read above and this write: 404, matching the
+		// read's own answer, so a SCIM client stops rather than retrying a 5xx.
 		if err := h.userRepo.UpdateUser(ctx, user); err != nil {
+			if errors.Is(err, idstore.ErrNotFound) {
+				scimError(c, http.StatusNotFound, fmt.Sprintf("User %q not found", userID))
+				return
+			}
 			slog.Error("scim: put user failed", "id", userID, "error", err)
 			scimError(c, http.StatusInternalServerError, "Failed to update user")
 			return

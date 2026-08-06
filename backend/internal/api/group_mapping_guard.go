@@ -5,7 +5,10 @@ package api
 
 import (
 	"context"
+	"errors"
 	"fmt"
+
+	idstore "github.com/sethbacon/terraform-suite-identity/identity/store"
 
 	"github.com/terraform-state-manager/terraform-state-manager/internal/auth"
 )
@@ -34,14 +37,22 @@ import (
 // the caller's own AddMemberWithParams/UpdateMemberRole performs the
 // authoritative name lookup immediately afterward and surfaces its own clear
 // error there, so this guard does not need to duplicate that failure mode.
+// Since terraform-suite-identity v0.24.0 the store reports "no such template"
+// as an error wrapping store.ErrNotFound instead of (nil, nil), so that
+// contract is now kept by matching the sentinel — the `rt == nil` branch below
+// no longer fires, and without this the guard would reject every mapping whose
+// role name does not exist rather than deferring to the write's own error.
+//
 // Any other lookup failure is returned (fails closed) — a transient DB error
 // here should not silently let an unverified role's scopes through.
 func (h *AuthHandlers) guardProvisionableRole(ctx context.Context, roleTemplateName string) error {
 	rt, err := h.roleRepo.GetRoleTemplateByName(ctx, roleTemplateName)
-	if err != nil {
+	switch {
+	case errors.Is(err, idstore.ErrNotFound):
+		return nil // unresolved name: the subsequent membership write reports it
+	case err != nil:
 		return fmt.Errorf("look up role template %q: %w", roleTemplateName, err)
-	}
-	if rt == nil {
+	case rt == nil:
 		return nil
 	}
 	return auth.ValidateProvisionableScopes(rt.Scopes)
