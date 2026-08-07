@@ -138,7 +138,16 @@ func (h *AdminHandlers) UpdateUser() gin.HandlerFunc {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
 			return
 		}
-		user, err := h.userRepo.GetUserByID(c.Request.Context(), c.Param("id"))
+		// The route's own guard (requireSharedOrgAdminWithTargetUser) has already
+		// proved the caller shares an administered organization with the target;
+		// the same set, as a store.OrgScope, is what the accessors now require, so
+		// a target outside it reports ErrNotFound and keeps this route's 404.
+		scope, sErr := h.callerOrgScope(c)
+		if sErr != nil {
+			serverError(c, sErr, "failed to resolve caller organizations")
+			return
+		}
+		user, err := h.userRepo.GetUserByID(c.Request.Context(), c.Param("id"), scope)
 		if err != nil || user == nil {
 			c.JSON(http.StatusNotFound, gin.H{"error": "user not found"})
 			return
@@ -150,7 +159,7 @@ func (h *AdminHandlers) UpdateUser() gin.HandlerFunc {
 		// deleted in between. Answer the same 404 the read above would have —
 		// not a 500, and not the silent 200 this returned before v0.24.0 made
 		// the zero-row write distinguishable.
-		if err := h.userRepo.UpdateUser(c.Request.Context(), user); err != nil {
+		if err := h.userRepo.UpdateUser(c.Request.Context(), user, scope); err != nil {
 			if notFound(err) {
 				c.JSON(http.StatusNotFound, gin.H{"error": "user not found"})
 				return
@@ -175,11 +184,18 @@ func (h *AdminHandlers) DeleteUser() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		ctx := c.Request.Context()
 		id := c.Param("id")
+		scope, sErr := h.callerOrgScope(c)
+		if sErr != nil {
+			serverError(c, sErr, "failed to resolve caller organizations")
+			return
+		}
 		// Invalidate every credential family before removing the account: the
-		// API-key rows (which outlive the owner — user_id is ON DELETE SET NULL —
-		// and would otherwise keep authenticating at their frozen scopes) and the
-		// user's live JWT sessions, whose scopes were embedded at login and which
-		// the JTI denylist cannot reach because no JTI is recorded (#330).
+		// API-key rows (whose stored scopes keep authenticating until something
+		// deletes them) and the user's live JWT sessions, whose scopes were
+		// embedded at login and which the JTI denylist cannot reach because no
+		// JTI is recorded (#330). identity v0.25.0's migration 000007 makes
+		// api_keys.user_id ON DELETE CASCADE, which is a backstop for the rows —
+		// it still cannot reach a live session, so the sweep still runs first.
 		out := h.creds.UserDeprovisioned(ctx, id, "admin: user deleted")
 		if out.Incomplete {
 			serverError(c, errCredentialSweepIncomplete, "failed to revoke credentials")
@@ -191,7 +207,7 @@ func (h *AdminHandlers) DeleteUser() gin.HandlerFunc {
 		// that case ("nothing to delete"), so it is absorbed rather than turned
 		// into the 500 a bare `err != nil` would now produce on every repeat
 		// call. A real failure still 500s.
-		if err := h.userRepo.DeleteUser(ctx, id); err != nil && !notFound(err) {
+		if err := h.userRepo.DeleteUser(ctx, id, scope); err != nil && !notFound(err) {
 			serverError(c, err, "failed to delete user")
 			return
 		}
@@ -236,7 +252,16 @@ func (h *AdminHandlers) ExportUserData() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		ctx := c.Request.Context()
 		id := c.Param("id")
-		user, err := h.userRepo.GetUserByID(ctx, id)
+		// One scope for the whole export: the organizations the caller
+		// administers, plus rows nobody owns. It bounds the subject lookup and
+		// the audit read alike, so the export cannot disclose through one axis
+		// what it refuses on the other.
+		scope, err := h.callerOrgScope(c)
+		if err != nil {
+			serverError(c, err, "failed to resolve caller organizations")
+			return
+		}
+		user, err := h.userRepo.GetUserByID(ctx, id, scope)
 		if err != nil || user == nil {
 			c.JSON(http.StatusNotFound, gin.H{"error": "user not found"})
 			return
@@ -255,11 +280,6 @@ func (h *AdminHandlers) ExportUserData() gin.HandlerFunc {
 		// unscoped read would hand the caller the target's trail from every
 		// OTHER tenant the target also belongs to — the same leak as the bulk
 		// export, reached through the per-user axis.
-		scope, err := h.callerAuditScope(c)
-		if err != nil {
-			serverError(c, err, "failed to resolve caller organizations")
-			return
-		}
 		logs, _, err := h.auditRepo.ListAuditLogs(ctx, auditFiltersForUser(id), scope, 1000, 0)
 		if err != nil {
 			serverError(c, err, "failed to load audit entries")
@@ -298,7 +318,12 @@ func (h *AdminHandlers) EraseUser() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		ctx := c.Request.Context()
 		id := c.Param("id")
-		user, err := h.userRepo.GetUserByID(ctx, id)
+		scope, sErr := h.callerOrgScope(c)
+		if sErr != nil {
+			serverError(c, sErr, "failed to resolve caller organizations")
+			return
+		}
+		user, err := h.userRepo.GetUserByID(ctx, id, scope)
 		if err != nil || user == nil {
 			c.JSON(http.StatusNotFound, gin.H{"error": "user not found"})
 			return
@@ -309,7 +334,7 @@ func (h *AdminHandlers) EraseUser() gin.HandlerFunc {
 		// Raced delete between the read above and this write: 404, matching the
 		// read's own answer. Anonymization reporting success when it wrote no
 		// row is the exact GDPR-relevant lie v0.24.0 makes detectable.
-		if err := h.userRepo.UpdateUser(ctx, user); err != nil {
+		if err := h.userRepo.UpdateUser(ctx, user, scope); err != nil {
 			if notFound(err) {
 				c.JSON(http.StatusNotFound, gin.H{"error": "user not found"})
 				return
@@ -317,9 +342,20 @@ func (h *AdminHandlers) EraseUser() gin.HandlerFunc {
 			serverError(c, err, "failed to anonymize user")
 			return
 		}
-		// The bulk sweep reports an affected-row count rather than ErrNotFound:
-		// a user who holds no memberships is already in the erased end state.
-		if _, err := h.orgRepo.RemoveAllMembershipsForUser(ctx, id); err != nil {
+		// The bulk sweep reports the organizations it emptied rather than
+		// ErrNotFound: a user who holds no memberships is already in the erased
+		// end state.
+		//
+		// Erasure is deliberately NOT narrowed to the caller's tenancy. Article
+		// 17 is an obligation about the whole data subject, and the two steps
+		// either side of this one — anonymizing the users row and revoking every
+		// credential — are already whole-principal. A tenant-scoped strip here
+		// would leave the "erased" account still a live member elsewhere, which
+		// is both a compliance failure and an authority the anonymized row can
+		// still be used to exercise. See admin_audit_scope_test.go, which
+		// records this as a reviewed platform-wide call site.
+		removed, err := h.orgRepo.RemoveAllMembershipsForUser(ctx, id, idstore.OrgScopeAllOrganizations())
+		if err != nil {
 			serverError(c, err, "failed to revoke memberships")
 			return
 		}
@@ -333,7 +369,8 @@ func (h *AdminHandlers) EraseUser() gin.HandlerFunc {
 			return
 		}
 		h.writeAudit(c, "user.erase", "user", id, map[string]interface{}{
-			"api_keys_revoked": out.KeysRevoked, "sessions_revoked": out.TokensRevoked})
+			"api_keys_revoked": out.KeysRevoked, "sessions_revoked": out.TokensRevoked,
+			"organizations_emptied": removed.OrganizationIDs()})
 		c.JSON(http.StatusOK, gin.H{
 			"message": "User data has been erased. Audit log entries are preserved with anonymized identifiers.",
 			"user_id": id,
@@ -372,7 +409,7 @@ func (h *AdminHandlers) CreateOrganization() gin.HandlerFunc {
 			DisplayName: strings.TrimSpace(req.DisplayName),
 		}
 		ctx := c.Request.Context()
-		if err := h.orgRepo.CreateOrganization(ctx, org); err != nil {
+		if err := h.orgRepo.Create(ctx, org); err != nil {
 			serverError(c, err, "failed to create organization")
 			return
 		}
@@ -386,7 +423,7 @@ func (h *AdminHandlers) CreateOrganization() gin.HandlerFunc {
 		// still fully administer the organization they just created.
 		if callerID, ok := c.Get("user_id"); ok {
 			if uid, _ := callerID.(string); uid != "" {
-				if err := h.orgRepo.AddMemberWithParams(ctx, org.ID, uid, "org_owner"); err != nil {
+				if err := h.orgRepo.AddMemberWithParams(ctx, org.ID, uid, "org_owner", idstore.OrgScopeOrganizations(org.ID)); err != nil {
 					serverError(c, err, "organization created, but failed to add you as its owner")
 					return
 				}
@@ -416,13 +453,14 @@ func (h *AdminHandlers) UpdateOrganization() gin.HandlerFunc {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
 			return
 		}
-		org, err := h.orgRepo.GetByID(ctx, c.Param("id"))
+		scope := routeOrgScope(c)
+		org, err := h.orgRepo.GetByID(ctx, c.Param("id"), scope)
 		if err != nil || org == nil {
 			c.JSON(http.StatusNotFound, gin.H{"error": "organization not found"})
 			return
 		}
 		if name := strings.TrimSpace(req.Name); name != "" && name != org.Name {
-			if err := h.orgRepo.Rename(ctx, org.ID, name); err != nil {
+			if err := h.orgRepo.Rename(ctx, org.ID, name, scope); err != nil {
 				if notFound(err) {
 					c.JSON(http.StatusNotFound, gin.H{"error": "organization not found"})
 					return
@@ -442,7 +480,7 @@ func (h *AdminHandlers) UpdateOrganization() gin.HandlerFunc {
 		if req.IdpName != nil {
 			org.IdpName = nilIfEmpty(*req.IdpName)
 		}
-		if err := h.orgRepo.Update(ctx, org); err != nil {
+		if err := h.orgRepo.Update(ctx, org, scope); err != nil {
 			if notFound(err) {
 				c.JSON(http.StatusNotFound, gin.H{"error": "organization not found"})
 				return
@@ -479,14 +517,15 @@ func (h *AdminHandlers) DeleteOrganization() gin.HandlerFunc {
 		// the organization silently reduces every member's authority — a
 		// reduction with no membership statement of its own. Snapshot the members
 		// FIRST: after the delete there is nobody left to sweep (#330).
-		members, err := h.orgRepo.ListMembers(ctx, id)
+		scope := routeOrgScope(c)
+		members, err := h.orgRepo.ListMembers(ctx, id, scope)
 		if err != nil {
 			serverError(c, err, "failed to list organization members")
 			return
 		}
 		// Idempotent DELETE (see DeleteUser): an already-absent organization
 		// answered 204 before v0.24.0 and keeps answering 204.
-		if err := h.orgRepo.Delete(ctx, id); err != nil && !notFound(err) {
+		if err := h.orgRepo.Delete(ctx, id, scope); err != nil && !notFound(err) {
 			serverError(c, err, "failed to delete organization")
 			return
 		}
@@ -508,7 +547,7 @@ func (h *AdminHandlers) DeleteOrganization() gin.HandlerFunc {
 // @Router       /admin/organizations/{id}/members [get]
 func (h *AdminHandlers) ListOrganizationMembers() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		members, err := h.orgRepo.ListMembersWithUsers(c.Request.Context(), c.Param("id"))
+		members, err := h.orgRepo.ListMembersWithUsers(c.Request.Context(), c.Param("id"), routeOrgScope(c))
 		if err != nil {
 			serverError(c, err, "failed to list members")
 			return
@@ -562,7 +601,7 @@ func (h *AdminHandlers) AddOrganizationMember() gin.HandlerFunc {
 			return
 		}
 		orgID := c.Param("id")
-		if err := h.orgRepo.AddMemberWithRoleTemplate(c.Request.Context(), orgID, req.UserID, roleID); err != nil {
+		if err := h.orgRepo.AddMemberWithRoleTemplate(c.Request.Context(), orgID, req.UserID, roleID, routeOrgScope(c)); err != nil {
 			serverError(c, err, "failed to add member")
 			return
 		}
@@ -606,7 +645,7 @@ func (h *AdminHandlers) UpdateOrganizationMember() gin.HandlerFunc {
 		// the user's retained scopes rather than assuming a change happened.
 		// Whether this endpoint SHOULD 404 on a non-member is a deliberate API
 		// decision, tracked separately from the identity upgrade.
-		if err := h.orgRepo.UpdateMemberRoleTemplate(ctx, orgID, userID, roleID); err != nil && !notFound(err) {
+		if err := h.orgRepo.UpdateMemberRoleTemplate(ctx, orgID, userID, roleID, routeOrgScope(c)); err != nil && !notFound(err) {
 			serverError(c, err, "failed to update member")
 			return
 		}
@@ -635,7 +674,7 @@ func (h *AdminHandlers) RemoveOrganizationMember() gin.HandlerFunc {
 		// member answered 204 before v0.24.0 and keeps answering 204. The sweep
 		// below still runs, which is the safe direction — it recomputes the
 		// authority the user retains rather than trusting that a row moved.
-		if err := h.orgRepo.RemoveMember(ctx, orgID, userID); err != nil && !notFound(err) {
+		if err := h.orgRepo.RemoveMember(ctx, orgID, userID, routeOrgScope(c)); err != nil && !notFound(err) {
 			serverError(c, err, "failed to remove member")
 			return
 		}

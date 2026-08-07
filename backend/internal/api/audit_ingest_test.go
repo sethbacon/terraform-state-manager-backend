@@ -1,7 +1,7 @@
 package api
 
 import (
-	"errors"
+	"database/sql"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -61,16 +61,35 @@ func TestAuditIngest_MissingAction(t *testing.T) {
 	}
 }
 
+// expectSiblingIDResolves queues the two existence probes resolveSiblingIDs
+// issues, answering "this id names a row here" for each non-empty argument and
+// "it does not" for an empty one.
+func expectSiblingIDResolves(mock sqlmock.Sqlmock, userID, orgID string) {
+	if userID != "" {
+		mock.ExpectQuery("FROM users").WithArgs(userID).
+			WillReturnRows(sqlmock.NewRows([]string{"id", "email", "name", "oidc_sub", "created_at", "updated_at"}).
+				AddRow(userID, "a@x.io", "A", nil, time.Now(), time.Now()))
+	}
+	if orgID != "" {
+		mock.ExpectQuery("FROM organizations").WithArgs(orgID).
+			WillReturnRows(sqlmock.NewRows([]string{"id", "name", "display_name", "idp_type", "idp_name", "created_at", "updated_at"}).
+				AddRow(orgID, "org", "Org", nil, nil, time.Now(), time.Now()))
+	}
+}
+
 func TestAuditIngest_RecordsEntry(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	// args: id, user_id, organization_id, action, resource_type, resource_id, metadata, ip_address, created_at
-	mock.ExpectExec("INSERT INTO audit_logs").
-		WithArgs(sqlmock.AnyArg(), "u1", "o1", "module.upload", "module", nil, sqlmock.AnyArg(), nil, sqlmock.AnyArg()).
-		WillReturnResult(sqlmock.NewResult(1, 1))
+	// Both ids resolve locally (the shared-store case this endpoint is gated on),
+	// so both are stamped on the row and the entry belongs to o1's admins.
+	expectSiblingIDResolves(mock, "u1", "o1")
+	// args: id, user_id, organization_id, action, resource_type, resource_id, metadata, ip_address, created_at, actor_email
+	mock.ExpectQuery("INSERT INTO audit_logs").
+		WithArgs(sqlmock.AnyArg(), "u1", "o1", "module.upload", "module", nil, sqlmock.AnyArg(), nil, sqlmock.AnyArg(), nil).
+		WillReturnRows(auditInsertReturn())
 
 	h := NewAuditIngestHandlers(db, sharedStoreCfg(true))
 	body := `{"action":"module.upload","user_id":"u1","organization_id":"o1","resource_type":"module","timestamp":"2026-06-16T10:00:00Z","auth_method":"api_key","status_code":201}`
@@ -82,21 +101,55 @@ func TestAuditIngest_RecordsEntry(t *testing.T) {
 	}
 }
 
-func TestAuditIngest_NullsActorOnInsertFailureThenRetries(t *testing.T) {
+// TestAuditIngest_NullsUnresolvableActorBeforeInsert is the re-pointed successor
+// to TestAuditIngest_NullsActorOnInsertFailureThenRetries.
+//
+// The OUTCOME asserted is unchanged and still has to hold — an entry naming an
+// actor or organization this database does not have lands org-less, with the
+// sibling's originals preserved in metadata, and the shipper gets its 202. What
+// changed is the mechanism, and it had to: identity v0.25.0's migration 000007
+// dropped the audit_logs foreign keys, so the insert the old test made fail
+// CANNOT fail that way any more. A test that keeps stubbing an FK violation
+// would keep passing while asserting a branch production can no longer take.
+//
+// The single insert is itself the assertion that the retry is gone.
+func TestAuditIngest_NullsUnresolvableActorBeforeInsert(t *testing.T) {
 	db, mock, _ := sqlmock.New()
 	defer db.Close()
-	// First insert (with the sibling's actor) fails like an FK violation...
-	mock.ExpectExec("INSERT INTO audit_logs").
-		WithArgs(sqlmock.AnyArg(), "ghost", "o9", "x", sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg()).
-		WillReturnError(errors.New("insert or update on table \"audit_logs\" violates foreign key constraint"))
-	// ...so it retries with the actor nulled (originals preserved in metadata).
-	mock.ExpectExec("INSERT INTO audit_logs").
-		WithArgs(sqlmock.AnyArg(), nil, nil, "x", sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg()).
-		WillReturnResult(sqlmock.NewResult(1, 1))
+	// Neither id resolves here: the actor was provisioned only in the sibling,
+	// and the organization is one this deployment has no row for.
+	mock.ExpectQuery("FROM users").WithArgs("ghost").WillReturnError(sql.ErrNoRows)
+	mock.ExpectQuery("FROM organizations").WithArgs("o9").WillReturnError(sql.ErrNoRows)
+	// Exactly ONE insert, with both actor columns nulled.
+	mock.ExpectQuery("INSERT INTO audit_logs").
+		WithArgs(sqlmock.AnyArg(), nil, nil, "x", sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), nil).
+		WillReturnRows(auditInsertReturn())
 
 	h := NewAuditIngestHandlers(db, sharedStoreCfg(true))
 	if w := postIngest(h, `{"action":"x","user_id":"ghost","organization_id":"o9"}`); w.Code != http.StatusAccepted {
-		t.Fatalf("want 202 after FK-failure retry, got %d", w.Code)
+		t.Fatalf("want 202 for an unresolvable federated actor, got %d", w.Code)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sqlmock expectations: %v", err)
+	}
+}
+
+// TestAuditIngest_KeepsResolvableOrganization is the other half of the decision:
+// narrowing must not turn every federated entry into an org-less one. An id that
+// DOES resolve stays stamped, so the entry reaches that tenant's admins rather
+// than the platform bucket every admin can read.
+func TestAuditIngest_KeepsResolvableOrganization(t *testing.T) {
+	db, mock, _ := sqlmock.New()
+	defer db.Close()
+	mock.ExpectQuery("FROM users").WithArgs("ghost").WillReturnError(sql.ErrNoRows)
+	expectSiblingIDResolves(mock, "", "o1")
+	mock.ExpectQuery("INSERT INTO audit_logs").
+		WithArgs(sqlmock.AnyArg(), nil, "o1", "x", sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), nil).
+		WillReturnRows(auditInsertReturn())
+
+	h := NewAuditIngestHandlers(db, sharedStoreCfg(true))
+	if w := postIngest(h, `{"action":"x","user_id":"ghost","organization_id":"o1"}`); w.Code != http.StatusAccepted {
+		t.Fatalf("want 202, got %d", w.Code)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("unmet sqlmock expectations: %v", err)

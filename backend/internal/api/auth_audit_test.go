@@ -19,7 +19,7 @@ import (
 func TestLogout_AuditsAuthenticatedUser(t *testing.T) {
 	h, mock := newReconcileEnv(t, nil)
 
-	mock.ExpectExec("INSERT INTO audit_logs").WithArgs(
+	mock.ExpectQuery("INSERT INTO audit_logs").WithArgs(
 		sqlmock.AnyArg(), // id
 		"u1",             // user_id
 		nil,              // organization_id
@@ -29,7 +29,8 @@ func TestLogout_AuditsAuthenticatedUser(t *testing.T) {
 		nil,              // metadata
 		sqlmock.AnyArg(), // ip
 		sqlmock.AnyArg(), // created_at
-	).WillReturnResult(sqlmock.NewResult(0, 1))
+		nil,              // actor_email: filled by the INSERT's own COALESCE subquery
+	).WillReturnRows(auditInsertReturn())
 
 	r := gin.New()
 	r.POST("/logout", func(c *gin.Context) { c.Set("user_id", "u1") }, h.LogoutPostHandler())
@@ -73,7 +74,7 @@ func TestLDAPLogin_FailureAudited(t *testing.T) {
 		cfg.Auth.LDAP.UserFilter = "(uid=%s)"
 	})
 
-	mock.ExpectExec("INSERT INTO audit_logs").WithArgs(
+	mock.ExpectQuery("INSERT INTO audit_logs").WithArgs(
 		sqlmock.AnyArg(), // id
 		nil,              // user_id: unknown on failure
 		nil,              // organization_id
@@ -83,7 +84,8 @@ func TestLDAPLogin_FailureAudited(t *testing.T) {
 		[]byte(`{"provider":"ldap","username":"alice"}`),
 		sqlmock.AnyArg(), // ip
 		sqlmock.AnyArg(), // created_at
-	).WillReturnResult(sqlmock.NewResult(0, 1))
+		nil,              // actor_email: filled by the INSERT's own COALESCE subquery
+	).WillReturnRows(auditInsertReturn())
 
 	r := gin.New()
 	r.POST("/login", h.LDAPLoginHandler())

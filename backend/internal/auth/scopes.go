@@ -44,6 +44,19 @@ func HasScope(userScopes []string, s Scope) bool {
 	return idauth.HasScope(userScopes, string(s), rwPairs)
 }
 
+// ReadWritePairs returns a copy of this app's write-implies-read table, for the
+// shared identity helpers that take it directly rather than through HasScope —
+// notably store.OrganizationRepository.OrgScopeForUser, which resolves a
+// caller's tenancy with exactly the scope semantics the route guards use. A
+// copy, so a caller cannot silently widen this app's authorization table.
+func ReadWritePairs() idauth.ReadWritePairs {
+	out := make(idauth.ReadWritePairs, len(rwPairs))
+	for read, write := range rwPairs {
+		out[read] = write
+	}
+	return out
+}
+
 // HasAnyScope reports whether userScopes satisfies at least one required scope.
 func HasAnyScope(userScopes []string, scopes []Scope) bool {
 	return idauth.HasAnyScope(userScopes, toStrings(scopes), rwPairs)

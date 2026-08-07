@@ -2,10 +2,17 @@
 // was about to revoke is already gone, across terraform-suite-identity's
 // store.ErrNotFound change (module v0.24.0).
 //
-// The sweep lists a user's keys and then deletes them one by one, so there is
-// always a window: a rotation, a parallel sweep, or an admin can destroy a row
-// between the list and the delete. Since v0.24.0 that zero-row delete reports
-// ErrNotFound instead of nil.
+// The SELECTIVE sweep (revokeOverAskingKeys, behind the membership and role
+// routes) lists a user's keys and then deletes them one by one, because it has
+// to compare each key's frozen scopes against the authority the user retains.
+// That leaves a window: a rotation, a parallel sweep, or an admin can destroy a
+// row between the list and the delete. Since v0.24.0 that zero-row delete
+// reports ErrNotFound instead of nil.
+//
+// The WHOLE-PRINCIPAL sweep (UserDeprovisioned) has no such window since
+// identity v0.25.0: it is one bulk DELETE keyed on the owner, and a bulk delete
+// that matches nothing returns a count of zero rather than an error, so there
+// is no sentinel to classify. Its rows below assert that directly.
 //
 // Outcome.Incomplete is not a log field — AdminHandlers.DeleteUser and
 // EraseUser turn it into a 500 and refuse to remove the account. Counting a
@@ -23,16 +30,17 @@ import (
 )
 
 // TestUserDeprovisioned_AlreadyRevokedKey_DoesNotBlockOffboarding is the case
-// that matters: a key that vanished between the list and the delete must leave
-// Incomplete false, so the caller still deletes the account.
+// that matters: keys that were already gone must leave Incomplete false, so the
+// caller still deletes the account. Since v0.25.0 the bulk sweep expresses that
+// as a zero affected-row count, which is the shape that CANNOT be mistaken for
+// a failure — the sentinel-vs-error classification the per-key loop needed is
+// gone from this path entirely.
 func TestUserDeprovisioned_AlreadyRevokedKey_DoesNotBlockOffboarding(t *testing.T) {
 	s, mock := newSweeper(t)
 	mock.ExpectExec("INSERT INTO user_token_revocations").WithArgs("u1").
 		WillReturnResult(sqlmock.NewResult(0, 1))
-	mock.ExpectQuery("FROM api_keys").WithArgs("u1").
-		WillReturnRows(keyRow("k1", `["state:read"]`))
-	// Zero rows: the key was destroyed by something else first.
-	mock.ExpectExec("DELETE FROM api_keys").WithArgs("k1").
+	// Zero rows: the keys were destroyed by something else first.
+	mock.ExpectExec("DELETE FROM api_keys").WithArgs("u1").
 		WillReturnResult(sqlmock.NewResult(0, 0))
 
 	out := s.UserDeprovisioned(ctx, "u1", "admin: user deleted")
@@ -56,14 +64,12 @@ func TestUserDeprovisioned_RealDeleteFailure_IsIncomplete(t *testing.T) {
 	s, mock := newSweeper(t)
 	mock.ExpectExec("INSERT INTO user_token_revocations").WithArgs("u1").
 		WillReturnResult(sqlmock.NewResult(0, 1))
-	mock.ExpectQuery("FROM api_keys").WithArgs("u1").
-		WillReturnRows(keyRow("k1", `["state:read"]`))
-	mock.ExpectExec("DELETE FROM api_keys").WithArgs("k1").
+	mock.ExpectExec("DELETE FROM api_keys").WithArgs("u1").
 		WillReturnError(errors.New("connection refused"))
 
 	out := s.UserDeprovisioned(ctx, "u1", "admin: user deleted")
 	if !out.Incomplete {
-		t.Fatal("a real delete failure must mark the sweep incomplete: the key is still live")
+		t.Fatal("a real delete failure must mark the sweep incomplete: the keys are still live")
 	}
 }
 

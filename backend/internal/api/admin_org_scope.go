@@ -20,9 +20,7 @@
 package api
 
 import (
-	"context"
 	"net/http"
-	"sort"
 
 	"github.com/gin-gonic/gin"
 	idstore "github.com/sethbacon/terraform-suite-identity/identity/store"
@@ -116,65 +114,75 @@ func (h *AdminHandlers) requireSharedOrgAdminWithTargetUser() gin.HandlerFunc {
 	}
 }
 
-// adminOrgSet returns the set of organization IDs in which callerID holds admin
-// scope. It underpins per-org narrowing of the global admin READ lists (users,
-// API keys): because being admin in a single organization yields the flat
-// ScopeAdmin that passes the outer /admin gate, those lists must be filtered to
-// the organizations the caller actually administers rather than exposing every
-// tenant's records (#182). An empty callerID or no admin membership yields an
-// empty set (the caller then sees nothing cross-org).
-func adminOrgSet(ctx context.Context, orgRepo *idstore.OrganizationRepository, callerID string) (map[string]struct{}, error) {
-	orgs := map[string]struct{}{}
-	if callerID == "" {
-		return orgs, nil
-	}
-	memberships, err := orgRepo.GetUserMemberships(ctx, callerID)
-	if err != nil {
-		return nil, err
-	}
-	for _, m := range memberships {
-		if auth.HasScope(m.RoleTemplateScopes, auth.ScopeAdmin) {
-			orgs[m.OrganizationID] = struct{}{}
-		}
-	}
-	return orgs, nil
-}
-
-// callerAuditScope resolves the tenant constraint every audit-log READ must
-// carry (identity v0.21.0's store.AuditScope): the organizations the caller
-// actually administers, plus rows that have no owning organization at all.
+// callerScopeFor resolves the organizations in which the authenticated caller's
+// ROLE TEMPLATE grants required, as the store.OrgScope every scoped accessor in
+// the identity package now demands.
 //
-// Applies to every audit read axis behind the flat /admin gate — the paginated
-// list, the CSV/JSON export, and the GDPR per-user export. That gate accepts
-// any single-org admin's flat ScopeAdmin, so it is not a tenant boundary and
-// each axis has to narrow for itself (#182/#298, and #331 for the export that
-// did not).
+// It replaces the hand-rolled adminOrgSet this file carried until identity
+// v0.25.0: OrganizationRepository.OrgScopeForUser is that function, shipped by
+// the module that owns organization_members, and it also deduplicates and sorts
+// the ids so the bound query argument is a function of the SET rather than of
+// map iteration order (the reason adminOrgSet's callers had to sort by hand).
 //
-// The unowned axis is not a widening. TSM deliberately writes platform-level
-// events with a NULL organization_id: logins, state-file and source actions
-// (state_sources are a single shared pool with no per-tenant owner), and
-// federated entries whose sibling-provisioned actor cannot be resolved locally
-// (audit_ingest.go). Those events belong to no tenant and every admin is their
-// intended reviewer. AuditScopeOrganizations alone would hide them from the
-// people meant to review them; AuditScopeAllOrganizations would hand the
-// caller every other tenant's rows. This reproduces exactly what the
-// in-memory auditLogsInAdminOrgs filter used to do, as a SQL predicate.
-//
-// A caller who administers no organization gets "unowned rows only" — the same
-// result the in-memory filter produced from an empty admin set.
-func (h *AdminHandlers) callerAuditScope(c *gin.Context) (idstore.AuditScope, error) {
+// There is deliberately NO platform-wide branch here. "Platform-wide" is a
+// property of the token, and TSM has no platform-wide principal: admin is
+// granted per organization and merely SURFACES as a flat scope, so every
+// /admin caller is somebody's tenant admin. See
+// TestNoPlatformWideOrgScopeInAuditHandlers, which fails the build if an
+// OrgScopeAllOrganizations() ever appears on one of these paths.
+func (h *AdminHandlers) callerScopeFor(c *gin.Context, required auth.Scope) (idstore.OrgScope, error) {
 	callerID, _ := c.Get("user_id")
 	uid, _ := callerID.(string)
-	adminOrgs, err := adminOrgSet(c.Request.Context(), h.orgRepo, uid)
+	// The zero OrgScope matches nothing, so a caller that ignored the error
+	// would still read no rows rather than every tenant's.
+	return h.orgRepo.OrgScopeForUser(c.Request.Context(), uid, string(required), auth.ReadWritePairs())
+}
+
+// callerOrgScope resolves the tenant constraint every /admin READ behind the
+// flat ScopeAdmin gate must carry: the organizations the caller actually
+// administers, plus rows that have no owning organization at all.
+//
+// Applies to every axis behind that gate — the paginated audit list, the
+// CSV/JSON audit export, the GDPR per-user export, and the user list/search.
+// The gate accepts any single-org admin's flat ScopeAdmin, so it is not a
+// tenant boundary and each axis has to narrow for itself (#182/#298, and #331
+// for the export that did not).
+//
+// The unowned axis is not a widening, and it means the right thing on both
+// tables this scope is applied to:
+//
+//   - audit_logs: TSM deliberately writes platform-level events with a NULL
+//     organization_id — logins, state-file and source actions (state_sources
+//     are a single shared pool with no per-tenant owner), and federated entries
+//     whose sibling-provisioned actor cannot be resolved locally
+//     (audit_ingest.go). Those events belong to no tenant and every admin is
+//     their intended reviewer.
+//   - users: a user with NO memberships at all. Letting those through is what
+//     requireSharedOrgAdminWithTargetUser already does in Go ("nothing
+//     cross-tenant to protect against"), and what the deleted usersInAdminOrgs
+//     post-filter did for the list axis.
+//
+// OrgScopeOrganizations alone would hide both from the people meant to see
+// them; OrgScopeAllOrganizations would hand the caller every other tenant's
+// rows. A caller who administers no organization gets "unowned rows only" —
+// the same result the in-memory filters produced from an empty admin set.
+func (h *AdminHandlers) callerOrgScope(c *gin.Context) (idstore.OrgScope, error) {
+	scope, err := h.callerScopeFor(c, auth.ScopeAdmin)
 	if err != nil {
-		// The zero AuditScope matches nothing, so a caller that ignored this
-		// error would still read no rows rather than every tenant's.
-		return idstore.AuditScope{}, err
+		return idstore.OrgScope{}, err
 	}
-	orgIDs := make([]string, 0, len(adminOrgs))
-	for id := range adminOrgs {
-		orgIDs = append(orgIDs, id)
-	}
-	sort.Strings(orgIDs) // map order is random; keep the query args stable
-	return idstore.AuditScopeOrganizationsAndUnowned(orgIDs...), nil
+	return scope.WithUnowned(), nil
+}
+
+// routeOrgScope is the tenancy of a route that names ONE organization in its
+// :id path parameter and sits behind requireOrgScope.
+//
+// UPGRADING.md's rule for this shape is "pass the scope you resolved for that
+// guard", and requireOrgScope resolved exactly one organization: it re-derived
+// the caller's scopes WITHIN c.Param("id") and required organizations:write (or
+// admin) there. Re-running OrgScopeForUser would answer a wider question (every
+// organization the caller can write) than the guard asked, and would cost a
+// second membership read per request to do it.
+func routeOrgScope(c *gin.Context) idstore.OrgScope {
+	return idstore.OrgScopeOrganizations(c.Param("id"))
 }

@@ -30,10 +30,15 @@ func buildSuiteManifest(cfg *config.Config) suite.Manifest {
 		App:           "terraform-state-manager",
 		Version:       AppVersion,
 		BuildDate:     AppBuildDate,
-		PublicURL:     pub,
-		Identity:      suite.IdentityInfo{Issuer: suiteIssuer, SharedStore: cfg.Suite.IdentitySharedStore, Schema: "identity"},
-		Capabilities:  caps,
-		Links:         map[string]string{"sourceDetail": "/sources/{id}"},
+		// UntrustedURL is the type a SIBLING's manifest field carries, because a
+		// consumer must not concatenate a sibling-asserted URL into a request.
+		// This is OUR OWN manifest, built from OUR OWN configuration, so the
+		// conversion is the trusted direction: we are asserting it, not
+		// consuming it.
+		PublicURL:    suite.UntrustedURL(pub),
+		Identity:     suite.IdentityInfo{Issuer: suiteIssuer, SharedStore: cfg.Suite.IdentitySharedStore, Schema: "identity"},
+		Capabilities: caps,
+		Links:        map[string]string{"sourceDetail": "/sources/{id}"},
 	}
 }
 
@@ -57,7 +62,11 @@ func uiConfigHandler(cfg *config.Config, getClient func() *suite.DiscoveryClient
 				// block can't leak during degraded/unreachable windows.
 				out["sibling"] = gin.H{
 					"app": m.App, "state": string(state),
-					"publicUrl": m.PublicURL, "links": m.Links,
+					// Display, not Resolve: this payload is rendered by the SPA, never
+					// fetched by this backend. Resolve is for the outbound path (see
+					// ListStateModuleFreshness), and using it here would fail the whole
+					// UI-config read for a sibling this app has no intention of dialing.
+					"publicUrl": m.PublicURL.Display(), "links": m.Links,
 					"issuer":      m.Identity.Issuer,
 					"sharedStore": cfg.Suite.IdentitySharedStore && m.Identity.SharedStore,
 				}

@@ -13,6 +13,7 @@ import (
 	"net/url"
 
 	"github.com/gin-gonic/gin"
+	identitymailer "github.com/sethbacon/terraform-suite-identity/identity/mailer"
 
 	identitycrypto "github.com/sethbacon/terraform-suite-identity/identity/crypto"
 	idstore "github.com/sethbacon/terraform-suite-identity/identity/store"
@@ -333,13 +334,21 @@ type notificationsSMTPInput struct {
 	Username string `json:"username"`
 	Password string `json:"password"`
 	From     string `json:"from"`
-	UseTLS   bool   `json:"use_tls"`
+	// A POINTER so an omitted "use_tls" is distinguishable from an explicit
+	// false. As a plain bool, a full-replace PUT that did not mention the field
+	// decoded to false and silently switched the relay to plaintext. Same
+	// reasoning as Expiry *notificationsExpiryConfigDB and as scim.SCIMUser
+	// .Active, where a partial PUT must not be read as "deprovision".
+	UseTLS *bool `json:"use_tls"`
 }
 
 func (h *NotificationHandlers) smtpResponse(passwordConfigured bool) NotificationsSMTPResponse {
 	return NotificationsSMTPResponse{
 		Host: h.smtp.Host, Port: h.smtp.Port, Username: h.smtp.Username, From: h.smtp.From,
-		UseTLS: h.smtp.UseTLS, PasswordConfigured: passwordConfigured,
+		// The response reports the relay's effective posture, derived from the
+		// one TLSMode the mailer actually uses, so this cannot report "encrypted"
+		// while the transport sends plaintext.
+		UseTLS: h.smtp.TLSMode == identitymailer.TLSRequired, PasswordConfigured: passwordConfigured,
 	}
 }
 
@@ -418,7 +427,9 @@ func (h *NotificationHandlers) PutSMTPConfig() gin.HandlerFunc {
 		dbc.SMTP.Port = input.Port
 		dbc.SMTP.Username = input.Username
 		dbc.SMTP.From = input.From
-		dbc.SMTP.UseTLS = input.UseTLS
+		if input.UseTLS != nil {
+			dbc.SMTP.UseTLS = *input.UseTLS
+		}
 		if input.Password != "" {
 			if !crypto.Available() {
 				c.JSON(http.StatusBadRequest, gin.H{"error": "cannot store password: encryption key not configured (set TSM_ENCRYPTION_KEY)"})
@@ -450,7 +461,11 @@ func (h *NotificationHandlers) PutSMTPConfig() gin.HandlerFunc {
 		h.smtp.Port = input.Port
 		h.smtp.Username = input.Username
 		h.smtp.From = input.From
-		h.smtp.UseTLS = input.UseTLS
+		// One conversion, in the module's own tested helper, rather than a
+		// hand-written conditional per call site.
+		if input.UseTLS != nil {
+			h.smtp.TLSMode = identitymailer.TLSModeForUseTLS(*input.UseTLS)
+		}
 		if input.Password != "" {
 			h.smtp.Password = input.Password
 		}

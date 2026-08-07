@@ -98,22 +98,47 @@ func NewHandlers(cfg *config.Config, identityDB *sql.DB, opts ...Option) *Handle
 // The sweep is best-effort and never fails the request: the membership strip has
 // already committed, and SCIM clients retry aggressively on 5xx, so a sweep
 // failure is logged rather than turned into an error the IdP would replay.
+//
+// TENANCY. The strip runs at OrgScopeAllOrganizations(), and that is a decision,
+// not an omission. identity #162 narrows this call so a scim:provision holder
+// cannot strip memberships in organizations they have no relationship with. TSM
+// cannot take that narrowing without breaking what this endpoint is FOR: there
+// is one SCIM surface for the whole deployment, driven by one directory, and a
+// deactivation is the directory asserting something about the WHOLE principal.
+// Scoped to the caller, an HR offboarding would strip the IdP service account's
+// own organizations and leave the departing employee a live member — with a
+// live JWT scope union — everywhere else, which is a strictly worse outcome than
+// the one the narrowing prevents. The mitigations that make this defensible are
+// that scim:provision is not key-assignable (see api.assignableKeyScopes) and
+// that no seeded role template carries it, so it is reachable only through the
+// admin wildcard. Recorded in admin_audit_scope_test.go's reviewed list.
+//
+// The returned scope names the organizations actually emptied, which the old
+// int64 count could not, so the audit trail says WHERE authority was withdrawn.
 func (h *Handlers) deprovisionUser(ctx context.Context, userID, reason string) error {
-	// A bulk sweep reports its affected-row count, not ErrNotFound: a user with
-	// no memberships left to strip is an already-deprovisioned user, which is the
+	// A bulk sweep reports what it removed, not ErrNotFound: a user with no
+	// memberships left to strip is an already-deprovisioned user, which is the
 	// desired end state and must not fail an IdP-driven deactivation that the
 	// client will replay.
-	removed, err := h.orgRepo.RemoveAllMembershipsForUser(ctx, userID)
+	removed, err := h.orgRepo.RemoveAllMembershipsForUser(ctx, userID, idstore.OrgScopeAllOrganizations())
 	if err != nil {
 		return err
 	}
 	out := h.creds.UserDeprovisioned(ctx, userID, reason)
 	slog.Info("scim: credentials revoked for deprovisioned user",
-		"id", userID, "reason", reason, "memberships_removed", removed,
+		"id", userID, "reason", reason,
+		"organizations_emptied", removed.OrganizationIDs(),
 		"tokens_revoked", out.TokensRevoked, "api_keys_revoked", out.KeysRevoked,
 		"incomplete", out.Incomplete)
 	return nil
 }
+
+// directoryScope is the tenancy every SCIM accessor here carries: the whole
+// directory. SCIM is a machine-to-machine sync with an external IdP that is
+// authoritative for the entire deployment's user and group population — a
+// partial view would make it reconcile toward deleting the users and groups it
+// could not see. See deprovisionUser for the full argument and the mitigations.
+func directoryScope() idstore.OrgScope { return idstore.OrgScopeAllOrganizations() }
 
 // --- SCIM resource types ---
 
@@ -225,10 +250,10 @@ func (h *Handlers) ListUsers() gin.HandlerFunc {
 		var err error
 
 		if value := extractFilterValue(filter); filter != "" && value != "" {
-			users, err = h.userRepo.Search(ctx, value, count, offset)
+			users, err = h.userRepo.Search(ctx, value, count, offset, directoryScope())
 			total = len(users)
 		} else {
-			users, total, err = h.userRepo.ListUsers(ctx, count, offset)
+			users, total, err = h.userRepo.ListUsers(ctx, count, offset, directoryScope())
 		}
 		if err != nil {
 			slog.Error("scim: list users failed", "error", err)
@@ -270,7 +295,7 @@ func (h *Handlers) GetUser() gin.HandlerFunc {
 		// would 500 every miss since v0.24.0, and SCIM clients retry 5xx
 		// aggressively — a provisioning loop would hammer this route forever
 		// over a user that simply does not exist.
-		user, err := h.userRepo.GetUserByID(c.Request.Context(), userID)
+		user, err := h.userRepo.GetUserByID(c.Request.Context(), userID, directoryScope())
 		if errors.Is(err, idstore.ErrNotFound) || (err == nil && user == nil) {
 			scimError(c, http.StatusNotFound, fmt.Sprintf("User %q not found", userID))
 			return
@@ -334,7 +359,7 @@ func (h *Handlers) CreateUser() gin.HandlerFunc {
 		// directory (the same basis LDAP/SAML logins use here), not a
 		// self-asserted value.
 		ctx := c.Request.Context()
-		user, err := h.userRepo.GetOrCreateUserByOIDC(ctx, oidcSub, email, displayName, true)
+		user, err := h.userRepo.GetOrCreateUserFromOIDC(ctx, oidcSub, email, displayName, true)
 		if err != nil {
 			slog.Error("scim: create user failed", "email", email, "error", err)
 			scimError(c, http.StatusConflict, "User already exists or creation failed")
@@ -370,7 +395,7 @@ func (h *Handlers) PatchUser() gin.HandlerFunc {
 			return
 		}
 
-		user, err := h.userRepo.GetUserByID(ctx, userID)
+		user, err := h.userRepo.GetUserByID(ctx, userID, directoryScope())
 		if err != nil || user == nil {
 			scimError(c, http.StatusNotFound, fmt.Sprintf("User %q not found", userID))
 			return
@@ -385,7 +410,7 @@ func (h *Handlers) PatchUser() gin.HandlerFunc {
 
 		// Raced delete between the read above and this write: 404, matching the
 		// read's own answer, so a SCIM client stops rather than retrying a 5xx.
-		if err := h.userRepo.UpdateUser(ctx, user); err != nil {
+		if err := h.userRepo.UpdateUser(ctx, user, directoryScope()); err != nil {
 			if errors.Is(err, idstore.ErrNotFound) {
 				scimError(c, http.StatusNotFound, fmt.Sprintf("User %q not found", userID))
 				return
@@ -424,7 +449,7 @@ func (h *Handlers) PutUser() gin.HandlerFunc {
 			return
 		}
 
-		user, err := h.userRepo.GetUserByID(ctx, userID)
+		user, err := h.userRepo.GetUserByID(ctx, userID, directoryScope())
 		if err != nil || user == nil {
 			scimError(c, http.StatusNotFound, fmt.Sprintf("User %q not found", userID))
 			return
@@ -452,7 +477,7 @@ func (h *Handlers) PutUser() gin.HandlerFunc {
 
 		// Raced delete between the read above and this write: 404, matching the
 		// read's own answer, so a SCIM client stops rather than retrying a 5xx.
-		if err := h.userRepo.UpdateUser(ctx, user); err != nil {
+		if err := h.userRepo.UpdateUser(ctx, user, directoryScope()); err != nil {
 			if errors.Is(err, idstore.ErrNotFound) {
 				scimError(c, http.StatusNotFound, fmt.Sprintf("User %q not found", userID))
 				return
@@ -482,7 +507,7 @@ func (h *Handlers) DeleteUser() gin.HandlerFunc {
 		userID := c.Param("id")
 		ctx := c.Request.Context()
 
-		user, err := h.userRepo.GetUserByID(ctx, userID)
+		user, err := h.userRepo.GetUserByID(ctx, userID, directoryScope())
 		if err != nil || user == nil {
 			scimError(c, http.StatusNotFound, fmt.Sprintf("User %q not found", userID))
 			return
@@ -512,7 +537,7 @@ func (h *Handlers) DeleteUser() gin.HandlerFunc {
 // @Router       /scim/v2/Groups [get]
 func (h *Handlers) ListGroups() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		orgs, err := h.orgRepo.List(c.Request.Context(), 200, 0)
+		orgs, err := h.orgRepo.List(c.Request.Context(), 200, 0, directoryScope())
 		if err != nil {
 			scimError(c, http.StatusInternalServerError, "Failed to list groups")
 			return
@@ -547,7 +572,7 @@ func (h *Handlers) ListGroups() gin.HandlerFunc {
 func (h *Handlers) GetGroup() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		groupID := c.Param("id")
-		org, err := h.orgRepo.GetByID(c.Request.Context(), groupID)
+		org, err := h.orgRepo.GetByID(c.Request.Context(), groupID, directoryScope())
 		if err != nil || org == nil {
 			scimError(c, http.StatusNotFound, fmt.Sprintf("Group %q not found", groupID))
 			return

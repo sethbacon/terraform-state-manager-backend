@@ -11,7 +11,7 @@ import (
 
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
 	"github.com/gin-gonic/gin"
-	"github.com/jmoiron/sqlx"
+	"github.com/lib/pq"
 	idauth "github.com/sethbacon/terraform-suite-identity/identity/auth"
 	idstore "github.com/sethbacon/terraform-suite-identity/identity/store"
 
@@ -97,6 +97,16 @@ func expectKeyRevoked(mock sqlmock.Sqlmock, userID, keyID string) {
 		WillReturnResult(sqlmock.NewResult(0, 1))
 }
 
+// expectAllKeysRevoked is the whole-principal offboarding shape: since identity
+// v0.25.0 UserDeprovisioned issues ONE bulk DELETE keyed on the owner instead of
+// listing the rows and deleting each. The list-then-delete pair above is still
+// what the SELECTIVE sweep (revokeOverAskingKeys) does, because that one has to
+// compare each key's frozen scopes against the authority the user retains.
+func expectAllKeysRevoked(mock sqlmock.Sqlmock, userID string) {
+	mock.ExpectExec("DELETE FROM api_keys").WithArgs(userID).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+}
+
 // expectKeyList registers ONLY the list, with no revocation following: the
 // caller is asserting the key is RETAINED because everything it carries is
 // still granted.
@@ -109,7 +119,7 @@ func expectKeyList(mock sqlmock.Sqlmock, userID, keyID, scopes string) {
 
 // newClassAdminHandlers builds AdminHandlers exactly as the router does.
 func newClassAdminHandlers(db *sql.DB) *AdminHandlers {
-	return NewAdminHandlers(sqlx.NewDb(db, "sqlmock"), WithAdminCredentialSweeper(classSweeper(db)))
+	return NewAdminHandlers(db, WithAdminCredentialSweeper(classSweeper(db)))
 }
 
 func classSweeper(db *sql.DB) *credlifecycle.Sweeper {
@@ -148,10 +158,12 @@ func newClassSCIMRouter(db *sql.DB) *gin.Engine {
 // strip memberships, move the watermark, revoke every key. Deprovisioning
 // retains nothing, so there is no scope re-derivation and no filtering.
 func expectSCIMDeprovision(mock sqlmock.Sqlmock, userID string) {
-	mock.ExpectExec("DELETE FROM organization_members").WithArgs(userID).
-		WillReturnResult(sqlmock.NewResult(0, 1))
+	// The strip RETURNS the organizations it emptied (an OrgScope since
+	// v0.25.0), so it is a query with a RETURNING clause rather than an exec.
+	mock.ExpectQuery("DELETE FROM organization_members").WithArgs(userID).
+		WillReturnRows(sqlmock.NewRows([]string{"organization_id"}).AddRow("o1"))
 	expectWatermarkWrite(mock, userID)
-	expectKeyRevoked(mock, userID, "k-scim")
+	expectAllKeysRevoked(mock, userID)
 }
 
 // assertPreExistingSessionRejected is the CONSEQUENCE half of the JWT axis: the
@@ -255,7 +267,7 @@ func TestCredentialLifecycleClass_AuthorityReductionInvalidatesEveryCredentialFa
 				r := gin.New()
 				r.DELETE("/organizations/:id/members/:user_id", h.RemoveOrganizationMember())
 
-				mock.ExpectExec("DELETE FROM organization_members").WithArgs("o1", "u1").
+				mock.ExpectExec("DELETE FROM organization_members").WithArgs("o1", "u1", pq.Array([]string{"o1"})).
 					WillReturnResult(sqlmock.NewResult(0, 1))
 				expectWatermarkWrite(mock, "u1")
 				expectRetainedScopes(mock, "u1", `["state:read"]`)
@@ -311,9 +323,9 @@ func TestCredentialLifecycleClass_AuthorityReductionInvalidatesEveryCredentialFa
 
 				// Members are snapshotted BEFORE the delete; the cascade removes
 				// them, so afterwards there is nobody left to sweep.
-				mock.ExpectQuery("FROM organization_members").WithArgs("o1").
+				mock.ExpectQuery("FROM organization_members").WithArgs("o1", pq.Array([]string{"o1"})).
 					WillReturnRows(sqlmock.NewRows(memberRowCols).AddRow("o1", "u1", nil, time.Now()))
-				mock.ExpectExec("DELETE FROM organizations").WithArgs("o1").
+				mock.ExpectExec("DELETE FROM organizations").WithArgs("o1", pq.Array([]string{"o1"})).
 					WillReturnResult(sqlmock.NewResult(0, 1))
 				expectWatermarkWrite(mock, "u1")
 				expectRetainedScopes(mock, "u1", `["state:read"]`)
@@ -327,9 +339,11 @@ func TestCredentialLifecycleClass_AuthorityReductionInvalidatesEveryCredentialFa
 			},
 		},
 		{
-			// The sweep runs BEFORE the row is deleted: identity.api_keys.user_id
-			// is ON DELETE SET NULL, so afterwards there is no user_id left to
-			// select the keys by and they survive as userless rows.
+			// The sweep runs BEFORE the row is deleted. identity v0.25.0's
+			// migration 000007 changed api_keys.user_id to ON DELETE CASCADE, so
+			// the rows no longer survive as userless credentials — but that is a
+			// backstop that runs after the fact and cannot reach a live JWT, so
+			// the order still matters and the sweep still has to succeed first.
 			site:         "api.AdminHandlers.DeleteUser / DELETE /admin/users/:id",
 			userID:       "u1",
 			wantJWTSweep: true,
@@ -339,7 +353,7 @@ func TestCredentialLifecycleClass_AuthorityReductionInvalidatesEveryCredentialFa
 				r.DELETE("/users/:id", h.DeleteUser())
 
 				expectWatermarkWrite(mock, "u1")
-				expectKeyRevoked(mock, "u1", "k-deleted-user")
+				expectAllKeysRevoked(mock, "u1")
 				mock.ExpectExec("DELETE FROM users").WithArgs("u1").
 					WillReturnResult(sqlmock.NewResult(0, 1))
 
@@ -364,10 +378,10 @@ func TestCredentialLifecycleClass_AuthorityReductionInvalidatesEveryCredentialFa
 				mock.ExpectQuery("SELECT id, email, name, oidc_sub").WithArgs("u1").
 					WillReturnRows(idUserRow("u1"))
 				mock.ExpectExec("UPDATE users").WillReturnResult(sqlmock.NewResult(0, 1))
-				mock.ExpectExec("DELETE FROM organization_members").WithArgs("u1").
-					WillReturnResult(sqlmock.NewResult(0, 2))
+				mock.ExpectQuery("DELETE FROM organization_members").WithArgs("u1").
+					WillReturnRows(sqlmock.NewRows([]string{"organization_id"}).AddRow("o1").AddRow("o2"))
 				expectWatermarkWrite(mock, "u1")
-				expectKeyRevoked(mock, "u1", "k-erased-user")
+				expectAllKeysRevoked(mock, "u1")
 
 				w := httptest.NewRecorder()
 				r.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/users/u1/erase", nil))
@@ -472,9 +486,9 @@ func TestCredentialLifecycleClass_AuthorityReductionInvalidatesEveryCredentialFa
 				desired, managed := resolveGroupMappings([]string{"other-team"}, mappings)
 
 				expectOrgByName(mock, "o1", "acme")
-				mock.ExpectQuery("FROM organization_members").WithArgs("o1", "u1").
+				mock.ExpectQuery("FROM organization_members").WithArgs("o1", "u1", pq.Array([]string{"o1"})).
 					WillReturnRows(sqlmock.NewRows(memberRowCols).AddRow("o1", "u1", "rt-editor", time.Now()))
-				mock.ExpectExec("DELETE FROM organization_members").WithArgs("o1", "u1").
+				mock.ExpectExec("DELETE FROM organization_members").WithArgs("o1", "u1", pq.Array([]string{"o1"})).
 					WillReturnResult(sqlmock.NewResult(0, 1))
 				expectRetainedScopes(mock, "u1", `["state:read"]`)
 				expectKeyRevoked(mock, "u1", "k-idp-deprovisioned")
@@ -502,7 +516,7 @@ func TestCredentialLifecycleClass_AuthorityReductionInvalidatesEveryCredentialFa
 					[]config.LDAPGroupMapping{{GroupDN: "cn=platform,ou=groups", Organization: "acme", Role: "viewer"}})
 
 				expectOrgByName(mock, "o1", "acme")
-				mock.ExpectQuery("FROM organization_members").WithArgs("o1", "u1").
+				mock.ExpectQuery("FROM organization_members").WithArgs("o1", "u1", pq.Array([]string{"o1"})).
 					WillReturnRows(sqlmock.NewRows(memberRowCols).AddRow("o1", "u1", "rt-owner", time.Now()))
 				expectRoleScopesLookup(mock, "viewer", []string{"state:read"})
 				mock.ExpectQuery("SELECT id FROM role_templates WHERE name").WithArgs("viewer").
@@ -529,9 +543,9 @@ func TestCredentialLifecycleClass_AuthorityReductionInvalidatesEveryCredentialFa
 					[]config.SAMLGroupMapping{{Group: "platform-team", Organization: "acme", Role: "editor"}})
 
 				expectOrgByName(mock, "o1", "acme")
-				mock.ExpectQuery("FROM organization_members").WithArgs("o1", "u1").
+				mock.ExpectQuery("FROM organization_members").WithArgs("o1", "u1", pq.Array([]string{"o1"})).
 					WillReturnRows(sqlmock.NewRows(memberRowCols).AddRow("o1", "u1", "rt-editor", time.Now()))
-				mock.ExpectExec("DELETE FROM organization_members").WithArgs("o1", "u1").
+				mock.ExpectExec("DELETE FROM organization_members").WithArgs("o1", "u1", pq.Array([]string{"o1"})).
 					WillReturnResult(sqlmock.NewResult(0, 1))
 				expectRetainedScopes(mock, "u1", `["state:read"]`)
 				expectKeyRevoked(mock, "u1", "k-saml-deprovisioned")
@@ -591,7 +605,7 @@ func TestCredentialLifecycleClass_PromotionRetainsKeys(t *testing.T) {
 	h := newClassAuthHandlers(t, db, nil)
 
 	expectOrgByName(mock, "o1", "acme")
-	mock.ExpectQuery("FROM organization_members").WithArgs("o1", "u1").
+	mock.ExpectQuery("FROM organization_members").WithArgs("o1", "u1", pq.Array([]string{"o1"})).
 		WillReturnRows(sqlmock.NewRows(memberRowCols).AddRow("o1", "u1", "rt-viewer", time.Now()))
 	expectRoleScopesLookup(mock, "editor", []string{"state:read", "state:write"})
 	mock.ExpectQuery("SELECT id FROM role_templates WHERE name").WithArgs("editor").

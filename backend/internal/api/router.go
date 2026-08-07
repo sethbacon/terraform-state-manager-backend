@@ -14,9 +14,9 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/jmoiron/sqlx"
 
 	identitycrypto "github.com/sethbacon/terraform-suite-identity/identity/crypto"
+	identitymailer "github.com/sethbacon/terraform-suite-identity/identity/mailer"
 	idstore "github.com/sethbacon/terraform-suite-identity/identity/store"
 	"github.com/sethbacon/terraform-suite-identity/identity/suite"
 
@@ -29,6 +29,7 @@ import (
 	"github.com/terraform-state-manager/terraform-state-manager/internal/credlifecycle"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/crypto"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/db/repositories"
+	"github.com/terraform-state-manager/terraform-state-manager/internal/egress"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/middleware"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/services/notify"
 )
@@ -267,7 +268,7 @@ func NewRouter(cfg *config.Config, database *sql.DB, identityDB *sql.DB) (*gin.E
 		v1.GET("/reports/states/export", requireAuth, middleware.RequireScope(auth.ScopeStateRead), sources.ReportStatesExport())
 
 		// Identity management (admin scope): users, organizations, roles, audit log.
-		admin := NewAdminHandlers(sqlx.NewDb(identityDB, "postgres"), WithAdminCredentialSweeper(credSweeper))
+		admin := NewAdminHandlers(identityDB, WithAdminCredentialSweeper(credSweeper))
 		ag := v1.Group("/admin", requireAuth, middleware.RequireScope(auth.ScopeAdmin))
 		{
 			ag.GET("/stats", admin.Stats())
@@ -351,9 +352,16 @@ func NewRouter(cfg *config.Config, database *sql.DB, identityDB *sql.DB) (*gin.E
 		// identityTokenCipher (shared identity/crypto, used ONLY for
 		// notification-channel targets) is separate from this repo's own
 		// internal/crypto (used for CI-source tokens, OIDC secrets, etc.) — see
-		// buildIdentityTokenCipher's doc comment. A nil egress guard applies the
-		// shared identity/httpsafe strict default SSRF policy (this app has no
-		// security.egress.allowlist equivalent config).
+		// buildIdentityTokenCipher's doc comment.
+		//
+		// The notifier takes the deployment's egress guard (internal/egress,
+		// built from security.egress.allowlist at config.go's
+		// security.egress.allowlist / TSM_SECURITY_EGRESS_ALLOWLIST and wired in
+		// main.go). An empty allow-list makes that the strict default policy,
+		// which is what the nil this used to pass meant — so a deployment that
+		// configures nothing is unchanged, and one that allow-lists an internal
+		// host gets that host for its webhooks too rather than having the setting
+		// silently apply to some outbound paths and not others.
 		var notifier *notify.Notifier
 		var tokenCipher *identitycrypto.TokenCipher
 		smtpCfg := &notify.SMTPConfig{
@@ -362,7 +370,7 @@ func NewRouter(cfg *config.Config, database *sql.DB, identityDB *sql.DB) (*gin.E
 			From:     cfg.Notifications.SMTP.From,
 			Username: cfg.Notifications.SMTP.Username,
 			Password: cfg.Notifications.SMTP.Password,
-			UseTLS:   cfg.Notifications.SMTP.UseTLS,
+			TLSMode:  identitymailer.TLSModeForUseTLS(cfg.Notifications.SMTP.UseTLS),
 		}
 		if database != nil {
 			reloadNotificationsSMTPConfigFromDB(smtpCfg, settingsRepo)
@@ -371,7 +379,7 @@ func NewRouter(cfg *config.Config, database *sql.DB, identityDB *sql.DB) (*gin.E
 				slog.Warn("notification channels disabled: channel-target encryption unavailable", "error", err)
 			} else {
 				tokenCipher = tc
-				notifier = notify.New(repositories.NewNotificationChannelRepository(database), smtpCfg, tokenCipher, nil)
+				notifier = notify.New(repositories.NewNotificationChannelRepository(database), smtpCfg, tokenCipher, egress.Guard())
 			}
 		}
 
@@ -517,10 +525,12 @@ func NewRouter(cfg *config.Config, database *sql.DB, identityDB *sql.DB) (*gin.E
 	if cfg.Suite.SiblingURL != "" {
 		// NewDiscoveryClient (terraform-suite-identity v0.17.0+) fails closed for
 		// a plaintext "http://" sibling URL, protecting the unauthenticated
-		// manifest fetch from tampering by a network-position attacker. Treat
-		// that failure the same as an absent/unreachable sibling: log it and run
-		// standalone rather than starting an insecure client implicitly.
-		dc, err := suite.NewDiscoveryClient(cfg.Suite.SiblingURL, buildSuiteManifest(cfg), cfg.Suite.PollInterval)
+		// manifest fetch from tampering by a network-position attacker. Since
+		// v0.25.0 it also takes the deployment's egress guard, so a sibling on an
+		// internal address must be allow-listed. Treat either failure the same as
+		// an absent/unreachable sibling: log it and run standalone rather than
+		// starting an unguarded client implicitly.
+		dc, err := suite.NewDiscoveryClient(cfg.Suite.SiblingURL, buildSuiteManifest(cfg), cfg.Suite.PollInterval, egress.Guard())
 		if err != nil {
 			slog.Error("suite discovery: failed to start sibling discovery client", "sibling_url", cfg.Suite.SiblingURL, "error", err)
 		} else {
@@ -554,7 +564,7 @@ func reloadNotificationsSMTPConfigFromDB(smtp *notify.SMTPConfig, settingsRepo *
 	smtp.Port = dbc.SMTP.Port
 	smtp.Username = dbc.SMTP.Username
 	smtp.From = dbc.SMTP.From
-	smtp.UseTLS = dbc.SMTP.UseTLS
+	smtp.TLSMode = identitymailer.TLSModeForUseTLS(dbc.SMTP.UseTLS)
 	if dbc.SMTP.PasswordEncrypted != "" {
 		if pw, derr := crypto.Decrypt([]byte(dbc.SMTP.PasswordEncrypted)); derr != nil {
 			slog.Error("notifications startup: failed to decrypt persisted smtp password", "error", derr)

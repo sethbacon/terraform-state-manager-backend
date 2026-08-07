@@ -113,13 +113,16 @@ func (d backgroundWorkerDeps) startWorkers(syncer *statesync.Syncer) (stop func(
 			return identitynotify.ExpiryConfig{
 				Enabled:        d.cfg.Notifications.Enabled,
 				APIKeyExpiring: d.cfg.Notifications.Events.APIKeyExpiring,
+				// notify.SMTPConfig is an ALIAS for identitymailer.Config, so
+				// TLSMode copies straight across: both sides are the module's own
+				// type and the polarity cannot be inverted in transit.
 				SMTP: identitymailer.Config{
 					Host:     d.smtpCfg.Host,
 					Port:     d.smtpCfg.Port,
 					From:     d.smtpCfg.From,
 					Username: d.smtpCfg.Username,
 					Password: d.smtpCfg.Password,
-					UseTLS:   d.smtpCfg.UseTLS,
+					TLSMode:  d.smtpCfg.TLSMode,
 				},
 				WarningDays:        d.cfg.Notifications.APIKeyExpiryWarningDays,
 				CheckIntervalHours: d.cfg.Notifications.APIKeyExpiryCheckIntervalHours,

@@ -3,13 +3,14 @@ package api
 import (
 	"errors"
 	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
 	"github.com/gin-gonic/gin"
-	"github.com/jmoiron/sqlx"
-	idmodels "github.com/sethbacon/terraform-suite-identity/identity/models"
+	"github.com/lib/pq"
 )
 
 // newAdminOrgScopeEnv wires the /admin/organizations/:id* routes the same way
@@ -24,7 +25,7 @@ func newAdminOrgScopeEnv(t *testing.T, callerUserID string) *sourcesEnv {
 	}
 	t.Cleanup(func() { db.Close() })
 
-	h := NewAdminHandlers(sqlx.NewDb(db, "sqlmock"))
+	h := NewAdminHandlers(db)
 	r := gin.New()
 	r.Use(func(c *gin.Context) {
 		if callerUserID != "" {
@@ -99,7 +100,9 @@ func TestRequireOrgScope_AllowsAdminActingOnOwnOrg(t *testing.T) {
 	e := newAdminOrgScopeEnv(t, "caller-1")
 
 	expectGetUserScopesForOrg(e.mock, "org-a", "caller-1", `["admin"]`)
-	e.mock.ExpectQuery("FROM organization_members om").WithArgs("org-a").
+	// The members list now also binds the route's own OrgScope (routeOrgScope),
+	// which requireOrgScope has already proved the caller holds.
+	e.mock.ExpectQuery("FROM organization_members om").WithArgs("org-a", pq.Array([]string{"org-a"})).
 		WillReturnRows(sqlmock.NewRows(scopeMemberCols))
 
 	w := e.do(http.MethodGet, "/api/v1/admin/organizations/org-a/members", "")
@@ -149,7 +152,7 @@ func TestRequireOrgScope_AllowsAdminForMemberMutations(t *testing.T) {
 	e := newAdminOrgScopeEnv(t, "caller-1")
 
 	expectGetUserScopesForOrg(e.mock, "org-a", "caller-1", `["admin"]`)
-	e.mock.ExpectExec("DELETE FROM organization_members").WithArgs("org-a", "u2").
+	e.mock.ExpectExec("DELETE FROM organization_members").WithArgs("org-a", "u2", pq.Array([]string{"org-a"})).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 
 	w := e.do(http.MethodDelete, "/api/v1/admin/organizations/org-a/members/u2", "")
@@ -206,8 +209,15 @@ func TestRequireOrgScope_DoesNotGateOrganizationListOrCreate(t *testing.T) {
 	// intentionally omits so it can isolate requireOrgScope's own behavior.
 	e := newAdminOrgScopeEnv(t, "caller-1")
 
-	e.mock.ExpectQuery("FROM organizations").WillReturnRows(sqlmock.NewRows(
-		[]string{"id", "name", "display_name", "idp_type", "idp_name", "created_at", "updated_at"}))
+	// The list still runs without requireOrgScope, but it now narrows itself to
+	// the organizations the caller holds organizations:read in (identity #161),
+	// so the caller's memberships are resolved first.
+	e.mock.ExpectQuery("FROM organization_members om").WithArgs("caller-1").
+		WillReturnRows(sqlmock.NewRows(userMembershipCols).
+			AddRow("org-a", "Org A", "rt-owner", time.Now(), "org_owner", "Owner", []byte(`["organizations:write"]`)))
+	e.mock.ExpectQuery("FROM organizations").WithArgs(pq.Array([]string{"org-a"}), sqlmock.AnyArg(), sqlmock.AnyArg()).
+		WillReturnRows(sqlmock.NewRows(
+			[]string{"id", "name", "display_name", "idp_type", "idp_name", "created_at", "updated_at"}))
 	w := e.do(http.MethodGet, "/api/v1/admin/organizations", "")
 	if w.Code != http.StatusOK {
 		t.Fatalf("list organizations: status = %d (%s), want 200 (no membership check expected)", w.Code, w.Body.String())
@@ -231,9 +241,9 @@ func TestCreateOrganization_AddsCallerAsOrgOwner(t *testing.T) {
 		WithArgs("org_owner").
 		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("rt-org-owner"))
 	e.mock.ExpectExec("INSERT INTO organization_members").
-		WithArgs("org-1", "caller-1", "rt-org-owner").
+		WithArgs("org-1", "caller-1", "rt-org-owner", pq.Array([]string{"org-1"})).
 		WillReturnResult(sqlmock.NewResult(0, 1))
-	e.mock.ExpectExec("INSERT INTO audit_logs").WillReturnResult(sqlmock.NewResult(0, 1))
+	e.mock.ExpectQuery("INSERT INTO audit_logs").WillReturnRows(auditInsertReturn())
 
 	w := e.do(http.MethodPost, "/api/v1/admin/organizations", `{"name":"Acme","display_name":"Acme Corp"}`)
 	if w.Code != http.StatusCreated {
@@ -272,7 +282,7 @@ func TestRequireOrgScope_AllowsOrganizationsWriteWithoutAdmin(t *testing.T) {
 	e := newAdminOrgScopeEnv(t, "caller-1")
 
 	expectGetUserScopesForOrg(e.mock, "org-a", "caller-1", `["organizations:write"]`)
-	e.mock.ExpectExec("DELETE FROM organization_members").WithArgs("org-a", "u2").
+	e.mock.ExpectExec("DELETE FROM organization_members").WithArgs("org-a", "u2", pq.Array([]string{"org-a"})).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 
 	w := e.do(http.MethodDelete, "/api/v1/admin/organizations/org-a/members/u2", "")
@@ -437,25 +447,105 @@ func TestRequireSharedOrgAdminWithTargetUser_DoesNotGateUserListOrCreate(t *test
 	}
 }
 
-// TestUsersInAdminOrgs directly exercises the #182 user-list narrowing: a user
-// is kept only if they share an org with the caller's admin orgs, except
-// membership-less users (no cross-tenant boundary) which are always kept.
-func TestUsersInAdminOrgs(t *testing.T) {
-	adminOrgs := map[string]struct{}{"org-a": {}}
-	users := []*idmodels.UserWithOrgRoles{
-		{User: idmodels.User{ID: "u-a"}, Memberships: []idmodels.UserMembership{{OrganizationID: "org-a"}}},
-		{User: idmodels.User{ID: "u-b"}, Memberships: []idmodels.UserMembership{{OrganizationID: "org-b"}}},
-		{User: idmodels.User{ID: "u-none"}, Memberships: nil},
+// wantUserMembershipPredicate is the SQL the store emits for "shares an
+// organization with the caller, or belongs to none at all" — the #182 user-list
+// narrowing.
+//
+// This replaces TestUsersInAdminOrgs, which exercised the in-memory
+// usersInAdminOrgs post-filter deleted in the identity v0.25.0 bump. The RULE is
+// unchanged and still has to hold; what changed is where it is enforced, and
+// that is precisely why the assertion had to move. A post-filter is observable
+// in the response; a predicate is observable ONLY in the statement, so a handler
+// that dropped its scope would still answer 200 with whatever rows the mock was
+// told to return. Asserting the literal fragment also separates the two ways
+// this can break: losing the scope removes the clause entirely, while narrowing
+// to OrgScopeOrganizations drops the NOT EXISTS half and hides every
+// membership-less user.
+const (
+	wantUserInScope   = "EXISTS (SELECT 1 FROM organization_members osm WHERE osm.user_id = users.id AND osm.organization_id = ANY($1))"
+	wantUserNoMembers = "NOT EXISTS (SELECT 1 FROM organization_members osm WHERE osm.user_id = users.id)"
+)
+
+// TestListUsers_NarrowsToCallerAdminOrgs pins the #182 narrowing as the query's
+// own predicate: a user is visible only if they share an organization the caller
+// administers, except membership-less users (no cross-tenant boundary to
+// protect), who stay visible.
+func TestListUsers_NarrowsToCallerAdminOrgs(t *testing.T) {
+	rec := &auditSQLRecorder{}
+	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(
+		sqlmock.QueryMatcherFunc(func(expectedSQL, actualSQL string) error {
+			rec.record(actualSQL)
+			return sqlmock.QueryMatcherRegexp.Match(expectedSQL, actualSQL)
+		}),
+	))
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
 	}
-	got := usersInAdminOrgs(users, adminOrgs)
-	kept := map[string]bool{}
-	for _, u := range got {
-		kept[u.ID] = true
+	t.Cleanup(func() { db.Close() })
+
+	h := NewAdminHandlers(db)
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	r.Use(func(c *gin.Context) { c.Set("user_id", auditScopeCaller); c.Next() })
+	r.GET("/users", h.ListUsers())
+
+	// The caller administers org-a and is a plain viewer in org-c, so only org-a
+	// may reach the predicate.
+	mock.ExpectQuery("FROM organization_members om").WithArgs(auditScopeCaller).
+		WillReturnRows(sqlmock.NewRows(userMembershipCols).
+			AddRow(auditScopeOrgA, "Org A", "rt-admin", time.Now(), "admin", "Admin", []byte(`["admin"]`)).
+			AddRow("org-c", "Org C", "rt-viewer", time.Now(), "viewer", "Viewer", []byte(`["state:read"]`)))
+	mock.ExpectQuery(`SELECT COUNT\(\*\) FROM users`).WithArgs(pq.Array([]string{auditScopeOrgA})).
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(2))
+	mock.ExpectQuery("FROM users").
+		WithArgs(pq.Array([]string{auditScopeOrgA}), sqlmock.AnyArg(), sqlmock.AnyArg()).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "email", "name", "oidc_sub", "created_at", "updated_at"}).
+			AddRow("u-a", "a@x.io", "A", nil, time.Now(), time.Now()).
+			AddRow("u-none", "n@x.io", "N", nil, time.Now(), time.Now()))
+	mock.ExpectQuery("FROM organization_members om").
+		WithArgs(pq.Array([]string{"u-a", "u-none"}), pq.Array([]string{auditScopeOrgA})).
+		WillReturnRows(sqlmock.NewRows(append([]string{"user_id"}, userMembershipCols...)).
+			AddRow("u-a", auditScopeOrgA, "Org A", "rt-admin", time.Now(), "admin", "Admin", []byte(`["admin"]`)))
+
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/users", nil))
+
+	// The guard first, and independently of the response: a dropped scope makes
+	// the bind arguments stop matching and surfaces as an uninformative 500.
+	var userReads int
+	for _, q := range rec.seen {
+		if !strings.Contains(q, "FROM users") {
+			continue
+		}
+		userReads++
+		if !strings.Contains(q, wantUserInScope) {
+			t.Errorf("user read is not tenant-scoped — it can enumerate another tenant's users.\nwant fragment: %s\ngot statement:  %s", wantUserInScope, q)
+		}
+		if !strings.Contains(q, wantUserNoMembers) {
+			t.Errorf("user read dropped the membership-less axis — a user belonging to no organization becomes invisible to every admin.\nwant fragment: %s\ngot statement:  %s", wantUserNoMembers, q)
+		}
 	}
-	if !kept["u-a"] || !kept["u-none"] {
-		t.Errorf("expected u-a (shared org) and u-none (no memberships) kept, got %v", kept)
+	if userReads == 0 {
+		t.Fatal("no users read reached the database")
 	}
-	if kept["u-b"] {
-		t.Errorf("u-b belongs only to a non-admin org and must be excluded, got %v", kept)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (%s)", w.Code, w.Body.String())
+	}
+
+	// Nothing may re-narrow after the database: rows the predicate admitted must
+	// reach the response. This is what fails if a post-filter is reintroduced.
+	body := w.Body.String()
+	for _, id := range []string{"u-a", "u-none"} {
+		if !strings.Contains(body, id) {
+			t.Errorf("user %q was admitted by the scope but is missing from the response: %s", id, body)
+		}
+	}
+	// ...and the count must be the scoped one the repository returned, not a
+	// page-relative number a post-filter forced.
+	if !strings.Contains(body, `"total":2`) {
+		t.Errorf("total must be the repository's scoped count, got %s", body)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("queued round-trips did not all run: %v", err)
 	}
 }

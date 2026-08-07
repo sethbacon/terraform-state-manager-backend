@@ -1,6 +1,7 @@
 package statesource
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -36,7 +37,7 @@ func TestEgressGuard_Policy(t *testing.T) {
 		"https://169.254.169.254/latest/meta-data/", // cloud metadata (link-local)
 		"https://127.0.0.1/state",                   // loopback
 	} {
-		if err := g.ValidateURL(u); err == nil {
+		if err := g.ValidateURL(context.Background(), u); err == nil {
 			t.Errorf("expected %q to be blocked by the egress policy", u)
 		}
 	}
@@ -44,7 +45,7 @@ func TestEgressGuard_Policy(t *testing.T) {
 		"https://10.1.2.3/state",    // private (allow-listed)
 		"https://192.168.1.5/state", // private (allow-listed)
 	} {
-		if err := g.ValidateURL(u); err != nil {
+		if err := g.ValidateURL(context.Background(), u); err != nil {
 			t.Errorf("expected private %q to be allowed, got %v", u, err)
 		}
 	}
@@ -146,10 +147,10 @@ func TestInstallGuardedGitTransport(t *testing.T) {
 // mirroring the IPv4 RFC1918 exemption, while IPv6 link-local stays blocked (#302).
 func TestEgressGuard_AllowsIPv6ULA(t *testing.T) {
 	g := identityhttpsafe.MustGuard(defaultEgressAllowlist...)
-	if err := g.ValidateURL("https://[fd00::1]/state"); err != nil {
+	if err := g.ValidateURL(context.Background(), "https://[fd00::1]/state"); err != nil {
 		t.Errorf("expected IPv6 ULA backend to be allowed, got %v", err)
 	}
-	if err := g.ValidateURL("https://[fe80::1]/state"); err == nil {
+	if err := g.ValidateURL(context.Background(), "https://[fe80::1]/state"); err == nil {
 		t.Error("expected IPv6 link-local to be blocked")
 	}
 }

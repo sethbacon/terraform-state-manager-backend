@@ -7,7 +7,7 @@ import (
 
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
 	"github.com/gin-gonic/gin"
-	"github.com/jmoiron/sqlx"
+	"github.com/lib/pq"
 
 	"github.com/terraform-state-manager/terraform-state-manager/internal/auth"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/middleware"
@@ -30,7 +30,7 @@ func newAdminOrgRoutingEnv(t *testing.T, callerUserID string, scopes []string) *
 	}
 	t.Cleanup(func() { db.Close() })
 
-	h := NewAdminHandlers(sqlx.NewDb(db, "sqlmock"))
+	h := NewAdminHandlers(db)
 	r := gin.New()
 	r.Use(func(c *gin.Context) {
 		if callerUserID != "" {
@@ -72,8 +72,16 @@ func TestAdminOrgRouting_ListRequiresOrganizationsReadScope(t *testing.T) {
 func TestAdminOrgRouting_ListAllowsOrganizationsReadScope(t *testing.T) {
 	e := newAdminOrgRoutingEnv(t, "caller-1", []string{"organizations:read"})
 
-	e.mock.ExpectQuery("FROM organizations").WillReturnRows(sqlmock.NewRows(
-		[]string{"id", "name", "display_name", "idp_type", "idp_name", "created_at", "updated_at"}))
+	// The route gate is the flat scope; the RESULT is additionally narrowed to
+	// the organizations the caller holds organizations:read in (identity #161),
+	// which is resolved from their memberships first.
+	e.mock.ExpectQuery("FROM organization_members om").WithArgs("caller-1").
+		WillReturnRows(sqlmock.NewRows(userMembershipCols).
+			AddRow("org-a", "Org A", "rt-owner", time.Now(), "org_owner", "Owner", []byte(`["organizations:read"]`)))
+	e.mock.ExpectQuery("FROM organizations").
+		WithArgs(pq.Array([]string{"org-a"}), sqlmock.AnyArg(), sqlmock.AnyArg()).
+		WillReturnRows(sqlmock.NewRows(
+			[]string{"id", "name", "display_name", "idp_type", "idp_name", "created_at", "updated_at"}))
 
 	w := e.do(http.MethodGet, "/api/v1/admin/organizations", "")
 	if w.Code != http.StatusOK {
@@ -108,9 +116,9 @@ func TestAdminOrgRouting_CreateAllowsOrganizationsCreateScope(t *testing.T) {
 		WithArgs("org_owner").
 		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("rt-org-owner"))
 	e.mock.ExpectExec("INSERT INTO organization_members").
-		WithArgs("org-1", "caller-1", "rt-org-owner").
+		WithArgs("org-1", "caller-1", "rt-org-owner", pq.Array([]string{"org-1"})).
 		WillReturnResult(sqlmock.NewResult(0, 1))
-	e.mock.ExpectExec("INSERT INTO audit_logs").WillReturnResult(sqlmock.NewResult(0, 1))
+	e.mock.ExpectQuery("INSERT INTO audit_logs").WillReturnRows(auditInsertReturn())
 
 	w := e.do(http.MethodPost, "/api/v1/admin/organizations", `{"name":"Acme"}`)
 	if w.Code != http.StatusCreated {
@@ -128,8 +136,16 @@ func TestAdminOrgRouting_CreateAllowsOrganizationsCreateScope(t *testing.T) {
 func TestAdminOrgRouting_AdminWildcardBypassesOrganizationsReadAndCreate(t *testing.T) {
 	e := newAdminOrgRoutingEnv(t, "caller-1", []string{"admin"})
 
-	e.mock.ExpectQuery("FROM organizations").WillReturnRows(sqlmock.NewRows(
-		[]string{"id", "name", "display_name", "idp_type", "idp_name", "created_at", "updated_at"}))
+	// The route gate is the flat scope; the RESULT is additionally narrowed to
+	// the organizations the caller holds organizations:read in (identity #161),
+	// which is resolved from their memberships first.
+	e.mock.ExpectQuery("FROM organization_members om").WithArgs("caller-1").
+		WillReturnRows(sqlmock.NewRows(userMembershipCols).
+			AddRow("org-a", "Org A", "rt-owner", time.Now(), "org_owner", "Owner", []byte(`["organizations:read"]`)))
+	e.mock.ExpectQuery("FROM organizations").
+		WithArgs(pq.Array([]string{"org-a"}), sqlmock.AnyArg(), sqlmock.AnyArg()).
+		WillReturnRows(sqlmock.NewRows(
+			[]string{"id", "name", "display_name", "idp_type", "idp_name", "created_at", "updated_at"}))
 
 	w := e.do(http.MethodGet, "/api/v1/admin/organizations", "")
 	if w.Code != http.StatusOK {

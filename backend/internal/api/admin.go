@@ -1,16 +1,18 @@
 package api
 
 import (
+	"database/sql"
 	"errors"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/jmoiron/sqlx"
 	idmodels "github.com/sethbacon/terraform-suite-identity/identity/models"
 	idstore "github.com/sethbacon/terraform-suite-identity/identity/store"
 
+	"github.com/terraform-state-manager/terraform-state-manager/internal/auth"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/credlifecycle"
 )
 
@@ -39,12 +41,17 @@ func WithAdminCredentialSweeper(s *credlifecycle.Sweeper) AdminOption {
 }
 
 // NewAdminHandlers builds the admin handlers over the identity-schema connection.
-func NewAdminHandlers(identityDB *sqlx.DB, opts ...AdminOption) *AdminHandlers {
+//
+// It takes a *sql.DB, like every other handler constructor here: identity
+// v0.25.0 made NewRoleTemplateRepository take one too, so the sqlx handle this
+// signature used to demand — and the sqlx.NewDb wrapper every caller built to
+// satisfy it — existed only to feed that one constructor.
+func NewAdminHandlers(identityDB *sql.DB, opts ...AdminOption) *AdminHandlers {
 	h := &AdminHandlers{
-		userRepo:  idstore.NewUserRepository(identityDB.DB),
-		orgRepo:   idstore.NewOrganizationRepository(identityDB.DB),
+		userRepo:  idstore.NewUserRepository(identityDB),
+		orgRepo:   idstore.NewOrganizationRepository(identityDB),
 		roleRepo:  idstore.NewRoleTemplateRepository(identityDB),
-		auditRepo: idstore.NewAuditRepository(identityDB.DB),
+		auditRepo: idstore.NewAuditRepository(identityDB),
 	}
 	for _, opt := range opts {
 		opt(h)
@@ -54,10 +61,14 @@ func NewAdminHandlers(identityDB *sqlx.DB, opts ...AdminOption) *AdminHandlers {
 
 // errCredentialSweepIncomplete reports that an offboarding sweep could not
 // invalidate every credential family. The user-lifecycle routes treat it as
-// fatal and answer 500 BEFORE the destructive step, because a half-swept
-// principal whose account is then deleted leaves credentials nothing can find
-// again: identity.api_keys.user_id is ON DELETE SET NULL, so the rows outlive
-// the owner with no user_id left to select them by.
+// fatal and answer 500 BEFORE the destructive step.
+//
+// identity v0.25.0's migration 000007 changed identity.api_keys.user_id from
+// ON DELETE SET NULL to ON DELETE CASCADE, so a deleted user's key rows no
+// longer outlive the owner as unattributable organization credentials. That is
+// a BACKSTOP, not a reason to relax this: CASCADE runs after the fact and
+// cannot reach a JWT whose scopes were embedded at login, so the sweep still
+// has to succeed first and this error still has to be fatal.
 var errCredentialSweepIncomplete = errors.New("credential sweep incomplete")
 
 func pageParams(c *gin.Context) (limit, offset int) {
@@ -87,60 +98,46 @@ func pageParams(c *gin.Context) (limit, offset int) {
 // @Router       /admin/users [get]
 func (h *AdminHandlers) ListUsers() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		// Narrow the global user list to users who share an organization the caller
-		// administers. The outer /admin gate accepts any single-org admin's flat
-		// ScopeAdmin, so without this an admin of one org could enumerate every
-		// tenant's users (#182).
-		callerID, _ := c.Get("user_id")
-		uid, _ := callerID.(string)
-		adminOrgs, err := adminOrgSet(c.Request.Context(), h.orgRepo, uid)
+		// GUARD org-scope-user-list (#182): narrow the global user list to users
+		// who share an organization the caller administers, plus users who belong
+		// to no organization at all. The outer /admin gate accepts any single-org
+		// admin's flat ScopeAdmin, so without this an admin of one org could
+		// enumerate every tenant's users.
+		//
+		// Since identity v0.25.0 that narrowing is the query's own predicate (an
+		// EXISTS over organization_members) rather than the usersInAdminOrgs
+		// post-filter this handler used to apply. The predicate also bounds the
+		// MEMBERSHIPS attached to each returned user, which the post-filter never
+		// could: it could only drop a whole user, so a user the caller was
+		// entitled to see arrived carrying their memberships in every other
+		// tenant (#161).
+		scope, err := h.callerOrgScope(c)
 		if err != nil {
 			serverError(c, err, "failed to resolve caller organizations")
 			return
 		}
 		limit, offset := pageParams(c)
 		if q := c.Query("q"); q != "" {
-			users, err := h.userRepo.SearchWithMemberships(c.Request.Context(), q, limit, offset)
+			users, err := h.userRepo.SearchWithMemberships(c.Request.Context(), q, limit, offset, scope)
 			if err != nil {
 				serverError(c, err, "failed to search users")
 				return
 			}
-			users = usersInAdminOrgs(users, adminOrgs)
 			// Search has no exact count; clients page until a short page comes back.
 			c.JSON(http.StatusOK, gin.H{"users": users, "total": offset + len(users)})
 			return
 		}
-		users, _, err := h.userRepo.ListUsersWithMemberships(c.Request.Context(), limit, offset)
+		users, total, err := h.userRepo.ListUsersWithMemberships(c.Request.Context(), limit, offset, scope)
 		if err != nil {
 			serverError(c, err, "failed to list users")
 			return
 		}
-		users = usersInAdminOrgs(users, adminOrgs)
-		// Post-filtered per page, so the count is page-relative (like the search
-		// path) rather than the unfiltered DB total.
-		c.JSON(http.StatusOK, gin.H{"users": users, "total": offset + len(users)})
+		// total is now the scoped count straight from the repository: with the
+		// tenant predicate pushed into SQL there is no post-filter to make it
+		// disagree with the rows returned, so it no longer has to be reported
+		// page-relative.
+		c.JSON(http.StatusOK, gin.H{"users": users, "total": total})
 	}
-}
-
-// usersInAdminOrgs keeps only the users the caller may see under #182: those
-// sharing at least one organization with the caller's admin orgs, plus users
-// with no memberships at all (no cross-tenant boundary to protect, mirroring
-// requireSharedOrgAdminWithTargetUser).
-func usersInAdminOrgs(users []*idmodels.UserWithOrgRoles, adminOrgs map[string]struct{}) []*idmodels.UserWithOrgRoles {
-	out := make([]*idmodels.UserWithOrgRoles, 0, len(users))
-	for _, u := range users {
-		if len(u.Memberships) == 0 {
-			out = append(out, u)
-			continue
-		}
-		for _, m := range u.Memberships {
-			if _, ok := adminOrgs[m.OrganizationID]; ok {
-				out = append(out, u)
-				break
-			}
-		}
-	}
-	return out
 }
 
 // ListOrganizations returns all organizations (paginated).
@@ -153,8 +150,19 @@ func usersInAdminOrgs(users []*idmodels.UserWithOrgRoles, adminOrgs map[string]s
 // @Router       /admin/organizations [get]
 func (h *AdminHandlers) ListOrganizations() gin.HandlerFunc {
 	return func(c *gin.Context) {
+		// GUARD org-scope-org-list (identity #161): the route is gated on the flat
+		// organizations:read scope, which names no organization, so it is not a
+		// tenant boundary — exactly the shape that let this axis hand every
+		// tenant's organization directory to any single-org member. Scoped to the
+		// organizations the caller's role template grants organizations:read in,
+		// which is the same set requireOrgScope re-derives for the :id routes.
+		scope, err := h.callerScopeFor(c, auth.ScopeOrganizationsRead)
+		if err != nil {
+			serverError(c, err, "failed to resolve caller organizations")
+			return
+		}
 		limit, offset := pageParams(c)
-		orgs, err := h.orgRepo.List(c.Request.Context(), limit, offset)
+		orgs, err := h.orgRepo.List(c.Request.Context(), limit, offset, scope)
 		if err != nil {
 			serverError(c, err, "failed to list organizations")
 			return
@@ -264,7 +272,7 @@ func (h *AdminHandlers) ListAuditLogs() gin.HandlerFunc {
 		// this an admin of one org could read another tenant's member-management
 		// trail. The narrowing is a SQL predicate rather than a post-filter, so
 		// the database never returns another tenant's rows in the first place.
-		scope, err := h.callerAuditScope(c)
+		scope, err := h.callerOrgScope(c)
 		if err != nil {
 			serverError(c, err, "failed to resolve caller organizations")
 			return
@@ -293,8 +301,20 @@ func (h *AdminHandlers) ListAuditLogs() gin.HandlerFunc {
 func (h *AdminHandlers) Stats() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		ctx := c.Request.Context()
-		userCount, _ := h.userRepo.Count(ctx)
-		orgs, _ := h.orgRepo.List(ctx, 1000, 0)
+		// Each tile counts exactly what its list route would show the same
+		// caller: users under the admin scope ListUsers uses, organizations
+		// under the organizations:read scope ListOrganizations uses. A tile that
+		// counted rows the caller cannot open is a cross-tenant existence oracle,
+		// which is the disclosure half of the same class the lists close.
+		userScope, uErr := h.callerOrgScope(c)
+		orgScope, oErr := h.callerScopeFor(c, auth.ScopeOrganizationsRead)
+		if uErr != nil || oErr != nil {
+			// The zero OrgScope denies, so the counts below already fail closed;
+			// this only keeps the failure from being silent.
+			slog.Warn("admin stats: failed to resolve caller organizations", "user_scope_error", uErr, "org_scope_error", oErr)
+		}
+		userCount, _ := h.userRepo.Count(ctx, userScope)
+		orgs, _ := h.orgRepo.List(ctx, 1000, 0, orgScope)
 		roles, _ := h.roleRepo.ListRoleTemplates(ctx)
 		c.JSON(http.StatusOK, gin.H{
 			"users":         userCount,

@@ -59,6 +59,7 @@ import (
 	"github.com/terraform-state-manager/terraform-state-manager/internal/config"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/db"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/db/repositories"
+	"github.com/terraform-state-manager/terraform-state-manager/internal/egress"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/statesource"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/telemetry"
 )
@@ -128,6 +129,20 @@ func serve(cfg *config.Config) error {
 		slog.Info("state-source egress allow-list applied", "entries", len(cfg.Security.Egress.Allowlist))
 	}
 	statesource.InstallGuardedGitTransport()
+
+	// The SAME allow-list also governs the outbound requests the shared identity
+	// module makes on this app's behalf — OIDC discovery, JWKS and the
+	// authorization-code token exchange, the sibling-manifest poll, and the
+	// module-freshness join — which identity v0.25.0 routes through httpsafe.
+	// Unconditional, and applied even when the list is empty: empty means the
+	// STRICT policy there (loopback, RFC 1918, link-local, CGNAT and IPv6 ULA
+	// all denied), not the connectors' private-range default. A deployment whose
+	// IdP or sibling app lives on an internal address must name it — and,
+	// because setting the list REPLACES the connectors' default, must re-state
+	// the private ranges those connectors still need. See internal/egress.
+	if err := egress.Configure(cfg.Security.Egress.Allowlist); err != nil {
+		return fmt.Errorf("invalid security.egress.allowlist: %w", err)
+	}
 
 	// Confine the state sources that name a path on this server's filesystem (the
 	// local connector's base_path, the kubernetes connector's kubeconfig) to the
