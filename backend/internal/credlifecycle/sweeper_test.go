@@ -94,12 +94,13 @@ func TestUserDeprovisioned_RevokesBothFamilies(t *testing.T) {
 
 	mock.ExpectExec("INSERT INTO user_token_revocations").WithArgs("u1").
 		WillReturnResult(sqlmock.NewResult(0, 1))
-	mock.ExpectQuery("FROM api_keys").WithArgs("u1").
-		WillReturnRows(keyRow("k1", `["state:read"]`).
-			AddRow("k2", "u1", "o1", "Deploy", nil, "hash", "tsm_def456", []byte(`["admin"]`),
-				nil, nil, nil, time.Now(), "Alice"))
-	mock.ExpectExec("DELETE FROM api_keys").WithArgs("k1").WillReturnResult(sqlmock.NewResult(0, 1))
-	mock.ExpectExec("DELETE FROM api_keys").WithArgs("k2").WillReturnResult(sqlmock.NewResult(0, 1))
+	// ONE bulk delete keyed on the owner, since identity v0.25.0. Two things
+	// follow from that and both matter: there is no window between a list and a
+	// per-row delete in which a freshly minted key escapes the sweep, and the
+	// per-key already-gone race disappears because a DELETE matching nothing is
+	// a count, not an error to classify.
+	mock.ExpectExec("DELETE FROM api_keys").WithArgs("u1").
+		WillReturnResult(sqlmock.NewResult(0, 2))
 
 	// Offboarding retains nothing, so no scope comparison happens: every key
 	// goes, whatever it carries.

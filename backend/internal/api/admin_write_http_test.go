@@ -2,13 +2,14 @@ package api
 
 import (
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
 	"github.com/gin-gonic/gin"
-	"github.com/jmoiron/sqlx"
+	"github.com/lib/pq"
 	idstore "github.com/sethbacon/terraform-suite-identity/identity/store"
 
 	"github.com/terraform-state-manager/terraform-state-manager/internal/credlifecycle"
@@ -28,7 +29,7 @@ func newAdminWriteEnv(t *testing.T) *sourcesEnv {
 
 	// The credential sweeper is wired exactly as the router wires it, so the
 	// offboarding routes are exercised on their production path (#330).
-	h := NewAdminHandlers(sqlx.NewDb(db, "sqlmock"), WithAdminCredentialSweeper(
+	h := NewAdminHandlers(db, WithAdminCredentialSweeper(
 		credlifecycle.NewSweeper(
 			repositories.NewUserTokenRevocationRepository(db),
 			idstore.NewAPIKeyRepository(db),
@@ -66,7 +67,7 @@ func TestAdminCreateUser(t *testing.T) {
 	}
 
 	e.mock.ExpectExec("INSERT INTO users").WillReturnResult(sqlmock.NewResult(0, 1))
-	e.mock.ExpectExec("INSERT INTO audit_logs").WillReturnResult(sqlmock.NewResult(0, 1))
+	e.mock.ExpectQuery("INSERT INTO audit_logs").WillReturnRows(auditInsertReturn())
 	w := e.do(http.MethodPost, "/api/v1/admin/users", `{"email":" a@b.c ","name":"Alice"}`)
 	if w.Code != http.StatusCreated || !strings.Contains(w.Body.String(), `"a@b.c"`) {
 		t.Fatalf("create: status = %d (%s) — email should be trimmed", w.Code, w.Body.String())
@@ -102,7 +103,10 @@ func TestAdminDeleteUser(t *testing.T) {
 	// (none here).
 	e.mock.ExpectExec("INSERT INTO user_token_revocations").WithArgs("u1").
 		WillReturnResult(sqlmock.NewResult(0, 1))
-	e.mock.ExpectQuery("FROM api_keys").WithArgs("u1").WillReturnRows(sqlmock.NewRows([]string{"id"}))
+	// Since identity v0.25.0 the key sweep is ONE bulk DELETE rather than a list
+	// followed by a delete per row, so there is no window in which a key minted
+	// mid-sweep survives it.
+	e.mock.ExpectExec("DELETE FROM api_keys").WithArgs("u1").WillReturnResult(sqlmock.NewResult(0, 0))
 	e.mock.ExpectExec("DELETE FROM users").WithArgs("u1").WillReturnResult(sqlmock.NewResult(0, 1))
 	if w := e.do(http.MethodDelete, "/api/v1/admin/users/u1", ""); w.Code != http.StatusNoContent {
 		t.Errorf("delete: status = %d, want 204", w.Code)
@@ -118,15 +122,13 @@ var apiKeyListCols = []string{
 func TestAdminDeleteUserRevokesAPIKeys(t *testing.T) {
 	e := newAdminWriteEnv(t)
 	// The offboarded user owns two keys; both must be deleted before the account,
-	// and their live sessions retired with them.
+	// and their live sessions retired with them. The sweep is keyed on the OWNER
+	// and reaches every organization, which is the point: a TSM key carries the
+	// default organization's id whoever owns it, so an org-scoped sweep would
+	// strand exactly the credentials this route exists to destroy.
 	e.mock.ExpectExec("INSERT INTO user_token_revocations").WithArgs("u1").
 		WillReturnResult(sqlmock.NewResult(0, 1))
-	e.mock.ExpectQuery("FROM api_keys").WithArgs("u1").WillReturnRows(
-		sqlmock.NewRows(apiKeyListCols).
-			AddRow("k1", "u1", "o1", "CI", nil, "h", "tsm_a", []byte(`["admin"]`), nil, nil, nil, time.Now(), "Alice").
-			AddRow("k2", "u1", "o1", "Deploy", nil, "h", "tsm_b", []byte(`["state:read"]`), nil, nil, nil, time.Now(), "Alice"))
-	e.mock.ExpectExec("DELETE FROM api_keys").WithArgs("k1").WillReturnResult(sqlmock.NewResult(0, 1))
-	e.mock.ExpectExec("DELETE FROM api_keys").WithArgs("k2").WillReturnResult(sqlmock.NewResult(0, 1))
+	e.mock.ExpectExec("DELETE FROM api_keys").WithArgs("u1").WillReturnResult(sqlmock.NewResult(0, 2))
 	e.mock.ExpectExec("DELETE FROM users").WithArgs("u1").WillReturnResult(sqlmock.NewResult(0, 1))
 
 	if w := e.do(http.MethodDelete, "/api/v1/admin/users/u1", ""); w.Code != http.StatusNoContent {
@@ -155,8 +157,10 @@ func TestAdminGetUserMemberships(t *testing.T) {
 	}
 }
 
+// auditCols mirrors ListAuditLogs' projection; actor_email is column 10 as of
+// identity v0.25.0 (see auditRowCols in admin_audit_export_test.go).
 var auditCols = []string{"id", "user_id", "organization_id", "action", "resource_type", "resource_id",
-	"metadata", "ip_address", "created_at", "user_email", "user_name"}
+	"metadata", "ip_address", "created_at", "actor_email", "user_email", "user_name"}
 
 func TestAdminExportUserData(t *testing.T) {
 	e := newAdminWriteEnv(t)
@@ -174,7 +178,7 @@ func TestAdminExportUserData(t *testing.T) {
 	e.mock.ExpectQuery("SELECT COUNT").WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
 	e.mock.ExpectQuery("FROM audit_logs al").
 		WillReturnRows(sqlmock.NewRows(auditCols).
-			AddRow("l1", "u1", nil, "state.edit", "state", "s1", nil, "127.0.0.1", time.Now(), "a@b.c", "Alice"))
+			AddRow("l1", "u1", nil, "state.edit", "state", "s1", nil, "127.0.0.1", time.Now(), "a@b.c", "a@b.c", "Alice"))
 
 	w := e.do(http.MethodGet, "/api/v1/admin/users/u1/export", "")
 	if w.Code != http.StatusOK {
@@ -199,16 +203,15 @@ func TestAdminEraseUser(t *testing.T) {
 	e.mock.ExpectExec("UPDATE users").
 		WithArgs("u1", "erased-u1@anonymized.invalid", "Erased User", nil, sqlmock.AnyArg()).
 		WillReturnResult(sqlmock.NewResult(0, 1))
-	e.mock.ExpectExec("DELETE FROM organization_members").WithArgs("u1").
-		WillReturnResult(sqlmock.NewResult(0, 2))
+	// The membership strip now RETURNS the organizations it emptied (an OrgScope
+	// since v0.25.0, not a count), so it is a query rather than an exec.
+	e.mock.ExpectQuery("DELETE FROM organization_members").WithArgs("u1").
+		WillReturnRows(sqlmock.NewRows([]string{"organization_id"}).AddRow("o1").AddRow("o2"))
 	// Erasure also revokes the user's sessions and API keys (the tombstone would
-	// otherwise keep both valid); the one key here is deleted.
+	// otherwise keep both valid), in one bulk delete.
 	e.mock.ExpectExec("INSERT INTO user_token_revocations").WithArgs("u1").
 		WillReturnResult(sqlmock.NewResult(0, 1))
-	e.mock.ExpectQuery("FROM api_keys").WithArgs("u1").WillReturnRows(
-		sqlmock.NewRows(apiKeyListCols).
-			AddRow("k1", "u1", "o1", "CI", nil, "h", "tsm_a", []byte(`["admin"]`), nil, nil, nil, time.Now(), "Alice"))
-	e.mock.ExpectExec("DELETE FROM api_keys").WithArgs("k1").WillReturnResult(sqlmock.NewResult(0, 1))
+	e.mock.ExpectExec("DELETE FROM api_keys").WithArgs("u1").WillReturnResult(sqlmock.NewResult(0, 1))
 
 	w := e.do(http.MethodPost, "/api/v1/admin/users/u1/erase", "")
 	if w.Code != http.StatusOK {
@@ -236,9 +239,9 @@ func TestAdminOrganizationCRUD(t *testing.T) {
 
 	orgCols := []string{"id", "name", "display_name", "idp_type", "idp_name", "created_at", "updated_at"}
 	// Update: rename + bind IdP.
-	e.mock.ExpectQuery("FROM organizations").WithArgs("o1").
+	e.mock.ExpectQuery("FROM organizations").WithArgs("o1", pq.Array([]string{"o1"})).
 		WillReturnRows(sqlmock.NewRows(orgCols).AddRow("o1", "eng", "Engineering", nil, nil, now, now))
-	e.mock.ExpectExec("UPDATE organizations SET name").WithArgs("platform", "o1").
+	e.mock.ExpectExec("UPDATE organizations SET name").WithArgs("platform", "o1", pq.Array([]string{"o1"})).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	e.mock.ExpectExec("UPDATE organizations").WillReturnResult(sqlmock.NewResult(0, 1))
 	w = e.do(http.MethodPut, "/api/v1/admin/organizations/o1",
@@ -248,7 +251,7 @@ func TestAdminOrganizationCRUD(t *testing.T) {
 	}
 
 	// Clearing the IdP binding with empty strings.
-	e.mock.ExpectQuery("FROM organizations").WithArgs("o1").
+	e.mock.ExpectQuery("FROM organizations").WithArgs("o1", pq.Array([]string{"o1"})).
 		WillReturnRows(sqlmock.NewRows(orgCols).AddRow("o1", "platform", "Platform", "oidc", "keycloak", now, now))
 	e.mock.ExpectExec("UPDATE organizations").WillReturnResult(sqlmock.NewResult(0, 1))
 	w = e.do(http.MethodPut, "/api/v1/admin/organizations/o1", `{"idp_type":"","idp_name":""}`)
@@ -259,16 +262,16 @@ func TestAdminOrganizationCRUD(t *testing.T) {
 		t.Error("empty idp fields must clear the binding")
 	}
 
-	e.mock.ExpectQuery("FROM organizations").WithArgs("ghost").WillReturnRows(sqlmock.NewRows(orgCols))
+	e.mock.ExpectQuery("FROM organizations").WithArgs("ghost", pq.Array([]string{"ghost"})).WillReturnRows(sqlmock.NewRows(orgCols))
 	if w := e.do(http.MethodPut, "/api/v1/admin/organizations/ghost", `{"name":"x"}`); w.Code != http.StatusNotFound {
 		t.Errorf("missing org: status = %d, want 404", w.Code)
 	}
 
 	// Members are snapshotted BEFORE the delete: organization_members cascades,
 	// so afterwards there is nobody left to sweep (none here).
-	e.mock.ExpectQuery("FROM organization_members").WithArgs("o1").
+	e.mock.ExpectQuery("FROM organization_members").WithArgs("o1", pq.Array([]string{"o1"})).
 		WillReturnRows(sqlmock.NewRows([]string{"organization_id", "user_id", "role_template_id", "created_at"}))
-	e.mock.ExpectExec("DELETE FROM organizations").WithArgs("o1").WillReturnResult(sqlmock.NewResult(0, 1))
+	e.mock.ExpectExec("DELETE FROM organizations").WithArgs("o1", pq.Array([]string{"o1"})).WillReturnResult(sqlmock.NewResult(0, 1))
 	if w := e.do(http.MethodDelete, "/api/v1/admin/organizations/o1", ""); w.Code != http.StatusNoContent {
 		t.Errorf("delete org: status = %d, want 204", w.Code)
 	}
@@ -279,7 +282,7 @@ func TestAdminOrganizationMembers(t *testing.T) {
 
 	memberWithUserCols := []string{"organization_id", "user_id", "role_template_id", "created_at",
 		"user_name", "user_email", "role_template_name", "role_template_display_name", "role_template_scopes"}
-	e.mock.ExpectQuery("FROM organization_members om").WithArgs("o1").
+	e.mock.ExpectQuery("FROM organization_members om").WithArgs("o1", pq.Array([]string{"o1"})).
 		WillReturnRows(sqlmock.NewRows(memberWithUserCols).
 			AddRow("o1", "u1", nil, time.Now(), "Alice", "a@b.c", nil, nil, []byte(`[]`)))
 	w := e.do(http.MethodGet, "/api/v1/admin/organizations/o1/members", "")
@@ -319,9 +322,87 @@ func TestAdminOrganizationMembers(t *testing.T) {
 		t.Fatalf("update member: status = %d (%s)", w.Code, w.Body.String())
 	}
 
-	e.mock.ExpectExec("DELETE FROM organization_members").WithArgs("o1", "u1").
+	e.mock.ExpectExec("DELETE FROM organization_members").WithArgs("o1", "u1", pq.Array([]string{"o1"})).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	if w := e.do(http.MethodDelete, "/api/v1/admin/organizations/o1/members/u1", ""); w.Code != http.StatusNoContent {
 		t.Errorf("remove member: status = %d, want 204", w.Code)
+	}
+}
+
+// TestAdminEraseUser_StripsMembershipsInEveryOrganization pins the one tenancy
+// decision on this route that is deliberately NOT narrowed.
+//
+// GDPR Article 17 is an obligation about the whole data subject, and the steps
+// either side of the strip — anonymizing the users row and revoking every
+// credential — are already whole-principal. Narrowing the strip to the caller's
+// administered organizations would leave the "erased" account a live member
+// elsewhere, with an authority the anonymized row can still exercise: a
+// compliance failure AND a live-access failure, produced by a change that looks
+// like tightening.
+//
+// It is asserted on the emitted predicate, not on the bound arguments, because
+// that is the only place the difference shows: the caller-scoped variant binds a
+// predicate over organization_id, while the platform-wide one is a literal TRUE.
+// A caller-less test rig would match both on WithArgs alone.
+func TestAdminEraseUser_StripsMembershipsInEveryOrganization(t *testing.T) {
+	rec := &auditSQLRecorder{}
+	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(
+		sqlmock.QueryMatcherFunc(func(expectedSQL, actualSQL string) error {
+			rec.record(actualSQL)
+			return sqlmock.QueryMatcherRegexp.Match(expectedSQL, actualSQL)
+		}),
+	))
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+
+	h := NewAdminHandlers(db, WithAdminCredentialSweeper(
+		credlifecycle.NewSweeper(
+			repositories.NewUserTokenRevocationRepository(db),
+			idstore.NewAPIKeyRepository(db),
+			idstore.NewOrganizationRepository(db))))
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	r.Use(func(c *gin.Context) { c.Set("user_id", "caller-1"); c.Next() })
+	r.POST("/users/:id/erase", h.EraseUser())
+
+	// The caller administers ONE organization; the subject belongs to two.
+	mock.ExpectQuery("FROM organization_members om").WithArgs("caller-1").
+		WillReturnRows(sqlmock.NewRows(userMembershipCols).
+			AddRow("org-a", "Org A", "rt-admin", time.Now(), "admin", "Admin", []byte(`["admin"]`)))
+	mock.ExpectQuery("SELECT id, email, name, oidc_sub").
+		WithArgs("u1", pq.Array([]string{"org-a"})).WillReturnRows(idUserRow("u1"))
+	mock.ExpectExec("UPDATE users").WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectQuery("DELETE FROM organization_members").WithArgs("u1").
+		WillReturnRows(sqlmock.NewRows([]string{"organization_id"}).AddRow("org-a").AddRow("org-b"))
+	mock.ExpectExec("INSERT INTO user_token_revocations").WithArgs("u1").
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("DELETE FROM api_keys").WithArgs("u1").WillReturnResult(sqlmock.NewResult(0, 1))
+
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/users/u1/erase", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("erase: status = %d (%s)", w.Code, w.Body.String())
+	}
+
+	var strip string
+	for _, q := range rec.seen {
+		if strings.Contains(q, "DELETE FROM organization_members") {
+			strip = q
+		}
+	}
+	if strip == "" {
+		t.Fatal("no membership strip reached the database")
+	}
+	if !strings.Contains(strip, "AND TRUE") {
+		t.Errorf("GDPR erasure must strip memberships in EVERY organization, not just the "+
+			"caller's. A tenant predicate here leaves the erased account a live member "+
+			"elsewhere.\ngot statement: %s", strip)
+	}
+	// ...and the response reports where authority was actually withdrawn, which
+	// the pre-v0.25.0 int64 count could not.
+	if !strings.Contains(w.Body.String(), "u1") {
+		t.Errorf("erase response should name the subject: %s", w.Body.String())
 	}
 }

@@ -88,14 +88,35 @@ func validateGrantedScopes(c *gin.Context, requested []string) (ok bool, bad str
 	return true, ""
 }
 
+// keyScope is the tenant constraint every api_keys accessor in this file
+// carries.
+//
+// It is OrgScopeAllOrganizations() by design, and that decision belongs here
+// rather than at each call site. In terraform-registry an api_keys row's
+// organization_id is a real authority binding, so scoping by it is the tenant
+// boundary. In TSM it is not: mintKey stamps EVERY key with the GLOBAL DEFAULT
+// organization, whoever the owner is and whatever they are a member of. A scope
+// over ak.organization_id here would therefore mean "is the default
+// organization in your scope" — which shows an admin of the default
+// organization every other tenant's keys, and an admin of any other
+// organization none of their own. The tenant boundary for a TSM key is its
+// OWNER's membership, which is what ownsOrAdmin and keysVisibleToScope apply.
+//
+// Narrowing this properly is a schema change (bind a key to the organization
+// whose authority it draws on) and is out of scope for the identity bump; it is
+// reported rather than half-applied here.
+func keyScope() idstore.OrgScope { return idstore.OrgScopeAllOrganizations() }
+
 // ownsOrAdmin loads the key and authorizes the caller (owner or admin),
 // answering 404/403/500 itself when access is denied.
 func (h *APIKeysHandlers) ownsOrAdmin(c *gin.Context) (*models.APIKey, bool) {
 	// Sentinel first: an unknown key id keeps answering 404. A bare `err != nil`
 	// would 500 here since v0.24.0 and leave the 404 below unreachable — which
 	// would also leak existence, since the "hide other users' keys" branch just
-	// below deliberately answers 404 too.
-	key, err := h.keys.GetByID(c.Request.Context(), c.Param("id"))
+	// below deliberately answers 404 too. Since v0.25.0 a key OUTSIDE the scope
+	// reports the same ErrNotFound, so refused access and absent row are
+	// indistinguishable to the caller either way.
+	key, err := h.keys.GetAPIKeyByID(c.Request.Context(), c.Param("id"), keyScope())
 	if errors.Is(err, idstore.ErrNotFound) || (err == nil && key == nil) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "API key not found"})
 		return nil, false
@@ -131,20 +152,21 @@ func (h *APIKeysHandlers) ListAPIKeys() gin.HandlerFunc {
 			// admin view to keys whose OWNER shares an organization the caller
 			// administers (#182). Every key is tagged with the default org at mint
 			// time (see mintKey), so the owner's org membership — not the key's own
-			// organization_id — is the tenant boundary.
-			adminOrgs, aErr := adminOrgSet(c.Request.Context(), h.orgs, userIDOf(c))
+			// organization_id — is the tenant boundary. See keyScope.
+			adminOrgs, aErr := h.orgs.OrgScopeForUser(c.Request.Context(), userIDOf(c),
+				string(auth.ScopeAdmin), auth.ReadWritePairs())
 			if aErr != nil {
 				serverError(c, aErr, "failed to resolve caller organizations")
 				return
 			}
-			all, lErr := h.keys.ListAll(c.Request.Context())
+			all, lErr := h.keys.ListAPIKeys(c.Request.Context(), keyScope())
 			if lErr != nil {
 				serverError(c, lErr, "failed to list API keys")
 				return
 			}
-			keys, err = h.keysOwnedInAdminOrgs(c.Request.Context(), all, adminOrgs)
+			keys, err = h.keysVisibleToScope(c.Request.Context(), all, adminOrgs.WithUnowned())
 		} else {
-			keys, err = h.keys.ListByUser(c.Request.Context(), userIDOf(c))
+			keys, err = h.keys.ListAPIKeysByUser(c.Request.Context(), userIDOf(c), keyScope())
 		}
 		if err != nil {
 			serverError(c, err, "failed to list API keys")
@@ -157,12 +179,18 @@ func (h *APIKeysHandlers) ListAPIKeys() gin.HandlerFunc {
 	}
 }
 
-// keysOwnedInAdminOrgs keeps only keys whose OWNER shares an organization with
-// the caller's admin orgs. Every API key is tagged with the global default org
-// at mint time, so a key's own organization_id is not a tenant boundary — the
-// owner's org membership is (#182). Owners with no membership are kept, mirroring
-// the user-list rule (usersInAdminOrgs); each distinct owner is looked up once.
-func (h *APIKeysHandlers) keysOwnedInAdminOrgs(ctx context.Context, keys []*models.APIKey, adminOrgs map[string]struct{}) ([]*models.APIKey, error) {
+// keysVisibleToScope keeps only keys whose OWNER falls inside scope.
+//
+// This is the ONE place in this repo that still narrows organization-owned rows
+// after the database rather than in the query, and it is deliberate: the row's
+// own organization_id is not the boundary here (see keyScope), the owner's
+// membership is, and identity exposes no api_keys accessor that joins through
+// organization_members. The membership test itself is not re-implemented — it
+// is store.OrgScope.PermitsOrganization, the in-memory half of the same
+// predicate the SQL builds, so this cannot drift from it. Owners with no
+// membership are kept when the scope admits unowned rows, mirroring the
+// user-list rule; each distinct owner is looked up once.
+func (h *APIKeysHandlers) keysVisibleToScope(ctx context.Context, keys []*models.APIKey, scope idstore.OrgScope) ([]*models.APIKey, error) {
 	allowed := map[string]bool{}
 	out := []*models.APIKey{}
 	for _, k := range keys {
@@ -176,9 +204,10 @@ func (h *APIKeysHandlers) keysOwnedInAdminOrgs(ctx context.Context, keys []*mode
 			if mErr != nil {
 				return nil, mErr
 			}
-			ok = len(memberships) == 0
+			// An owner who belongs to nothing is the users-table "unowned" case.
+			ok = len(memberships) == 0 && scope.IncludesUnowned()
 			for _, m := range memberships {
-				if _, in := adminOrgs[m.OrganizationID]; in {
+				if scope.PermitsOrganization(m.OrganizationID) {
 					ok = true
 					break
 				}
@@ -290,7 +319,7 @@ func (h *APIKeysHandlers) mintKey(c *gin.Context, req apiKeyInput, expires *time
 	if req.Description != "" {
 		row.Description = &req.Description
 	}
-	if err := h.keys.CreateAPIKey(c.Request.Context(), row); err != nil {
+	if err := h.keys.CreateAPIKey(c.Request.Context(), row, keyScope()); err != nil {
 		return "", nil, err
 	}
 	return fullKey, row, nil
@@ -341,7 +370,7 @@ func (h *APIKeysHandlers) UpdateAPIKey() gin.HandlerFunc {
 		key.ExpiresAt = expires
 		// ownsOrAdmin read the row a moment ago, so a zero-row UPDATE means it
 		// was deleted in between: same 404 the read would have given.
-		if err := h.keys.Update(c.Request.Context(), key); err != nil {
+		if err := h.keys.Update(c.Request.Context(), key, keyScope()); err != nil {
 			if errors.Is(err, idstore.ErrNotFound) {
 				c.JSON(http.StatusNotFound, gin.H{"error": "API key not found"})
 				return
@@ -365,7 +394,7 @@ func (h *APIKeysHandlers) DeleteAPIKey() gin.HandlerFunc {
 		// Idempotent: a key already destroyed by a concurrent rotation or sweep
 		// is the desired end state of a DELETE, so it keeps its 204 rather than
 		// becoming the 500 a bare `err != nil` would now yield.
-		if err := h.keys.Delete(c.Request.Context(), key.ID); err != nil &&
+		if err := h.keys.RevokeAPIKey(c.Request.Context(), key.ID, keyScope()); err != nil &&
 			!errors.Is(err, idstore.ErrNotFound) {
 			serverError(c, err, "failed to delete API key")
 			return
@@ -424,7 +453,7 @@ func (h *APIKeysHandlers) RotateAPIKey() gin.HandlerFunc {
 		// rotation failed while holding the only copy of the new secret. A real
 		// failure still 500s.
 		if req.GracePeriodHours == 0 {
-			if err := h.keys.Delete(c.Request.Context(), key.ID); err != nil &&
+			if err := h.keys.RevokeAPIKey(c.Request.Context(), key.ID, keyScope()); err != nil &&
 				!errors.Is(err, idstore.ErrNotFound) {
 				serverError(c, err, "rotated, but failed to revoke the old key")
 				return
@@ -432,7 +461,7 @@ func (h *APIKeysHandlers) RotateAPIKey() gin.HandlerFunc {
 		} else {
 			cutoff := time.Now().Add(time.Duration(req.GracePeriodHours) * time.Hour)
 			key.ExpiresAt = &cutoff
-			if err := h.keys.Update(c.Request.Context(), key); err != nil &&
+			if err := h.keys.Update(c.Request.Context(), key, keyScope()); err != nil &&
 				!errors.Is(err, idstore.ErrNotFound) {
 				serverError(c, err, "rotated, but failed to schedule the old key's expiry")
 				return

@@ -13,6 +13,7 @@ import (
 	"net/url"
 
 	"github.com/gin-gonic/gin"
+	identitymailer "github.com/sethbacon/terraform-suite-identity/identity/mailer"
 
 	identitycrypto "github.com/sethbacon/terraform-suite-identity/identity/crypto"
 	idstore "github.com/sethbacon/terraform-suite-identity/identity/store"
@@ -339,7 +340,10 @@ type notificationsSMTPInput struct {
 func (h *NotificationHandlers) smtpResponse(passwordConfigured bool) NotificationsSMTPResponse {
 	return NotificationsSMTPResponse{
 		Host: h.smtp.Host, Port: h.smtp.Port, Username: h.smtp.Username, From: h.smtp.From,
-		UseTLS: h.smtp.UseTLS, PasswordConfigured: passwordConfigured,
+		// The response reports the relay's effective posture, derived from the
+		// one TLSMode the mailer actually uses, so this cannot report "encrypted"
+		// while the transport sends plaintext.
+		UseTLS: h.smtp.TLSMode == identitymailer.TLSRequired, PasswordConfigured: passwordConfigured,
 	}
 }
 
@@ -450,7 +454,9 @@ func (h *NotificationHandlers) PutSMTPConfig() gin.HandlerFunc {
 		h.smtp.Port = input.Port
 		h.smtp.Username = input.Username
 		h.smtp.From = input.From
-		h.smtp.UseTLS = input.UseTLS
+		// One conversion, in the module's own tested helper, rather than a
+		// hand-written conditional per call site.
+		h.smtp.TLSMode = identitymailer.TLSModeForUseTLS(input.UseTLS)
 		if input.Password != "" {
 			h.smtp.Password = input.Password
 		}

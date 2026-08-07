@@ -9,14 +9,20 @@ import (
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
 )
 
+// auditRowCols mirrors ListAuditLogs' projection. actor_email is COLUMN 10,
+// between created_at and the joined user_email/user_name, as of identity
+// v0.25.0's migration 000007: it is the actor's address as it stood when the
+// entry was written, STORED on the row so attribution survives the users row
+// being deleted, while user_email/user_name stay transient join fields that go
+// nil once the user is gone.
 var auditRowCols = []string{
 	"id", "user_id", "organization_id", "action", "resource_type", "resource_id",
-	"metadata", "ip_address", "created_at", "user_email", "user_name",
+	"metadata", "ip_address", "created_at", "actor_email", "user_email", "user_name",
 }
 
 func auditRow(rows *sqlmock.Rows, id, action, email string) *sqlmock.Rows {
 	return rows.AddRow(id, "u1", nil, action, "user", nil, nil, "10.0.0.9",
-		time.Date(2026, 7, 10, 8, 0, 0, 0, time.UTC), email, "Alice")
+		time.Date(2026, 7, 10, 8, 0, 0, 0, time.UTC), email, email, "Alice")
 }
 
 // expectAuditPage queues one ListAuditLogs round-trip: the COUNT then the page.
@@ -26,9 +32,20 @@ func expectAuditPage(mock sqlmock.Sqlmock, total int, page *sqlmock.Rows) {
 	mock.ExpectQuery("SELECT al.id, .+ FROM audit_logs").WillReturnRows(page)
 }
 
+// auditInsertReturn is what CreateAuditLog's INSERT hands back.
+//
+// It is a QUERY, not an Exec, as of identity v0.25.0: the statement ends
+// `RETURNING actor_email` because it fills that column from the users table with
+// a COALESCE subquery when the caller leaves it nil, and returns what it stored.
+// An ExpectExec queued against it no longer matches, which is why every audit
+// expectation in this package moved to ExpectQuery.
+func auditInsertReturn() *sqlmock.Rows {
+	return sqlmock.NewRows([]string{"actor_email"}).AddRow(nil)
+}
+
 // expectExportSelfAudit queues the audit.export entry the handler writes about itself.
 func expectExportSelfAudit(mock sqlmock.Sqlmock) {
-	mock.ExpectExec("INSERT INTO audit_logs").WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectQuery("INSERT INTO audit_logs").WillReturnRows(auditInsertReturn())
 }
 
 func TestExportAuditLogs_CSVPagesThroughAll(t *testing.T) {

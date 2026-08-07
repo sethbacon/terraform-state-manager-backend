@@ -18,7 +18,6 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/jmoiron/sqlx"
 	idoidc "github.com/sethbacon/terraform-suite-identity/identity/auth/oidc"
 	idstore "github.com/sethbacon/terraform-suite-identity/identity/store"
 
@@ -80,7 +79,7 @@ func NewAuthHandlers(cfg *config.Config, identityDB *sql.DB, opts ...AuthOption)
 		cfg:         cfg,
 		userRepo:    idstore.NewUserRepository(identityDB),
 		orgRepo:     idstore.NewOrganizationRepository(identityDB),
-		roleRepo:    idstore.NewRoleTemplateRepository(sqlx.NewDb(identityDB, "postgres")),
+		roleRepo:    idstore.NewRoleTemplateRepository(identityDB),
 		tokenRepo:   idstore.NewTokenRepository(identityDB),
 		apiKeyRepo:  idstore.NewAPIKeyRepository(identityDB),
 		stateStore:  stateStore,
@@ -127,6 +126,28 @@ func NewAuthHandlers(cfg *config.Config, identityDB *sql.DB, opts ...AuthOption)
 	}
 	return h, nil
 }
+
+// loginScope is the tenancy every identity accessor on an AUTHENTICATION path
+// carries.
+//
+// It is OrgScopeAllOrganizations(), and it is the case UPGRADING.md names
+// explicitly: "an authority-derivation path (login, API-key authentication, a
+// middleware that is itself the tenant check)". Two shapes reach it, and
+// neither has a tenant to scope by:
+//
+//   - /auth/me and /auth/refresh read the CALLER'S OWN record to report or
+//     re-derive their scope union. The scope that would narrow the read is the
+//     one the read exists to compute, so any narrower value is circular — and a
+//     value derived from the presented token would let the token decide which
+//     rows authenticate it.
+//   - The OIDC/LDAP group-mapping reconciliation resolves an organization NAMED
+//     BY AN ADMIN-CONFIGURED MAPPING (never by the user, never by the ID token).
+//     Once resolved, every membership read and write below is scoped to that one
+//     organization's id, so the platform-wide reach stops at the name lookup.
+//
+// Recorded in admin_audit_scope_test.go's reviewed list of platform-wide sites.
+// Nothing here reads audit_logs.
+func loginScope() idstore.OrgScope { return idstore.OrgScopeAllOrganizations() }
 
 // UserRepo and TokenRepo expose the identity repositories for the auth middleware.
 func (h *AuthHandlers) UserRepo() *idstore.UserRepository        { return h.userRepo }
@@ -246,10 +267,12 @@ func (h *AuthHandlers) LoginHandler() gin.HandlerFunc {
 			serverError(c, err, "Failed to generate state")
 			return
 		}
-		// BeginAuth (rather than the legacy GetAuthURL) generates a per-login
-		// nonce and PKCE verifier. Both must be persisted alongside the state
+		// BeginAuth generates a per-login nonce and PKCE verifier and returns
+		// them as one CallbackSession. Both must be persisted alongside the state
 		// token so the callback can bind the ID token and code exchange to this
-		// specific login attempt.
+		// specific login attempt; ExchangeAndVerify refuses the exchange if
+		// either is missing, so a half-written state entry fails the login rather
+		// than completing an unbound one.
 		challenge, err := op.BeginAuth(state)
 		if err != nil {
 			serverError(c, err, "Failed to initiate OIDC login")
@@ -259,8 +282,8 @@ func (h *AuthHandlers) LoginHandler() gin.HandlerFunc {
 			State:        state,
 			CreatedAt:    time.Now(),
 			ProviderType: "oidc",
-			Nonce:        challenge.Nonce,
-			CodeVerifier: challenge.CodeVerifier,
+			Nonce:        challenge.Session.Nonce,
+			CodeVerifier: challenge.Session.CodeVerifier,
 		}
 		if err := h.stateStore.Save(c.Request.Context(), state, ss, 10*time.Minute); err != nil {
 			serverError(c, err, "Failed to save session state")
@@ -300,31 +323,30 @@ func (h *AuthHandlers) CallbackHandler() gin.HandlerFunc {
 			return
 		}
 
-		// The PKCE verifier persisted at BeginAuth time binds this exchange to the
-		// authorization request this specific login made, so a stolen
-		// authorization code cannot be redeemed by anyone who did not also
-		// observe the verifier.
-		token, err := op.ExchangeCode(ctx, c.Query("code"), idoidc.WithPKCEVerifier(ss.CodeVerifier))
+		// Both per-login bindings persisted at BeginAuth time go back as one
+		// value: the PKCE verifier binds this exchange to the authorization
+		// request this specific login made (so a stolen authorization code
+		// cannot be redeemed by anyone who did not also observe the verifier),
+		// and the nonce binds verification to the same login (so a replayed or
+		// injected ID token issued for a different attempt is rejected).
+		//
+		// ExchangeAndVerify applies both itself and fails closed on an empty
+		// one before any network call, which also covers the deploy-window case:
+		// a state entry written by the previous build carries both fields, but
+		// one written by anything that lost a field now fails the callback
+		// instead of completing an unbound exchange. It extracts id_token from
+		// the token response, so there is no separate "no ID token" branch.
+		_, idToken, err := op.ExchangeAndVerify(ctx, c.Query("code"), idoidc.CallbackSession{
+			Nonce:        ss.Nonce,
+			CodeVerifier: ss.CodeVerifier,
+		})
 		if err != nil {
 			fail("token_exchange_failed", "Failed to exchange the authorization code.")
 			return
 		}
-		rawIDToken, ok := token.Extra("id_token").(string)
-		if !ok {
-			fail("no_id_token", "The identity provider did not return an ID token.")
-			return
-		}
-		// The nonce persisted at BeginAuth time binds verification to this
-		// specific login, so a replayed or injected ID token issued for a
-		// different login attempt is rejected.
-		idToken, err := op.VerifyIDToken(ctx, rawIDToken, idoidc.WithExpectedNonce(ss.Nonce))
-		if err != nil {
-			fail("id_token_invalid", "The ID token could not be verified.")
-			return
-		}
 		// oidcEmailVerified is the IdP's email_verified signal for THIS login,
 		// as returned by ExtractUserInfo (terraform-suite-identity's fix for
-		// audit #52). It gates GetOrCreateUserByOIDC's new email->identity
+		// audit #52). It gates GetOrCreateUserFromOIDC's new email->identity
 		// binding paths below and is distinct from the enforceEmailVerified
 		// check just after: that one implements this app's own configurable
 		// RequireVerifiedEmail login-rejection policy, re-derived independently
@@ -345,7 +367,7 @@ func (h *AuthHandlers) CallbackHandler() gin.HandlerFunc {
 			return
 		}
 
-		user, err := h.userRepo.GetOrCreateUserByOIDC(ctx, sub, email, name, oidcEmailVerified)
+		user, err := h.userRepo.GetOrCreateUserFromOIDC(ctx, sub, email, name, oidcEmailVerified)
 		if err != nil {
 			fail("user_creation_failed", "Failed to look up or create your account.")
 			return
@@ -405,7 +427,7 @@ func (h *AuthHandlers) MeHandler() gin.HandlerFunc {
 		// not 500. GetUserWithOrgRoles propagates GetUserByID's ErrNotFound, and
 		// a user with no memberships is NOT a miss (it returns an empty slice),
 		// so this cannot swallow a legitimately membership-less account.
-		userWithRoles, err := h.userRepo.GetUserWithOrgRoles(c.Request.Context(), uid)
+		userWithRoles, err := h.userRepo.GetUserWithOrgRoles(c.Request.Context(), uid, loginScope())
 		if errors.Is(err, idstore.ErrNotFound) || (err == nil && userWithRoles == nil) {
 			c.JSON(http.StatusNotFound, gin.H{"error": "User not found"})
 			return
@@ -458,7 +480,7 @@ func (h *AuthHandlers) RefreshHandler() gin.HandlerFunc {
 		}
 		uid, _ := userID.(string)
 
-		user, err := h.userRepo.GetUserByID(c.Request.Context(), uid)
+		user, err := h.userRepo.GetUserByID(c.Request.Context(), uid, loginScope())
 		if err != nil || user == nil {
 			c.JSON(http.StatusUnauthorized, gin.H{"error": "User not found"})
 			return
@@ -634,12 +656,12 @@ func (h *AuthHandlers) applyGroupMappings(ctx context.Context, userID string, gr
 func (h *AuthHandlers) reconcileManagedMemberships(ctx context.Context, userID string, desired map[string]string, managed map[string]struct{}, defaultRole string) error {
 	// Reconcile each IdP-managed organization.
 	for orgName := range managed {
-		org, err := h.orgRepo.GetByName(ctx, orgName)
+		org, err := h.orgRepo.GetByName(ctx, orgName, loginScope())
 		if err != nil || org == nil {
 			slog.Warn("group mapping: organization not found", "org", orgName)
 			continue
 		}
-		isMember, _, err := h.orgRepo.CheckMembership(ctx, org.ID, userID)
+		isMember, _, err := h.orgRepo.CheckMembership(ctx, org.ID, userID, idstore.OrgScopeOrganizations(org.ID))
 		if err != nil {
 			return fmt.Errorf("check membership org=%s user=%s: %w", org.ID, userID, err)
 		}
@@ -663,7 +685,7 @@ func (h *AuthHandlers) reconcileManagedMemberships(ctx context.Context, userID s
 				// managed set: aborting it here would leave every LATER
 				// organization unreconciled and fail the login outright, for an
 				// element that is already in a settled state. Skip and continue.
-				updErr := h.orgRepo.UpdateMemberRole(ctx, org.ID, userID, role)
+				updErr := h.orgRepo.UpdateMemberRole(ctx, org.ID, userID, role, idstore.OrgScopeOrganizations(org.ID))
 				if errors.Is(updErr, idstore.ErrNotFound) {
 					slog.Info("group mapping: membership vanished before the role update; skipping",
 						"user_id", userID, "org", orgName)
@@ -678,7 +700,7 @@ func (h *AuthHandlers) reconcileManagedMemberships(ctx context.Context, userID s
 				// right; a sweep on the sibling (removal) arm alone would leave it
 				// uncovered (#330).
 				h.sweepIdPReduction(ctx, userID, "idp group mapping: role reassigned")
-			} else if err := h.orgRepo.AddMemberWithParams(ctx, org.ID, userID, role); err != nil {
+			} else if err := h.orgRepo.AddMemberWithParams(ctx, org.ID, userID, role, idstore.OrgScopeOrganizations(org.ID)); err != nil {
 				return fmt.Errorf("add member org=%s user=%s: %w", org.ID, userID, err)
 			}
 			slog.Info("group mapping applied", "user_id", userID, "org", orgName, "role", role)
@@ -690,7 +712,7 @@ func (h *AuthHandlers) reconcileManagedMemberships(ctx context.Context, userID s
 			// reconciling the remaining organizations rather than aborting the
 			// login; a deprovisioning loop that stops at the first
 			// already-deprovisioned element leaves the rest provisioned.
-			if err := h.orgRepo.RemoveMember(ctx, org.ID, userID); err != nil &&
+			if err := h.orgRepo.RemoveMember(ctx, org.ID, userID, idstore.OrgScopeOrganizations(org.ID)); err != nil &&
 				!errors.Is(err, idstore.ErrNotFound) {
 				return fmt.Errorf("revoke membership org=%s user=%s: %w", org.ID, userID, err)
 			}
@@ -708,12 +730,12 @@ func (h *AuthHandlers) reconcileManagedMemberships(ctx context.Context, userID s
 		if _, isManaged := managed[org.Name]; isManaged {
 			return nil // reconciliation above already governs the default org
 		}
-		isMember, _, err := h.orgRepo.CheckMembership(ctx, org.ID, userID)
+		isMember, _, err := h.orgRepo.CheckMembership(ctx, org.ID, userID, idstore.OrgScopeOrganizations(org.ID))
 		if err != nil {
 			return fmt.Errorf("check membership default org user=%s: %w", userID, err)
 		}
 		if !isMember {
-			if err := h.orgRepo.AddMemberWithParams(ctx, org.ID, userID, defaultRole); err != nil {
+			if err := h.orgRepo.AddMemberWithParams(ctx, org.ID, userID, defaultRole, idstore.OrgScopeOrganizations(org.ID)); err != nil {
 				return fmt.Errorf("add default member user=%s: %w", userID, err)
 			}
 		}
@@ -757,7 +779,7 @@ func (h *AuthHandlers) assignRole(ctx context.Context, userID, role string) {
 		slog.Warn("default organization not found; cannot assign role", "error", err)
 		return
 	}
-	isMember, _, err := h.orgRepo.CheckMembership(ctx, org.ID, userID)
+	isMember, _, err := h.orgRepo.CheckMembership(ctx, org.ID, userID, idstore.OrgScopeOrganizations(org.ID))
 	if err != nil {
 		return
 	}
@@ -765,7 +787,7 @@ func (h *AuthHandlers) assignRole(ctx context.Context, userID, role string) {
 		// First-login-only: never re-assign or escalate an existing member.
 		return
 	}
-	if err := h.orgRepo.AddMemberWithParams(ctx, org.ID, userID, role); err != nil {
+	if err := h.orgRepo.AddMemberWithParams(ctx, org.ID, userID, role, idstore.OrgScopeOrganizations(org.ID)); err != nil {
 		slog.Warn("failed to add membership", "user_id", userID, "role", role, "error", err)
 	}
 }

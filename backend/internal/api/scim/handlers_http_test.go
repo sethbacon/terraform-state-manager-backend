@@ -2,6 +2,7 @@ package scim
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -63,6 +64,18 @@ func doJSON(r *gin.Engine, method, path, body string) *httptest.ResponseRecorder
 	return w
 }
 
+// removedOrgRows is what RemoveAllMembershipsForUser returns since identity
+// v0.25.0: the organizations whose membership it actually removed, as
+// RETURNING rows rather than an affected-row count. n rows stand in for the
+// count the old expectations asserted.
+func removedOrgRows(n int) *sqlmock.Rows {
+	rows := sqlmock.NewRows([]string{"organization_id"})
+	for i := 0; i < n; i++ {
+		rows.AddRow(fmt.Sprintf("o%d", i+1))
+	}
+	return rows
+}
+
 func TestListUsers(t *testing.T) {
 	r, mock := newSCIM(t)
 
@@ -86,7 +99,9 @@ func TestListUsers(t *testing.T) {
 func TestListUsers_FilterUsesSearch(t *testing.T) {
 	r, mock := newSCIM(t)
 
-	mock.ExpectQuery("WHERE email ILIKE").WithArgs("%alice%", 100, 0).
+	// The scope predicate is spliced in before the LIMIT/OFFSET, so the WHERE
+	// clause no longer ends at the ILIKE pair.
+	mock.ExpectQuery(`WHERE \(email ILIKE`).WithArgs("%alice%", 100, 0).
 		WillReturnRows(userRow("u1", "alice@b.c", "Alice"))
 
 	w := doJSON(r, http.MethodGet, `/scim/v2/Users?filter=userName+eq+"alice"`, "")
@@ -167,8 +182,8 @@ func TestPatchUser_DeactivateRemovesMemberships(t *testing.T) {
 
 	mock.ExpectQuery("SELECT id, email, name, oidc_sub").WithArgs("u1").
 		WillReturnRows(userRow("u1", "a@b.c", "Alice"))
-	mock.ExpectExec("DELETE FROM organization_members").WithArgs("u1").
-		WillReturnResult(sqlmock.NewResult(0, 2))
+	mock.ExpectQuery("DELETE FROM organization_members").WithArgs("u1").
+		WillReturnRows(removedOrgRows(2))
 	mock.ExpectExec("UPDATE users").
 		WillReturnResult(sqlmock.NewResult(0, 1))
 
@@ -224,8 +239,8 @@ func TestPutUser_DeactivateAndRename(t *testing.T) {
 
 	mock.ExpectQuery("SELECT id, email, name, oidc_sub").WithArgs("u1").
 		WillReturnRows(userRow("u1", "a@b.c", "Alice"))
-	mock.ExpectExec("DELETE FROM organization_members").WithArgs("u1").
-		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectQuery("DELETE FROM organization_members").WithArgs("u1").
+		WillReturnRows(removedOrgRows(1))
 	mock.ExpectExec("UPDATE users").
 		WithArgs("u1", "renamed@b.c", "Renamed", sqlmock.AnyArg(), sqlmock.AnyArg()).
 		WillReturnResult(sqlmock.NewResult(0, 1))
@@ -245,8 +260,8 @@ func TestDeleteUser_SoftDeletes(t *testing.T) {
 
 	mock.ExpectQuery("SELECT id, email, name, oidc_sub").WithArgs("u1").
 		WillReturnRows(userRow("u1", "a@b.c", "Alice"))
-	mock.ExpectExec("DELETE FROM organization_members").WithArgs("u1").
-		WillReturnResult(sqlmock.NewResult(0, 3))
+	mock.ExpectQuery("DELETE FROM organization_members").WithArgs("u1").
+		WillReturnRows(removedOrgRows(3))
 
 	w := doJSON(r, http.MethodDelete, "/scim/v2/Users/u1", "")
 	if w.Code != http.StatusNoContent {

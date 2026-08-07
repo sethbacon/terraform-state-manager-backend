@@ -63,10 +63,10 @@ func (h *AuthHandlers) LDAPLoginHandler() gin.HandlerFunc {
 		// directory entry the user bind-authenticated against above, not a
 		// self-asserted OIDC claim — the directory itself is the trust source
 		// for this attribute, administratively controlled independent of the
-		// end user. That is the same trust level GetOrCreateUserByOIDC's
+		// end user. That is the same trust level GetOrCreateUserFromOIDC's
 		// emailVerified gate is designed to require before establishing a new
 		// email->identity binding.
-		user, err := h.userRepo.GetOrCreateUserByOIDC(ctx, sub, info.Email, info.Name, true)
+		user, err := h.userRepo.GetOrCreateUserFromOIDC(ctx, sub, info.Email, info.Name, true)
 		if err != nil {
 			serverError(c, err, "failed to provision account")
 			return

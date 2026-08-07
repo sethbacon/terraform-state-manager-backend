@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	identityhttpsafe "github.com/sethbacon/terraform-suite-identity/identity/httpsafe"
 	"github.com/sethbacon/terraform-suite-identity/identity/suite"
 
 	"github.com/terraform-state-manager/terraform-state-manager/internal/config"
@@ -96,7 +97,7 @@ func TestUIConfigHandler_ActiveSibling(t *testing.T) {
 	sibling := suite.Manifest{
 		SchemaVersion: suite.SchemaVersionV1,
 		App:           "terraform-registry",
-		PublicURL:     "https://registry.example.com",
+		PublicURL:     suite.UntrustedURL("https://registry.example.com"),
 		Links:         map[string]string{"moduleDetail": "/modules/{namespace}/{name}/{system}"},
 	}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -105,9 +106,13 @@ func TestUIConfigHandler_ActiveSibling(t *testing.T) {
 	defer srv.Close()
 
 	self := suite.Manifest{SchemaVersion: suite.SchemaVersionV1, App: "terraform-state-manager"}
-	// srv.URL is an httptest server (plaintext HTTP); NewDiscoveryClient fails
-	// closed on that, so tests use the explicit insecure opt-out instead.
-	dc := suite.NewInsecureDiscoveryClient(srv.URL, self, time.Minute)
+	// srv.URL is an httptest server (plaintext HTTP) on loopback, so the test
+	// needs BOTH opt-outs: NewInsecureDiscoveryClient for the scheme, and a
+	// guard that admits loopback for the destination. Since identity v0.25.0
+	// those are deliberately separate controls — opting out of HTTPS does not
+	// also opt out of knowing where the traffic goes — which is exactly the
+	// deployment-configuration change a dev stack needs.
+	dc := suite.NewInsecureDiscoveryClient(srv.URL, self, time.Minute, identityhttpsafe.MustGuard("127.0.0.1", "::1"))
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	go dc.Start(ctx)
@@ -157,7 +162,7 @@ func TestUIConfigHandler_UnreachableSibling(t *testing.T) {
 	self := suite.Manifest{SchemaVersion: suite.SchemaVersionV1, App: "terraform-state-manager"}
 	// Plaintext by design (unreachable-sibling test); use the explicit insecure
 	// opt-out rather than a real HTTPS endpoint.
-	dc := suite.NewInsecureDiscoveryClient("http://127.0.0.1:1", self, 0)
+	dc := suite.NewInsecureDiscoveryClient("http://127.0.0.1:1", self, 0, identityhttpsafe.MustGuard("127.0.0.1", "::1"))
 	dc.Start(ctxThatCancelsImmediately())
 
 	r := gin.New()
@@ -214,7 +219,7 @@ func TestUIConfigHandler_ForwardsIdentityBlock(t *testing.T) {
 	sibling := suite.Manifest{
 		SchemaVersion: suite.SchemaVersionV1,
 		App:           "terraform-registry",
-		PublicURL:     "https://registry.example.com",
+		PublicURL:     suite.UntrustedURL("https://registry.example.com"),
 		Identity:      suite.IdentityInfo{Issuer: "terraform-registry", SharedStore: true, Schema: "identity"},
 	}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -223,9 +228,13 @@ func TestUIConfigHandler_ForwardsIdentityBlock(t *testing.T) {
 	defer srv.Close()
 
 	self := suite.Manifest{SchemaVersion: suite.SchemaVersionV1, App: "terraform-state-manager"}
-	// srv.URL is an httptest server (plaintext HTTP); NewDiscoveryClient fails
-	// closed on that, so tests use the explicit insecure opt-out instead.
-	dc := suite.NewInsecureDiscoveryClient(srv.URL, self, time.Minute)
+	// srv.URL is an httptest server (plaintext HTTP) on loopback, so the test
+	// needs BOTH opt-outs: NewInsecureDiscoveryClient for the scheme, and a
+	// guard that admits loopback for the destination. Since identity v0.25.0
+	// those are deliberately separate controls — opting out of HTTPS does not
+	// also opt out of knowing where the traffic goes — which is exactly the
+	// deployment-configuration change a dev stack needs.
+	dc := suite.NewInsecureDiscoveryClient(srv.URL, self, time.Minute, identityhttpsafe.MustGuard("127.0.0.1", "::1"))
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	go dc.Start(ctx)

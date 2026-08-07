@@ -78,8 +78,8 @@ func TestDeleteUser_NoMembershipsToStrip_Returns204(t *testing.T) {
 	r, mock := newSCIM(t)
 	mock.ExpectQuery("SELECT id, email, name, oidc_sub").WithArgs("u1").
 		WillReturnRows(userRow("u1", "a@b.c", "Alice"))
-	mock.ExpectExec("DELETE FROM organization_members").WithArgs("u1").
-		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectQuery("DELETE FROM organization_members").WithArgs("u1").
+		WillReturnRows(removedOrgRows(0))
 
 	w := doJSON(r, http.MethodDelete, "/scim/v2/Users/u1", "")
 	if w.Code != http.StatusNoContent {

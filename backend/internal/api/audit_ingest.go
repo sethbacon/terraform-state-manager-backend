@@ -2,12 +2,16 @@
 // suite app (the registry) ships its audit entries here via its existing webhook
 // shipper so they land in this app's shared identity audit trail — the same
 // trail the admin Audit Log page reads. Federation is only coherent when both
-// apps share one identity store (so the sibling's user/org IDs resolve here and
-// satisfy the audit_logs FK); the handler refuses otherwise, matching the
-// audit.ingest.v1 manifest capability which is advertised only under sharedStore.
+// apps share one identity store (so the sibling's user/org IDs resolve here);
+// the handler refuses otherwise, matching the audit.ingest.v1 manifest
+// capability which is advertised only under sharedStore. An id that does not
+// resolve even then is nulled before the insert rather than stamped — see
+// resolveSiblingIDs, and note that identity v0.25.0 removed the foreign keys
+// that used to make that failure detectable after the fact.
 package api
 
 import (
+	"context"
 	"database/sql"
 	"log/slog"
 	"net/http"
@@ -49,16 +53,22 @@ type federatedAuditEntry struct {
 
 // AuditIngestHandlers records federated audit entries from a sibling suite app.
 type AuditIngestHandlers struct {
-	auditRepo   *idstore.AuditRepository
+	auditRepo *idstore.AuditRepository
+	// userRepo and orgRepo resolve the sibling's actor and organization ids
+	// against this database before the entry is written. See resolveSiblingIDs.
+	userRepo    *idstore.UserRepository
+	orgRepo     *idstore.OrganizationRepository
 	sharedStore bool
 }
 
 // NewAuditIngestHandlers wires the receiver. A nil identityDB (unit-test rigs)
-// leaves the repo unset; the handler then reports the store unavailable.
+// leaves the repos unset; the handler then reports the store unavailable.
 func NewAuditIngestHandlers(identityDB *sql.DB, cfg *config.Config) *AuditIngestHandlers {
 	h := &AuditIngestHandlers{sharedStore: cfg.Suite.IdentitySharedStore}
 	if identityDB != nil {
 		h.auditRepo = idstore.NewAuditRepository(identityDB)
+		h.userRepo = idstore.NewUserRepository(identityDB)
+		h.orgRepo = idstore.NewOrganizationRepository(identityDB)
 	}
 	return h
 }
@@ -79,9 +89,9 @@ func NewAuditIngestHandlers(identityDB *sql.DB, cfg *config.Config) *AuditIngest
 func (h *AuditIngestHandlers) Ingest() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		// Federation is only coherent under a shared identity store: only then do
-		// the sibling's user/org IDs resolve in this app's identity tables (else a
-		// merged timeline mis-attributes actors, and the user_id FK rejects the
-		// row). This mirrors the audit.ingest.v1 capability gate in the manifest.
+		// the sibling's user/org IDs resolve in this app's identity tables, and a
+		// merged timeline that cannot resolve its actors mis-attributes them.
+		// This mirrors the audit.ingest.v1 capability gate in the manifest.
 		if !h.sharedStore {
 			c.JSON(http.StatusForbidden, gin.H{"error": "audit federation requires a shared identity store"})
 			return
@@ -104,24 +114,69 @@ func (h *AuditIngestHandlers) Ingest() gin.HandlerFunc {
 			return
 		}
 
-		entry := federatedAuditModel(&req, c.GetHeader(suiteSourceAppHeader))
 		ctx := c.Request.Context()
+		entry := federatedAuditModel(&req, c.GetHeader(suiteSourceAppHeader))
+		h.resolveSiblingIDs(ctx, entry, &req)
 		if err := h.auditRepo.CreateAuditLog(ctx, entry); err != nil {
-			// Most likely the sibling's user/org id doesn't exist here (sharedStore
-			// mis-declared, or the actor was provisioned only in the sibling).
-			// Degrade to an attributed-in-metadata record rather than 500-storm the
-			// shipper: null the actor FKs, preserve the originals in metadata, retry.
-			entry.Metadata["federated_user_id"] = req.UserID
-			entry.Metadata["federated_organization_id"] = req.OrganizationID
-			entry.UserID = nil
-			entry.OrganizationID = nil
-			if err2 := h.auditRepo.CreateAuditLog(ctx, entry); err2 != nil {
-				slog.Warn("failed to ingest federated audit entry", "action", req.Action, "error", err2)
-				c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to record audit entry"})
-				return
-			}
+			slog.Warn("failed to ingest federated audit entry", "action", req.Action, "error", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to record audit entry"})
+			return
 		}
 		c.JSON(http.StatusAccepted, gin.H{"status": "recorded"})
+	}
+}
+
+// resolveSiblingIDs decides, BEFORE the insert, whether the sibling's actor and
+// organization ids name rows this database actually holds — nulling the ones
+// that do not and preserving the originals in metadata.
+//
+// This replaces a catch-the-foreign-key-error-and-retry fallback, and it is not
+// a like-for-like port: identity v0.25.0's migration 000007 DROPPED the foreign
+// keys on audit_logs.user_id and audit_logs.organization_id (its #142), so the
+// insert that used to fail now succeeds and the unresolvable id is stored as
+// written. Deleting the fallback and doing nothing else was the wrong answer,
+// because the fallback was itself an instance of the class 000007 closes: a row
+// whose owning organization does not resolve is a row re-homed into a tenancy
+// state that means something else.
+//
+// The two available decisions are not symmetric HERE, which is what settles it:
+//
+//   - Keep the stamped id. audit_logs.organization_id then names an
+//     organization this deployment has no row for, so it matches no admin's
+//     OrgScope and the entry is readable only through OrgScopeAllOrganizations()
+//     — which, deliberately, no TSM handler holds. The entry would be written
+//     and then visible to nobody: federated audit that silently disappears.
+//   - Resolve first and null what does not exist. The entry lands in the
+//     platform/unowned bucket, which callerOrgScope ADMITS on purpose and which
+//     this app already documents as the home for exactly these rows (see
+//     admin_org_scope.go). Every admin is their intended reviewer, which is the
+//     same outcome the old fallback produced — now by decision rather than by
+//     depending on a constraint that no longer exists.
+//
+// A resolvable id is kept, so a genuinely shared user or organization keeps
+// being attributed to the tenant it belongs to.
+//
+// ActorEmail is deliberately left nil for an unresolved actor: the federated
+// wire shape (the registry's audit.LogEntry) carries no email, so there is
+// nothing truthful to denormalise, and the sibling's own id stays in metadata
+// under federated_user_id for triage.
+func (h *AuditIngestHandlers) resolveSiblingIDs(ctx context.Context, entry *idmodels.AuditLog, req *federatedAuditEntry) {
+	// Existence probes on a server-to-server route authenticated by the suite
+	// service token: there is no tenant principal to derive a scope from, and
+	// the question being asked is "does this id resolve in this database at
+	// all". Recorded in admin_audit_scope_test.go's reviewed list.
+	probe := idstore.OrgScopeAllOrganizations()
+	if entry.UserID != nil && h.userRepo != nil {
+		if _, err := h.userRepo.GetUserByID(ctx, *entry.UserID, probe); err != nil {
+			entry.Metadata["federated_user_id"] = req.UserID
+			entry.UserID = nil
+		}
+	}
+	if entry.OrganizationID != nil && h.orgRepo != nil {
+		if _, err := h.orgRepo.GetByID(ctx, *entry.OrganizationID, probe); err != nil {
+			entry.Metadata["federated_organization_id"] = req.OrganizationID
+			entry.OrganizationID = nil
+		}
 	}
 }
 

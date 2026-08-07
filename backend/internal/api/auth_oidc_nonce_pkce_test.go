@@ -199,8 +199,19 @@ func TestOIDCCallback_NonceMismatch_Rejected(t *testing.T) {
 	if !strings.HasPrefix(loc, cfg.Server.PublicURL+"/auth/callback?error=") {
 		t.Fatalf("callback redirect = %q, want an error redirect", loc)
 	}
-	if !strings.Contains(loc, "id_token_invalid") {
-		t.Errorf("callback redirect = %q, want error=id_token_invalid", loc)
+	// The error CODE changed with identity v0.25.0 and the change is the point:
+	// ExchangeAndVerify applies both bindings itself and reports one failure, so
+	// the callback can no longer tell the client whether the authorization code
+	// or the nonce binding was at fault. That is a narrowing, not a regression —
+	// the two used to be distinguishable from outside, which told an attacker
+	// probing with a replayed token exactly which half they had defeated. The
+	// login still fails, which is what this test exists to prove.
+	if !strings.Contains(loc, "token_exchange_failed") {
+		t.Errorf("callback redirect = %q, want error=token_exchange_failed "+
+			"(one code for a failed exchange-and-verify)", loc)
+	}
+	if strings.Contains(loc, "state=") {
+		t.Errorf("callback redirect = %q must not complete the login", loc)
 	}
 	if idp.gotVerifier == "" {
 		t.Error("token endpoint never received a code_verifier (PKCE not sent)")
@@ -210,8 +221,8 @@ func TestOIDCCallback_NonceMismatch_Rejected(t *testing.T) {
 // TestOIDCCallback_HappyPath_Succeeds is the happy path: an ID token carrying
 // exactly the nonce BeginAuth generated for this login, exchanged with the
 // matching PKCE verifier, completes the login and redirects to the frontend
-// with a session cookie — proving BeginAuth/WithExpectedNonce/WithPKCEVerifier
-// did not break the working flow.
+// with a session cookie — proving BeginAuth/ExchangeAndVerify did not break the
+// working flow.
 func TestOIDCCallback_HappyPath_Succeeds(t *testing.T) {
 	idp := newOIDCTestIdP(t)
 	e, cfg := newOIDCCallbackEnv(t, idp)
@@ -236,7 +247,7 @@ func TestOIDCCallback_HappyPath_Succeeds(t *testing.T) {
 	// GetUserCombinedScopes -> GetUserMemberships: brand-new user, no memberships yet.
 	e.mock.ExpectQuery("FROM organization_members om").WillReturnRows(sqlmock.NewRows(membershipCols))
 	// audit.write
-	e.mock.ExpectExec("INSERT INTO audit_logs").WillReturnResult(sqlmock.NewResult(0, 1))
+	e.mock.ExpectQuery("INSERT INTO audit_logs").WillReturnRows(auditInsertReturn())
 
 	w := e.do(http.MethodGet, "/api/v1/auth/callback?state="+state+"&code=test-code", "")
 	if w.Code != http.StatusFound {

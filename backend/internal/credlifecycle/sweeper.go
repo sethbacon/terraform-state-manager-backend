@@ -25,11 +25,25 @@
 // scopes its API-key sweep to one organization (ListByUserAndOrganization),
 // because a registry key's organization_id is a real authority binding. Here it
 // is not: apikeys.mintKey tags EVERY key with the global default organization
-// (see APIKeysHandlers.keysOwnedInAdminOrgs, #182), and scopes are checked
+// (see APIKeysHandlers.keysVisibleToScope, #182), and scopes are checked
 // against the owner's cross-organization union (GetUserCombinedScopes). So an
 // org-scoped filter would silently skip the very keys a membership removal
 // invalidates. The sweep is therefore keyed on the owner and filtered by the
 // authority they RETAIN across all organizations after the change.
+//
+// THIS IS WHY THE SWEEP PASSES OrgScopeAllOrganizations(). identity v0.25.0
+// pairs the membership strip with the credential sweep by feeding the strip's
+// returned OrgScope — the organizations whose membership it actually removed —
+// straight into RevokeAPIKeysForUser, so a key is revoked exactly where
+// authority was just withdrawn (its #160 vs #732/#736). That pairing assumes
+// api_keys.organization_id names the organization whose authority the key draws
+// on. In TSM it names the default organization for every key ever minted, so
+// binding the sweep to the strip's result would revoke NOTHING for a user whose
+// stripped organizations do not happen to include the default one — reinstating
+// the stranded-credential defect the sweep exists to prevent. The invariant the
+// pairing encodes ("sweep exactly where authority was withdrawn") is satisfied
+// here on the PRINCIPAL axis instead, which is the axis a TSM key is actually
+// bound to: authority was withdrawn from this user, so this user's keys go.
 package credlifecycle
 
 import (
@@ -172,6 +186,13 @@ func (s *Sweeper) KeysOnly(ctx context.Context, userID, reason string) Outcome {
 // Use for whole-principal offboarding — SCIM DELETE /Users/{id}, SCIM
 // active=false via PUT or PATCH, admin user deletion, GDPR erasure — where the
 // user retains no authority at all and no scope comparison is needed.
+//
+// Since identity v0.25.0 this is ONE bulk statement rather than a list plus a
+// RevokeAPIKey per row. That removes the window in which a key minted between
+// the list and the last delete survived the sweep, and it removes the
+// per-key already-gone race entirely: a DELETE that matches nothing is a
+// count of zero, not an error to classify. See the package doc for why the
+// scope is platform-wide here.
 func (s *Sweeper) UserDeprovisioned(ctx context.Context, userID, reason string) Outcome {
 	if s == nil {
 		return Outcome{}
@@ -180,34 +201,23 @@ func (s *Sweeper) UserDeprovisioned(ctx context.Context, userID, reason string) 
 	if s.apiKeys == nil {
 		return out
 	}
-	keys, err := s.apiKeys.ListAPIKeysByUser(ctx, userID)
+	n, err := s.apiKeys.RevokeAPIKeysForUser(ctx, userID, idstore.OrgScopeAllOrganizations())
 	if err != nil {
-		slog.Error("credlifecycle: failed to list user API keys for revocation",
+		slog.Error("credlifecycle: failed to revoke user API keys",
 			"user_id", userID, "reason", reason, "error", err)
 		out.Incomplete = true
 		return out
 	}
-	for _, k := range keys {
-		if err := s.apiKeys.RevokeAPIKey(ctx, k.ID); err != nil {
-			if alreadyGone(err) {
-				slog.Info("credlifecycle: API key already gone", "api_key_id", k.ID,
-					"user_id", userID, "reason", reason)
-				continue
-			}
-			slog.Error("credlifecycle: failed to revoke API key",
-				"api_key_id", k.ID, "user_id", userID, "reason", reason, "error", err)
-			out.Incomplete = true
-			continue
-		}
-		out.KeysRevoked++
-		slog.Info("credlifecycle: API key revoked", "api_key_id", k.ID, "user_id", userID, "reason", reason)
+	out.KeysRevoked = int(n)
+	if n > 0 {
+		slog.Info("credlifecycle: API keys revoked", "count", n, "user_id", userID, "reason", reason)
 	}
 	return out
 }
 
 // alreadyGone reports whether a revocation failed because the key had already
 // been deleted — by a concurrent rotation, a parallel sweep, or an admin acting
-// between the ListAPIKeysByUser above and the delete below.
+// between revokeOverAskingKeys' listing and its delete.
 //
 // It must NOT count as Incomplete. Outcome.Incomplete is a hard failure signal:
 // AdminHandlers.DeleteUser and EraseUser turn it into a 500 and refuse to
@@ -259,7 +269,9 @@ func (s *Sweeper) revokeOverAskingKeys(ctx context.Context, userID, reason strin
 			"user_id", userID, "reason", reason, "error", err)
 		return Outcome{Incomplete: true}
 	}
-	keys, err := s.apiKeys.ListAPIKeysByUser(ctx, userID)
+	// Platform-wide: a TSM key's organization_id is the default organization,
+	// not an authority binding, so the owner is the axis (see the package doc).
+	keys, err := s.apiKeys.ListAPIKeysByUser(ctx, userID, idstore.OrgScopeAllOrganizations())
 	if err != nil {
 		slog.Error("credlifecycle: failed to list API keys for revocation",
 			"user_id", userID, "reason", reason, "error", err)
@@ -271,7 +283,7 @@ func (s *Sweeper) revokeOverAskingKeys(ctx context.Context, userID, reason strin
 			out.KeysRetained++
 			continue
 		}
-		if err := s.apiKeys.RevokeAPIKey(ctx, k.ID); err != nil {
+		if err := s.apiKeys.RevokeAPIKey(ctx, k.ID, idstore.OrgScopeAllOrganizations()); err != nil {
 			if alreadyGone(err) {
 				slog.Info("credlifecycle: over-asking API key already gone",
 					"api_key_id", k.ID, "user_id", userID, "reason", reason)

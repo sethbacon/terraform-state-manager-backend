@@ -49,7 +49,7 @@ func (h *AdminHandlers) ExportAuditLogs() gin.HandlerFunc {
 		// v0.21.0 made the scope a required parameter it carried no tenant
 		// predicate at all — so a caller refused rows by the list path could
 		// collect them in bulk here. It must narrow identically to the list.
-		scope, err := h.callerAuditScope(c)
+		scope, err := h.callerOrgScope(c)
 		if err != nil {
 			serverError(c, err, "failed to resolve caller organizations")
 			return

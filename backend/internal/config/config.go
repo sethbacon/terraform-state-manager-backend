@@ -59,25 +59,46 @@ type DriftConfig struct {
 }
 
 // SecurityConfig groups defense-in-depth controls. Egress governs the SSRF guard
-// applied to the state-source connectors that dial operator-supplied hosts.
+// applied to every outbound request whose destination is operator- or
+// sibling-supplied.
 type SecurityConfig struct {
 	Egress EgressConfig `mapstructure:"egress"`
 }
 
-// EgressConfig controls the SSRF egress allow-list for the state-source
-// connectors (http, consul, k8s, git) that dial an operator-supplied backend host
-// with an attached credential. By default the connectors block loopback,
-// link-local (including the 169.254.169.254 cloud metadata endpoint), and other
-// non-private reserved ranges while ALLOWING the RFC1918 / IPv6-ULA private
-// ranges so legitimate internal backends keep working. Setting Allowlist REPLACES
-// that private-range default with exactly the entries given, letting an operator
-// tighten egress to only their own internal ranges (blocking the rest of the
-// private space) without breaking those backends.
+// EgressConfig controls the SSRF egress allow-list. It governs TWO sets of
+// outbound requests, and the entries mean the same thing for both — what differs
+// is only what an EMPTY list falls back to.
+//
+//  1. The state-source connectors (http, consul, k8s, git) that dial an
+//     operator-supplied backend host with an attached credential. These block
+//     loopback, link-local (including the 169.254.169.254 cloud metadata
+//     endpoint) and other non-private reserved ranges, while ALLOWING the
+//     RFC1918 / IPv6-ULA private ranges by default so legitimate internal
+//     backends keep working.
+//  2. The requests the shared identity module makes on this app's behalf, as of
+//     terraform-suite-identity v0.25.0: OIDC discovery, the JWKS key-set fetches
+//     and the authorization-code token exchange, the sibling-manifest discovery
+//     poll, and the module-freshness join that follows a sibling-asserted
+//     publicUrl. These default to STRICT DENY — an IdP or sibling app is pinned
+//     by URL, so a deployment whose one lives on an internal address states it.
+//
 // Env: TSM_SECURITY_EGRESS_ALLOWLIST (comma-separated).
 type EgressConfig struct {
-	// Allowlist is the set of hostnames, IPs, or CIDR ranges the connectors may
-	// dial in addition to public addresses. Empty = the built-in private-range
-	// default (RFC1918 + IPv6-ULA allowed; metadata/loopback/link-local blocked).
+	// Allowlist is the set of hostnames, IPs, or CIDR ranges that may be dialed
+	// in addition to public addresses.
+	//
+	// Setting it REPLACES the connectors' private-range default with exactly the
+	// entries given — it does not add to it. That is what lets an operator
+	// tighten egress to only their own internal ranges, and it is also the
+	// trap: a value added to admit an internal IdP silently withdraws RFC1918
+	// from the state-source connectors unless it re-states those ranges. A
+	// deployment that needs both looks like
+	//
+	//	allowlist: [10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, "fc00::/7", keycloak]
+	//
+	// Empty = the built-in private-range default for the connectors (RFC1918 +
+	// IPv6-ULA allowed; metadata/loopback/link-local blocked) and strict deny
+	// for the identity-module requests.
 	Allowlist []string `mapstructure:"allowlist"`
 }
 
@@ -677,8 +698,10 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("suite.identity_shared_store", false)
 	v.SetDefault("suite.service_token", "")
 
-	// SSRF egress allow-list for the state-source connectors; empty = the
-	// built-in private-range default (see statesource/egress.go).
+	// SSRF egress allow-list. Empty = the built-in private-range default for the
+	// state-source connectors (see statesource/egress.go) and strict deny for
+	// the identity module's own outbound requests (see internal/egress). Setting
+	// it REPLACES the connector default rather than adding to it.
 	v.SetDefault("security.egress.allowlist", []string{})
 
 	// Roots the state sources that name a server-local path are confined to.

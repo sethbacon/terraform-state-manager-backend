@@ -10,6 +10,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	identitycrypto "github.com/sethbacon/terraform-suite-identity/identity/crypto"
+	identitymailer "github.com/sethbacon/terraform-suite-identity/identity/mailer"
 
 	"github.com/terraform-state-manager/terraform-state-manager/internal/db/repositories"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/services/notify"
@@ -70,7 +71,7 @@ func TestSMTPConfig_Unwired503(t *testing.T) {
 }
 
 func TestGetSMTPConfig(t *testing.T) {
-	smtp := &notify.SMTPConfig{Host: "smtp.example.com", Port: 587, From: "tsm@example.com", UseTLS: true}
+	smtp := &notify.SMTPConfig{Host: "smtp.example.com", Port: 587, From: "tsm@example.com", TLSMode: identitymailer.TLSRequired}
 	e := newSMTPSettingsEnv(t, smtp)
 	e.mock.ExpectQuery("SELECT notifications_config FROM system_settings").
 		WillReturnRows(sqlmock.NewRows([]string{"notifications_config"}).
@@ -115,7 +116,8 @@ func TestPutSMTPConfig_SuccessWithPassword(t *testing.T) {
 		t.Fatalf("status = %d (%s)", w.Code, w.Body.String())
 	}
 	// The live config pointer must be updated in place so the Notifier observes it.
-	if smtp.Host != "smtp.example.com" || smtp.Port != 465 || smtp.Password != "secret" || !smtp.UseTLS {
+	if smtp.Host != "smtp.example.com" || smtp.Port != 465 || smtp.Password != "secret" ||
+		smtp.TLSMode != identitymailer.TLSRequired {
 		t.Errorf("live smtp config not updated in place: %+v", *smtp)
 	}
 	if !strings.Contains(w.Body.String(), `"password_configured":true`) {

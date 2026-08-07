@@ -17,9 +17,11 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	identityhttpsafe "github.com/sethbacon/terraform-suite-identity/identity/httpsafe"
 	"github.com/sethbacon/terraform-suite-identity/identity/suite"
 
 	"github.com/terraform-state-manager/terraform-state-manager/internal/db/repositories"
+	"github.com/terraform-state-manager/terraform-state-manager/internal/egress"
 	semver "github.com/terraform-state-manager/terraform-state-manager/internal/version"
 )
 
@@ -81,16 +83,24 @@ func (h *SourcesHandlers) ListStateModuleFreshness(getClient func() *suite.Disco
 		// computeFreshness) the ref's host must match the sibling's host. Any miss
 		// degrades that module to no_registry — the endpoint is always 200 and
 		// never errors on a missing sibling.
+		//
+		// SiblingPublicURL is the first two gates AND the egress check in one
+		// call: publicUrl is asserted by the sibling, not pinned by the operator,
+		// so before v0.25.0 this handler read it into a bare *http.Client and
+		// issued a GET to whatever address the manifest named, from inside the
+		// deployment network (identity #144). GuardedClient supplies the matching
+		// dialer; using one without the other leaves half the check in place.
+		ctx := c.Request.Context()
 		var siblingURL, siblingHost string
+		client := identityhttpsafe.NewClient(freshnessTimeout, egress.Guard())
 		if dc := getClient(); dc != nil {
-			if state, m := dc.Snapshot(); state == suite.StateActive && m != nil && m.PublicURL != "" {
-				siblingURL = strings.TrimRight(m.PublicURL, "/")
-				siblingHost = suite.CanonicalHost(m.PublicURL)
+			if pub, uErr := dc.SiblingPublicURL(ctx); uErr == nil {
+				siblingURL = strings.TrimRight(pub, "/")
+				siblingHost = suite.CanonicalHost(pub)
+				client = dc.GuardedClient(freshnessTimeout)
 			}
 		}
-
-		client := &http.Client{Timeout: freshnessTimeout}
-		c.JSON(http.StatusOK, gin.H{"modules": computeFreshness(c.Request.Context(), client, siblingURL, siblingHost, refs)})
+		c.JSON(http.StatusOK, gin.H{"modules": computeFreshness(ctx, client, siblingURL, siblingHost, refs)})
 	}
 }
 

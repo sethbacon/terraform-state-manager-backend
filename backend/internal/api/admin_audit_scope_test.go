@@ -16,7 +16,6 @@ import (
 
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
 	"github.com/gin-gonic/gin"
-	"github.com/jmoiron/sqlx"
 	"github.com/lib/pq"
 	idstore "github.com/sethbacon/terraform-suite-identity/identity/store"
 )
@@ -32,7 +31,8 @@ import (
 // accessors gets a row here, and adding an axis without a row leaves a hole.
 //
 // Since identity v0.21.0 the narrowing is a SQL predicate built from
-// store.AuditScope, not a post-filter over rows the database already returned.
+// store.OrgScope (store.AuditScope until v0.25.0 renamed it), not a post-filter
+// over rows the database already returned.
 // That means the guard is only observable in the statement sent to the
 // database — a handler that dropped its scope would still answer 200 with
 // whatever rows the mock was told to hand back. These tests therefore assert on
@@ -57,7 +57,7 @@ const (
 // wantScopedPredicate is the SQL the store emits for "these organizations, plus
 // rows nobody owns". Asserting the literal fragment pins the specific failure:
 // a dropped scope removes it entirely and a scope narrowed to
-// AuditScopeOrganizations drops the "OR ... IS NULL" half, and the two are
+// OrgScopeOrganizations drops the "OR ... IS NULL" half, and the two are
 // different bugs with different fixes.
 const wantScopedPredicate = "AND (al.organization_id = ANY($1) OR al.organization_id IS NULL)"
 
@@ -112,7 +112,7 @@ func newAuditScopeEnv(t *testing.T) *auditScopeEnv {
 		t.Fatalf("sqlmock.New: %v", err)
 	}
 	t.Cleanup(func() { db.Close() })
-	return &auditScopeEnv{h: NewAdminHandlers(sqlx.NewDb(db, "sqlmock")), mock: mock, rec: rec}
+	return &auditScopeEnv{h: NewAdminHandlers(db), mock: mock, rec: rec}
 }
 
 // serveAs runs handler with callerID installed the way the real requireAuth
@@ -130,8 +130,8 @@ func (e *auditScopeEnv) serveAs(route, target, callerID string, handler gin.Hand
 	return w
 }
 
-// expectAdminMemberships queues the caller lookup adminOrgSet issues, returning
-// an admin-scoped membership per organization given.
+// expectAdminMemberships queues the caller lookup OrgScopeForUser issues,
+// returning an admin-scoped membership per organization given.
 func expectAdminMemberships(mock sqlmock.Sqlmock, userID string, adminOrgIDs ...string) {
 	rows := sqlmock.NewRows(userMembershipCols)
 	for _, orgID := range adminOrgIDs {
@@ -148,7 +148,7 @@ func scopedAuditRow(rows *sqlmock.Rows, id, action, orgID string) *sqlmock.Rows 
 		org = orgID
 	}
 	return rows.AddRow(id, "u1", org, action, "state", nil, nil, "10.0.0.9",
-		time.Date(2026, 7, 10, 8, 0, 0, 0, time.UTC), "a@x.io", "Alice")
+		time.Date(2026, 7, 10, 8, 0, 0, 0, time.UTC), "a@x.io", "a@x.io", "Alice")
 }
 
 // --- the class test ----------------------------------------------------------
@@ -188,7 +188,7 @@ var auditReadAxes = []auditReadAxis{
 			e.mock.ExpectQuery("SELECT al.id, .+ FROM audit_logs").
 				WithArgs(pq.Array(wantOrgs), sqlmock.AnyArg(), sqlmock.AnyArg()).
 				WillReturnRows(page)
-			e.mock.ExpectExec("INSERT INTO audit_logs").WillReturnResult(sqlmock.NewResult(0, 1))
+			e.mock.ExpectQuery("INSERT INTO audit_logs").WillReturnRows(auditInsertReturn())
 			return e.serveAs("/x", "/x?format=json", callerID, e.h.ExportAuditLogs())
 		},
 	},
@@ -199,18 +199,22 @@ var auditReadAxes = []auditReadAxis{
 		// ONE organization with the target.
 		name: "user-export",
 		exercise: func(e *auditScopeEnv, callerID string, wantOrgs []string, page *sqlmock.Rows) *httptest.ResponseRecorder {
-			e.mock.ExpectQuery("SELECT id, email, name, oidc_sub").WithArgs(auditScopeTarget).
+			// The caller's scope is resolved FIRST since v0.25.0: it bounds the
+			// subject lookup as well as the audit read, so the export cannot
+			// disclose through one axis what it refuses on the other.
+			expectAdminMemberships(e.mock, callerID, wantOrgs...)
+			e.mock.ExpectQuery("SELECT id, email, name, oidc_sub").
+				WithArgs(auditScopeTarget, pq.Array(wantOrgs)).
 				WillReturnRows(idUserRow(auditScopeTarget))
 			e.mock.ExpectQuery("FROM organization_members om").WithArgs(auditScopeTarget).
 				WillReturnRows(sqlmock.NewRows(userMembershipCols))
-			expectAdminMemberships(e.mock, callerID, wantOrgs...)
 			e.mock.ExpectQuery(`SELECT COUNT\(\*\) FROM audit_logs`).
 				WithArgs(pq.Array(wantOrgs), auditScopeTarget).
 				WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(3))
 			e.mock.ExpectQuery("SELECT al.id, .+ FROM audit_logs").
 				WithArgs(pq.Array(wantOrgs), auditScopeTarget, sqlmock.AnyArg(), sqlmock.AnyArg()).
 				WillReturnRows(page)
-			e.mock.ExpectExec("INSERT INTO audit_logs").WillReturnResult(sqlmock.NewResult(0, 1))
+			e.mock.ExpectQuery("INSERT INTO audit_logs").WillReturnRows(auditInsertReturn())
 			return e.serveAs("/x/:id", "/x/"+auditScopeTarget, callerID, e.h.ExportUserData())
 		},
 	},
@@ -299,7 +303,7 @@ func TestAuditReadScope_NarrowsEveryAxis(t *testing.T) {
 				// organizations, which is what the WithArgs above pin. Restate
 				// the resulting visibility rule so a reader can see what the
 				// predicate means without decoding SQL.
-				scope := idstore.AuditScopeOrganizationsAndUnowned(caller.adminOrgs...)
+				scope := idstore.OrgScopeOrganizationsAndUnowned(caller.adminOrgs...)
 				if scope.IsAllOrganizations() {
 					t.Error("scope must never be the platform-wide scope on an org-admin path")
 				}
@@ -330,10 +334,11 @@ func TestAuditReadScope_NarrowsEveryAxis(t *testing.T) {
 	}
 }
 
-// TestCallerAuditScope_BuildsFromAdminMembershipsOnly pins how the scope is
+// TestCallerOrgScope_BuildsFromAdminMembershipsOnly pins how the scope is
 // derived: admin memberships only, never plain membership, and never the
-// platform-wide scope.
-func TestCallerAuditScope_BuildsFromAdminMembershipsOnly(t *testing.T) {
+// platform-wide scope. (Named callerAuditScope until identity v0.25.0 made the
+// same value bound the user list and the user-lifecycle routes too.)
+func TestCallerOrgScope_BuildsFromAdminMembershipsOnly(t *testing.T) {
 	e := newAuditScopeEnv(t)
 
 	rows := sqlmock.NewRows(userMembershipCols).
@@ -346,9 +351,9 @@ func TestCallerAuditScope_BuildsFromAdminMembershipsOnly(t *testing.T) {
 	c.Request = httptest.NewRequest(http.MethodGet, "/x", nil)
 	c.Set("user_id", auditScopeCaller)
 
-	scope, err := e.h.callerAuditScope(c)
+	scope, err := e.h.callerOrgScope(c)
 	if err != nil {
-		t.Fatalf("callerAuditScope: %v", err)
+		t.Fatalf("callerOrgScope: %v", err)
 	}
 	if scope.IsAllOrganizations() {
 		t.Fatal("an org admin must not receive the platform-wide scope")
@@ -369,20 +374,20 @@ func TestCallerAuditScope_BuildsFromAdminMembershipsOnly(t *testing.T) {
 	}
 }
 
-// TestCallerAuditScope_FailsClosedWithoutCaller covers the misconfigured-chain
+// TestCallerOrgScope_FailsClosedWithoutCaller covers the misconfigured-chain
 // case: no user_id in the context (requireAuth absent or broken) must not read
 // another tenant's rows. It degrades to org-less platform events, which is what
 // the in-memory filter did for an empty admin set.
-func TestCallerAuditScope_FailsClosedWithoutCaller(t *testing.T) {
+func TestCallerOrgScope_FailsClosedWithoutCaller(t *testing.T) {
 	e := newAuditScopeEnv(t)
 
 	gin.SetMode(gin.TestMode)
 	c, _ := gin.CreateTestContext(httptest.NewRecorder())
 	c.Request = httptest.NewRequest(http.MethodGet, "/x", nil)
 
-	scope, err := e.h.callerAuditScope(c)
+	scope, err := e.h.callerOrgScope(c)
 	if err != nil {
-		t.Fatalf("callerAuditScope: %v", err)
+		t.Fatalf("callerOrgScope: %v", err)
 	}
 	if scope.IsAllOrganizations() {
 		t.Fatal("an unauthenticated context must never yield the platform-wide scope")
@@ -395,21 +400,131 @@ func TestCallerAuditScope_FailsClosedWithoutCaller(t *testing.T) {
 	}
 }
 
-// TestNoPlatformWideAuditScopeInHandlers keeps the trap shut. Every audit read
-// accessor now REQUIRES a scope, so a future compile break is fixed either by
-// threading the caller's tenancy through or by silencing it with
-// AuditScopeAllOrganizations() — which compiles, passes every behavioural test
-// above (the mock returns whatever it is told to), and restores #331.
+// --- the source-scanning guards ------------------------------------------------
 //
-// There is no platform-wide reader in TSM: "admin" is granted per organization
-// and surfaces as a flat scope, so every /admin caller is somebody's tenant
-// admin. If a genuinely org-less path is ever added (a retention sweep, a
-// health check), this test is the place to record that decision.
-func TestNoPlatformWideAuditScopeInHandlers(t *testing.T) {
-	for _, file := range callSitesOf(t, "AuditScopeAllOrganizations") {
-		t.Errorf("%s reads audit logs across every organization. If that is deliberate, "+
-			"say why at the call site and amend this test; otherwise scope the read to "+
-			"the caller with callerAuditScope.", file)
+// These two tests are the ones that keep the trap shut, and they share a
+// failure mode worth naming: a source scan for a NAME goes quiet, silently and
+// permanently, the moment the name stops existing. That is not hypothetical.
+// identity v0.25.0 renamed store.AuditScope to store.OrgScope, and the
+// predecessor of TestNoPlatformWideOrgScopeInAuditHandlers looked for the
+// literal "AuditScopeAllOrganizations" — after the rename it kept compiling and
+// kept passing while checking nothing at all. The module's own UPGRADING.md
+// flagged this test by name.
+//
+// Three things stop that recurring:
+//
+//  1. scannedSymbols below REFERENCES each scanned name as a Go symbol, so a
+//     future rename in the identity module is a compile error here rather than
+//     a guard that quietly searches for a name nothing spells any more.
+//  2. TestCallSiteScannerFindsCallSites proves the scanner still works — right
+//     root, right parse, right selector match — by asserting it finds a name
+//     that IS present. Without it, "found nothing" and "cannot see anything"
+//     are the same green.
+//  3. The platform-wide guard is an ALLOW-LIST keyed by call site, not a blanket
+//     ban. OrgScope is not AuditScope: since v0.25.0 the same constructor is
+//     needed on paths that genuinely have no tenant (authentication, IdP-driven
+//     provisioning), so a blanket ban would have to be deleted the first time
+//     one appeared — and deleting it takes the audit guard with it.
+
+// scannedSymbols pins every string literal the scans below search for to the
+// symbol it names. It exists to be compiled, not called.
+var scannedSymbols = []interface{}{
+	idstore.OrgScopeAllOrganizations,                  // "OrgScopeAllOrganizations"
+	(*idstore.AuditRepository).GetAuditLog,            // "GetAuditLog"
+	(*idstore.AuditRepository).StreamAuditLogs,        // "StreamAuditLogs"
+	(*idstore.AuditRepository).ListAuditLogs,          // "ListAuditLogs"
+	(*idstore.OrganizationRepository).OrgScopeForUser, // "OrgScopeForUser"
+}
+
+// platformWideScope is the constructor that reaches every organization.
+const platformWideScope = "OrgScopeAllOrganizations"
+
+// reviewedPlatformWideSites maps "<path>:<enclosing func>" to the reason that
+// call site is allowed to reach every organization. A site not listed here
+// fails the build.
+//
+// The bar for adding an entry: the path must have NO tenant to scope by — not
+// "the scope was inconvenient to thread". Authentication qualifies, because the
+// scope that would narrow it is the one it exists to compute. An admin READ
+// never qualifies: "admin" in TSM is granted per organization and merely
+// surfaces as a flat scope, so every /admin caller is somebody's tenant admin.
+//
+// Nothing in this map reads audit_logs, and that is the invariant
+// TestNoPlatformWideOrgScopeInAuditHandlers enforces separately.
+var reviewedPlatformWideSites = map[string]string{
+	"internal/middleware/auth.go:AuthMiddleware":             "authority derivation: resolves the token's subject, which is the prerequisite of every tenant check",
+	"internal/middleware/auth.go:OptionalAuthMiddleware":     "authority derivation, as AuthMiddleware",
+	"internal/middleware/auth.go:authenticateAPIKey":         "authority derivation: confirms a bcrypt-verified key's owner still exists",
+	"internal/api/auth.go:loginScope":                        "login and IdP group-mapping reconciliation; see the loginScope doc",
+	"internal/api/apikeys.go:keyScope":                       "a TSM key's organization_id is the default org, not an authority binding; the owner's membership is the boundary and keysVisibleToScope applies it",
+	"internal/api/scim/handlers.go:deprovisionUser":          "IdP-driven whole-principal deactivation must be complete; see the deprovisionUser doc",
+	"internal/api/scim/handlers.go:directoryScope":           "SCIM syncs the whole directory for an IdP that is authoritative over it",
+	"internal/api/admin_write.go:EraseUser":                  "GDPR Article 17 erasure is an obligation about the whole data subject, and the anonymize and credential-revoke steps either side of it are already whole-principal",
+	"internal/api/audit_ingest.go:resolveSiblingIDs":         "existence probe on a service-token route with no tenant principal; decides whether a federated id resolves at all",
+	"internal/credlifecycle/sweeper.go:UserDeprovisioned":    "see the package doc: a TSM key is bound to its principal, not to an organization",
+	"internal/credlifecycle/sweeper.go:revokeOverAskingKeys": "as UserDeprovisioned",
+}
+
+// TestNoPlatformWideOrgScopeInAuditHandlers keeps the audit trail tenant-bound.
+//
+// Every audit read accessor REQUIRES a scope, so a future compile break is
+// fixed either by threading the caller's tenancy through or by silencing it
+// with OrgScopeAllOrganizations() — which compiles, passes every behavioural
+// test above (the mock returns whatever it is told to), and restores #331.
+//
+// If a genuinely org-less audit path is ever added (a retention sweep, a health
+// check), this test is the place to record that decision.
+func TestNoPlatformWideOrgScopeInAuditHandlers(t *testing.T) {
+	// Per FUNCTION, not per file: admin_write.go legitimately holds both
+	// ExportUserData (an audit read axis) and EraseUser (a reviewed platform-wide
+	// site), and a file-level test would have to exempt the file — taking the
+	// audit guard with it, which is the failure mode this whole file exists to
+	// prevent.
+	auditReaders := map[string]bool{}
+	for _, accessor := range []string{"ListAuditLogs", "GetAuditLog", "StreamAuditLogs"} {
+		for _, site := range qualifiedCallSitesOf(t, accessor) {
+			auditReaders[site] = true
+		}
+	}
+	if len(auditReaders) == 0 {
+		t.Fatal("no function reaches an audit read accessor — the scan is not seeing the tree it is meant to guard")
+	}
+	for _, site := range qualifiedCallSitesOf(t, platformWideScope) {
+		if auditReaders[site] {
+			t.Errorf("%s reads audit logs AND constructs the platform-wide scope. Scope the "+
+				"read to the caller with callerOrgScope; a platform-wide audit read is #331.", site)
+		}
+	}
+}
+
+// TestPlatformWideOrgScopeSitesAreReviewed fails when OrgScopeAllOrganizations
+// appears at a call site nobody has signed off on.
+//
+// This is the guard that replaces the old blanket ban. The ban was correct
+// while the type was AuditScope and applied to one table; since v0.25.0 the
+// same constructor is required on paths that have no tenant at all, so the
+// question is no longer "does it appear" but "is THIS appearance reviewed".
+func TestPlatformWideOrgScopeSitesAreReviewed(t *testing.T) {
+	sites := qualifiedCallSitesOf(t, platformWideScope)
+	if len(sites) == 0 {
+		t.Fatalf("found no %s call site at all. Either every tenancy decision was removed, "+
+			"or the identity module renamed the constructor and this guard is now scanning "+
+			"for a name that does not exist — the exact failure the AuditScope rename caused.",
+			platformWideScope)
+	}
+	seen := map[string]bool{}
+	for _, site := range sites {
+		seen[site] = true
+		if _, ok := reviewedPlatformWideSites[site]; !ok {
+			t.Errorf("%s reaches EVERY organization. Scope it to the caller, or add it to "+
+				"reviewedPlatformWideSites with the reason it has no tenant to scope by.", site)
+		}
+	}
+	for site := range reviewedPlatformWideSites {
+		if !seen[site] {
+			t.Errorf("reviewedPlatformWideSites lists %s, which no longer constructs %s. "+
+				"Remove the entry so the list keeps meaning what it says.", site, platformWideScope)
+		}
 	}
 }
 
@@ -427,11 +542,48 @@ func TestAuditReadAccessorsInUse(t *testing.T) {
 	}
 }
 
+// TestCallSiteScannerFindsCallSites is the non-vacuity check for the scanner
+// itself. Every guard above reports "clean" by finding nothing, so a scanner
+// that walks the wrong root, fails to parse, or stops matching selectors would
+// make all of them pass while checking nothing.
+//
+// OrgScopeForUser is the probe because it is the resolver every /admin tenancy
+// decision goes through: if it has no call site, the narrowing is gone and the
+// guards have nothing left to guard anyway.
+func TestCallSiteScannerFindsCallSites(t *testing.T) {
+	if got := callSitesOf(t, "OrgScopeForUser"); len(got) == 0 {
+		t.Fatal("the call-site scanner found no use of OrgScopeForUser. Either the tenant " +
+			"resolver is gone, or the scanner is not reading the source tree — in which " +
+			"case every guard in this file is silently passing.")
+	}
+	if got := qualifiedCallSitesOf(t, "OrgScopeForUser"); len(got) == 0 {
+		t.Fatal("the qualified call-site scanner found no use of OrgScopeForUser")
+	}
+}
+
 // callSitesOf returns the non-test files under backend/ that reference name as
 // a selector (the "Foo" in x.Foo). It parses rather than greps so that prose in
 // a doc comment — including the comments explaining these very rules — is not
-// mistaken for a call site.
+// mistaken for a call site. Paths are relative to backend/ so they are stable
+// enough to name in an allow-list.
 func callSitesOf(t *testing.T, name string) []string {
+	t.Helper()
+	seen := map[string]bool{}
+	var found []string
+	for _, site := range qualifiedCallSitesOf(t, name) {
+		file := site[:strings.LastIndex(site, ":")]
+		if !seen[file] {
+			seen[file] = true
+			found = append(found, file)
+		}
+	}
+	return found
+}
+
+// qualifiedCallSitesOf is callSitesOf resolved to "<path>:<enclosing func>", so
+// one file can hold a reviewed platform-wide call site without exempting its
+// neighbours. A reference outside any function reports "<path>:<file scope>".
+func qualifiedCallSitesOf(t *testing.T, name string) []string {
 	t.Helper()
 	var found []string
 	fset := token.NewFileSet()
@@ -447,10 +599,17 @@ func callSitesOf(t *testing.T, name string) []string {
 		if err != nil {
 			return fmt.Errorf("parse %s: %w", path, err)
 		}
+		rel := filepath.ToSlash(strings.TrimPrefix(filepath.Clean(path), "../../"))
+		enclosing := "file scope"
 		ast.Inspect(file, func(n ast.Node) bool {
-			if sel, ok := n.(*ast.SelectorExpr); ok && sel.Sel.Name == name {
-				found = append(found, path)
-				return false
+			switch node := n.(type) {
+			case *ast.FuncDecl:
+				enclosing = node.Name.Name
+			case *ast.SelectorExpr:
+				if node.Sel.Name == name {
+					found = append(found, rel+":"+enclosing)
+					return false
+				}
 			}
 			return true
 		})

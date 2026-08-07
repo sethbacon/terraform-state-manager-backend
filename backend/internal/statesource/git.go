@@ -55,7 +55,14 @@ func validateGitURL(raw string) error {
 	}
 	switch u.Scheme {
 	case "https":
-		return egressGuard.ValidateURL(raw)
+		// identity v0.25.0 made ValidateURL take a context so a client
+		// disconnect can cancel the DNS lookup instead of always waiting out the
+		// resolver timeout. There is no request context to thread here:
+		// statesource.New — the connector factory this runs inside — takes none,
+		// and every caller of it would have to change. Background() reproduces
+		// exactly the pre-v0.25.0 behaviour; threading the request context is a
+		// follow-up on the factory signature, not on this call.
+		return egressGuard.ValidateURL(context.Background(), raw)
 	case "ssh":
 		return nil
 	default:

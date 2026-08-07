@@ -42,6 +42,12 @@ func (h *Handlers) ConfigureAdmin(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to find the default organization"})
 		return
 	}
+	// The first-run wizard has no principal to derive a tenancy from — it runs
+	// behind the setup token, BEFORE any owner exists, and it writes into the one
+	// organization bootstrap seeded. The scope names that organization rather
+	// than reaching everywhere, so this grant cannot touch any organization
+	// created later.
+	bootstrapScope := idstore.OrgScopeOrganizations(defaultOrg.ID)
 	user := &models.User{Email: email, Name: email}
 	if err := userRepo.CreateUser(ctx, user); err != nil {
 		// Already exists (e.g. re-run): reuse the existing record.
@@ -52,7 +58,7 @@ func (h *Handlers) ConfigureAdmin(c *gin.Context) {
 		}
 		user = existing
 	}
-	if err := orgRepo.AddMemberWithParams(ctx, defaultOrg.ID, user.ID, "admin"); err != nil {
+	if err := orgRepo.AddMemberWithParams(ctx, defaultOrg.ID, user.ID, "admin", bootstrapScope); err != nil {
 		// Already a member (the insert is a plain INSERT, so a re-run of the
 		// wizard hits the unique constraint): promote to admin.
 		//
@@ -63,7 +69,7 @@ func (h *Handlers) ConfigureAdmin(c *gin.Context) {
 		// wizard could never be re-entered. The sentinel makes that case
 		// distinguishable, and the only safe answer for a privilege grant that
 		// wrote no row is to refuse.
-		uerr := orgRepo.UpdateMemberRole(ctx, defaultOrg.ID, user.ID, "admin")
+		uerr := orgRepo.UpdateMemberRole(ctx, defaultOrg.ID, user.ID, "admin", bootstrapScope)
 		if errors.Is(uerr, idstore.ErrNotFound) {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to grant the owner the admin role: no membership to promote"})
 			return

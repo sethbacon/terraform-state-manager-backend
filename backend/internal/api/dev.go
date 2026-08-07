@@ -29,7 +29,7 @@ func (h *AuthHandlers) DevLoginHandler() gin.HandlerFunc {
 		// router.go), and this handler re-checks auth.IsDevMode() above and
 		// returns 403 otherwise, so this path cannot run in production even if
 		// the route registration guard were ever bypassed.
-		user, err := h.userRepo.GetOrCreateUserByOIDC(ctx, "dev:admin", "admin.user@local.dev", "Dev Admin", true)
+		user, err := h.userRepo.GetOrCreateUserFromOIDC(ctx, "dev:admin", "admin.user@local.dev", "Dev Admin", true)
 		if err != nil {
 			serverError(c, err, "Failed to create dev user")
 			return

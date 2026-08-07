@@ -255,3 +255,66 @@ func TestAPIKeys_Rotate(t *testing.T) {
 		t.Errorf("grace > 72h: %d", w.Code)
 	}
 }
+
+// apiKeyAdminListCols mirrors ListAPIKeys' projection, which joins users for the
+// owner's display name and so carries one column more than apiKeyRowCols.
+var apiKeyAdminListCols = append(append([]string{}, apiKeyRowCols...), "user_name")
+
+// TestAPIKeys_AdminListNarrowsToOwnersSharingAnAdminOrg is the #182 guard for
+// the admin key view, and it exists because identity v0.25.0 makes it easy to
+// delete by accident.
+//
+// v0.25.0 replaced ListAll with ListAPIKeys(ctx, scope) and says, correctly for
+// its other consumer, that the in-memory admin-organization filter beside it is
+// now the query's own predicate. That is NOT true here: ListAPIKeys scopes on
+// ak.organization_id, and apikeys.mintKey stamps EVERY TSM key with the GLOBAL
+// DEFAULT organization whoever owns it. Swapping the owner-membership filter for
+// an org-scoped query would therefore show an admin of the default organization
+// every other tenant's keys — including their bcrypt key_hash — and an admin of
+// any other organization none at all. The tenant boundary here is the OWNER's
+// membership, and this test pins it.
+func TestAPIKeys_AdminListNarrowsToOwnersSharingAnAdminOrg(t *testing.T) {
+	e := newAPIKeysEnv(t)
+	*e.scopes = []string{"admin"}
+
+	// The caller administers org-a only.
+	e.mock.ExpectQuery("FROM organization_members om").WithArgs("u1").
+		WillReturnRows(sqlmock.NewRows(userMembershipCols).
+			AddRow("org-a", "Org A", "rt-admin", time.Now(), "admin", "Admin", []byte(`["admin"]`)).
+			AddRow("org-c", "Org C", "rt-viewer", time.Now(), "viewer", "Viewer", []byte(`["state:read"]`)))
+	// Every key carries the default organization, which is why the row's own
+	// organization_id cannot be the filter.
+	e.mock.ExpectQuery("FROM api_keys").WillReturnRows(
+		sqlmock.NewRows(apiKeyAdminListCols).
+			AddRow("k-shared", "owner-shared", "org1", "ci", nil, "h", "tsm_a", []byte(`["state:read"]`), nil, nil, nil, time.Now(), "Shared").
+			AddRow("k-other", "owner-other", "org1", "ci", nil, "h", "tsm_b", []byte(`["state:read"]`), nil, nil, nil, time.Now(), "Other").
+			AddRow("k-orphan", "owner-orphan", "org1", "ci", nil, "h", "tsm_c", []byte(`["state:read"]`), nil, nil, nil, time.Now(), "Orphan"))
+	// One membership lookup per distinct owner, in row order.
+	e.mock.ExpectQuery("FROM organization_members om").WithArgs("owner-shared").
+		WillReturnRows(sqlmock.NewRows(userMembershipCols).
+			AddRow("org-a", "Org A", "rt-viewer", time.Now(), "viewer", "Viewer", []byte(`["state:read"]`)))
+	e.mock.ExpectQuery("FROM organization_members om").WithArgs("owner-other").
+		WillReturnRows(sqlmock.NewRows(userMembershipCols).
+			AddRow("org-b", "Org B", "rt-viewer", time.Now(), "viewer", "Viewer", []byte(`["state:read"]`)))
+	e.mock.ExpectQuery("FROM organization_members om").WithArgs("owner-orphan").
+		WillReturnRows(sqlmock.NewRows(userMembershipCols))
+
+	w := e.do(http.MethodGet, "/api/v1/apikeys", "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("admin list: status = %d (%s)", w.Code, w.Body.String())
+	}
+	body := w.Body.String()
+	if !strings.Contains(body, "k-shared") {
+		t.Errorf("a key whose owner shares the caller's admin organization must be listed: %s", body)
+	}
+	if strings.Contains(body, "k-other") {
+		t.Errorf("a key whose owner belongs only to ANOTHER tenant must not be listed (#182): %s", body)
+	}
+	if !strings.Contains(body, "k-orphan") {
+		t.Errorf("a key whose owner belongs to no organization has no cross-tenant boundary "+
+			"to protect and must stay listed, mirroring the user list: %s", body)
+	}
+	if err := e.mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("queued round-trips did not all run: %v", err)
+	}
+}

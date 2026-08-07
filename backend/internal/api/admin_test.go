@@ -9,7 +9,6 @@ import (
 
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
 	"github.com/gin-gonic/gin"
-	"github.com/jmoiron/sqlx"
 	idmodels "github.com/sethbacon/terraform-suite-identity/identity/models"
 )
 
@@ -20,16 +19,42 @@ func newAdminHandlers(t *testing.T) (*AdminHandlers, sqlmock.Sqlmock) {
 		t.Fatalf("sqlmock.New: %v", err)
 	}
 	t.Cleanup(func() { db.Close() })
-	return NewAdminHandlers(sqlx.NewDb(db, "sqlmock")), mock
+	return NewAdminHandlers(db), mock
 }
 
+// serveAdmin runs handler with NO caller in the context. Since identity
+// v0.25.0 that is not a neutral rig: callerOrgScope resolves to the empty
+// OrgScope, which on audit_logs still admits the org-less platform rows (the
+// documented fail-closed degradation) but on organizations matches nothing and
+// short-circuits before any query. Use serveAdminAs wherever the handler's
+// tenancy is what is under test.
 func serveAdmin(handler gin.HandlerFunc, target string) *httptest.ResponseRecorder {
+	return serveAdminAs(handler, target, "")
+}
+
+// serveAdminAs runs handler with callerID installed the way requireAuth
+// installs it, so the caller's organizations resolve.
+func serveAdminAs(handler gin.HandlerFunc, target, callerID string) *httptest.ResponseRecorder {
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
+	r.Use(func(c *gin.Context) {
+		if callerID != "" {
+			c.Set("user_id", callerID)
+		}
+		c.Next()
+	})
 	r.GET("/x", handler)
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, httptest.NewRequest(http.MethodGet, target, nil))
 	return w
+}
+
+// expectCallerAdminOrg queues the membership lookup OrgScopeForUser issues,
+// answering "the caller is an admin of orgID".
+func expectCallerAdminOrg(mock sqlmock.Sqlmock, callerID, orgID string) {
+	mock.ExpectQuery("FROM organization_members om").WithArgs(callerID).
+		WillReturnRows(sqlmock.NewRows(userMembershipCols).
+			AddRow(orgID, "Org "+orgID, "rt-admin", time.Now(), "admin", "Admin", []byte(`["admin"]`)))
 }
 
 func TestPageParams(t *testing.T) {
@@ -103,6 +128,10 @@ func TestAdminStats(t *testing.T) {
 	h, mock := newAdminHandlers(t)
 	now := time.Now()
 
+	// Two membership lookups: the user count and the organization count are
+	// scoped independently, each matching the list route it mirrors.
+	expectCallerAdminOrg(mock, "caller-1", "org-1")
+	expectCallerAdminOrg(mock, "caller-1", "org-1")
 	mock.ExpectQuery("SELECT COUNT").
 		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(7))
 	mock.ExpectQuery("SELECT id, name, display_name, idp_type, idp_name, created_at, updated_at").
@@ -113,7 +142,7 @@ func TestAdminStats(t *testing.T) {
 			AddRow("11111111-1111-1111-1111-111111111111", "admin", "Administrator", "Full access", []byte(`["admin"]`), true, now, now).
 			AddRow("22222222-2222-2222-2222-222222222222", "viewer", "Viewer", "Read-only", []byte(`["state:read"]`), true, now, now))
 
-	w := serveAdmin(h.Stats(), "/x")
+	w := serveAdminAs(h.Stats(), "/x", "caller-1")
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200 (body: %s)", w.Code, w.Body.String())
 	}
@@ -157,11 +186,12 @@ func TestAdminListRoles_DBError(t *testing.T) {
 func TestAdminListOrganizations(t *testing.T) {
 	h, mock := newAdminHandlers(t)
 	now := time.Now()
+	expectCallerAdminOrg(mock, "caller-1", "org-1")
 	mock.ExpectQuery("SELECT id, name, display_name, idp_type, idp_name, created_at, updated_at").
 		WillReturnRows(sqlmock.NewRows([]string{"id", "name", "display_name", "idp_type", "idp_name", "created_at", "updated_at"}).
 			AddRow("org-1", "default", "Default", nil, nil, now, now))
 
-	w := serveAdmin(h.ListOrganizations(), "/x?page=2&per_page=5")
+	w := serveAdminAs(h.ListOrganizations(), "/x?page=2&per_page=5", "caller-1")
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200 (body: %s)", w.Code, w.Body.String())
 	}
@@ -169,7 +199,10 @@ func TestAdminListOrganizations(t *testing.T) {
 
 func TestAdminListOrganizations_DBError(t *testing.T) {
 	h, _ := newAdminHandlers(t)
-	if w := serveAdmin(h.ListOrganizations(), "/x"); w.Code != http.StatusInternalServerError {
+	// A caller IS installed: without one the scope resolves to "matches nothing"
+	// and the repository short-circuits before issuing any statement, so the
+	// unqueued-expectation failure this test relies on would never happen.
+	if w := serveAdminAs(h.ListOrganizations(), "/x", "caller-1"); w.Code != http.StatusInternalServerError {
 		t.Errorf("status = %d, want 500 on repository failure", w.Code)
 	}
 }

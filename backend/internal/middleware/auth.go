@@ -92,7 +92,13 @@ func AuthMiddleware(userRepo *idstore.UserRepository, tokenRepo *idstore.TokenRe
 		// generic error arm: since identity v0.24.0 a missing user arrives as an
 		// error rather than (nil, nil), so a plain `if err != nil` would answer
 		// 500 to every deleted-user token and leave the 401 below unreachable.
-		user, err := userRepo.GetUserByID(c.Request.Context(), claims.UserID)
+		// Platform-wide scope, deliberately: this IS the tenant check's own
+		// prerequisite. Resolving the token's subject is authority DERIVATION —
+		// there is no caller tenancy yet to scope by, because the scopes that
+		// would define one are what this lookup exists to establish. Scoping it
+		// to the token's own claims would let a forged claim decide which rows
+		// authenticate it. Recorded in admin_audit_scope_test.go's reviewed list.
+		user, err := userRepo.GetUserByID(c.Request.Context(), claims.UserID, idstore.OrgScopeAllOrganizations())
 		if errors.Is(err, idstore.ErrNotFound) || (err == nil && user == nil) {
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "User not found"})
 			return
@@ -136,7 +142,8 @@ func OptionalAuthMiddleware(userRepo *idstore.UserRepository, tokenRepo *idstore
 				return
 			}
 		}
-		if user, err := userRepo.GetUserByID(c.Request.Context(), claims.UserID); err == nil && user != nil {
+		// Authority derivation, as in AuthMiddleware above.
+		if user, err := userRepo.GetUserByID(c.Request.Context(), claims.UserID, idstore.OrgScopeAllOrganizations()); err == nil && user != nil {
 			setAuthContext(c, user.ID, claims, fromCookie)
 		}
 		c.Next()
@@ -173,7 +180,10 @@ func authenticateAPIKey(c *gin.Context, keys *idstore.APIKeyRepository, users *i
 			userID = *k.UserID
 		}
 		if userID != "" && users != nil {
-			user, uErr := users.GetUserByID(ctx, userID)
+			// Authority derivation, as in AuthMiddleware: the key has already been
+			// proved genuine by the bcrypt compare, and this only establishes that
+			// its owner still exists before the live-scope cap below.
+			user, uErr := users.GetUserByID(ctx, userID, idstore.OrgScopeAllOrganizations())
 			if uErr != nil || user == nil {
 				return false
 			}

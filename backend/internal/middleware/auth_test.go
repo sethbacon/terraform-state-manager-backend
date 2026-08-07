@@ -295,7 +295,10 @@ func TestAuthMiddleware_APIKeyAuthenticates(t *testing.T) {
 	fullKey, hash, prefix := mintTestKey(t)
 	keyRepo, keyMock := newAPIKeyRepo(t)
 	userRepo, userMock := newUserRepo(t)
-	keyMock.ExpectQuery("FROM api_keys").WithArgs(prefix).
+	// The prefix lookup binds a row cap as of identity v0.25.0: one prefix
+	// matching more than 100 live keys is refused outright rather than fanned
+	// across the whole table as bcrypt candidates.
+	keyMock.ExpectQuery("FROM api_keys").WithArgs(prefix, sqlmock.AnyArg()).
 		WillReturnRows(keyRow(hash, prefix, `["state:read","state:drift"]`, nil))
 	// Async last-used update may or may not land before the test ends.
 	keyMock.ExpectExec("UPDATE api_keys").WillReturnResult(sqlmock.NewResult(0, 1))
@@ -339,7 +342,10 @@ func TestAuthMiddleware_APIKeyScopesCappedByLiveOwnerScopes(t *testing.T) {
 	keyRepo, keyMock := newAPIKeyRepo(t)
 	userRepo, userMock := newUserRepo(t)
 	orgRepo, orgMock := newOrgRepoMW(t)
-	keyMock.ExpectQuery("FROM api_keys").WithArgs(prefix).
+	// The prefix lookup binds a row cap as of identity v0.25.0: one prefix
+	// matching more than 100 live keys is refused outright rather than fanned
+	// across the whole table as bcrypt candidates.
+	keyMock.ExpectQuery("FROM api_keys").WithArgs(prefix, sqlmock.AnyArg()).
 		WillReturnRows(keyRow(hash, prefix, `["admin","state:read"]`, nil))
 	keyMock.ExpectExec("UPDATE api_keys").WillReturnResult(sqlmock.NewResult(0, 1))
 	expectUserFound(userMock, "u1")

@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/terraform-state-manager/terraform-state-manager/internal/config"
+	"github.com/terraform-state-manager/terraform-state-manager/internal/egress"
 )
 
 // discoveryServer spins up a minimal OIDC discovery document whose issuer
@@ -57,6 +58,11 @@ func TestNewOIDCProviderWithContext_ProductionRejectsHTTPIssuer(t *testing.T) {
 // still works against a plaintext (e.g. Keycloak) discovery endpoint.
 func TestNewOIDCProviderWithContext_DevModeAllowsHTTPIssuer(t *testing.T) {
 	t.Setenv("DEV_MODE", "true")
+	// DEV_MODE opts out of the HTTPS requirement only. Since identity v0.25.0
+	// the DESTINATION rule is a separate control (the egress guard), and the
+	// stub discovery endpoint is on loopback — so this must allow-list it
+	// explicitly, exactly as a dev stack with a container-hosted IdP must.
+	allowLoopbackEgress(t)
 
 	srv := discoveryServer(t)
 	defer srv.Close()
@@ -70,6 +76,46 @@ func TestNewOIDCProviderWithContext_DevModeAllowsHTTPIssuer(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("NewOIDCProviderWithContext in DEV_MODE: %v", err)
+	}
+}
+
+// allowLoopbackEgress points internal/egress at a guard that permits loopback
+// for the duration of one test, restoring the strict default afterwards so a
+// later test cannot inherit the widening.
+func allowLoopbackEgress(t *testing.T) {
+	t.Helper()
+	if err := egress.Configure([]string{"127.0.0.1", "::1"}); err != nil {
+		t.Fatalf("egress.Configure: %v", err)
+	}
+	t.Cleanup(func() { _ = egress.Configure(nil) })
+}
+
+// TestNewOIDCProviderWithContext_EgressGuardBlocksUnlistedInternalIssuer is the
+// counterweight: without the allow-list entry the same DEV_MODE construction is
+// REFUSED, naming the denied destination. This is the v0.25.0 behaviour a
+// deployment feels first, and it is separate from AllowInsecureIssuer — opting
+// out of HTTPS does not opt out of knowing where the traffic goes.
+func TestNewOIDCProviderWithContext_EgressGuardBlocksUnlistedInternalIssuer(t *testing.T) {
+	t.Setenv("DEV_MODE", "true")
+	if err := egress.Configure(nil); err != nil {
+		t.Fatalf("egress.Configure: %v", err)
+	}
+
+	srv := discoveryServer(t)
+	defer srv.Close()
+
+	_, err := NewOIDCProviderWithContext(context.Background(), &config.OIDCConfig{
+		Enabled:      true,
+		IssuerURL:    srv.URL,
+		ClientID:     "client",
+		ClientSecret: "secret",
+		RedirectURL:  "https://app.example/callback",
+	})
+	if err == nil {
+		t.Fatal("an IdP on an internal address must be refused when security.egress.allowlist does not name it")
+	}
+	if !strings.Contains(err.Error(), "egress") {
+		t.Errorf("the refusal must name the egress policy so an operator knows what to configure; got %v", err)
 	}
 }
 
