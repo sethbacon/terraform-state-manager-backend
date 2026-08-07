@@ -334,7 +334,12 @@ type notificationsSMTPInput struct {
 	Username string `json:"username"`
 	Password string `json:"password"`
 	From     string `json:"from"`
-	UseTLS   bool   `json:"use_tls"`
+	// A POINTER so an omitted "use_tls" is distinguishable from an explicit
+	// false. As a plain bool, a full-replace PUT that did not mention the field
+	// decoded to false and silently switched the relay to plaintext. Same
+	// reasoning as Expiry *notificationsExpiryConfigDB and as scim.SCIMUser
+	// .Active, where a partial PUT must not be read as "deprovision".
+	UseTLS *bool `json:"use_tls"`
 }
 
 func (h *NotificationHandlers) smtpResponse(passwordConfigured bool) NotificationsSMTPResponse {
@@ -422,7 +427,9 @@ func (h *NotificationHandlers) PutSMTPConfig() gin.HandlerFunc {
 		dbc.SMTP.Port = input.Port
 		dbc.SMTP.Username = input.Username
 		dbc.SMTP.From = input.From
-		dbc.SMTP.UseTLS = input.UseTLS
+		if input.UseTLS != nil {
+			dbc.SMTP.UseTLS = *input.UseTLS
+		}
 		if input.Password != "" {
 			if !crypto.Available() {
 				c.JSON(http.StatusBadRequest, gin.H{"error": "cannot store password: encryption key not configured (set TSM_ENCRYPTION_KEY)"})
@@ -456,7 +463,9 @@ func (h *NotificationHandlers) PutSMTPConfig() gin.HandlerFunc {
 		h.smtp.From = input.From
 		// One conversion, in the module's own tested helper, rather than a
 		// hand-written conditional per call site.
-		h.smtp.TLSMode = identitymailer.TLSModeForUseTLS(input.UseTLS)
+		if input.UseTLS != nil {
+			h.smtp.TLSMode = identitymailer.TLSModeForUseTLS(*input.UseTLS)
+		}
 		if input.Password != "" {
 			h.smtp.Password = input.Password
 		}
