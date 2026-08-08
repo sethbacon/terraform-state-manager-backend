@@ -1,5 +1,18 @@
 # Changelog
 
+## [3.1.0](https://github.com/sethbacon/terraform-state-manager-backend/compare/v3.0.0...v3.1.0) (2026-08-08)
+
+
+### ⚠ BREAKING CHANGES
+
+* **identity:** three further operator-visible changes ship in 3.1.0, each written up in docs/upgrade-guide.md. (1) Read-then-mutate races on users, organizations, memberships, API keys and OIDC configs now return 404 where they previously returned a success status for a write that changed nothing; repeat DELETEs keep their existing success codes. (2) SMTP configuration carries an explicit TLS mode whose zero value requires TLS, and the mailer refuses credentials over plaintext to a non-local relay; a PUT to the SMTP config endpoint that omits use_tls no longer disables TLS -- an omitted field now leaves the current setting alone. (3) An authority reduction sweeps every API key the principal holds rather than only those stamped with the affected organization, because every key in this application carries the default organization regardless of its owner, so the organization-filtered sweep left the credentials it was meant to retire working.
+* **identity:** Outbound requests to the IdP and to the sibling suite app now go through the shared egress guard, whose default policy denies loopback, RFC1918 and link-local addresses. A deployment whose IdP is internal must set TSM_SECURITY_EGRESS_ALLOWLIST or authentication fails at startup with `egress to "<host>" blocked`. Note this key REPLACES the connectors' built-in default rather than widening it, so any value must re-state the private ranges: TSM_SECURITY_EGRESS_ALLOWLIST=10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,fc00::/7,<idp-host> Omitting them stops every internal state backend resolving. DEV_MODE does not cover this: the scheme rule and the destination rule are separate controls.
+
+### Bug Fixes
+
+* **identity:** announce the operator-visible changes already on main ([#346](https://github.com/sethbacon/terraform-state-manager-backend/issues/346)) ([9914756](https://github.com/sethbacon/terraform-state-manager-backend/commit/99147562596761de18be7fbae86b5a31ccb98060))
+* **identity:** carry the three notices dropped from the 3.1.0 changelog ([#348](https://github.com/sethbacon/terraform-state-manager-backend/issues/348)) ([15e83f1](https://github.com/sethbacon/terraform-state-manager-backend/commit/15e83f1bae3e891fcee80ca80abaed126e0ec477))
+
 ## [3.0.0](https://github.com/sethbacon/terraform-state-manager-backend/compare/v2.7.1...v3.0.0) (2026-08-05)
 
 
