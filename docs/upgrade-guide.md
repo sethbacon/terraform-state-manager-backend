@@ -94,9 +94,72 @@ the old authority, instead of leaving them working:
   **permanent** — a key's secret is displayed once at creation — so a key revoked
   by a role change must be re-created, not recovered.
 
+As of 3.1.0 the key sweep covers **every** key the principal holds, not only the
+keys stamped with the organization whose membership changed. Every API key in
+this application is stamped with the default organization regardless of who owns
+it, so an organization-filtered sweep matched almost nothing and left the very
+credentials it was meant to retire working. Expect a role change to retire more
+keys than the previous release did.
+
 No configuration is involved and nothing needs to be set before rolling: the
 migration is additive and the behaviour is on as soon as the new backend serves.
 Expect a burst of re-logins if you roll during a bulk membership or role change.
+
+## One-time notice: identity traffic is confined to an egress allow-list
+
+Starting with 3.1.0 the requests the shared identity module makes on this app's
+behalf — OIDC discovery, the JWKS fetches that decide which ID tokens are valid,
+the authorization-code token exchange, and the sibling-app manifest poll — go
+through the same egress guard the state-source connectors use. Their default is
+**strict deny**: loopback, RFC1918, link-local, CGNAT and IPv6 ULA are all
+refused, because an IdP is pinned by URL and a deployment whose one is internal
+can say so.
+
+If your IdP or sibling app lives on an internal address (every self-hosted
+Keycloak/ADFS, and every compose stack), set `TSM_SECURITY_EGRESS_ALLOWLIST`
+**before** rolling — otherwise the server fails at startup naming the denied
+endpoint (`egress to "<host>" blocked`). `DEV_MODE` does not cover this: the
+scheme rule and the destination rule are separate controls.
+
+The trap is that this one setting feeds **both** consumers, and setting it
+**replaces** the connectors' built-in private-range default rather than widening
+it. A value added only to admit an internal IdP silently withdraws RFC1918 from
+the state-source connectors, and every internal state backend stops resolving. A
+deployment that needs both must re-state the private ranges:
+
+```
+TSM_SECURITY_EGRESS_ALLOWLIST=10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,fc00::/7,<idp-host>
+```
+
+Prefer the IdP's **hostname** over its CIDR — narrower, and it survives the host
+getting a different address. Deployments whose IdP is public and whose state
+backends are all remote (HCP, S3, Azure Blob, GCS) need no action. See
+[configuration.md](configuration.md).
+
+## One-time notice: read-then-mutate races now answer 404
+
+Requests that read a record and then write it — on users, organizations,
+memberships, API keys and OIDC configs — used to answer with a success status
+when the record vanished between the two steps, reporting a write that never
+happened. From 3.1.0 they answer `404`.
+
+Nothing needs configuring, but a client that treated `2xx` as "the change is
+applied" will now see failures where it previously saw silent no-ops. Repeat
+`DELETE`s are unaffected and keep their existing success codes.
+
+## One-time notice: SMTP carries an explicit TLS mode
+
+SMTP configuration now holds an explicit TLS mode whose **zero value requires
+TLS**, and the mailer refuses to send credentials in the clear to a non-local
+relay. Two consequences:
+
+- A `PUT /api/v1/notifications/smtp-config` that **omits** `use_tls` no longer
+  disables TLS. An omitted field leaves the current setting alone; send
+  `"use_tls": false` to turn it off deliberately. Any automation that PUTs a
+  partial config was previously downgrading the relay on every call.
+- A relay configured with a username/password over plaintext to a non-local host
+  is refused rather than attempted. If you rely on that, either enable TLS on the
+  relay or drop the credentials.
 
 ## Version pinning
 
