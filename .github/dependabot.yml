@@ -25,6 +25,8 @@ updates:
     ignore:
       - dependency-name: "github.com/gin-gonic/gin"
         update-types: ["version-update:semver-major"]
+    cooldown:
+      default-days: 7
 
   # ---------------------------------------------------------------------------
   # Docker base images (backend/Dockerfile: golang builder + alpine runtime)
@@ -45,6 +47,8 @@ updates:
       docker-dependencies:
         patterns:
           - "*"
+    cooldown:
+      default-days: 7
 
   # ---------------------------------------------------------------------------
   # GitHub Actions (SHA-pinned uses: across .github/workflows and .github/actions)
@@ -65,3 +69,5 @@ updates:
       github-actions-dependencies:
         patterns:
           - "*"
+    cooldown:
+      default-days: 7
