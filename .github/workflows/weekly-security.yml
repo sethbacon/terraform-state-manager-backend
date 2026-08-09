@@ -24,7 +24,12 @@ jobs:
     permissions:
       contents: read
       issues: write
-    secrets: inherit
+    # Not `secrets: inherit`, which hands the called workflow EVERY secret this
+    # repository holds regardless of what it uses. ci.yml references exactly one
+    # (GIST_TOKEN, for the coverage badge); GITHUB_TOKEN is ambient and is not
+    # passed through this block.
+    secrets:
+      GIST_TOKEN: ${{ secrets.GIST_TOKEN }}
     uses: ./.github/workflows/ci.yml
 
   # ── OSV Vulnerability Scan ────────────────────────────

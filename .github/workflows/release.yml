@@ -18,6 +18,13 @@ concurrency:
   group: release
   cancel-in-progress: false
 
+permissions:
+  # Least privilege at the workflow level; every job that needs more says so.
+  # This repository's default_workflow_permissions is `write`, so without this
+  # block any job lacking its own `permissions:` silently ran with a read/write
+  # token.
+  contents: read
+
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository_owner }}/terraform-state-manager-backend
@@ -53,7 +60,20 @@ jobs:
   ci:
     name: CI
     needs: guard
-    secrets: inherit
+    # Not `secrets: inherit`, which hands the called workflow EVERY secret this
+    # repository holds regardless of what it uses. ci.yml references exactly one
+    # (GIST_TOKEN, for the coverage badge); GITHUB_TOKEN is ambient and is not
+    # passed through this block.
+    secrets:
+      GIST_TOKEN: ${{ secrets.GIST_TOKEN }}
+    # Explicit, because this job CALLS ci.yml and a reusable-workflow call fails
+    # at STARTUP if the caller grants less than any called job requests. This is
+    # exactly ci.yml's union -- backend-test/docker-build/deployment-validate
+    # need contents:read, gosec needs issues:write to open a findings issue --
+    # and no more, so the workflow-level contents: read below cannot starve it.
+    permissions:
+      contents: read
+      issues: write
     uses: ./.github/workflows/ci.yml
 
   # ── Build binaries + stage GitHub Release assets ─────────────────────────
