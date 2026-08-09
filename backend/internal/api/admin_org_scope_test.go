@@ -96,6 +96,18 @@ func expectGetUserMemberships(mock sqlmock.Sqlmock, targetUserID string, orgIDs 
 	mock.ExpectQuery("FROM organization_members om").WithArgs(targetUserID).WillReturnRows(rows)
 }
 
+// expectCallerAdminIn stubs the caller's OWN membership rows with an
+// admin-granting role template, which is what OrgScopeForUser reads to resolve
+// the caller's scope. expectGetUserMemberships hardcodes a "placeholder" scope
+// that grants nothing, so it cannot be used for the caller side.
+func expectCallerAdminIn(mock sqlmock.Sqlmock, callerID string, orgIDs ...string) {
+	rows := sqlmock.NewRows(userMembershipCols)
+	for _, orgID := range orgIDs {
+		rows.AddRow(orgID, "Org "+orgID, "rt-admin", time.Now(), "admin", "Admin", []byte(`["admin"]`))
+	}
+	mock.ExpectQuery("FROM organization_members om").WithArgs(callerID).WillReturnRows(rows)
+}
+
 func TestRequireOrgScope_AllowsAdminActingOnOwnOrg(t *testing.T) {
 	e := newAdminOrgScopeEnv(t, "caller-1")
 
@@ -322,7 +334,11 @@ func TestRequireSharedOrgAdminWithTargetUser_AllowsWhenCallerAdminsSharedOrg(t *
 	expectGetUserMemberships(e.mock, "target-1", "org-a")
 	// Caller holds admin scope in org-a — a genuine shared-org relationship.
 	expectGetUserScopesForOrg(e.mock, "org-a", "caller-1", `["admin"]`)
-	// The handler itself (GetUserMemberships) re-queries the target's memberships.
+	// The handler resolves the CALLER's scope first (identity #183): it must
+	// only return memberships in organizations the caller actually administers,
+	// not every organization the target belongs to.
+	expectCallerAdminIn(e.mock, "caller-1", "org-a")
+	// Then it re-queries the target's memberships and filters them.
 	expectGetUserMemberships(e.mock, "target-1", "org-a")
 
 	w := e.do(http.MethodGet, "/api/v1/admin/users/target-1/memberships", "")
@@ -357,7 +373,10 @@ func TestRequireSharedOrgAdminWithTargetUser_AllowsWhenTargetHasNoMemberships(t 
 	// pre-provisioned) — nothing cross-tenant to protect, so this must pass
 	// through without ever calling GetUserScopesForOrg.
 	expectGetUserMemberships(e.mock, "target-1")
-	expectGetUserMemberships(e.mock, "target-1") // the handler's own re-query
+	// The handler resolves the caller's scope, then re-queries the target
+	// (identity #183).
+	expectCallerAdminIn(e.mock, "caller-1", "org-a")
+	expectGetUserMemberships(e.mock, "target-1")
 
 	w := e.do(http.MethodGet, "/api/v1/admin/users/target-1/memberships", "")
 	if w.Code != http.StatusOK {
@@ -377,7 +396,11 @@ func TestRequireSharedOrgAdminWithTargetUser_ChecksAllMembershipsUntilMatch(t *t
 	expectGetUserMemberships(e.mock, "target-1", "org-b", "org-c")
 	expectNoMembership(e.mock, "org-b", "caller-1")
 	expectGetUserScopesForOrg(e.mock, "org-c", "caller-1", `["admin"]`)
-	expectGetUserMemberships(e.mock, "target-1", "org-b", "org-c") // handler's own re-query
+	// The handler resolves the caller's scope (org-c only), then re-queries the
+	// target and filters org-b out of the response — the caller administers
+	// nothing there (identity #183).
+	expectCallerAdminIn(e.mock, "caller-1", "org-c")
+	expectGetUserMemberships(e.mock, "target-1", "org-b", "org-c")
 
 	w := e.do(http.MethodGet, "/api/v1/admin/users/target-1/memberships", "")
 	if w.Code != http.StatusOK {
@@ -547,5 +570,82 @@ func TestListUsers_NarrowsToCallerAdminOrgs(t *testing.T) {
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Errorf("queued round-trips did not all run: %v", err)
+	}
+}
+
+// TestGetUserMemberships_OmitsOrgsTheCallerDoesNotAdminister is the disclosure
+// itself (identity #183).
+//
+// requireSharedOrgAdminWithTargetUser proves the caller administers AT LEAST
+// ONE organization the target belongs to. That authorises asking about the
+// user; it does not authorise seeing every organization the user belongs to.
+// Before this, an org-a admin received the target's membership rows for org-b
+// and org-c — organizations the caller belongs to nowhere — including their
+// names, role templates and role-template scopes.
+//
+// The shared module predicted exactly this: store.GetUserMemberships is
+// documented "UNSCOPED BY DESIGN — authority derivation" and says the consumer
+// must guard it when asking about SOMEONE ELSE.
+func TestGetUserMemberships_OmitsOrgsTheCallerDoesNotAdminister(t *testing.T) {
+	e := newAdminOrgScopeEnv(t, "caller-1")
+
+	// The target belongs to three organizations; the caller administers only
+	// org-a. The guard therefore admits the request.
+	expectGetUserMemberships(e.mock, "target-1", "org-a", "org-b", "org-c")
+	expectGetUserScopesForOrg(e.mock, "org-a", "caller-1", `["admin"]`)
+	// Caller scope resolution: admin in org-a only.
+	expectCallerAdminIn(e.mock, "caller-1", "org-a")
+	// The target's rows, which the handler must now filter.
+	expectGetUserMemberships(e.mock, "target-1", "org-a", "org-b", "org-c")
+
+	w := e.do(http.MethodGet, "/api/v1/admin/users/target-1/memberships", "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d (%s), want 200", w.Code, w.Body.String())
+	}
+
+	body := w.Body.String()
+	if !strings.Contains(body, "org-a") {
+		t.Errorf("the caller's own organization is missing from the response: %s", body)
+	}
+	for _, hidden := range []string{"org-b", "org-c"} {
+		if strings.Contains(body, hidden) {
+			t.Errorf("response discloses %s, an organization the caller does not "+
+				"administer: %s", hidden, body)
+		}
+	}
+}
+
+// TestExportUserData_MembershipsAreScopedLikeTheAuditTrail — the GDPR export
+// scoped its audit read (GUARD audit-scope-user-export, #331) with a comment
+// giving exactly this reasoning, then shipped the target's memberships
+// unfiltered in the same document.
+func TestExportUserData_MembershipsAreScopedLikeTheAuditTrail(t *testing.T) {
+	e := newAdminOrgScopeEnv(t, "caller-1")
+
+	// Guard: the target is in org-a and org-b; the caller administers org-a.
+	expectGetUserMemberships(e.mock, "target-1", "org-a", "org-b")
+	expectGetUserScopesForOrg(e.mock, "org-a", "caller-1", `["admin"]`)
+	// callerScopeFor for the export body.
+	expectCallerAdminIn(e.mock, "caller-1", "org-a")
+	e.mock.ExpectQuery("SELECT id, email, name, oidc_sub").WithArgs("target-1", sqlmock.AnyArg()).
+		WillReturnRows(sqlmock.NewRows(idUserCols).
+			AddRow("target-1", "t@example.com", "Target", nil, time.Now(), time.Now()))
+	// The target's memberships, which must now be filtered to org-a.
+	expectGetUserMemberships(e.mock, "target-1", "org-a", "org-b")
+	e.mock.ExpectQuery("SELECT COUNT").WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
+	e.mock.ExpectQuery("FROM audit_logs al").WillReturnRows(sqlmock.NewRows(auditCols))
+
+	w := e.do(http.MethodGet, "/api/v1/admin/users/target-1/export", "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d (%s), want 200", w.Code, w.Body.String())
+	}
+
+	body := w.Body.String()
+	if !strings.Contains(body, "org-a") {
+		t.Errorf("export is missing the caller's own organization: %s", body)
+	}
+	if strings.Contains(body, "org-b") {
+		t.Errorf("GDPR export discloses org-b, which the caller does not administer — "+
+			"the audit trail beside it is scoped and the memberships were not: %s", body)
 	}
 }
