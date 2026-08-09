@@ -39,7 +39,13 @@ func newAdminWriteEnv(t *testing.T) *sourcesEnv {
 	admin.POST("/users", h.CreateUser())
 	admin.PUT("/users/:id", h.UpdateUser())
 	admin.DELETE("/users/:id", h.DeleteUser())
-	admin.GET("/users/:id/memberships", h.GetUserMemberships())
+	// Only the routes whose handlers resolve a CALLER scope get an
+	// authenticated caller here. Setting it router-wide changed behaviour for
+	// unrelated handlers (self-deletion guards and the like), which is its own
+	// kind of wrong. Production puts a real authenticated principal on all of
+	// them; these tests only need the ones under test.
+	authed := func(c *gin.Context) { c.Set("user_id", "caller-1") }
+	admin.GET("/users/:id/memberships", authed, h.GetUserMemberships())
 	admin.GET("/users/:id/export", h.ExportUserData())
 	admin.POST("/users/:id/erase", h.EraseUser())
 	admin.POST("/organizations", h.CreateOrganization())
@@ -144,6 +150,11 @@ var membershipCols = []string{"organization_id", "organization_name", "role_temp
 
 func TestAdminGetUserMemberships(t *testing.T) {
 	e := newAdminWriteEnv(t)
+	// The caller's own memberships, resolving the scope the response is
+	// filtered against (identity #183). Admin in o1, so o1 is visible.
+	e.mock.ExpectQuery("FROM organization_members om").WithArgs("caller-1").
+		WillReturnRows(sqlmock.NewRows(membershipCols).
+			AddRow("o1", "default", "rt-1", time.Now(), "admin", "Admin", []byte(`["admin"]`)))
 	e.mock.ExpectQuery("FROM organization_members om").WithArgs("u1").
 		WillReturnRows(sqlmock.NewRows(membershipCols).
 			AddRow("o1", "default", nil, time.Now(), nil, nil, []byte(`[]`)))

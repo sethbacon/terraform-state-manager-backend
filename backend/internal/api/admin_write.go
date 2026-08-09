@@ -17,6 +17,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	idauth "github.com/sethbacon/terraform-suite-identity/identity/auth"
 	idmodels "github.com/sethbacon/terraform-suite-identity/identity/models"
 	idstore "github.com/sethbacon/terraform-suite-identity/identity/store"
 )
@@ -225,14 +226,52 @@ func (h *AdminHandlers) DeleteUser() gin.HandlerFunc {
 // @Security     BearerAuth
 // @Security     CookieAuth
 // @Router       /admin/users/{id}/memberships [get]
+// membershipsInCallerScope filters a target user's memberships down to the
+// organizations the caller actually administers.
+//
+// requireSharedOrgAdminWithTargetUser proves the caller administers AT LEAST
+// ONE organization the target belongs to. That authorises asking about the
+// user; it does not authorise seeing every organization the user belongs to.
+// Returning the unfiltered list hands an org-A admin the target's membership in
+// orgs B, C and D — organizations the caller belongs to nowhere.
+//
+// The shared module names this explicitly. store.GetUserMemberships is
+// documented "UNSCOPED BY DESIGN — authority derivation": it is what
+// OrgScopeForUser itself reads to work out where a principal may act, so a
+// scope parameter would be circular. Its doc then says the consumer must guard
+// it when asking about SOMEONE ELSE, which is what this does.
+//
+// terraform-registry-backend already filters the equivalent endpoint the same
+// way. Same data, same accessor, guarded in one consumer and not the other.
+func membershipsInCallerScope(scope idstore.OrgScope, memberships []*idmodels.UserMembership) []*idmodels.UserMembership {
+	if scope.IsAllOrganizations() {
+		return memberships
+	}
+	permitted := make([]*idmodels.UserMembership, 0, len(memberships))
+	for _, m := range memberships {
+		if scope.PermitsOrganization(m.OrganizationID) {
+			permitted = append(permitted, m)
+		}
+	}
+	return permitted
+}
+
 func (h *AdminHandlers) GetUserMemberships() gin.HandlerFunc {
 	return func(c *gin.Context) {
+		// GUARD user-memberships-caller-scope (identity #183).
+		scope, err := h.callerScopeFor(c, idauth.ScopeAdmin)
+		if err != nil {
+			serverError(c, err, "failed to resolve caller organizations")
+			return
+		}
 		memberships, err := h.orgRepo.GetUserMemberships(c.Request.Context(), c.Param("id"))
 		if err != nil {
 			serverError(c, err, "failed to load memberships")
 			return
 		}
-		c.JSON(http.StatusOK, gin.H{"memberships": memberships})
+		c.JSON(http.StatusOK, gin.H{
+			"memberships": membershipsInCallerScope(scope, memberships),
+		})
 	}
 }
 
@@ -271,6 +310,10 @@ func (h *AdminHandlers) ExportUserData() gin.HandlerFunc {
 			serverError(c, err, "failed to load memberships")
 			return
 		}
+		// Same narrowing the audit read below already applies, for the same
+		// reason (identity #183). It was applied to the trail and not to the
+		// memberships shipped beside it in the same document.
+		memberships = membershipsInCallerScope(scope, memberships)
 		// Audit entries attributed to the user (capped — exports are not a
 		// general audit-archival mechanism).
 		//
