@@ -62,39 +62,28 @@ func BindChannelTargets(
 		return res, errors.New("maintenance: no token cipher configured (set TSM_ENCRYPTION_KEY)")
 	}
 
-	// Only rows that actually hold a secret. An empty target means "unset" and
-	// is not a migration candidate.
-	rows, err := db.QueryContext(ctx,
-		`SELECT id, encrypted_target FROM notification_channels WHERE encrypted_target <> ''`)
+	// Read the whole candidate set and close the cursor BEFORE any write. The
+	// conversion loop below issues UPDATEs, and holding a result set open across
+	// them keeps a connection pinned for the length of the sweep. Loading first
+	// is also what lets the close be a single deferred call rather than one per
+	// early return.
+	all, err := loadSealedTargets(ctx, db)
 	if err != nil {
-		return res, fmt.Errorf("maintenance: list channels: %w", err)
+		return res, err
 	}
+	res.Total = len(all)
 
-	type pending struct{ id, sealed string }
-	var todo []pending
-
-	for rows.Next() {
-		var id, enc string
-		if err := rows.Scan(&id, &enc); err != nil {
-			rows.Close()
-			return res, fmt.Errorf("maintenance: scan channel: %w", err)
-		}
-		res.Total++
-
-		// Already bound? Cheapest and most reliable check available: try to open
-		// it under its own context. No schema flag can answer this, because the
-		// form is a property of the ciphertext, not of the row.
-		if _, err := tc.OpenWithContext(enc, identitynotify.TargetContext(id)); err == nil {
+	var todo []sealedTarget
+	for _, row := range all {
+		// Already bound? The cheapest and most reliable check available: try to
+		// open it under its own context. No schema flag can answer this, because
+		// the form is a property of the ciphertext, not of the row.
+		if _, err := tc.OpenWithContext(row.sealed, identitynotify.TargetContext(row.id)); err == nil {
 			res.AlreadyBound++
 			continue
 		}
-		todo = append(todo, pending{id: id, sealed: enc})
+		todo = append(todo, row)
 	}
-	if err := rows.Err(); err != nil {
-		rows.Close()
-		return res, fmt.Errorf("maintenance: iterate channels: %w", err)
-	}
-	rows.Close()
 
 	for _, p := range todo {
 		// ReSealWithContext opens through the legacy path (including the
@@ -128,4 +117,40 @@ func BindChannelTargets(
 		return res, fmt.Errorf("%w: %s", ErrUnboundRemain, res)
 	}
 	return res, nil
+}
+
+// sealedTarget is one candidate row: a channel id and the ciphertext stored for
+// it, in whichever form it currently has.
+type sealedTarget struct{ id, sealed string }
+
+// loadSealedTargets reads every channel that actually holds a secret.
+//
+// Split out so the cursor is closed by a single deferred call rather than at
+// each early return -- the previous shape had three explicit Close calls whose
+// errors were discarded implicitly, which gosec flags as G104 and which is a
+// real (if minor) smell: a Close error on a read is worth ignoring, but it
+// should be ignored ON PURPOSE and visibly.
+//
+// An empty encrypted_target means "unset", not "unbound", so it is excluded at
+// the query rather than filtered later; it is not a migration candidate.
+func loadSealedTargets(ctx context.Context, db *sql.DB) ([]sealedTarget, error) {
+	rows, err := db.QueryContext(ctx,
+		`SELECT id, encrypted_target FROM notification_channels WHERE encrypted_target <> ''`)
+	if err != nil {
+		return nil, fmt.Errorf("maintenance: list channels: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []sealedTarget
+	for rows.Next() {
+		var row sealedTarget
+		if err := rows.Scan(&row.id, &row.sealed); err != nil {
+			return nil, fmt.Errorf("maintenance: scan channel: %w", err)
+		}
+		out = append(out, row)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("maintenance: iterate channels: %w", err)
+	}
+	return out, nil
 }
