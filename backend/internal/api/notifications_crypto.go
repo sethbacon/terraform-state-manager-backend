@@ -22,6 +22,16 @@ import (
 // channel-webhook system) is optional, so a deployment with no encryption key
 // configured should simply run with that ONE feature unavailable, not fail to
 // start entirely.
+// BuildIdentityTokenCipher is the exported form, for callers outside this
+// package — currently the bind-targets maintenance command. It deliberately
+// delegates rather than re-deriving: the backfill must use the SAME key material
+// and the SAME parsing as the server, or it cannot open what the server sealed,
+// and a second parser is a second thing to drift (see registry-backend #835 for
+// how that ends).
+func BuildIdentityTokenCipher() (*identitycrypto.TokenCipher, error) {
+	return buildIdentityTokenCipher()
+}
+
 func buildIdentityTokenCipher() (*identitycrypto.TokenCipher, error) {
 	key, err := parseTSMEncryptionKey("TSM_ENCRYPTION_KEY", "ENCRYPTION_KEY")
 	if err != nil {
