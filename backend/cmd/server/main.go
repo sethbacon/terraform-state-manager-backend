@@ -60,6 +60,7 @@ import (
 	"github.com/terraform-state-manager/terraform-state-manager/internal/db"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/db/repositories"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/egress"
+	"github.com/terraform-state-manager/terraform-state-manager/internal/maintenance"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/statesource"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/telemetry"
 )
@@ -99,11 +100,16 @@ func run() error {
 			return fmt.Errorf("usage: %s migrate <up|down>", os.Args[0])
 		}
 		return runMigrations(cfg, os.Args[2])
+	case "bind-targets":
+		// bind-targets [verify] — convert notification-channel targets to the
+		// row-bound ciphertext form, or report how many are still unbound.
+		verify := len(os.Args) > 2 && os.Args[2] == "verify"
+		return runBindTargets(cfg, verify)
 	case "version":
 		fmt.Printf("Terraform State Manager v%s (built %s)\n", Version, BuildDate)
 		return nil
 	default:
-		return fmt.Errorf("unknown command: %s\nAvailable commands: serve, migrate, version", command)
+		return fmt.Errorf("unknown command: %s\nAvailable commands: serve, migrate, bind-targets, version", command)
 	}
 }
 
@@ -435,4 +441,39 @@ func handleSetupToken(repo *repositories.SystemSettingsRepository) error {
 		}
 	}
 	return nil
+}
+
+// runBindTargets converts notification-channel targets to the row-bound
+// ciphertext form (suite-identity #153), or with "verify" reports how many
+// remain unbound without writing anything.
+//
+// Operator-invoked rather than a startup hook: a boot-time sweep runs on every
+// replica at once and would need a cross-replica claim to be safe, and this
+// table is far too small for that to be worth it.
+//
+// The verify form is the exit criterion for the migration. While any row is
+// unbound the notifier must keep accepting unbound ciphertexts, which is the
+// property being retired; once verify reports zero, the read can move to
+// OpenWithContext and the legacy acceptance can be deleted. It exits non-zero
+// when rows remain, so it can gate that change in a script rather than needing
+// someone to read the output.
+func runBindTargets(cfg *config.Config, verify bool) error {
+	database, err := db.Connect(cfg.Database.GetDSN(), cfg.Database.MaxConnections, cfg.Database.MinIdleConnections)
+	if err != nil {
+		return fmt.Errorf("failed to connect to database: %w", err)
+	}
+	defer func() { _ = database.Close() }()
+
+	cipher, err := api.BuildIdentityTokenCipher()
+	if err != nil {
+		return fmt.Errorf("bind-targets needs the encryption key the server uses: %w", err)
+	}
+
+	res, err := maintenance.BindChannelTargets(context.Background(), database, cipher, verify)
+	mode := "convert"
+	if verify {
+		mode = "verify"
+	}
+	slog.Info("bind-targets complete", "mode", mode, "result", res.String())
+	return err
 }
