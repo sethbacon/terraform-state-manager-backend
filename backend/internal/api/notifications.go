@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/mail"
 	"net/url"
@@ -16,6 +17,7 @@ import (
 	identitymailer "github.com/sethbacon/terraform-suite-identity/identity/mailer"
 
 	identitycrypto "github.com/sethbacon/terraform-suite-identity/identity/crypto"
+	identitynotify "github.com/sethbacon/terraform-suite-identity/identity/notify"
 	idstore "github.com/sethbacon/terraform-suite-identity/identity/store"
 
 	"github.com/terraform-state-manager/terraform-state-manager/internal/config"
@@ -171,6 +173,14 @@ func (h *NotificationHandlers) CreateChannel() gin.HandlerFunc {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "cannot store target: encryption key not configured (set TSM_ENCRYPTION_KEY)"})
 			return
 		}
+		// The target is bound to its channel row (suite-identity #153), and the
+		// row id only exists after the INSERT: ChannelRepository.Create uses
+		// `INSERT ... RETURNING` and does not accept a caller-supplied id. So the
+		// row is created with an unbound ciphertext and immediately re-sealed
+		// against its own id.
+		//
+		// The window between the two writes is safe: the notifier reads through
+		// OpenWithContextOrLegacy, so a row in either state delivers.
 		enc, err := h.tokenCipher.Seal(req.Target)
 		if err != nil {
 			serverError(c, err, "failed to encrypt target")
@@ -184,6 +194,20 @@ func (h *NotificationHandlers) CreateChannel() gin.HandlerFunc {
 		if err != nil {
 			serverError(c, err, "failed to create channel")
 			return
+		}
+		// Bind it. A failure here is NOT surfaced to the caller: the channel
+		// exists and delivers either way, and returning an error for a row that
+		// was created would invite a retry that creates a duplicate. The row is
+		// left unbound and a backfill can convert it later.
+		if bound, sealErr := h.tokenCipher.SealWithContext(
+			req.Target, identitynotify.TargetContext(saved.ID),
+		); sealErr == nil {
+			if _, updErr := h.repo.Update(c.Request.Context(), saved.ID, saved.Name, saved.Type,
+				saved.Events, saved.Enabled, bound); updErr != nil {
+				logChannelBindFailure(saved.ID, updErr)
+			}
+		} else {
+			logChannelBindFailure(saved.ID, sealErr)
 		}
 		h.audit.write(c, "notification_channel.create", "notification_channel", saved.ID,
 			map[string]interface{}{"name": saved.Name, "type": saved.Type})
@@ -219,8 +243,12 @@ func (h *NotificationHandlers) UpdateChannel() gin.HandlerFunc {
 				c.JSON(http.StatusBadRequest, gin.H{"error": "cannot store target: encryption key not configured (set TSM_ENCRYPTION_KEY)"})
 				return
 			}
+			// Bound to the row being updated; the id is already in hand here, so
+			// unlike create this is a single write (suite-identity #153).
 			var encErr error
-			if enc, encErr = h.tokenCipher.Seal(req.Target); encErr != nil {
+			if enc, encErr = h.tokenCipher.SealWithContext(
+				req.Target, identitynotify.TargetContext(c.Param("id")),
+			); encErr != nil {
 				serverError(c, encErr, "failed to encrypt target")
 				return
 			}
@@ -645,4 +673,21 @@ func (h *NotificationHandlers) TestEmail() gin.HandlerFunc {
 		}
 		c.JSON(http.StatusOK, gin.H{"success": true, "message": "test email sent"})
 	}
+}
+
+// logChannelBindFailure records a channel whose target was stored but could not
+// be bound to its row (suite-identity #153).
+//
+// Deliberately a log rather than a request failure: the channel exists and
+// delivers, because the notifier reads unbound ciphertexts through
+// OpenWithContextOrLegacy. Failing the request would report an error for a row
+// that WAS created and invite a retry that creates a duplicate.
+//
+// It is logged at WARN rather than swallowed so an operator can find rows that
+// silently stayed unbound -- otherwise the only symptom is a security property
+// quietly not applying to some rows, which is the kind of thing that is never
+// noticed.
+func logChannelBindFailure(channelID string, err error) {
+	slog.Warn("notification channel target stored unbound; row-binding failed",
+		"channel_id", channelID, "error", err)
 }
