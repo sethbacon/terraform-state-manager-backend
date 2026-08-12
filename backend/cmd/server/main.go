@@ -105,11 +105,28 @@ func run() error {
 		// row-bound ciphertext form, or report how many are still unbound.
 		verify := len(os.Args) > 2 && os.Args[2] == "verify"
 		return runBindTargets(cfg, verify)
+	case "rekey-targets":
+		// rekey-targets [verify] — re-encrypt notification-channel targets under
+		// the current TSM_ENCRYPTION_KEY, or report what still needs the
+		// previous one.
+		//
+		// An unrecognised argument is rejected rather than ignored: this
+		// command's default mode REWRITES stored credentials, and silently
+		// reading `verfiy` as "no argument" would run the writing mode on a typo
+		// of the read-only one.
+		verify := false
+		if len(os.Args) > 2 {
+			if os.Args[2] != "verify" {
+				return fmt.Errorf("usage: %s rekey-targets [verify]", os.Args[0])
+			}
+			verify = true
+		}
+		return runRekeyTargets(cfg, verify)
 	case "version":
 		fmt.Printf("Terraform State Manager v%s (built %s)\n", Version, BuildDate)
 		return nil
 	default:
-		return fmt.Errorf("unknown command: %s\nAvailable commands: serve, migrate, bind-targets, version", command)
+		return fmt.Errorf("unknown command: %s\nAvailable commands: serve, migrate, bind-targets, rekey-targets, version", command)
 	}
 }
 
@@ -475,5 +492,44 @@ func runBindTargets(cfg *config.Config, verify bool) error {
 		mode = "verify"
 	}
 	slog.Info("bind-targets complete", "mode", mode, "result", res.String())
+	return err
+}
+
+// runRekeyTargets re-encrypts notification-channel targets under the current
+// TSM_ENCRYPTION_KEY, or with "verify" reports what still requires
+// TSM_ENCRYPTION_KEY_PREVIOUS without writing anything.
+//
+// This is what finishes a key rotation. bind-targets deliberately skips a row it
+// can already open under its own context, and that open falls back to the
+// previous key — so once targets are row-bound, bind-targets re-encrypts nothing
+// and the previous key can never be retired (#364).
+//
+// The verify form is the exit criterion, and the reason it takes the key rather
+// than only the cipher: a cipher with a fallback cannot tell "opened with the
+// current key" from "opened with the previous one", so it cannot answer the
+// question the gate asks. It exits non-zero while any row still needs the
+// previous key, which is what a runbook step gates the deletion on.
+func runRekeyTargets(cfg *config.Config, verify bool) error {
+	database, err := db.Connect(cfg.Database.GetDSN(), cfg.Database.MaxConnections, cfg.Database.MinIdleConnections)
+	if err != nil {
+		return fmt.Errorf("failed to connect to database: %w", err)
+	}
+	defer func() { _ = database.Close() }()
+
+	cipher, err := api.BuildIdentityTokenCipher()
+	if err != nil {
+		return fmt.Errorf("rekey-targets needs the encryption key the server uses: %w", err)
+	}
+	currentKey, err := api.CurrentTSMEncryptionKey()
+	if err != nil {
+		return fmt.Errorf("rekey-targets needs the encryption key the server uses: %w", err)
+	}
+
+	res, err := maintenance.RekeyChannelTargets(context.Background(), database, cipher, currentKey, verify)
+	mode := "re-encrypt"
+	if verify {
+		mode = "verify"
+	}
+	slog.Info("rekey-targets complete", "mode", mode, "result", res.String())
 	return err
 }
