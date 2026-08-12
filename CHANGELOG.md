@@ -1,5 +1,29 @@
 # Changelog
 
+## [3.2.0](https://github.com/sethbacon/terraform-state-manager-backend/compare/v3.1.0...v3.2.0) (2026-08-12)
+
+
+### Features
+
+* **maintenance:** add bind-targets backfill with a verify gate ([#360](https://github.com/sethbacon/terraform-state-manager-backend/issues/360)) ([9dee6ac](https://github.com/sethbacon/terraform-state-manager-backend/commit/9dee6ac9b2ea6e98bf1f517c16e59335d6ec1482))
+* **maintenance:** add rekey-targets so a key rotation can be completed ([#366](https://github.com/sethbacon/terraform-state-manager-backend/issues/366)) ([e46d21d](https://github.com/sethbacon/terraform-state-manager-backend/commit/e46d21deafa2bcc986f920ff16fee578d6c7a601)), closes [#364](https://github.com/sethbacon/terraform-state-manager-backend/issues/364)
+* **notifications:** bind the encrypted channel target to its channel row ([#359](https://github.com/sethbacon/terraform-state-manager-backend/issues/359)) ([8dfe34d](https://github.com/sethbacon/terraform-state-manager-backend/commit/8dfe34d31dc852fb795eaeba09cdbe2a07b17de0)), closes [#153](https://github.com/sethbacon/terraform-state-manager-backend/issues/153)
+
+
+### Bug Fixes
+
+* **admin:** scope a target user's memberships to the caller's organizations ([#357](https://github.com/sethbacon/terraform-state-manager-backend/issues/357))5 ([e295718](https://github.com/sethbacon/terraform-state-manager-backend/commit/e295718c127fa4fb84514211f1b4721631851df2))
+* **ci:** check out the two ADO extension repos the replay gate requires ([#356](https://github.com/sethbacon/terraform-state-manager-backend/issues/356)) ([da6bf20](https://github.com/sethbacon/terraform-state-manager-backend/commit/da6bf20cb6c79f3ace32beeb91597a90cd949cf9))
+* **ci:** point the suite-ui checkout at its new owner ([#363](https://github.com/sethbacon/terraform-state-manager-backend/issues/363)) ([d9ae8c2](https://github.com/sethbacon/terraform-state-manager-backend/commit/d9ae8c2973e540c8e1628b2405781fb43ebcaab1))
+* **ci:** repair the empty `with:` blocks that broke five workflows at startup ([#353](https://github.com/sethbacon/terraform-state-manager-backend/issues/353)) ([7d4be14](https://github.com/sethbacon/terraform-state-manager-backend/commit/7d4be14365ba2d008eec13d723a4905c235a3014))
+* **ci:** spend the replay credential on the one private checkout only ([#365](https://github.com/sethbacon/terraform-state-manager-backend/issues/365)) ([d0f1c98](https://github.com/sethbacon/terraform-state-manager-backend/commit/d0f1c982659ef2fee22fd78bc94082ce3fc4569e))
+* **db:** return the migration helpers' pooled connections instead of leaking them ([#355](https://github.com/sethbacon/terraform-state-manager-backend/issues/355)) ([3b817cb](https://github.com/sethbacon/terraform-state-manager-backend/commit/3b817cb21d9476806421eb5b54841dabe847f876))
+
+
+### Documentation
+
+* document the one-time bind-targets migration for operators ([#362](https://github.com/sethbacon/terraform-state-manager-backend/issues/362)) ([fbd3311](https://github.com/sethbacon/terraform-state-manager-backend/commit/fbd3311cdf9e87492f69230de09103b0c7ad3bef)), closes [#153](https://github.com/sethbacon/terraform-state-manager-backend/issues/153)
+
 ## [3.1.0](https://github.com/sethbacon/terraform-state-manager-backend/compare/v3.0.0...v3.1.0) (2026-08-08)
 
 
