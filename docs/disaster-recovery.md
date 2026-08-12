@@ -27,9 +27,11 @@ repopulates after a sync cycle.
 
 ## Encryption-key custody — read this one
 
-`TSM_ENCRYPTION_KEY` (AES-256-GCM) protects every stored credential. There is
-**no re-encryption tooling**: a database restore is only as good as the key
-that encrypted it.
+`TSM_ENCRYPTION_KEY` (AES-256-GCM) protects every stored credential. A database
+restore is only as good as the key that encrypted it. Re-encryption tooling
+exists for **one** column only — notification-channel targets, via
+`rekey-targets` ([secrets-rotation.md](secrets-rotation.md#rotating-tsm_encryption_key)) —
+and every other credential is still key-or-nothing.
 
 - **Losing the key** does not break login or stored analyses, but every
   source credential, CI token, and notification target becomes
@@ -37,9 +39,13 @@ that encrypted it.
   failures on use).
 - **Escrow the key** in at least two places (e.g. Key Vault + offline vault),
   versioned alongside your DB backups so any restorable dump has its key.
-- **Rotating the key** = generate new key → restart with it → re-enter every
-  stored credential (source edit keeps non-secret config; paste secrets
-  again; same for CI sources/pipeline tokens and notification targets). Plan
+- **Rotating the key** = set the new key **and** `TSM_ENCRYPTION_KEY_PREVIOUS`
+  to the old one → restart → re-enter every stored credential except
+  notification targets (source edit keeps non-secret config; paste secrets
+  again; same for CI sources and pipeline tokens) → run `rekey-targets`, then
+  `rekey-targets verify`, and only drop the previous key once verify exits
+  zero. Full runbook:
+  [secrets-rotation.md](secrets-rotation.md#rotating-tsm_encryption_key). Plan
   it as a maintenance task, not a config flip.
 
 ## Scenario quick-paths

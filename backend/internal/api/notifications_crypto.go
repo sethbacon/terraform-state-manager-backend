@@ -32,6 +32,29 @@ func BuildIdentityTokenCipher() (*identitycrypto.TokenCipher, error) {
 	return buildIdentityTokenCipher()
 }
 
+// CurrentTSMEncryptionKey returns the raw TSM_ENCRYPTION_KEY bytes — the key
+// everything is encrypted WITH, without the previous-key decryption fallback.
+//
+// The rekey-targets maintenance command needs the current key on its own,
+// because a cipher that falls back to the previous key cannot answer the only
+// question that ends a rotation: is this row still encrypted under the key I am
+// about to delete? An open that succeeds through the fallback looks identical to
+// one that did not need it (#364).
+//
+// It reads the key here, beside the cipher constructor and through the same
+// parser, rather than in the command: one key source, so the sweep and the
+// server cannot disagree about what "the current key" is.
+func CurrentTSMEncryptionKey() ([]byte, error) {
+	key, err := parseTSMEncryptionKey("TSM_ENCRYPTION_KEY", "ENCRYPTION_KEY")
+	if err != nil {
+		return nil, err
+	}
+	if key == nil {
+		return nil, fmt.Errorf("encryption key not configured (set TSM_ENCRYPTION_KEY or ENCRYPTION_KEY)")
+	}
+	return key, nil
+}
+
 func buildIdentityTokenCipher() (*identitycrypto.TokenCipher, error) {
 	key, err := parseTSMEncryptionKey("TSM_ENCRYPTION_KEY", "ENCRYPTION_KEY")
 	if err != nil {

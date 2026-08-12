@@ -8,7 +8,7 @@
 | LDAP bind password | Same pattern | |
 | API keys (`tsm_…`) | Self-service rotate in `/admin/apikeys` (0–72h grace overlap) | Update the consumer during the grace window |
 | TLS certs | cert-manager auto-renews (chart); certbot renew (binary) | None |
-| `TSM_ENCRYPTION_KEY` | **Special** — see [disaster-recovery.md](disaster-recovery.md): new key, restart, re-enter all stored credentials | Manual credential re-entry |
+| `TSM_ENCRYPTION_KEY` | **Special** — see [Rotating `TSM_ENCRYPTION_KEY`](#rotating-tsm_encryption_key) below. Notification-channel targets rotate with no downtime and no re-entry (`TSM_ENCRYPTION_KEY_PREVIOUS` + `rekey-targets`); every **other** stored credential must still be re-entered by hand | Partial: one column re-encrypts itself, the rest are manual |
 | `TSM_SUITE_SERVICE_TOKEN` | **Lockstep** — set the SAME new value on **both** this app and the sibling registry (its matching suite service token), then restart both. Rated *High* sensitivity by the [threat model](threat-model.md); see [ADR-001](adr/001-suite-coupling-shared-identity.md) for the coordination hazard | Cross-app reads (`/consumers`, `/audit/ingest`) return 401 until both sides carry the matching token; a leaked-but-unrotated token stays valid on whichever side was not updated |
 
 Kubernetes mechanics: rotating a Key Vault/Secrets Manager value updates the
@@ -53,3 +53,91 @@ runbook step rather than relying on someone reading output. Until it reports
 zero, the service must keep accepting unbound targets — which is the weakness
 being retired — so a future version that requires bound values is only safe to
 adopt once `verify` passes.
+
+`bind-targets` re-encrypts as a **side effect**, and only once. On its first run
+after upgrading, every target is still unbound, so converting it also lands it on
+the current key. After that every target is bound, so `bind-targets` skips them
+all and re-encrypts **nothing** — which is why finishing a key rotation needs
+`rekey-targets` below, not another `bind-targets` run.
+
+## Rotating `TSM_ENCRYPTION_KEY`
+
+Two different things are encrypted at rest, and a rotation treats them
+differently. Read the [coverage table](#what-rekey-targets-verify-does-not-certify)
+before planning the window.
+
+```bash
+# Re-encrypt every notification-channel target under the current key.
+kubectl exec deploy/terraform-state-manager -- /app/terraform-state-manager rekey-targets
+
+# Report what still needs the PREVIOUS key, writing nothing. Exits non-zero
+# while any row does.
+kubectl exec deploy/terraform-state-manager -- /app/terraform-state-manager rekey-targets verify
+```
+
+**The runbook.**
+
+1. Generate the new key (`openssl rand -hex 32`).
+2. Set `TSM_ENCRYPTION_KEY` to the **new** key and `TSM_ENCRYPTION_KEY_PREVIOUS`
+   to the **old** one, in the same secret update.
+3. `kubectl rollout restart deploy -n terraform-state-manager`. Notification
+   delivery keeps working throughout: targets still sealed under the old key open
+   through the previous-key fallback.
+4. Re-enter, by hand, every credential in the
+   [manual re-entry list](#what-rekey-targets-verify-does-not-certify). These are
+   unreadable from step 3 onward — the fallback does not apply to them.
+5. Run `rekey-targets`. Re-run it if it reports any `failed`; it is safe to
+   re-run and safe to interrupt.
+6. Run `rekey-targets verify`. **A zero exit is the gate.** While it exits
+   non-zero, `TSM_ENCRYPTION_KEY_PREVIOUS` must stay in place.
+7. Only once step 6 exits zero: delete `TSM_ENCRYPTION_KEY_PREVIOUS` and restart
+   again. The old key can then be destroyed.
+
+**Why `rekey-targets` exists at all.** `bind-targets` decides a row needs no work
+by opening it under its own context, and that open falls back to the previous
+key. A target that is already bound but still sealed under the old key therefore
+counts as done and is skipped forever, so the previous key can never be dropped
+(#364). `rekey-targets` asks the other question — *is this row readable WITHOUT
+the previous key?* — using a cipher built from `TSM_ENCRYPTION_KEY` alone, which
+is the only thing that can tell the two keys apart.
+
+It also subsumes binding: a target that is both unbound and on the old key
+converges to bound-and-current in one pass, so `bind-targets` is not a
+prerequisite.
+
+**What it will not do.** A target it cannot open at all — corrupt, or bound to a
+*different* channel's row — is reported as `failed`, left exactly as it is, and
+holds `verify` shut. It is never re-sealed into the row it was found in: that
+would mint the binding an attacker who moved the value could not forge, and use
+a routine rotation as the cover. Such a row must be investigated and its target
+re-entered; "one row could not be read" is not evidence that the previous key can
+go.
+
+### What `rekey-targets verify` does not certify
+
+A zero exit means: **no notification-channel target requires
+`TSM_ENCRYPTION_KEY_PREVIOUS` any more.** That is exactly the set of data the
+previous key protects — nothing else in this service ever reads it.
+
+It says nothing about the rest of the estate, because the rest of the estate has
+no dual-key support to retire. `internal/crypto` (the package that seals
+everything below) reads only `TSM_ENCRYPTION_KEY`; there is no previous-key
+fallback, so these values stop decrypting at the **restart in step 3**, not when
+the previous key is deleted.
+
+| Encrypted at rest | Cipher | Rotation behaviour |
+|---|---|---|
+| `notification_channels.encrypted_target` | shared identity `TokenCipher`, bound per row, dual-key | **Covered.** Keeps working across the rotation; `rekey-targets` completes it |
+| `state_sources.encrypted_credentials` | `internal/crypto`, no AAD, single key | Re-enter by hand (Sources → edit → paste the secret again) |
+| `ci_sources.encrypted_token` / `encrypted_client_secret` / `encrypted_app_private_key` | `internal/crypto` | Re-enter by hand |
+| drift `pipeline_connections.encrypted_token` | `internal/crypto` | Re-enter by hand |
+| `oidc_configs.client_secret_encrypted` | `internal/crypto` | Re-enter by hand |
+| `system_settings` → SMTP password | `internal/crypto` | Re-enter by hand |
+
+That table is enforced, not decorative:
+`internal/maintenance/rekey_coverage_test.go` walks the source tree and fails the
+build if an AAD-bound column is neither swept nor explicitly declared unswept
+with a reason, or if a new `internal/crypto.Encrypt` call site appears that this
+list does not mention — checked in both directions, so a stale entry fails too. A
+gate that quietly stopped covering a column would keep reporting success right up
+until an operator deleted the key it was still guarding.
