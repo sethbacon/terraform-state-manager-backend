@@ -67,14 +67,16 @@ jobs:
           # resolved module lockfile, so TSM records which registry modules this
           # state uses and how fresh they are. Both ride the existing jq -n payload
           # via --argjson (never string-concatenated), and are ignored by older servers.
-          MODULE_CALLS=$(jq -c '
-            # Module provenance is PROJECTED, never forwarded. The plan configuration
-            # block carries NO terraform sensitivity metadata, so relaying the raw
-            # module_calls subtree ships expressions.*.constant_value (every literal
-            # module argument, e.g. a hardcoded password) and the nested module tree
-            # in cleartext. Emit only the two fields the server reads, with source
-            # credentials scrubbed and every string capped — matching
-            # moduleCallsPlan() in @4cloudguru/terraform-drift-contract.
+          # ONE scrubber, used by BOTH provenance fields below. They carry the same
+          # addresses — modules.json is terraform's resolved view of the very source
+          # arguments the configuration block reports — so defining the redaction
+          # once is what stops them drifting apart, exactly as the report action
+          # reaches the contract's scrubber from both.
+          #   scrub: URL userinfo (git::https://x-access-token:ghp_…@…) and every
+          #          go-getter query parameter except ref (sshkey=, token=,
+          #          X-Amz-Signature=) are replaced with (redacted).
+          #   cap:   300 code points + U+2026, matching fmt().
+          JQ_REDACT='
             def scrub: sub("://[^/?#@]*@"; "://(redacted)@")
               | . as $s | ($s|index("?")) as $q
               | if $q == null then $s
@@ -83,7 +85,15 @@ jobs:
                         | if $e == null or .[0:$e] == "ref" then . else .[0:$e] + "=(redacted)" end)
                   | join("&"))
                 end;
-            def cap: if (length > 300) then .[0:300] + "…" else . end;
+            def cap: if (length > 300) then .[0:300] + "…" else . end;'
+          MODULE_CALLS=$(jq -c "$JQ_REDACT"'
+            # Module provenance is PROJECTED, never forwarded. The plan configuration
+            # block carries NO terraform sensitivity metadata, so relaying the raw
+            # module_calls subtree ships expressions.*.constant_value (every literal
+            # module argument, e.g. a hardcoded password) and the nested module tree
+            # in cleartext. Emit only the two fields the server reads, with source
+            # credentials scrubbed and every string capped — matching
+            # moduleCallsPlan() in @4cloudguru/terraform-drift-contract.
             def proj: if type == "object" then
                   (if (.source|type) == "string" then {source: (.source|scrub|cap)} else {} end)
                 + (if (.version_constraint|type) == "string" then {version_constraint: (.version_constraint|cap)} else {} end)
@@ -96,7 +106,21 @@ jobs:
                  | if (.m|has($f)) then .t = true else .m[$f] = ($calls[$k]|proj) end)) as $o
             | {configuration:{root_module:({module_calls:$o.m}
                 + (if $o.t then {module_calls_truncated:true} else {} end))}}' plan.json)
-          MODULE_LOCKS=$( [ -f .terraform/modules/modules.json ] && jq -c . .terraform/modules/modules.json || echo null )
+          # The lockfile is PROJECTED too, for the same reason: terraform records
+          # each module's resolved Source verbatim, so a private git module puts the
+          # very credential scrubbed out of module_calls above back into the payload
+          # one line later. Keep only Source + Version (all ParseModuleLocks reads)
+          # and Key (which names the call); Dir — the runner-local checkout path —
+          # and any field a later terraform adds are dropped by construction.
+          # Matches projectModuleLocks() in sethbacon/terraform-drift-report.
+          MODULE_LOCKS=$( [ -f .terraform/modules/modules.json ] \
+            && jq -c "$JQ_REDACT"'
+              {Modules: [ .Modules[]? | (if type == "object" then . else {} end)
+                | (if (.Key|type) == "string" then {Key} else {} end)
+                + (if (.Source|type) == "string" then {Source: (.Source|scrub|cap)} else {} end)
+                + (if (.Version|type) == "string" then {Version} else {} end) ]}' \
+              .terraform/modules/modules.json \
+            || echo null )
           PAYLOAD=$(jq -n \
             --argjson added "$ADD" --argjson changed "$CHG" --argjson destroyed "$DEL" \
             --argjson drifted "$DRIFTED" --argjson summary "$SUMMARY" \
@@ -149,14 +173,16 @@ steps:
       # resolved module lockfile, so TSM records which registry modules this state
       # uses and how fresh they are. Both ride the existing jq -n payload via
       # --argjson (never string-concatenated), and are ignored by older servers.
-      MODULE_CALLS=$(jq -c '
-        # Module provenance is PROJECTED, never forwarded. The plan configuration
-        # block carries NO terraform sensitivity metadata, so relaying the raw
-        # module_calls subtree ships expressions.*.constant_value (every literal
-        # module argument, e.g. a hardcoded password) and the nested module tree
-        # in cleartext. Emit only the two fields the server reads, with source
-        # credentials scrubbed and every string capped — matching
-        # moduleCallsPlan() in @4cloudguru/terraform-drift-contract.
+      # ONE scrubber, used by BOTH provenance fields below. They carry the same
+      # addresses — modules.json is terraform's resolved view of the very source
+      # arguments the configuration block reports — so defining the redaction once
+      # is what stops them drifting apart, exactly as the report task reaches the
+      # contract's scrubber from both.
+      #   scrub: URL userinfo (git::https://x-access-token:ghp_…@…) and every
+      #          go-getter query parameter except ref (sshkey=, token=,
+      #          X-Amz-Signature=) are replaced with (redacted).
+      #   cap:   300 code points + U+2026, matching fmt().
+      JQ_REDACT='
         def scrub: sub("://[^/?#@]*@"; "://(redacted)@")
           | . as $s | ($s|index("?")) as $q
           | if $q == null then $s
@@ -165,7 +191,15 @@ steps:
                     | if $e == null or .[0:$e] == "ref" then . else .[0:$e] + "=(redacted)" end)
               | join("&"))
             end;
-        def cap: if (length > 300) then .[0:300] + "…" else . end;
+        def cap: if (length > 300) then .[0:300] + "…" else . end;'
+      MODULE_CALLS=$(jq -c "$JQ_REDACT"'
+        # Module provenance is PROJECTED, never forwarded. The plan configuration
+        # block carries NO terraform sensitivity metadata, so relaying the raw
+        # module_calls subtree ships expressions.*.constant_value (every literal
+        # module argument, e.g. a hardcoded password) and the nested module tree
+        # in cleartext. Emit only the two fields the server reads, with source
+        # credentials scrubbed and every string capped — matching
+        # moduleCallsPlan() in @4cloudguru/terraform-drift-contract.
         def proj: if type == "object" then
               (if (.source|type) == "string" then {source: (.source|scrub|cap)} else {} end)
             + (if (.version_constraint|type) == "string" then {version_constraint: (.version_constraint|cap)} else {} end)
@@ -178,7 +212,21 @@ steps:
              | if (.m|has($f)) then .t = true else .m[$f] = ($calls[$k]|proj) end)) as $o
         | {configuration:{root_module:({module_calls:$o.m}
             + (if $o.t then {module_calls_truncated:true} else {} end))}}' plan.json)
-      MODULE_LOCKS=$( [ -f .terraform/modules/modules.json ] && jq -c . .terraform/modules/modules.json || echo null )
+      # The lockfile is PROJECTED too, for the same reason: terraform records each
+      # module's resolved Source verbatim, so a private git module puts the very
+      # credential scrubbed out of module_calls above back into the payload one
+      # line later. Keep only Source + Version (all ParseModuleLocks reads) and Key
+      # (which names the call); Dir — the runner-local checkout path — and any
+      # field a later terraform adds are dropped by construction. Matches
+      # projectModuleLocks() in sethbacon/terraform-drift-report.
+      MODULE_LOCKS=$( [ -f .terraform/modules/modules.json ] \
+        && jq -c "$JQ_REDACT"'
+          {Modules: [ .Modules[]? | (if type == "object" then . else {} end)
+            | (if (.Key|type) == "string" then {Key} else {} end)
+            + (if (.Source|type) == "string" then {Source: (.Source|scrub|cap)} else {} end)
+            + (if (.Version|type) == "string" then {Version} else {} end) ]}' \
+          .terraform/modules/modules.json \
+        || echo null )
       PAYLOAD=$(jq -n \
         --argjson added "$ADD" --argjson changed "$CHG" --argjson destroyed "$DEL" \
         --argjson drifted "$DRIFTED" --argjson summary "$SUMMARY" \

@@ -12,6 +12,8 @@ import (
 	"testing"
 
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
+
+	"github.com/terraform-state-manager/terraform-state-manager/internal/services/driftingest"
 )
 
 // TestDriftWorkflowTemplates_CaptureModuleProvenance guards that BOTH dispatched
@@ -201,18 +203,68 @@ func TestWorkflowTemplates_MaskCallbackToken(t *testing.T) {
 	}
 }
 
-// moduleCallsBlock extracts the shipped `MODULE_CALLS=$(jq -c '…' plan.json)`
-// assignment verbatim from a dispatched template, so the tests below exercise
-// the exact text a runner executes rather than a copy that can drift from it.
-var moduleCallsBlockRe = regexp.MustCompile(`(?s)(MODULE_CALLS=\$\(jq -c '.*?' plan\.json\))`)
+// The shipped provenance assignments, matched verbatim in the template text: the
+// shared JQ_REDACT definitions and each of the two fields that use them.
+var (
+	jqRedactBlockRe    = regexp.MustCompile(`(?s)(JQ_REDACT='.*?')`)
+	moduleCallsBlockRe = regexp.MustCompile(`(?s)(MODULE_CALLS=\$\(jq -c "\$JQ_REDACT".*?' plan\.json\))`)
+	moduleLocksBlockRe = regexp.MustCompile(`(?s)(MODULE_LOCKS=\$\(.*?echo null \))`)
+)
+
+// shippedBlock extracts the shared jq redaction definitions plus one provenance
+// assignment verbatim from a dispatched template, so the tests below exercise the
+// exact text a runner executes rather than a copy that can drift from it. Both
+// fields are scrubbed by the SAME JQ_REDACT block, which is why it is prepended
+// rather than restated here.
+func shippedBlock(t *testing.T, tmpl string, re *regexp.Regexp, what string) string {
+	t.Helper()
+	defs := jqRedactBlockRe.FindStringSubmatch(tmpl)
+	if defs == nil {
+		t.Fatal("template has no JQ_REDACT='…' definitions")
+	}
+	m := re.FindStringSubmatch(tmpl)
+	if m == nil {
+		t.Fatalf("template has no %s assignment", what)
+	}
+	return defs[1] + "\n" + m[1]
+}
 
 func moduleCallsBlock(t *testing.T, tmpl string) string {
 	t.Helper()
-	m := moduleCallsBlockRe.FindStringSubmatch(tmpl)
-	if m == nil {
-		t.Fatal("template has no MODULE_CALLS=$(jq …) assignment")
+	return shippedBlock(t, tmpl, moduleCallsBlockRe, "MODULE_CALLS=$(jq …)")
+}
+
+func moduleLocksBlock(t *testing.T, tmpl string) string {
+	t.Helper()
+	return shippedBlock(t, tmpl, moduleLocksBlockRe, "MODULE_LOCKS=$(…)")
+}
+
+// runShippedBlock runs an extracted assignment under bash in dir and returns the
+// value it assigned to varName.
+func runShippedBlock(t *testing.T, dir, jq, block, varName string) string {
+	t.Helper()
+	cmd := exec.Command("bash", "-c", block+"\nprintf '%s' \"$"+varName+"\"")
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(), "PATH="+filepath.Dir(jq)+string(os.PathListSeparator)+os.Getenv("PATH"))
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("running the shipped block failed: %v\n%s", err, out)
 	}
-	return m[1]
+	return string(out)
+}
+
+// requireJQ resolves jq, skipping locally but failing in CI (ubuntu-latest ships
+// jq, so a miss there means the guard went inert).
+func requireJQ(t *testing.T) string {
+	t.Helper()
+	jq, err := exec.LookPath("jq")
+	if err != nil {
+		if os.Getenv("CI") != "" {
+			t.Fatalf("jq is required to verify the dispatched templates in CI: %v", err)
+		}
+		t.Skipf("jq not installed: %v", err)
+	}
+	return jq
 }
 
 // TestDriftWorkflowTemplates_ProjectModuleCalls guards the redaction half of the
@@ -238,14 +290,7 @@ func TestDriftWorkflowTemplates_ProjectModuleCalls(t *testing.T) {
 		}
 	}
 
-	jq, err := exec.LookPath("jq")
-	if err != nil {
-		// ubuntu-latest ships jq, so a miss in CI means the guard went inert.
-		if os.Getenv("CI") != "" {
-			t.Fatalf("jq is required to verify the dispatched templates in CI: %v", err)
-		}
-		t.Skipf("jq not installed: %v", err)
-	}
+	jq := requireJQ(t)
 
 	// One plan carrying a credential in every place the raw subtree used to leak
 	// it: URL userinfo, credential-bearing query parameters, a literal module
@@ -266,14 +311,7 @@ func TestDriftWorkflowTemplates_ProjectModuleCalls(t *testing.T) {
 			if err := os.WriteFile(filepath.Join(dir, "plan.json"), []byte(plan), 0o600); err != nil {
 				t.Fatalf("write plan: %v", err)
 			}
-			cmd := exec.Command("bash", "-c", moduleCallsBlock(t, tmpl)+"\nprintf '%s' \"$MODULE_CALLS\"")
-			cmd.Dir = dir
-			cmd.Env = append(os.Environ(), "PATH="+filepath.Dir(jq)+string(os.PathListSeparator)+os.Getenv("PATH"))
-			out, err := cmd.CombinedOutput()
-			if err != nil {
-				t.Fatalf("running the shipped block failed: %v\n%s", err, out)
-			}
-			got := string(out)
+			got := runShippedBlock(t, dir, jq, moduleCallsBlock(t, tmpl), "MODULE_CALLS")
 			for _, s := range secrets {
 				if strings.Contains(got, s) {
 					t.Errorf("the dispatched payload leaks %q: %s", s, got)
@@ -301,13 +339,7 @@ func TestDriftWorkflowTemplates_ProjectModuleCalls(t *testing.T) {
 // with the U+2026 marker — so a pathological configuration cannot inflate the
 // callback body.
 func TestDriftWorkflowTemplates_ModuleCallsBounded(t *testing.T) {
-	jq, err := exec.LookPath("jq")
-	if err != nil {
-		if os.Getenv("CI") != "" {
-			t.Fatalf("jq is required to verify the dispatched templates in CI: %v", err)
-		}
-		t.Skipf("jq not installed: %v", err)
-	}
+	jq := requireJQ(t)
 
 	calls := make([]string, 0, 150)
 	for i := 0; i < 150; i++ {
@@ -323,13 +355,7 @@ func TestDriftWorkflowTemplates_ModuleCallsBounded(t *testing.T) {
 			if err := os.WriteFile(filepath.Join(dir, "plan.json"), []byte(plan), 0o600); err != nil {
 				t.Fatalf("write plan: %v", err)
 			}
-			cmd := exec.Command("bash", "-c", moduleCallsBlock(t, tmpl)+"\nprintf '%s' \"$MODULE_CALLS\"")
-			cmd.Dir = dir
-			cmd.Env = append(os.Environ(), "PATH="+filepath.Dir(jq)+string(os.PathListSeparator)+os.Getenv("PATH"))
-			out, err := cmd.CombinedOutput()
-			if err != nil {
-				t.Fatalf("running the shipped block failed: %v\n%s", err, out)
-			}
+			out := []byte(runShippedBlock(t, dir, jq, moduleCallsBlock(t, tmpl), "MODULE_CALLS"))
 			var got struct {
 				Configuration struct {
 					RootModule struct {
@@ -357,6 +383,112 @@ func TestDriftWorkflowTemplates_ModuleCallsBounded(t *testing.T) {
 						t.Errorf("%s.%s is %d code points, want <= 301 (300 + the U+2026 marker)", name, field, n)
 					}
 				}
+			}
+		})
+	}
+}
+
+// TestDriftWorkflowTemplates_ProjectModuleLocks guards the sibling of the
+// module_calls defect above, four lines below it in both templates (#376).
+//
+// .terraform/modules/modules.json is terraform's RESOLVED view of the very same
+// module source addresses the configuration block reports, so the credential
+// scrubbed out of module_calls — git::https://x-access-token:ghp_…@… — was
+// forwarded verbatim one line later by `jq -c .` on the manifest, together with
+// Dir (the runner-local checkout path) and any member a later terraform adds.
+//
+// Both templates must PROJECT the manifest to the provenance the server reads:
+// Source + Version (driftingest.ParseModuleLocks) plus Key, which names the call.
+// The projection is byte-identical to projectModuleLocks() in
+// sethbacon/terraform-drift-report, which the suite-profile templates get via the
+// report action/task — the same addresses must redact the same way on both paths.
+func TestDriftWorkflowTemplates_ProjectModuleLocks(t *testing.T) {
+	// The verbatim forward, as it shipped before the fix. Neither template may
+	// reintroduce it.
+	const rawForward = "jq -c . .terraform/modules/modules.json"
+	for name, tmpl := range map[string]string{"github": githubDriftWorkflow, "azure": azureDriftPipeline} {
+		if strings.Contains(tmpl, rawForward) {
+			t.Errorf("%s template forwards the RAW module lockfile; it must project instead", name)
+		}
+	}
+
+	jq := requireJQ(t)
+
+	// One manifest carrying a credential in every shape a go-getter source can
+	// hold it, alongside the entries whose provenance must survive.
+	const manifest = `{"Modules":[
+	  {"Key":"priv","Source":"git::https://x-access-token:ghp_LOCKFILESECRET@github.com/org/mod.git?ref=v2.0.0&sshkey=B64PRIVKEY&token=TTT","Version":"","Dir":".terraform/modules/priv"},
+	  {"Key":"bare","Source":"git::https://ghp_BARETOKEN@github.com/org/m.git","Version":"1.0.0","Dir":"d"},
+	  {"Key":"s3","Source":"s3::https://s3.amazonaws.com/b/m.zip?X-Amz-Signature=SIGSECRET","Version":"3.0.0","Dir":"d"},
+	  {"Key":"vpc","Source":"acme/vpc/aws","Version":"5.3.0","Dir":"/home/runner/work/RUNNER-PATH-LEAK"},
+	  {"Key":"typed","Source":404,"Version":true,"Dir":"d"},
+	  ["not","an","object"], "a string", null]}`
+	secrets := []string{
+		"ghp_LOCKFILESECRET", "B64PRIVKEY", "TTT", "ghp_BARETOKEN", "SIGSECRET",
+		"RUNNER-PATH-LEAK", "Dir", // Dir is dropped by construction, key included
+	}
+
+	for name, tmpl := range map[string]string{"github": githubDriftWorkflow, "azure": azureDriftPipeline} {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := os.MkdirAll(filepath.Join(dir, ".terraform", "modules"), 0o700); err != nil {
+				t.Fatalf("mkdir: %v", err)
+			}
+			manifestPath := filepath.Join(dir, ".terraform", "modules", "modules.json")
+			if err := os.WriteFile(manifestPath, []byte(manifest), 0o600); err != nil {
+				t.Fatalf("write manifest: %v", err)
+			}
+			block := moduleLocksBlock(t, tmpl)
+			got := runShippedBlock(t, dir, jq, block, "MODULE_LOCKS")
+			for _, s := range secrets {
+				if strings.Contains(got, s) {
+					t.Errorf("the dispatched payload leaks %q: %s", s, got)
+				}
+			}
+			// Provenance that must survive: the scrubbed source, the ref selector
+			// (the one provenance-bearing query parameter), Key and Version.
+			for _, want := range []string{
+				`{"Key":"priv","Source":"git::https://(redacted)@github.com/org/mod.git?ref=v2.0.0&sshkey=(redacted)&token=(redacted)","Version":""}`,
+				`{"Key":"bare","Source":"git::https://(redacted)@github.com/org/m.git","Version":"1.0.0"}`,
+				`{"Key":"s3","Source":"s3::https://s3.amazonaws.com/b/m.zip?X-Amz-Signature=(redacted)","Version":"3.0.0"}`,
+				`{"Key":"vpc","Source":"acme/vpc/aws","Version":"5.3.0"}`,
+				`{"Key":"typed"}`, // non-string members are dropped, never coerced
+				`{},{},{}`,        // a non-object entry projects to {}, never a value
+			} {
+				if !strings.Contains(got, want) {
+					t.Errorf("projected lockfile missing %s\ngot: %s", want, got)
+				}
+			}
+			// The projection must still satisfy its only consumer: the registry
+			// module's locked version has to survive the round trip.
+			if locks := driftingest.ParseModuleLocks([]byte(got)); locks["registry.terraform.io|acme/vpc/aws"] != "5.3.0" {
+				t.Errorf("ParseModuleLocks lost the locked version after projection: %v", locks)
+			}
+
+			// A source longer than the cap is truncated like every other emitted
+			// string, so a pathological manifest cannot inflate the callback body.
+			long := `{"Modules":[{"Key":"long","Source":"https://example.com/` + strings.Repeat("d", 400) + `","Version":"1.0.0"}]}`
+			if err := os.WriteFile(manifestPath, []byte(long), 0o600); err != nil {
+				t.Fatalf("write manifest: %v", err)
+			}
+			var capped struct {
+				Modules []struct{ Source string }
+			}
+			out := runShippedBlock(t, dir, jq, block, "MODULE_LOCKS")
+			if err := json.Unmarshal([]byte(out), &capped); err != nil {
+				t.Fatalf("payload is not valid JSON: %v\n%s", err, out)
+			}
+			if n := len([]rune(capped.Modules[0].Source)); n != 301 {
+				t.Errorf("Source is %d code points, want 301 (300 + the U+2026 marker)", n)
+			}
+
+			// Absent manifest: still exactly `null`, so --argjson stays valid and
+			// the server records provenance without locked versions, as before.
+			if err := os.Remove(manifestPath); err != nil {
+				t.Fatalf("remove manifest: %v", err)
+			}
+			if out := runShippedBlock(t, dir, jq, block, "MODULE_LOCKS"); out != "null" {
+				t.Errorf("absent manifest yielded %q, want null", out)
 			}
 		})
 	}

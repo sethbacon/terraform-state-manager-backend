@@ -7,7 +7,7 @@ import (
 )
 
 func TestSummarize_CountsMatchDispatchSummarizer(t *testing.T) {
-	// Semantics contract (reconciled with drift_summary.py): counts are action
+	// Semantics contract (reconciled with the canonical summarize.ts): counts are action
 	// MEMBERSHIP (a replacement counts as added AND destroyed); summary excludes
 	// changes whose actions are exactly ["no-op"] OR ["read"].
 	planJSON := `{
@@ -67,7 +67,7 @@ func TestSummarize_NoOpReadAndNilPlans(t *testing.T) {
 		t.Errorf("nil plan must yield an empty, clean result: %+v", res)
 	}
 
-	// A read-only refresh is now skipped entirely (matching drift_summary.py):
+	// A read-only refresh is now skipped entirely (matching the contract):
 	// empty summary, not drifted.
 	res = Summarize(&Plan{ResourceChanges: []ResourceChange{
 		{Address: "data.aws_ami.x", Change: Change{Actions: []string{"read"}}},
