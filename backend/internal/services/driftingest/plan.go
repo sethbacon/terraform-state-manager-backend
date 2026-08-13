@@ -53,9 +53,10 @@ type Change struct {
 }
 
 // AttrChange is one changed top-level attribute of a resource. Before/After are
-// nil (rendered as JSON null) for absent/None values; a value the plan marks
-// sensitive is replaced with the literal "(sensitive)" before formatting, so a
-// secret never reaches the formatter or the stored summary.
+// nil (rendered as JSON null) for absent/None values; an attribute the plan
+// marks sensitive on EITHER mirror has BOTH sides replaced with the literal
+// "(sensitive)" before formatting, so a secret never reaches the formatter or
+// the stored summary.
 type AttrChange struct {
 	Name   string  `json:"name"`
 	Before *string `json:"before"`
@@ -134,9 +135,10 @@ func hasAction(actions []string, action string) bool {
 
 // changedAttrs returns the top-level attributes whose value differs between
 // before and after, but only when both are JSON objects (the in-place update /
-// replace case). Each value is masked to "(sensitive)" when before_sensitive /
-// after_sensitive marks it, otherwise formatted with fmtVal. Mirrors the loop
-// in drift_summary.py.
+// replace case). An attribute is masked to "(sensitive)" on BOTH sides when
+// EITHER before_sensitive or after_sensitive marks it; otherwise both sides are
+// formatted with fmtVal. Mirrors the loop in the canonical
+// @4cloudguru/terraform-drift-contract summarize().
 func changedAttrs(ch Change) []AttrChange {
 	before, bok := asObject(ch.Before)
 	after, aok := asObject(ch.After)
@@ -148,10 +150,23 @@ func changedAttrs(ch Change) []AttrChange {
 		if jsonEqual(before[k], after[k]) {
 			continue
 		}
+		// Union, not per-side: terraform applies a config-derived mark (a
+		// `sensitive = true` variable, sensitive(), a sensitive module output) to
+		// the PLANNED value only — it is never persisted to state — so a
+		// credential routinely arrives marked on exactly one side. Masking each
+		// side against its own mirror emitted the other side in cleartext (the
+		// `~ user_data = "old-plaintext" -> (sensitive value)` shape). Over-masking
+		// a symmetric pair costs nothing: both sides already render "(sensitive)".
+		//
+		// When NEITHER mirror is present the value is emitted unmasked. That is
+		// deliberate and fail-open (see the contract's SECURITY.md): plans without
+		// sensitivity metadata are common, and masking them would mask every
+		// attribute of every such plan.
+		sensitive := isSens(ch.BeforeSensitive, k) || isSens(ch.AfterSensitive, k)
 		attrs = append(attrs, AttrChange{
 			Name:   k,
-			Before: maskOrFmt(ch.BeforeSensitive, k, before[k]),
-			After:  maskOrFmt(ch.AfterSensitive, k, after[k]),
+			Before: maskOrFmt(sensitive, before[k]),
+			After:  maskOrFmt(sensitive, after[k]),
 		})
 	}
 	if len(attrs) == 0 {
@@ -160,8 +175,10 @@ func changedAttrs(ch Change) []AttrChange {
 	return attrs
 }
 
-func maskOrFmt(sens json.RawMessage, key string, val json.RawMessage) *string {
-	if isSens(sens, key) {
+// maskOrFmt yields the literal "(sensitive)" when the attribute is masked (so a
+// secret never reaches the formatter), otherwise the formatted value.
+func maskOrFmt(sensitive bool, val json.RawMessage) *string {
+	if sensitive {
 		s := "(sensitive)"
 		return &s
 	}

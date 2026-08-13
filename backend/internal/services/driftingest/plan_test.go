@@ -2,6 +2,7 @@ package driftingest
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -360,4 +361,113 @@ func TestModuleRefs_WithLocks(t *testing.T) {
 	if r := got["hashicorp/consul/aws"]; r.ModuleVersion != nil {
 		t.Errorf("module absent from the manifest must stay version-nil, got %v", *r.ModuleVersion)
 	}
+}
+
+// TestChangedAttrs_SensitivityUnion is the guard for the redaction gap fixed
+// alongside @4cloudguru/terraform-drift-contract v1.1.0: an attribute marked
+// sensitive on EITHER before_sensitive or after_sensitive is masked on BOTH
+// sides. Masking each side against its own mirror emitted the unmarked side in
+// cleartext, and a one-sided mark is the ROUTINE shape — terraform applies a
+// config-derived mark (a `sensitive = true` variable, sensitive(), a sensitive
+// module output) to the planned value only and never persists it to state.
+//
+// Rows were verified by inverting the guard (restoring the per-side masking):
+// every union row below fails, and no fail-open row does.
+func TestChangedAttrs_SensitivityUnion(t *testing.T) {
+	const (
+		oldSecret = "old-plaintext-SECRET"
+		newSecret = "new-plaintext-SECRET"
+		masked    = "(sensitive)"
+	)
+	cases := []struct {
+		name       string
+		beforeSens string
+		afterSens  string
+		wantBefore string
+		wantAfter  string
+	}{
+		// --- the fix: a one-sided mark masks both sides -----------------------
+		{"marked on before only", `{"k":true}`, `{"k":false}`, masked, masked},
+		{"marked on after only", `{"k":false}`, `{"k":true}`, masked, masked},
+		{"marked on both (unchanged behaviour)", `{"k":true}`, `{"k":true}`, masked, masked},
+		{"before mirror absent, after marks", ``, `{"k":true}`, masked, masked},
+		{"after mirror absent, before marks", `{"k":true}`, ``, masked, masked},
+		{"nested non-empty dict on before only", `{"k":{"n":true}}`, `{"k":{}}`, masked, masked},
+		{"nested non-empty list on after only", `{"k":[]}`, `{"k":[true]}`, masked, masked},
+		{"whole-value mark on before only", `true`, `false`, masked, masked},
+		{"whole-value mark on after only", `false`, `true`, masked, masked},
+
+		// --- deliberately fail-open: these must NOT start masking -------------
+		// Neither mirror present: emitted as-is. Masking here would mask every
+		// attribute of every plan that carries no sensitivity metadata, and would
+		// diverge from the contract (see its SECURITY.md).
+		{"neither mirror present", ``, ``, oldSecret, newSecret},
+		{"mirrors present but key unmarked", `{"other":true}`, `{"other":true}`, oldSecret, newSecret},
+		{"both mirrors explicitly false", `{"k":false}`, `{"k":false}`, oldSecret, newSecret},
+		{"empty nested dict on both (falsey)", `{"k":{}}`, `{"k":{}}`, oldSecret, newSecret},
+		{"whole-value mark false on both", `false`, `false`, oldSecret, newSecret},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			ch := Change{
+				Actions: []string{"update"},
+				Before:  json.RawMessage(`{"k":"` + oldSecret + `"}`),
+				After:   json.RawMessage(`{"k":"` + newSecret + `"}`),
+			}
+			if c.beforeSens != "" {
+				ch.BeforeSensitive = json.RawMessage(c.beforeSens)
+			}
+			if c.afterSens != "" {
+				ch.AfterSensitive = json.RawMessage(c.afterSens)
+			}
+			attrs := changedAttrs(ch)
+			if len(attrs) != 1 || attrs[0].Name != "k" {
+				t.Fatalf("attrs = %+v, want exactly one attr named k", attrs)
+			}
+			if attrs[0].Before == nil || *attrs[0].Before != c.wantBefore {
+				t.Errorf("before = %v, want %q", deref(attrs[0].Before), c.wantBefore)
+			}
+			if attrs[0].After == nil || *attrs[0].After != c.wantAfter {
+				t.Errorf("after = %v, want %q", deref(attrs[0].After), c.wantAfter)
+			}
+		})
+	}
+}
+
+// TestChangedAttrs_MaskingHappensBeforeFmt proves a masked value is replaced
+// wholesale rather than formatted: an oversized secret marked on one side only
+// emits the bare literal, with no truncation marker and no fragment of the
+// secret anywhere in the serialized summary.
+func TestChangedAttrs_MaskingHappensBeforeFmt(t *testing.T) {
+	secret := "S3CRET-" + strings.Repeat("x", 400) // > the 300-code-point cap
+	plan := &Plan{ResourceChanges: []ResourceChange{{
+		Address: "aws_instance.a",
+		Change: Change{
+			Actions:         []string{"update"},
+			Before:          json.RawMessage(`{"user_data":"` + secret + `"}`),
+			After:           json.RawMessage(`{"user_data":"` + secret + `Z"}`),
+			BeforeSensitive: json.RawMessage(`{"user_data":true}`), // marked on ONE side
+			AfterSensitive:  json.RawMessage(`{}`),
+		},
+	}}}
+	out, err := json.Marshal(Summarize(plan).Summary)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if strings.Contains(string(out), "S3CRET") {
+		t.Fatalf("secret reached the summary: %s", out)
+	}
+	if strings.Contains(string(out), "…") {
+		t.Errorf("masked value must not be truncated (masking precedes fmt): %s", out)
+	}
+	if want := `"before":"(sensitive)","after":"(sensitive)"`; !strings.Contains(string(out), want) {
+		t.Errorf("both sides must be masked, got %s", out)
+	}
+}
+
+func deref(s *string) string {
+	if s == nil {
+		return "<nil>"
+	}
+	return *s
 }
