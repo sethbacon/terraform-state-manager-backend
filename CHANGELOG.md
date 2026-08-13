@@ -1,5 +1,13 @@
 # Changelog
 
+## [3.3.0](https://github.com/sethbacon/terraform-state-manager-backend/compare/v3.2.0...v3.3.0) (2026-08-13)
+
+
+### Bug Fixes
+
+* **security:** mask on either sensitivity mirror, project dispatched module_calls ([#374](https://github.com/sethbacon/terraform-state-manager-backend/issues/374)) ([e2dfb63](https://github.com/sethbacon/terraform-state-manager-backend/commit/e2dfb6392ba313f74acf056ed8425f5d8b33a72c))
+* **security:** project the dispatched module lockfile, not just module_calls ([#377](https://github.com/sethbacon/terraform-state-manager-backend/issues/377)) ([095eaca](https://github.com/sethbacon/terraform-state-manager-backend/commit/095eacacc59311831f55a4e63faedd920ffdcbe5)), closes [#376](https://github.com/sethbacon/terraform-state-manager-backend/issues/376)
+
 ## [3.2.0](https://github.com/sethbacon/terraform-state-manager-backend/compare/v3.1.0...v3.2.0) (2026-08-12)
 
 
