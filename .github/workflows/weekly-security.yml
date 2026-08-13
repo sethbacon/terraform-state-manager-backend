@@ -57,7 +57,7 @@ jobs:
 
       - name: Create issue on new vulnerabilities
         if: steps.osv.outcome == 'failure'
-        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         with:
           script: |
             const marker = 'OSV-Scanner: vulnerabilities found';
@@ -117,7 +117,7 @@ jobs:
 
       - name: Create issue on new vulnerabilities
         if: steps.govulncheck.outcome == 'failure'
-        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         with:
           script: |
             const marker = 'govulncheck: reachable vulnerabilities found';
@@ -186,7 +186,7 @@ jobs:
       issues: write
     steps:
       - name: Create failure issue
-        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         with:
           script: |
             const title = `Weekly security scan failed — ${new Date().toISOString().slice(0,10)}`;
