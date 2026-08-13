@@ -1,7 +1,13 @@
 package api
 
 import (
+	"encoding/json"
+	"fmt"
 	"net/http"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -15,9 +21,9 @@ import (
 func TestDriftWorkflowTemplates_CaptureModuleProvenance(t *testing.T) {
 	templates := map[string]string{"github": githubDriftWorkflow, "azure": azureDriftPipeline}
 	wants := []string{
-		".terraform/modules/modules.json",                       // read the resolved module lockfile
-		"module_calls:(.configuration.root_module.module_calls", // extract the module calls subset
-		`--argjson plan "$MODULE_CALLS"`,                        // injected, never concatenated
+		".terraform/modules/modules.json", // read the resolved module lockfile
+		"{module_calls:$o.m}",             // the PROJECTED calls (see the redaction test below)
+		`--argjson plan "$MODULE_CALLS"`,  // injected, never concatenated
 		`--argjson module_locks "$MODULE_LOCKS"`,
 		"plan:$plan, module_locks:$module_locks", // present in the posted object
 	}
@@ -192,5 +198,166 @@ func TestWorkflowTemplates_MaskCallbackToken(t *testing.T) {
 		if !strings.Contains(tmpl, "issecret=true]$CALLBACK_TOKEN") {
 			t.Errorf("%s template does not register the callback token as a secret variable", name)
 		}
+	}
+}
+
+// moduleCallsBlock extracts the shipped `MODULE_CALLS=$(jq -c '…' plan.json)`
+// assignment verbatim from a dispatched template, so the tests below exercise
+// the exact text a runner executes rather than a copy that can drift from it.
+var moduleCallsBlockRe = regexp.MustCompile(`(?s)(MODULE_CALLS=\$\(jq -c '.*?' plan\.json\))`)
+
+func moduleCallsBlock(t *testing.T, tmpl string) string {
+	t.Helper()
+	m := moduleCallsBlockRe.FindStringSubmatch(tmpl)
+	if m == nil {
+		t.Fatal("template has no MODULE_CALLS=$(jq …) assignment")
+	}
+	return m[1]
+}
+
+// TestDriftWorkflowTemplates_ProjectModuleCalls guards the redaction half of the
+// module-provenance defect: the plan's `configuration` block carries NO terraform
+// sensitivity metadata (before_sensitive/after_sensitive exist only inside
+// resource_changes), so anything forwarded from it is unredacted by construction.
+// Forwarding the raw `module_calls` subtree therefore shipped every literal module
+// argument (`expressions.*.constant_value` — a hardcoded password, an API key) and
+// the whole recursive `module` subtree to the callback in cleartext.
+//
+// Both dispatched pipelines must instead PROJECT each call down to the two fields
+// the server actually reads (driftingest.Configuration): `source`, with URL
+// userinfo and every non-`ref` query parameter redacted, and `version_constraint`.
+// This mirrors moduleCallsPlan() in @4cloudguru/terraform-drift-contract, which
+// the suite-profile templates get via the report action/task.
+func TestDriftWorkflowTemplates_ProjectModuleCalls(t *testing.T) {
+	// The raw forward, verbatim, as it shipped before the fix. Neither template
+	// may reintroduce it.
+	const rawForward = "module_calls:(.configuration.root_module.module_calls // {})"
+	for name, tmpl := range map[string]string{"github": githubDriftWorkflow, "azure": azureDriftPipeline} {
+		if strings.Contains(tmpl, rawForward) {
+			t.Errorf("%s template forwards the RAW module_calls subtree; it must project instead", name)
+		}
+	}
+
+	jq, err := exec.LookPath("jq")
+	if err != nil {
+		// ubuntu-latest ships jq, so a miss in CI means the guard went inert.
+		if os.Getenv("CI") != "" {
+			t.Fatalf("jq is required to verify the dispatched templates in CI: %v", err)
+		}
+		t.Skipf("jq not installed: %v", err)
+	}
+
+	// One plan carrying a credential in every place the raw subtree used to leak
+	// it: URL userinfo, credential-bearing query parameters, a literal module
+	// argument, and the nested module tree's outputs/variable defaults.
+	const plan = `{"configuration":{"root_module":{"module_calls":{
+	  "vpc":{"source":"git::https://x-access-token:ghp_TOKENSECRET@github.com/org/mod.git?ref=v1.2.3&sshkey=B64PRIVKEY&token=TTT",
+	         "version_constraint":"~> 5.0",
+	         "expressions":{"db_password":{"constant_value":"hunter2-PLAINTEXT-LEAK"}},
+	         "module":{"outputs":{"o":{"value":"NESTED-CONFIG-LEAK"}},
+	                   "variables":{"v":{"default":"DEFAULT-LEAK"}}}},
+	  "bare":{"source":"acme/vpc/aws","version_constraint":"1.0.0"},
+	  "notobj":["a","b"]}}}}`
+	secrets := []string{"ghp_TOKENSECRET", "B64PRIVKEY", "TTT", "hunter2-PLAINTEXT-LEAK", "NESTED-CONFIG-LEAK", "DEFAULT-LEAK", "expressions", "constant_value"}
+
+	for name, tmpl := range map[string]string{"github": githubDriftWorkflow, "azure": azureDriftPipeline} {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dir, "plan.json"), []byte(plan), 0o600); err != nil {
+				t.Fatalf("write plan: %v", err)
+			}
+			cmd := exec.Command("bash", "-c", moduleCallsBlock(t, tmpl)+"\nprintf '%s' \"$MODULE_CALLS\"")
+			cmd.Dir = dir
+			cmd.Env = append(os.Environ(), "PATH="+filepath.Dir(jq)+string(os.PathListSeparator)+os.Getenv("PATH"))
+			out, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("running the shipped block failed: %v\n%s", err, out)
+			}
+			got := string(out)
+			for _, s := range secrets {
+				if strings.Contains(got, s) {
+					t.Errorf("the dispatched payload leaks %q: %s", s, got)
+				}
+			}
+			// Provenance that must survive: the scrubbed source, the ref selector
+			// (the one provenance-bearing query parameter) and the constraint.
+			for _, want := range []string{
+				`"source":"git::https://(redacted)@github.com/org/mod.git?ref=v1.2.3&sshkey=(redacted)&token=(redacted)"`,
+				`"version_constraint":"~> 5.0"`,
+				`"bare":{"source":"acme/vpc/aws","version_constraint":"1.0.0"}`,
+				`"notobj":{}`, // a non-object call projects to an empty object, never a value
+			} {
+				if !strings.Contains(got, want) {
+					t.Errorf("projected payload missing %s\ngot: %s", want, got)
+				}
+			}
+		})
+	}
+}
+
+// TestDriftWorkflowTemplates_ModuleCallsBounded guards the other half of
+// moduleCallsPlan(): at most 100 module calls are emitted, an overflow sets
+// module_calls_truncated, and every emitted string is capped at 300 code points
+// with the U+2026 marker — so a pathological configuration cannot inflate the
+// callback body.
+func TestDriftWorkflowTemplates_ModuleCallsBounded(t *testing.T) {
+	jq, err := exec.LookPath("jq")
+	if err != nil {
+		if os.Getenv("CI") != "" {
+			t.Fatalf("jq is required to verify the dispatched templates in CI: %v", err)
+		}
+		t.Skipf("jq not installed: %v", err)
+	}
+
+	calls := make([]string, 0, 150)
+	for i := 0; i < 150; i++ {
+		calls = append(calls, fmt.Sprintf(`"m%03d":{"source":"ns/n%03d/aws","version_constraint":"1.0.0"}`, i, i))
+	}
+	// One call whose source and constraint both exceed the 300-code-point cap.
+	calls = append(calls, `"long":{"source":"https://example.com/`+strings.Repeat("d", 400)+`","version_constraint":"~> `+strings.Repeat("9", 400)+`"}`)
+	plan := `{"configuration":{"root_module":{"module_calls":{` + strings.Join(calls, ",") + `}}}}`
+
+	for name, tmpl := range map[string]string{"github": githubDriftWorkflow, "azure": azureDriftPipeline} {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dir, "plan.json"), []byte(plan), 0o600); err != nil {
+				t.Fatalf("write plan: %v", err)
+			}
+			cmd := exec.Command("bash", "-c", moduleCallsBlock(t, tmpl)+"\nprintf '%s' \"$MODULE_CALLS\"")
+			cmd.Dir = dir
+			cmd.Env = append(os.Environ(), "PATH="+filepath.Dir(jq)+string(os.PathListSeparator)+os.Getenv("PATH"))
+			out, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("running the shipped block failed: %v\n%s", err, out)
+			}
+			var got struct {
+				Configuration struct {
+					RootModule struct {
+						ModuleCalls map[string]struct {
+							Source            string `json:"source"`
+							VersionConstraint string `json:"version_constraint"`
+						} `json:"module_calls"`
+						Truncated bool `json:"module_calls_truncated"`
+					} `json:"root_module"`
+				} `json:"configuration"`
+			}
+			if err := json.Unmarshal(out, &got); err != nil {
+				t.Fatalf("payload is not valid JSON: %v\n%s", err, out)
+			}
+			rm := got.Configuration.RootModule
+			if len(rm.ModuleCalls) != 100 {
+				t.Errorf("emitted %d module calls, want the 100 cap", len(rm.ModuleCalls))
+			}
+			if !rm.Truncated {
+				t.Error("an over-cap configuration must set module_calls_truncated")
+			}
+			for name, call := range rm.ModuleCalls {
+				for field, v := range map[string]string{"source": call.Source, "version_constraint": call.VersionConstraint} {
+					if n := len([]rune(v)); n > 301 {
+						t.Errorf("%s.%s is %d code points, want <= 301 (300 + the U+2026 marker)", name, field, n)
+					}
+				}
+			}
+		})
 	}
 }

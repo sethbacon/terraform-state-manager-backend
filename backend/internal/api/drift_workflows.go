@@ -67,7 +67,35 @@ jobs:
           # resolved module lockfile, so TSM records which registry modules this
           # state uses and how fresh they are. Both ride the existing jq -n payload
           # via --argjson (never string-concatenated), and are ignored by older servers.
-          MODULE_CALLS=$(jq -c '{configuration:{root_module:{module_calls:(.configuration.root_module.module_calls // {})}}}' plan.json)
+          MODULE_CALLS=$(jq -c '
+            # Module provenance is PROJECTED, never forwarded. The plan configuration
+            # block carries NO terraform sensitivity metadata, so relaying the raw
+            # module_calls subtree ships expressions.*.constant_value (every literal
+            # module argument, e.g. a hardcoded password) and the nested module tree
+            # in cleartext. Emit only the two fields the server reads, with source
+            # credentials scrubbed and every string capped — matching
+            # moduleCallsPlan() in @4cloudguru/terraform-drift-contract.
+            def scrub: sub("://[^/?#@]*@"; "://(redacted)@")
+              | . as $s | ($s|index("?")) as $q
+              | if $q == null then $s
+                else $s[0:$q] + "?" + ($s[$q+1:] | split("&")
+                  | map((index("=")) as $e
+                        | if $e == null or .[0:$e] == "ref" then . else .[0:$e] + "=(redacted)" end)
+                  | join("&"))
+                end;
+            def cap: if (length > 300) then .[0:300] + "…" else . end;
+            def proj: if type == "object" then
+                  (if (.source|type) == "string" then {source: (.source|scrub|cap)} else {} end)
+                + (if (.version_constraint|type) == "string" then {version_constraint: (.version_constraint|cap)} else {} end)
+              else {} end;
+            (.configuration.root_module.module_calls) as $raw
+            | (if ($raw|type) == "object" then $raw else {} end) as $calls
+            | ($calls|keys) as $names
+            | (reduce $names[0:100][] as $k ({m:{}, t:(($names|length)>100)};
+                 ($k|cap) as $f
+                 | if (.m|has($f)) then .t = true else .m[$f] = ($calls[$k]|proj) end)) as $o
+            | {configuration:{root_module:({module_calls:$o.m}
+                + (if $o.t then {module_calls_truncated:true} else {} end))}}' plan.json)
           MODULE_LOCKS=$( [ -f .terraform/modules/modules.json ] && jq -c . .terraform/modules/modules.json || echo null )
           PAYLOAD=$(jq -n \
             --argjson added "$ADD" --argjson changed "$CHG" --argjson destroyed "$DEL" \
@@ -121,7 +149,35 @@ steps:
       # resolved module lockfile, so TSM records which registry modules this state
       # uses and how fresh they are. Both ride the existing jq -n payload via
       # --argjson (never string-concatenated), and are ignored by older servers.
-      MODULE_CALLS=$(jq -c '{configuration:{root_module:{module_calls:(.configuration.root_module.module_calls // {})}}}' plan.json)
+      MODULE_CALLS=$(jq -c '
+        # Module provenance is PROJECTED, never forwarded. The plan configuration
+        # block carries NO terraform sensitivity metadata, so relaying the raw
+        # module_calls subtree ships expressions.*.constant_value (every literal
+        # module argument, e.g. a hardcoded password) and the nested module tree
+        # in cleartext. Emit only the two fields the server reads, with source
+        # credentials scrubbed and every string capped — matching
+        # moduleCallsPlan() in @4cloudguru/terraform-drift-contract.
+        def scrub: sub("://[^/?#@]*@"; "://(redacted)@")
+          | . as $s | ($s|index("?")) as $q
+          | if $q == null then $s
+            else $s[0:$q] + "?" + ($s[$q+1:] | split("&")
+              | map((index("=")) as $e
+                    | if $e == null or .[0:$e] == "ref" then . else .[0:$e] + "=(redacted)" end)
+              | join("&"))
+            end;
+        def cap: if (length > 300) then .[0:300] + "…" else . end;
+        def proj: if type == "object" then
+              (if (.source|type) == "string" then {source: (.source|scrub|cap)} else {} end)
+            + (if (.version_constraint|type) == "string" then {version_constraint: (.version_constraint|cap)} else {} end)
+          else {} end;
+        (.configuration.root_module.module_calls) as $raw
+        | (if ($raw|type) == "object" then $raw else {} end) as $calls
+        | ($calls|keys) as $names
+        | (reduce $names[0:100][] as $k ({m:{}, t:(($names|length)>100)};
+             ($k|cap) as $f
+             | if (.m|has($f)) then .t = true else .m[$f] = ($calls[$k]|proj) end)) as $o
+        | {configuration:{root_module:({module_calls:$o.m}
+            + (if $o.t then {module_calls_truncated:true} else {} end))}}' plan.json)
       MODULE_LOCKS=$( [ -f .terraform/modules/modules.json ] && jq -c . .terraform/modules/modules.json || echo null )
       PAYLOAD=$(jq -n \
         --argjson added "$ADD" --argjson changed "$CHG" --argjson destroyed "$DEL" \
