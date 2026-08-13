@@ -3,6 +3,12 @@
 // dispatched CI workflows compute with jq (see internal/api/drift_workflows.go),
 // so ingested and dispatched drift render identically. Ported from ogtsm's
 // driftingest with the summary adapted to drift_runs' [{address, actions}] form.
+//
+// The AUTHORITY for these semantics is the canonical TypeScript implementation —
+// summarize.ts in @4cloudguru/terraform-drift-contract, together with its test
+// vectors. Earlier comments here cited a Python `drift_summary.py` as the
+// canonical dispatch summarizer; no such file exists in any repository of this
+// suite, so it was not something an implementation could be diffed against.
 package driftingest
 
 import (
@@ -84,14 +90,16 @@ type Result struct {
 }
 
 // Drifted reports whether the plan planned any add/change/destroy. Matches the
-// dispatch summarizer (drift_summary.py): a pure replacement has Changed==0 but
-// Added+Destroyed>0, so it is still drift; a read-only refresh is not.
+// canonical contract (summarize() in @4cloudguru/terraform-drift-contract): a
+// pure replacement has Changed==0 but Added+Destroyed>0, so it is still drift; a
+// read-only refresh is not.
 func (r *Result) Drifted() bool {
 	return r.Added+r.Changed+r.Destroyed > 0
 }
 
-// Summarize classifies each resource change, reconciled with the authoritative
-// dispatch summarizer (drift_summary.py): resource changes whose actions are
+// Summarize classifies each resource change, reconciled with the canonical
+// contract (summarize.ts in @4cloudguru/terraform-drift-contract, plus its test
+// vectors — see the package comment): resource changes whose actions are
 // exactly ["no-op"] or ["read"] are skipped entirely; for in-place updates and
 // replacements (before and after both JSON objects) the per-attribute diff is
 // captured with sensitive masking. Counts are replace-aware and not mutually
@@ -215,7 +223,7 @@ func sortedUnion(a, b map[string]json.RawMessage) []string {
 	return keys
 }
 
-// fmtVal is the Go port of drift_summary.py `fmt`: JSON null/absent → nil;
+// fmtVal is the Go port of the contract's `fmt()`: JSON null/absent → nil;
 // a JSON string passes through raw (unquoted); anything else is compact
 // canonical JSON (Go sorts map keys), truncated past 300 runes with U+2026.
 func fmtVal(raw json.RawMessage) *string {
@@ -243,7 +251,7 @@ func truncate(s string) string {
 	return string([]rune(s)[:300]) + "…"
 }
 
-// isSens is the Go port of drift_summary.py `is_sens`: when the sensitivity map
+// isSens is the Go port of the contract's `isSens()`: when the sensitivity map
 // is not a JSON object it is the whole-value flag (truthy → mask); otherwise the
 // key is masked when its entry is true or a non-empty nested object/array.
 func isSens(sens json.RawMessage, key string) bool {
