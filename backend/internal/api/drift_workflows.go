@@ -81,13 +81,36 @@ jobs:
           # rows rather than one row per data source; and a JSON null entry is ignored
           # rather than emitted as {address: null, actions: null}. Rows are
           # {address, actions} only — this path carries no attribute values and so has
-          # nothing to mask. An absent address emits "" rather than null, matching the
-# contract; a wrong-TYPED address is still copied through, which the corpus
-# states. Conformance vectors: skip/read-exactly, drifted/refresh-only,
-          # shape/null-entry-in-resource-changes.
-          SUMMARY=$(jq -c '[.resource_changes[]? | select(type == "object")
+          # nothing to mask. An absent address emits "" rather than null, matching
+          # the contract; a wrong-TYPED address is still copied through, which the
+          # corpus states. Conformance vectors: skip/read-exactly,
+          # drifted/refresh-only, shape/null-entry-in-resource-changes.
+          JQ_ROWS='[.resource_changes[]? | select(type == "object")
             | select(.change.actions != ["no-op"] and .change.actions != ["read"])
-            | {address: (.address // ""), actions: .change.actions}]' plan.json)
+            | {address: (.address // ""), actions: .change.actions}]'
+          # Bounded like every other emitted value. The counts above are NOT capped, so a
+          # capped summary still reports drift truthfully — the counts are the signal, the
+          # rows are the detail — and omitted_entries says how much was left out, so a
+          # consumer can tell "no more drift" from "we stopped looking". 500 is the
+          # contract's limit, declared in its conformance corpus.
+          SUMMARY=$(jq -c "$JQ_ROWS"' | .[0:500]' plan.json)
+          OMITTED_ENTRIES=$(jq "$JQ_ROWS"' | length - 500 | if . > 0 then . else 0 end' plan.json)
+          TRUNCATED=$( [ "$OMITTED_ENTRIES" -gt 0 ] && echo true || echo false )
+          # A document that is not a plan at all — a truncated terraform show, the wrong
+          # file, a broken step — used to post the SAME clean result as a verified-clean
+          # plan. Nothing downstream could tell them apart, which is a false negative on
+          # the signal this job exists to produce.
+          UNPARSEABLE=$(jq -c 'if (type == "object") and ((.resource_changes|type) == "array")
+            then false else true end' plan.json)
+          # A change that would emit attribute values and carries NEITHER sensitivity
+          # mirror was masked by nothing at all. This path emits no attribute values, so
+          # nothing leaks here — but the flag is computed from the same plan shape as the
+          # other producers, so an operator gets the same warning whichever one ran.
+          UNMASKED=$(jq -c '[.resource_changes[]? | select(type == "object")
+            | select(.change.actions != ["no-op"] and .change.actions != ["read"])
+            | select((.change.before|type) == "object" and (.change.after|type) == "object")
+            | select(.change.before_sensitive == null and .change.after_sensitive == null)]
+            | length > 0' plan.json)
           # Module provenance (optional): the configuration's module calls plus the
           # resolved module lockfile, so TSM records which registry modules this
           # state uses and how fresh they are. Both ride the existing jq -n payload
@@ -149,9 +172,11 @@ jobs:
           PAYLOAD=$(jq -n \
             --argjson added "$ADD" --argjson changed "$CHG" --argjson destroyed "$DEL" \
             --argjson drifted "$DRIFTED" --argjson summary "$SUMMARY" \
+            --argjson unparseable "$UNPARSEABLE" --argjson unmasked "$UNMASKED" \
+            --argjson truncated "$TRUNCATED" --argjson omitted_entries "$OMITTED_ENTRIES" \
             --argjson plan "$MODULE_CALLS" --argjson module_locks "$MODULE_LOCKS" \
             --arg detail "github run $GITHUB_RUN_ID" \
-            '{status:"completed", added:$added, changed:$changed, destroyed:$destroyed, drifted:$drifted, summary:$summary, plan:$plan, module_locks:$module_locks, detail:$detail}')
+            '{status:"completed", added:$added, changed:$changed, destroyed:$destroyed, drifted:$drifted, unparseable:$unparseable, unmasked:$unmasked, truncated:$truncated, omitted_entries:$omitted_entries, omitted_attrs:0, summary:$summary, plan:$plan, module_locks:$module_locks, detail:$detail}')
           curl -sf -X POST "$CALLBACK_URL" \
             -H "Content-Type: application/json" \
             -H "X-TSM-Callback-Token: $CALLBACK_TOKEN" \
@@ -212,13 +237,36 @@ steps:
       # rows rather than one row per data source; and a JSON null entry is ignored
       # rather than emitted as {address: null, actions: null}. Rows are
       # {address, actions} only — this path carries no attribute values and so has
-      # nothing to mask. An absent address emits "" rather than null, matching the
-# contract; a wrong-TYPED address is still copied through, which the corpus
-# states. Conformance vectors: skip/read-exactly, drifted/refresh-only,
-      # shape/null-entry-in-resource-changes.
-      SUMMARY=$(jq -c '[.resource_changes[]? | select(type == "object")
+      # nothing to mask. An absent address emits "" rather than null, matching
+      # the contract; a wrong-TYPED address is still copied through, which the
+      # corpus states. Conformance vectors: skip/read-exactly,
+      # drifted/refresh-only, shape/null-entry-in-resource-changes.
+      JQ_ROWS='[.resource_changes[]? | select(type == "object")
         | select(.change.actions != ["no-op"] and .change.actions != ["read"])
-        | {address: (.address // ""), actions: .change.actions}]' plan.json)
+        | {address: (.address // ""), actions: .change.actions}]'
+      # Bounded like every other emitted value. The counts above are NOT capped, so a
+      # capped summary still reports drift truthfully — the counts are the signal, the
+      # rows are the detail — and omitted_entries says how much was left out, so a
+      # consumer can tell "no more drift" from "we stopped looking". 500 is the
+      # contract's limit, declared in its conformance corpus.
+      SUMMARY=$(jq -c "$JQ_ROWS"' | .[0:500]' plan.json)
+      OMITTED_ENTRIES=$(jq "$JQ_ROWS"' | length - 500 | if . > 0 then . else 0 end' plan.json)
+      TRUNCATED=$( [ "$OMITTED_ENTRIES" -gt 0 ] && echo true || echo false )
+      # A document that is not a plan at all — a truncated terraform show, the wrong
+      # file, a broken step — used to post the SAME clean result as a verified-clean
+      # plan. Nothing downstream could tell them apart, which is a false negative on
+      # the signal this job exists to produce.
+      UNPARSEABLE=$(jq -c 'if (type == "object") and ((.resource_changes|type) == "array")
+        then false else true end' plan.json)
+      # A change that would emit attribute values and carries NEITHER sensitivity
+      # mirror was masked by nothing at all. This path emits no attribute values, so
+      # nothing leaks here — but the flag is computed from the same plan shape as the
+      # other producers, so an operator gets the same warning whichever one ran.
+      UNMASKED=$(jq -c '[.resource_changes[]? | select(type == "object")
+        | select(.change.actions != ["no-op"] and .change.actions != ["read"])
+        | select((.change.before|type) == "object" and (.change.after|type) == "object")
+        | select(.change.before_sensitive == null and .change.after_sensitive == null)]
+        | length > 0' plan.json)
       # Module provenance (optional): the configuration's module calls plus the
       # resolved module lockfile, so TSM records which registry modules this state
       # uses and how fresh they are. Both ride the existing jq -n payload via
@@ -280,9 +328,11 @@ steps:
       PAYLOAD=$(jq -n \
         --argjson added "$ADD" --argjson changed "$CHG" --argjson destroyed "$DEL" \
         --argjson drifted "$DRIFTED" --argjson summary "$SUMMARY" \
+        --argjson unparseable "$UNPARSEABLE" --argjson unmasked "$UNMASKED" \
+        --argjson truncated "$TRUNCATED" --argjson omitted_entries "$OMITTED_ENTRIES" \
         --argjson plan "$MODULE_CALLS" --argjson module_locks "$MODULE_LOCKS" \
         --arg detail "azdo build $BUILD_BUILDID" \
-        '{status:"completed", added:$added, changed:$changed, destroyed:$destroyed, drifted:$drifted, summary:$summary, plan:$plan, module_locks:$module_locks, detail:$detail}')
+        '{status:"completed", added:$added, changed:$changed, destroyed:$destroyed, drifted:$drifted, unparseable:$unparseable, unmasked:$unmasked, truncated:$truncated, omitted_entries:$omitted_entries, omitted_attrs:0, summary:$summary, plan:$plan, module_locks:$module_locks, detail:$detail}')
       curl -sf -X POST "$CALLBACK_URL" \
         -H "Content-Type: application/json" \
         -H "X-TSM-Callback-Token: $CALLBACK_TOKEN" \

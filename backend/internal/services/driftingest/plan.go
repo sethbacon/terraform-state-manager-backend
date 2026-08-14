@@ -85,6 +85,22 @@ type SummaryEntry struct {
 	Attrs   []AttrChange `json:"attrs,omitempty"`
 }
 
+// MaxEntries and MaxAttrsPerEntry bound the summary. The 300-rune cap in
+// fmtVal is per VALUE; without these there is no cap on the number of entries,
+// on attrs per entry, or on total bytes, and this Result becomes a stored drift
+// record. Measured on the canonical implementation before they existed: 5000
+// resources x 50 changed attrs produced a 153.6 MiB body, from a plan an
+// attacker can author on a fork PR.
+//
+// The numbers are the CONTRACT's, declared in
+// testdata/conformance/vectors.json under "limits" and asserted against these
+// constants by conformance_test.go — so changing a bound means changing the
+// corpus, which means changing every implementation.
+const (
+	MaxEntries       = 500
+	MaxAttrsPerEntry = 50
+)
+
 // Result carries the counts and summary derived from a plan. Count semantics
 // match the CI workflow's jq exactly: a resource counts as added/changed/
 // destroyed when its actions CONTAIN create/update/delete respectively, so a
@@ -94,7 +110,30 @@ type Result struct {
 	Changed   int
 	Destroyed int
 	Summary   []SummaryEntry
+
+	// Unparseable reports that the document did not have the shape of a plan:
+	// no resource_changes array. Without it a truncated `terraform show -json`,
+	// the wrong file, or an empty {} produced the identical answer as a verified
+	// clean plan — a false negative on the only signal this package exists to
+	// produce. Matches `unparseable` in the canonical contract.
+	Unparseable bool
+	// Unmasked reports that at least one non-skipped change would have emitted
+	// attribute values and carried NEITHER sensitivity mirror, so nothing was
+	// masked for it. Deliberately shape-based, and therefore slightly over-broad
+	// — it is the definition all three implementations can compute identically,
+	// and over-warning is the right direction for a redaction signal. A
+	// present-but-false mirror IS metadata and does not set it.
+	Unmasked bool
+	// OmittedEntries counts summary rows dropped by MaxEntries. The COUNTS above
+	// still include them, so Drifted() stays truthful when the summary is capped.
+	OmittedEntries int
+	// OmittedAttrs counts changed attributes dropped by MaxAttrsPerEntry.
+	OmittedAttrs int
 }
+
+// Truncated reports that a bound was reached and the summary is not the whole
+// story.
+func (r *Result) Truncated() bool { return r.OmittedEntries > 0 || r.OmittedAttrs > 0 }
 
 // Drifted reports whether the plan planned any add/change/destroy. Matches the
 // canonical contract (summarize() in @4cloudguru/terraform-drift-contract): a
@@ -114,18 +153,24 @@ func (r *Result) Drifted() bool {
 func Summarize(plan *Plan) *Result {
 	res := &Result{Summary: []SummaryEntry{}}
 	if plan == nil {
+		res.Unparseable = true
 		return res
 	}
+	// nil vs empty slice is the whole signal here and is load-bearing:
+	// encoding/json leaves the field nil for an absent key and for an explicit
+	// null, and allocates an empty non-nil slice for []. So a genuinely clean
+	// plan is distinguishable from a document that is not a plan at all —
+	// which is what Unparseable reports. Pinned by conformance vectors
+	// shape/not-a-plan-document and clean/empty-resource-changes; do not
+	// "simplify" this to len() == 0.
+	res.Unparseable = plan.ResourceChanges == nil
 	for _, rc := range plan.ResourceChanges {
 		actions := rc.Change.Actions
 		if len(actions) == 1 && (actions[0] == "no-op" || actions[0] == "read") {
 			continue
 		}
-		entry := SummaryEntry{Address: rc.Address, Actions: actions}
-		if attrs := changedAttrs(rc.Change); len(attrs) > 0 {
-			entry.Attrs = attrs
-		}
-		res.Summary = append(res.Summary, entry)
+		// Counted BEFORE the entry cap, so a capped summary still reports drift
+		// truthfully: the counts are the security signal, the rows are detail.
 		if hasAction(actions, "create") {
 			res.Added++
 		}
@@ -135,6 +180,24 @@ func Summarize(plan *Plan) *Result {
 		if hasAction(actions, "delete") {
 			res.Destroyed++
 		}
+
+		attrs, omitted, inPlace := changedAttrs(rc.Change, MaxAttrsPerEntry)
+		// A property of the PLAN, not of how much of it fit in the summary, so it
+		// is evaluated for capped entries too.
+		if inPlace && canon(rc.Change.BeforeSensitive) == "null" && canon(rc.Change.AfterSensitive) == "null" {
+			res.Unmasked = true
+		}
+		if len(res.Summary) >= MaxEntries {
+			res.OmittedEntries++
+			continue
+		}
+		res.OmittedAttrs += omitted
+
+		entry := SummaryEntry{Address: rc.Address, Actions: actions}
+		if len(attrs) > 0 {
+			entry.Attrs = attrs
+		}
+		res.Summary = append(res.Summary, entry)
 	}
 	return res
 }
@@ -149,20 +212,31 @@ func hasAction(actions []string, action string) bool {
 }
 
 // changedAttrs returns the top-level attributes whose value differs between
-// before and after, but only when both are JSON objects (the in-place update /
-// replace case). An attribute is masked to "(sensitive)" on BOTH sides when
-// EITHER before_sensitive or after_sensitive marks it; otherwise both sides are
+// before and after, plus the number dropped by maxAttrs and whether this was the
+// in-place case at all (which the caller needs for the Unmasked signal). Only
+// when both sides are JSON objects (the in-place update / replace case).
+//
+// An attribute is masked to "(sensitive)" on BOTH sides when EITHER
+// before_sensitive or after_sensitive marks it; otherwise both sides are
 // formatted with fmtVal. Mirrors the loop in the canonical
 // @4cloudguru/terraform-drift-contract summarize().
-func changedAttrs(ch Change) []AttrChange {
+func changedAttrs(ch Change, maxAttrs int) (attrs []AttrChange, omitted int, inPlace bool) {
 	before, bok := asObject(ch.Before)
 	after, aok := asObject(ch.After)
 	if !bok || !aok {
-		return nil
+		return nil, 0, false
 	}
-	attrs := []AttrChange{}
+	inPlace = true
+	attrs = []AttrChange{}
 	for _, k := range sortedUnion(before, after) {
 		if jsonEqual(before[k], after[k]) {
+			continue
+		}
+		// Past the cap the key is still KNOWN to have changed — the comparison
+		// above has already run — so it is counted, not concealed. Only the
+		// formatting is skipped, which is the expensive half.
+		if len(attrs) >= maxAttrs {
+			omitted++
 			continue
 		}
 		// Union, not per-side: terraform applies a config-derived mark (a
@@ -185,9 +259,9 @@ func changedAttrs(ch Change) []AttrChange {
 		})
 	}
 	if len(attrs) == 0 {
-		return nil
+		return nil, omitted, true
 	}
-	return attrs
+	return attrs, omitted, true
 }
 
 // maskOrFmt yields the literal "(sensitive)" when the attribute is masked (so a

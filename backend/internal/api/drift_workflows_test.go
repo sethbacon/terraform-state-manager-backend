@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
+	"gopkg.in/yaml.v3"
 
 	"github.com/terraform-state-manager/terraform-state-manager/internal/services/driftingest"
 )
@@ -489,6 +490,38 @@ func TestDriftWorkflowTemplates_ProjectModuleLocks(t *testing.T) {
 			}
 			if out := runShippedBlock(t, dir, jq, block, "MODULE_LOCKS"); out != "null" {
 				t.Errorf("absent manifest yielded %q, want null", out)
+			}
+		})
+	}
+}
+
+// TestDriftWorkflowTemplates_AreValidYAML is the guard the jq tests do not
+// provide. They extract the shell blocks and run them under bash, which proves
+// the jq is correct and proves nothing about the document those blocks are
+// embedded in — so an edit to a multi-line `run: |` block can ship a template
+// that every existing test passes and that no runner can parse. These constants
+// are served to users as the file they commit; a YAML break here is an outage in
+// someone else's pipeline, discovered by them.
+func TestDriftWorkflowTemplates_AreValidYAML(t *testing.T) {
+	templates := map[string]string{
+		"github drift":          githubDriftWorkflow,
+		"azure drift":           azureDriftPipeline,
+		"github drift suite":    githubDriftWorkflowSuite,
+		"azure drift suite":     azureDriftPipelineSuite,
+		"github versionlab":     githubHealthWorkflow,
+		"azure versionlab":      azureHealthPipeline,
+		"github versionlab ste": githubHealthWorkflowSuite,
+		"azure versionlab ste":  azureHealthPipelineSuite,
+	}
+	for name, tmpl := range templates {
+		t.Run(name, func(t *testing.T) {
+			var doc map[string]any
+			if err := yaml.Unmarshal([]byte(tmpl), &doc); err != nil {
+				t.Fatalf("template does not parse as YAML: %v", err)
+			}
+			// A document that parses to nothing would pass the check above.
+			if len(doc) == 0 {
+				t.Fatal("template parsed to an empty document")
 			}
 		})
 	}

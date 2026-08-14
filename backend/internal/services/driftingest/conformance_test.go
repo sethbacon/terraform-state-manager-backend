@@ -41,9 +41,9 @@ import (
 // repositories, in the same batch.
 const (
 	corpusPath   = "testdata/conformance/vectors.json"
-	corpusSHA256 = "bfcd27ff0b1304457420371dc6088a9fb8df937b7581b2ec211ffbfb5c55b20c"
+	corpusSHA256 = "84bb23be80a420e7ff77ea0bd7808a8daeaef745f0190f896a917e387a929316"
 	// Same literal as RECONCILED_DIGEST in the contract's __tests__/conformance.test.ts.
-	reconciledDigest = "9551f9b36c2aebee75b8092e099d299885dd338519c57622b544bdabeb17c809"
+	reconciledDigest = "4f0002731219d9491636de981cde760688f720971d9a3882a2d6f55e13b6a173"
 )
 
 type conformStated struct {
@@ -62,12 +62,31 @@ type conformVector struct {
 
 // conformResult is the comparison envelope. The field order is the contract's
 // and is what makes the rendered bytes comparable with the TypeScript side.
+// A vector's `expect` states only the NON-DEFAULT markers, so the zero value of
+// this struct IS the default — which is why every marker is named so that false
+// and 0 are the ordinary answer.
 type conformResult struct {
-	Added     int            `json:"added"`
-	Changed   int            `json:"changed"`
-	Destroyed int            `json:"destroyed"`
-	Drifted   bool           `json:"drifted"`
-	Summary   []SummaryEntry `json:"summary"`
+	Added          int            `json:"added"`
+	Changed        int            `json:"changed"`
+	Destroyed      int            `json:"destroyed"`
+	Drifted        bool           `json:"drifted"`
+	Unparseable    bool           `json:"unparseable"`
+	Unmasked       bool           `json:"unmasked"`
+	Truncated      bool           `json:"truncated"`
+	OmittedEntries int            `json:"omitted_entries"`
+	OmittedAttrs   int            `json:"omitted_attrs"`
+	Summary        []SummaryEntry `json:"summary"`
+}
+
+// envelope projects a Result into the comparison shape, in one place, so the
+// two call sites below cannot drift apart.
+func envelope(r *Result) conformResult {
+	return conformResult{
+		Added: r.Added, Changed: r.Changed, Destroyed: r.Destroyed,
+		Drifted: r.Drifted(), Unparseable: r.Unparseable, Unmasked: r.Unmasked,
+		Truncated: r.Truncated(), OmittedEntries: r.OmittedEntries,
+		OmittedAttrs: r.OmittedAttrs, Summary: r.Summary,
+	}
 }
 
 // renderConform is the rendering discipline, shared by the actual and the
@@ -110,10 +129,22 @@ func loadCorpus(t *testing.T) []conformVector {
 			"and update corpusSHA256 and reconciledDigest together", got, corpusSHA256)
 	}
 	var doc struct {
+		Limits struct {
+			MaxEntries       int `json:"max_entries"`
+			MaxAttrsPerEntry int `json:"max_attrs_per_entry"`
+		} `json:"limits"`
 		Vectors []conformVector `json:"vectors"`
 	}
 	if err := json.Unmarshal(raw, &doc); err != nil {
 		t.Fatalf("parsing the conformance corpus: %v", err)
+	}
+	// The bounds are the contract's, not this package's. Changing one here
+	// without the corpus (or the other way round) means the producers and the
+	// ingester stop describing the same bound, and a consumer cannot tell a
+	// capped summary from a complete one across them.
+	if doc.Limits.MaxEntries != MaxEntries || doc.Limits.MaxAttrsPerEntry != MaxAttrsPerEntry {
+		t.Fatalf("this package bounds the summary at %d/%d, the contract declares %d/%d",
+			MaxEntries, MaxAttrsPerEntry, doc.Limits.MaxEntries, doc.Limits.MaxAttrsPerEntry)
 	}
 	// An empty corpus would make every assertion below vacuous.
 	if len(doc.Vectors) < 40 {
@@ -149,11 +180,7 @@ func TestConformance_Corpus(t *testing.T) {
 				t.Fatalf("the corpus states no difference for this vector, but json.Unmarshal rejected it: %v", err)
 			}
 
-			res := Summarize(&plan)
-			got := renderConform(t, conformResult{
-				Added: res.Added, Changed: res.Changed, Destroyed: res.Destroyed,
-				Drifted: res.Drifted(), Summary: res.Summary,
-			})
+			got := renderConform(t, envelope(Summarize(&plan)))
 
 			want := vec.Expect
 			if vec.Go != nil && len(vec.Go.Expect) > 0 {
@@ -181,11 +208,7 @@ func TestConformance_ReconciledDigest(t *testing.T) {
 		if err := json.Unmarshal(vec.Plan, &plan); err != nil {
 			t.Fatalf("%s: %v", vec.ID, err)
 		}
-		res := Summarize(&plan)
-		rendered := renderConform(t, conformResult{
-			Added: res.Added, Changed: res.Changed, Destroyed: res.Destroyed,
-			Drifted: res.Drifted(), Summary: res.Summary,
-		})
+		rendered := renderConform(t, envelope(Summarize(&plan)))
 		h.Write([]byte(vec.ID + "\n" + rendered + "\n"))
 		n++
 	}

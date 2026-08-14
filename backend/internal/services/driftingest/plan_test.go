@@ -2,6 +2,7 @@ package driftingest
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -420,7 +421,7 @@ func TestChangedAttrs_SensitivityUnion(t *testing.T) {
 			if c.afterSens != "" {
 				ch.AfterSensitive = json.RawMessage(c.afterSens)
 			}
-			attrs := changedAttrs(ch)
+			attrs, _, _ := changedAttrs(ch, MaxAttrsPerEntry)
 			if len(attrs) != 1 || attrs[0].Name != "k" {
 				t.Fatalf("attrs = %+v, want exactly one attr named k", attrs)
 			}
@@ -470,4 +471,105 @@ func deref(s *string) string {
 		return "<nil>"
 	}
 	return *s
+}
+
+// TestSummarize_BoundsAndMarkers covers what no shared conformance vector can:
+// the corpus declares the LIMITS and every implementation asserts them, but a
+// 501-entry plan committed as a vector would be 150 KB of noise, so the tripping
+// behaviour is exercised here.
+func TestSummarize_BoundsAndMarkers(t *testing.T) {
+	t.Run("entry cap keeps the counts whole and reports what it dropped", func(t *testing.T) {
+		changes := make([]ResourceChange, 0, MaxEntries+3)
+		for i := 0; i < MaxEntries+3; i++ {
+			changes = append(changes, ResourceChange{
+				Address: fmt.Sprintf("aws_instance.a%d", i),
+				Change:  Change{Actions: []string{"create"}},
+			})
+		}
+		res := Summarize(&Plan{ResourceChanges: changes})
+		if len(res.Summary) != MaxEntries {
+			t.Errorf("emitted %d rows, want the %d cap", len(res.Summary), MaxEntries)
+		}
+		if res.OmittedEntries != 3 || !res.Truncated() {
+			t.Errorf("omitted=%d truncated=%v, want 3/true", res.OmittedEntries, res.Truncated())
+		}
+		// The counts are the security signal; capping them would turn a size
+		// limit into a missed detection.
+		if res.Added != MaxEntries+3 || !res.Drifted() {
+			t.Errorf("added=%d drifted=%v, want %d/true", res.Added, res.Drifted(), MaxEntries+3)
+		}
+	})
+
+	t.Run("attr cap reports what it dropped, across entries", func(t *testing.T) {
+		wide := func(n, bump int) json.RawMessage {
+			parts := make([]string, 0, n)
+			for i := 0; i < n; i++ {
+				parts = append(parts, fmt.Sprintf("%q:%d", fmt.Sprintf("k%03d", i), i+bump))
+			}
+			return json.RawMessage("{" + strings.Join(parts, ",") + "}")
+		}
+		res := Summarize(&Plan{ResourceChanges: []ResourceChange{
+			{Address: "a.b", Change: Change{Actions: []string{"update"}, Before: wide(60, 0), After: wide(60, 1)}},
+			{Address: "c.d", Change: Change{Actions: []string{"update"}, Before: wide(55, 0), After: wide(55, 1)}},
+		}})
+		for _, entry := range res.Summary {
+			if len(entry.Attrs) != MaxAttrsPerEntry {
+				t.Errorf("%s has %d attrs, want the %d cap", entry.Address, len(entry.Attrs), MaxAttrsPerEntry)
+			}
+		}
+		if res.OmittedAttrs != 15 || !res.Truncated() {
+			t.Errorf("omittedAttrs=%d truncated=%v, want 15/true", res.OmittedAttrs, res.Truncated())
+		}
+	})
+
+	t.Run("unparseable distinguishes a non-plan from a clean plan", func(t *testing.T) {
+		cases := []struct {
+			name string
+			doc  string
+			want bool
+		}{
+			{"empty object", `{}`, true},
+			{"resource_changes null", `{"resource_changes":null}`, true},
+			{"clean plan", `{"resource_changes":[]}`, false},
+			{"a plan with drift", `{"resource_changes":[{"address":"a.b","change":{"actions":["create"]}}]}`, false},
+		}
+		for _, c := range cases {
+			var plan Plan
+			if err := json.Unmarshal([]byte(c.doc), &plan); err != nil {
+				t.Fatalf("%s: %v", c.name, err)
+			}
+			if got := Summarize(&plan).Unparseable; got != c.want {
+				t.Errorf("%s: unparseable = %v, want %v", c.name, got, c.want)
+			}
+		}
+		if !Summarize(nil).Unparseable {
+			t.Error("a nil plan must report unparseable")
+		}
+	})
+
+	t.Run("unmasked flags a change with no sensitivity metadata, and only that", func(t *testing.T) {
+		cases := []struct {
+			name string
+			doc  string
+			want bool
+		}{
+			{"no mirrors", `{"actions":["update"],"before":{"pw":"OLD"},"after":{"pw":"NEW"}}`, true},
+			{"explicit null mirrors", `{"actions":["update"],"before":{"pw":"OLD"},"after":{"pw":"NEW"},"before_sensitive":null,"after_sensitive":null}`, true},
+			{"present but false", `{"actions":["update"],"before":{"pw":"OLD"},"after":{"pw":"NEW"},"before_sensitive":false,"after_sensitive":false}`, false},
+			{"empty object mirrors", `{"actions":["update"],"before":{"pw":"OLD"},"after":{"pw":"NEW"},"before_sensitive":{},"after_sensitive":{}}`, false},
+			{"one mirror is enough", `{"actions":["update"],"before":{"pw":"OLD"},"after":{"pw":"NEW"},"after_sensitive":{"pw":true}}`, false},
+			{"skipped change emits nothing", `{"actions":["no-op"],"before":{"pw":"OLD"},"after":{"pw":"OLD"}}`, false},
+			{"a create has no attrs path", `{"actions":["create"],"before":null,"after":{"pw":"NEW"}}`, false},
+		}
+		for _, c := range cases {
+			var plan Plan
+			doc := `{"resource_changes":[{"address":"a.b","change":` + c.doc + `}]}`
+			if err := json.Unmarshal([]byte(doc), &plan); err != nil {
+				t.Fatalf("%s: %v", c.name, err)
+			}
+			if got := Summarize(&plan).Unmasked; got != c.want {
+				t.Errorf("%s: unmasked = %v, want %v", c.name, got, c.want)
+			}
+		}
+	})
 }
