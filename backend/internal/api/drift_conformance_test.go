@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -41,13 +42,13 @@ const provenanceDigest = "102777523913f3d90fb5a1a0bd7860e9b96c8b42f31ac30ceef13a
 
 // The shipped summarizer, matched verbatim in the template text so these tests
 // exercise the exact lines a runner executes.
-var summarizeBlockRe = regexp.MustCompile(`(?s)(ADD=\$\(jq .*?SUMMARY=\$\(jq -c '.*?' plan\.json\))`)
+var summarizeBlockRe = regexp.MustCompile(`(?s)(ADD=\$\(jq .*?UNMASKED=\$\(jq -c '.*?' plan\.json\))`)
 
 func summarizeBlock(t *testing.T, tmpl string) string {
 	t.Helper()
 	m := summarizeBlockRe.FindStringSubmatch(tmpl)
 	if m == nil {
-		t.Fatal("template has no ADD=…/SUMMARY=$(jq …) summarizer block")
+		t.Fatal("template has no ADD=…/UNMASKED=$(jq …) summarizer block")
 	}
 	return m[1]
 }
@@ -70,11 +71,16 @@ type jqVector struct {
 // order they compose it, so the rendered expectation is comparable with the jq
 // output byte for byte rather than merely value for value.
 type jqEnvelope struct {
-	Added     int     `json:"added"`
-	Changed   int     `json:"changed"`
-	Destroyed int     `json:"destroyed"`
-	Drifted   bool    `json:"drifted"`
-	Summary   []jqRow `json:"summary"`
+	Added          int     `json:"added"`
+	Changed        int     `json:"changed"`
+	Destroyed      int     `json:"destroyed"`
+	Drifted        bool    `json:"drifted"`
+	Unparseable    bool    `json:"unparseable"`
+	Unmasked       bool    `json:"unmasked"`
+	Truncated      bool    `json:"truncated"`
+	OmittedEntries int     `json:"omitted_entries"`
+	OmittedAttrs   int     `json:"omitted_attrs"`
+	Summary        []jqRow `json:"summary"`
 }
 
 // Address and Actions are `any` because two vectors deliberately carry a
@@ -104,10 +110,21 @@ func loadJQCorpus(t *testing.T) []jqVector {
 		t.Fatalf("reading the conformance corpus: %v", err)
 	}
 	var doc struct {
+		Limits struct {
+			MaxEntries int `json:"max_entries"`
+		} `json:"limits"`
 		Vectors []jqVector `json:"vectors"`
 	}
 	if err := json.Unmarshal(raw, &doc); err != nil {
 		t.Fatalf("parsing the conformance corpus: %v", err)
+	}
+	// The dispatched templates hard-code the row cap in the jq itself, so the
+	// only way it stays the contract's number is to assert the two agree.
+	for name, tmpl := range map[string]string{"github": githubDriftWorkflow, "azure": azureDriftPipeline} {
+		want := fmt.Sprintf(".[0:%d]", doc.Limits.MaxEntries)
+		if !strings.Contains(tmpl, want) {
+			t.Errorf("%s template does not cap the summary at the contract's %d rows (%q)", name, doc.Limits.MaxEntries, want)
+		}
 	}
 	// The driftingest side pins the file's SHA-256; an empty read here would
 	// still make every assertion below vacuous.
@@ -147,7 +164,11 @@ func runSummarizer(t *testing.T, jq, block string, plan []byte) string {
 	}
 	const emit = "\njq -n -c --argjson added \"$ADD\" --argjson changed \"$CHG\" " +
 		"--argjson destroyed \"$DEL\" --argjson drifted \"$DRIFTED\" --argjson summary \"$SUMMARY\" " +
-		"'{added:$added, changed:$changed, destroyed:$destroyed, drifted:$drifted, summary:$summary}'"
+		"--argjson unparseable \"$UNPARSEABLE\" --argjson unmasked \"$UNMASKED\" " +
+		"--argjson truncated \"$TRUNCATED\" --argjson omitted_entries \"$OMITTED_ENTRIES\" " +
+		"'{added:$added, changed:$changed, destroyed:$destroyed, drifted:$drifted, " +
+		"unparseable:$unparseable, unmasked:$unmasked, truncated:$truncated, " +
+		"omitted_entries:$omitted_entries, omitted_attrs:0, summary:$summary}'"
 	cmd := exec.Command("bash", "-c", block+emit)
 	cmd.Dir = dir
 	cmd.Env = append(os.Environ(), "PATH="+filepath.Dir(jq)+string(os.PathListSeparator)+os.Getenv("PATH"))
@@ -219,6 +240,41 @@ func TestConformance_DispatchedProvenance(t *testing.T) {
 			if digest := hex.EncodeToString(h.Sum(nil)); digest != provenanceDigest {
 				t.Errorf("the dispatched provenance does not match moduleCallsPlan():\n got %s\nwant %s",
 					digest, provenanceDigest)
+			}
+		})
+	}
+}
+
+// TestConformance_DispatchedSummaryIsBounded covers what no shared vector can:
+// the corpus declares the row cap and every implementation asserts the NUMBER,
+// but a 501-entry plan committed as a vector would be 150 KB of noise, so the
+// tripping behaviour is exercised here.
+func TestConformance_DispatchedSummaryIsBounded(t *testing.T) {
+	jq := requireJQ(t)
+
+	changes := make([]string, 0, 503)
+	for i := 0; i < 503; i++ {
+		changes = append(changes, fmt.Sprintf(`{"address":"aws_instance.a%d","change":{"actions":["create"]}}`, i))
+	}
+	plan := []byte(`{"resource_changes":[` + strings.Join(changes, ",") + `]}`)
+
+	for name, tmpl := range map[string]string{"github": githubDriftWorkflow, "azure": azureDriftPipeline} {
+		block := summarizeBlock(t, tmpl)
+		t.Run(name, func(t *testing.T) {
+			var got jqEnvelope
+			if err := json.Unmarshal([]byte(runSummarizer(t, jq, block, plan)), &got); err != nil {
+				t.Fatalf("payload is not valid JSON: %v", err)
+			}
+			if len(got.Summary) != 500 {
+				t.Errorf("emitted %d rows, want the 500 cap", len(got.Summary))
+			}
+			if got.OmittedEntries != 3 || !got.Truncated {
+				t.Errorf("omitted_entries=%d truncated=%v, want 3/true", got.OmittedEntries, got.Truncated)
+			}
+			// The counts are NOT capped: capping them would turn a payload bound
+			// into a missed detection, and `drifted` is derived from them.
+			if got.Added != 503 || !got.Drifted {
+				t.Errorf("added=%d drifted=%v, want 503/true", got.Added, got.Drifted)
 			}
 		})
 	}

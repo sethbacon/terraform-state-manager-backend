@@ -132,6 +132,17 @@ func (h *DriftHandlers) IngestDrift() gin.HandlerFunc {
 				return
 			}
 			res := driftingest.Summarize(&plan)
+			// A document that parses as JSON but carries no resource_changes array
+			// is not `terraform show -json` output — a truncated show, the wrong
+			// file, or a broken pipeline step. It used to be recorded as a clean
+			// drift record, indistinguishable from a verified-clean plan, which is
+			// a false negative on the signal this endpoint exists to store. The
+			// error message below was already the right one; it just never covered
+			// this case.
+			if res.Unparseable {
+				c.JSON(http.StatusUnprocessableEntity, gin.H{"error": "plan is not valid terraform show -json output"})
+				return
+			}
 			added, changed, destroyed = res.Added, res.Changed, res.Destroyed
 			summary, _ = json.Marshal(res.Summary)
 			drifted = res.Drifted()

@@ -1,6 +1,10 @@
 {
   "schema": "drift-contract-conformance/v1",
-  "note": "The shared conformance corpus for the TSM drift contract. One input plan per\nvector plus the EXPECTED output, hand-authored as intent and never read back\nfrom an implementation. Every implementation of the contract runs this file\nand compares byte-for-byte:\n  - TypeScript (canonical) - 4cloudguru/terraform-drift-contract, __tests__/conformance.test.ts\n  - Go driftingest         - terraform-state-manager-backend, internal/services/driftingest\n  - jq                     - terraform-state-manager-backend, the dispatched CI templates\nThis file is byte-identical in both repositories; each side asserts the same\nSHA-256 of it, so an edit to one copy reddens that repository immediately.\nFields: `expect` is the canonical summarize() Result. `expect_module_calls`,\nwhen present, is the canonical moduleCallsPlan() output. `go` and `jq` record\na STATED difference for that vector - either {\"rejects\": why} when that\nimplementation refuses the document outright, or {\"expect\": ..., \"why\": ...}\nwhen it answers differently. A difference with no entry here is a regression.\nThe jq expectation, when not stated, is `expect` with every attrs array\ndropped: the dispatched summary is {address, actions} only and has no\nattribute values at all.",
+  "limits": {
+    "max_entries": 500,
+    "max_attrs_per_entry": 50
+  },
+  "note": "The shared conformance corpus for the TSM drift contract. One input plan per\nvector plus the EXPECTED output, hand-authored as intent and never read back\nfrom an implementation. Every implementation of the contract runs this file\nand compares byte-for-byte:\n  - TypeScript (canonical) - 4cloudguru/terraform-drift-contract, __tests__/conformance.test.ts\n  - Go driftingest         - terraform-state-manager-backend, internal/services/driftingest\n  - jq                     - terraform-state-manager-backend, the dispatched CI templates\nThis file is byte-identical in both repositories; each side asserts the same\nSHA-256 of it, so an edit to one copy reddens that repository immediately.\nFields: `expect` is the canonical summarize() Result; it states only the\nNON-DEFAULT markers, and each runner fills unparseable/unmasked/truncated/\nomitted_entries/omitted_attrs from the zero value. `expect_module_calls`,\nwhen present, is the canonical moduleCallsPlan() output. `go` and `jq` record\na STATED difference for that vector - either {\"rejects\": why} when that\nimplementation refuses the document outright, or {\"expect\": ..., \"why\": ...}\nwhen it answers differently. A difference with no entry here is a regression.\nThe jq expectation, when not stated, is `expect` with every attrs array\ndropped: the dispatched summary is {address, actions} only and has no\nattribute values at all.",
   "vectors": [
     {
       "id": "counts/create",
@@ -76,7 +80,8 @@
               }
             ]
           }
-        ]
+        ],
+        "unmasked": true
       }
     },
     {
@@ -155,7 +160,8 @@
               }
             ]
           }
-        ]
+        ],
+        "unmasked": true
       }
     },
     {
@@ -200,7 +206,8 @@
               }
             ]
           }
-        ]
+        ],
+        "unmasked": true
       }
     },
     {
@@ -305,7 +312,8 @@
               "delete"
             ]
           }
-        ]
+        ],
+        "unmasked": true
       }
     },
     {
@@ -562,7 +570,8 @@
               }
             ]
           }
-        ]
+        ],
+        "unmasked": true
       }
     },
     {
@@ -599,7 +608,8 @@
               "update"
             ]
           }
-        ]
+        ],
+        "unmasked": true
       }
     },
     {
@@ -643,7 +653,8 @@
               }
             ]
           }
-        ]
+        ],
+        "unmasked": true
       }
     },
     {
@@ -720,7 +731,8 @@
               }
             ]
           }
-        ]
+        ],
+        "unmasked": true
       }
     },
     {
@@ -763,7 +775,8 @@
               }
             ]
           }
-        ]
+        ],
+        "unmasked": true
       }
     },
     {
@@ -949,7 +962,8 @@
               }
             ]
           }
-        ]
+        ],
+        "unmasked": true
       }
     },
     {
@@ -1278,7 +1292,8 @@
               }
             ]
           }
-        ]
+        ],
+        "unmasked": true
       }
     },
     {
@@ -1323,7 +1338,8 @@
               }
             ]
           }
-        ]
+        ],
+        "unmasked": true
       }
     },
     {
@@ -1369,7 +1385,8 @@
               }
             ]
           }
-        ]
+        ],
+        "unmasked": true
       }
     },
     {
@@ -1414,7 +1431,8 @@
               }
             ]
           }
-        ]
+        ],
+        "unmasked": true
       }
     },
     {
@@ -1459,7 +1477,8 @@
               }
             ]
           }
-        ]
+        ],
+        "unmasked": true
       }
     },
     {
@@ -1506,7 +1525,8 @@
               }
             ]
           }
-        ]
+        ],
+        "unmasked": true
       }
     },
     {
@@ -1551,7 +1571,8 @@
               }
             ]
           }
-        ]
+        ],
+        "unmasked": true
       }
     },
     {
@@ -1596,7 +1617,8 @@
               }
             ]
           }
-        ]
+        ],
+        "unmasked": true
       }
     },
     {
@@ -1639,7 +1661,8 @@
               }
             ]
           }
-        ]
+        ],
+        "unmasked": true
       }
     },
     {
@@ -1689,7 +1712,8 @@
               }
             ]
           }
-        ]
+        ],
+        "unmasked": true
       }
     },
     {
@@ -1732,7 +1756,8 @@
               }
             ]
           }
-        ]
+        ],
+        "unmasked": true
       }
     },
     {
@@ -1768,7 +1793,8 @@
               "update"
             ]
           }
-        ]
+        ],
+        "unmasked": true
       }
     },
     {
@@ -1811,7 +1837,8 @@
               }
             ]
           }
-        ]
+        ],
+        "unmasked": true
       }
     },
     {
@@ -1854,7 +1881,8 @@
               }
             ]
           }
-        ]
+        ],
+        "unmasked": true
       }
     },
     {
@@ -1994,7 +2022,8 @@
         "changed": 0,
         "destroyed": 0,
         "drifted": false,
-        "summary": []
+        "summary": [],
+        "unparseable": true
       },
       "go": {
         "rejects": "json.Unmarshal fails on the string, so /drift/ingest answers 422 — the only implementation that tells the operator anything."
@@ -2148,6 +2177,198 @@
             }
           ]
         }
+      }
+    },
+    {
+      "id": "shape/not-a-plan-document",
+      "why": "Contract issue #31 finding 43. An empty object parses fine and used to produce the IDENTICAL Result as a verified-clean plan — added 0, drifted false, empty summary. A `terraform show -json` document always carries resource_changes, so its absence means this is not a plan: a truncated show, the wrong file handed to the callback, or a broken pipeline step. Now says so.",
+      "plan": {},
+      "expect": {
+        "added": 0,
+        "changed": 0,
+        "destroyed": 0,
+        "drifted": false,
+        "summary": [],
+        "unparseable": true
+      }
+    },
+    {
+      "id": "shape/resource-changes-null",
+      "why": "An explicit null is the same non-answer as an absent key.",
+      "plan": {
+        "resource_changes": null
+      },
+      "expect": {
+        "added": 0,
+        "changed": 0,
+        "destroyed": 0,
+        "drifted": false,
+        "summary": [],
+        "unparseable": true
+      }
+    },
+    {
+      "id": "bounds/deeply-nested-value",
+      "why": "Contract issue #11. A 60-level nested value serialises past the 300-code-point cap and both implementations must truncate the same prefix. The crash this issue reported is TypeScript-only and unbounded (the recursive serializer threw RangeError around 2,600 levels, out of summarize() and into the consumer CI step, suppressing the drift report); the serializer is now iterative and cannot throw at any depth, which no shared vector can express because Go rejects anything past encoding/json own 10,000 nesting cap at the unmarshal boundary. This vector pins the part they CAN both answer.",
+      "plan": {
+        "resource_changes": [
+          {
+            "address": "aws_instance.a",
+            "change": {
+              "actions": [
+                "update"
+              ],
+              "before": {
+                "k": {
+                  "a": {
+                    "a": {
+                      "a": {
+                        "a": {
+                          "a": {
+                            "a": {
+                              "a": {
+                                "a": {
+                                  "a": {
+                                    "a": {
+                                      "a": {
+                                        "a": {
+                                          "a": {
+                                            "a": {
+                                              "a": {
+                                                "a": {
+                                                  "a": {
+                                                    "a": {
+                                                      "a": {
+                                                        "a": {
+                                                          "a": {
+                                                            "a": {
+                                                              "a": {
+                                                                "a": {
+                                                                  "a": {
+                                                                    "a": {
+                                                                      "a": {
+                                                                        "a": {
+                                                                          "a": {
+                                                                            "a": {
+                                                                              "a": {
+                                                                                "a": {
+                                                                                  "a": {
+                                                                                    "a": {
+                                                                                      "a": {
+                                                                                        "a": {
+                                                                                          "a": {
+                                                                                            "a": {
+                                                                                              "a": {
+                                                                                                "a": {
+                                                                                                  "a": {
+                                                                                                    "a": {
+                                                                                                      "a": {
+                                                                                                        "a": {
+                                                                                                          "a": {
+                                                                                                            "a": {
+                                                                                                              "a": {
+                                                                                                                "a": {
+                                                                                                                  "a": {
+                                                                                                                    "a": {
+                                                                                                                      "a": {
+                                                                                                                        "a": {
+                                                                                                                          "a": {
+                                                                                                                            "a": {
+                                                                                                                              "a": {
+                                                                                                                                "a": {
+                                                                                                                                  "a": {
+                                                                                                                                    "a": {
+                                                                                                                                      "a": {
+                                                                                                                                        "a": 1
+                                                                                                                                      }
+                                                                                                                                    }
+                                                                                                                                  }
+                                                                                                                                }
+                                                                                                                              }
+                                                                                                                            }
+                                                                                                                          }
+                                                                                                                        }
+                                                                                                                      }
+                                                                                                                    }
+                                                                                                                  }
+                                                                                                                }
+                                                                                                              }
+                                                                                                            }
+                                                                                                          }
+                                                                                                        }
+                                                                                                      }
+                                                                                                    }
+                                                                                                  }
+                                                                                                }
+                                                                                              }
+                                                                                            }
+                                                                                          }
+                                                                                        }
+                                                                                      }
+                                                                                    }
+                                                                                  }
+                                                                                }
+                                                                              }
+                                                                            }
+                                                                          }
+                                                                        }
+                                                                      }
+                                                                    }
+                                                                  }
+                                                                }
+                                                              }
+                                                            }
+                                                          }
+                                                        }
+                                                      }
+                                                    }
+                                                  }
+                                                }
+                                              }
+                                            }
+                                          }
+                                        }
+                                      }
+                                    }
+                                  }
+                                }
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              "after": {
+                "k": 2
+              }
+            }
+          }
+        ]
+      },
+      "expect": {
+        "added": 0,
+        "changed": 1,
+        "destroyed": 0,
+        "drifted": true,
+        "summary": [
+          {
+            "address": "aws_instance.a",
+            "actions": [
+              "update"
+            ],
+            "attrs": [
+              {
+                "name": "k",
+                "before": "{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":…",
+                "after": "2"
+              }
+            ]
+          }
+        ],
+        "unmasked": true
       }
     },
     {
