@@ -31,7 +31,7 @@ const goodOIDCBody = `{"issuer_url":"https://idp.example.com","client_id":"c","c
 func TestSaveOIDCConfig_CoupledReturns409(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.Suite.RoleSeedOwner = "registry"
-	h := NewHandlers(nil, nil, nil, nil, cfg, nil)
+	h := NewHandlers(nil, nil, nil, nil, nil, cfg, nil)
 	if w := postJSON(h.SaveOIDCConfig, goodOIDCBody); w.Code != http.StatusConflict {
 		t.Fatalf("coupled SaveOIDCConfig = %d, want 409 (%s)", w.Code, w.Body.String())
 	}
@@ -45,14 +45,14 @@ func TestSaveOIDCConfig_NoEncryptionKeyReturns400(t *testing.T) {
 	}
 	cfg := &config.Config{}
 	cfg.Suite.RoleSeedOwner = "self"
-	h := NewHandlers(nil, nil, nil, nil, cfg, nil)
+	h := NewHandlers(nil, nil, nil, nil, nil, cfg, nil)
 	if w := postJSON(h.SaveOIDCConfig, goodOIDCBody); w.Code != http.StatusBadRequest {
 		t.Fatalf("no-key SaveOIDCConfig = %d, want 400 (%s)", w.Code, w.Body.String())
 	}
 }
 
 func TestTestOIDCConfig_MissingFieldsReturns400(t *testing.T) {
-	h := NewHandlers(nil, nil, nil, nil, &config.Config{}, nil)
+	h := NewHandlers(nil, nil, nil, nil, nil, &config.Config{}, nil)
 	if w := postJSON(h.TestOIDCConfig, `{}`); w.Code != http.StatusBadRequest {
 		t.Fatalf("missing fields TestOIDCConfig = %d, want 400", w.Code)
 	}

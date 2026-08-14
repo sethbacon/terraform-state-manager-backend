@@ -12,13 +12,31 @@ import (
 )
 
 // ConfigureAdmin creates the first OWNER: an email-only user in the identity
-// store, granted the admin role in the default organization. No password and no
-// pending-email column are needed — the IdP mints the credential on first login,
-// where the suite-identity store links the email to the OIDC subject.
+// store, granted the admin role in the default organization AND recorded in this
+// deployment's platform-admin carrier. No password and no pending-email column
+// are needed — the IdP mints the credential on first login, where the
+// suite-identity store links the email to the OIDC subject.
+//
+// THIS IS THE CARRIER'S BOOTSTRAP PATH, and it is the only one that can be:
+// every other way of granting platform-admin requires an authenticated caller
+// who already holds `admin`, which is precisely what a deployment with nobody in
+// it does not have. This step runs behind the setup-token middleware, before any
+// owner exists, and is permanently unreachable once setup completes — so it
+// cannot become a standing privilege-escalation route.
+//
+// IDEMPOTENT END TO END. The user is created or reused, the membership is
+// inserted or promoted, and the carrier grant is a no-op when the row is already
+// there (EnsureAdmin swallows ErrAlreadyPlatformAdmin), leaving the original
+// granted_by/granted_at/note provenance intact. Re-running the wizard step
+// therefore converges rather than either failing or rewriting history.
 //
 // Refused with 409 in coupled mode (the sibling registry owns identity); the
 // wizard hides this step there, and this guard stops a hand-crafted request from
-// clobbering the shared identity store.
+// clobbering the shared identity store. A coupled deployment gets its first TSM
+// platform admin from POST /api/v1/admin/platform-admins instead, called by
+// somebody the sibling's identity already made an admin here — which works
+// because this phase's elevation is additive and the role-template route to
+// `admin` still stands.
 func (h *Handlers) ConfigureAdmin(c *gin.Context) {
 	if !h.cfg.Suite.ShouldSeedRoles("tsm") {
 		c.JSON(http.StatusConflict, gin.H{"error": "identity is managed by the suite registry; create the owner there"})
@@ -76,6 +94,21 @@ func (h *Handlers) ConfigureAdmin(c *gin.Context) {
 		}
 		if uerr != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to grant the owner the admin role"})
+			return
+		}
+	}
+	// The carrier row, written BEFORE SetAdminConfigured for the same reason the
+	// membership promotion fails closed above: marking the deployment
+	// "owner configured" burns the only re-entry into this step, so anything that
+	// did not actually happen must not be recorded as having happened.
+	//
+	// granted_by is NULL — at first boot there is no principal to attribute the
+	// grant to — and the note says where the row came from, so the provenance is
+	// not silently invented.
+	if h.platformAdmins != nil {
+		if _, err := h.platformAdmins.EnsureAdmin(ctx, user.ID,
+			"granted by the first-run setup wizard"); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to record the owner as a platform administrator"})
 			return
 		}
 	}

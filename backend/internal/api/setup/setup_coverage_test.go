@@ -18,7 +18,7 @@ import (
 func TestDefaultRedirectURL(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.Server.PublicURL = "https://tsm.example.com/"
-	h := NewHandlers(nil, nil, nil, nil, cfg, nil)
+	h := NewHandlers(nil, nil, nil, nil, nil, cfg, nil)
 	if got := h.defaultRedirectURL(); got != "https://tsm.example.com/api/v1/auth/callback" {
 		t.Errorf("PublicURL: got %q", got)
 	}
@@ -26,7 +26,7 @@ func TestDefaultRedirectURL(t *testing.T) {
 	// Falls back to BaseURL when PublicURL is empty.
 	cfg2 := &config.Config{}
 	cfg2.Server.BaseURL = "https://base.example.com"
-	h2 := NewHandlers(nil, nil, nil, nil, cfg2, nil)
+	h2 := NewHandlers(nil, nil, nil, nil, nil, cfg2, nil)
 	if got := h2.defaultRedirectURL(); got != "https://base.example.com/api/v1/auth/callback" {
 		t.Errorf("BaseURL fallback: got %q", got)
 	}
@@ -62,7 +62,7 @@ func TestOIDCRequestToConfig(t *testing.T) {
 func TestConfigureAdmin_Coupled409(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.Suite.RoleSeedOwner = "registry" // coupled: the sibling registry owns identity
-	h := NewHandlers(nil, nil, nil, nil, cfg, nil)
+	h := NewHandlers(nil, nil, nil, nil, nil, cfg, nil)
 	if w := postJSON(h.ConfigureAdmin, `{"email":"owner@example.com"}`); w.Code != http.StatusConflict {
 		t.Errorf("coupled ConfigureAdmin = %d, want 409 (%s)", w.Code, w.Body.String())
 	}
@@ -71,7 +71,7 @@ func TestConfigureAdmin_Coupled409(t *testing.T) {
 func TestConfigureAdmin_BadEmail400(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.Suite.RoleSeedOwner = "self"
-	h := NewHandlers(nil, nil, nil, nil, cfg, nil)
+	h := NewHandlers(nil, nil, nil, nil, nil, cfg, nil)
 	if w := postJSON(h.ConfigureAdmin, `{"email":"not-an-email"}`); w.Code != http.StatusBadRequest {
 		t.Errorf("bad-email ConfigureAdmin = %d, want 400", w.Code)
 	}
@@ -82,7 +82,7 @@ func TestConfigureAdmin_BadEmail400(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestSaveSource_BadInput(t *testing.T) {
-	h := NewHandlers(nil, nil, nil, nil, &config.Config{}, nil)
+	h := NewHandlers(nil, nil, nil, nil, nil, &config.Config{}, nil)
 	if w := postJSON(h.SaveSource, `{bad`); w.Code != http.StatusBadRequest {
 		t.Errorf("bad-json SaveSource = %d, want 400", w.Code)
 	}
@@ -92,7 +92,7 @@ func TestSaveSource_BadInput(t *testing.T) {
 }
 
 func TestTestSource_BadInput(t *testing.T) {
-	h := NewHandlers(nil, nil, nil, nil, &config.Config{}, nil)
+	h := NewHandlers(nil, nil, nil, nil, nil, &config.Config{}, nil)
 	if w := postJSON(h.TestSource, `{bad`); w.Code != http.StatusBadRequest {
 		t.Errorf("bad-json TestSource = %d, want 400", w.Code)
 	}
@@ -119,7 +119,7 @@ func newCompleteSetupHandler(t *testing.T, roleSeedOwner string) (*Handlers, sql
 	t.Cleanup(func() { _ = db.Close() })
 	cfg := &config.Config{}
 	cfg.Suite.RoleSeedOwner = roleSeedOwner
-	h := NewHandlers(repositories.NewSystemSettingsRepository(db), nil, nil, nil, cfg, nil)
+	h := NewHandlers(repositories.NewSystemSettingsRepository(db), nil, nil, nil, nil, cfg, nil)
 	return h, mock
 }
 

@@ -9,10 +9,12 @@ import (
 
 	"github.com/gin-gonic/gin"
 	idauth "github.com/sethbacon/terraform-suite-identity/identity/auth"
+	idplatformadmin "github.com/sethbacon/terraform-suite-identity/identity/platformadmin"
 	idstore "github.com/sethbacon/terraform-suite-identity/identity/store"
 
 	"github.com/terraform-state-manager/terraform-state-manager/internal/auth"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/db/repositories"
+	"github.com/terraform-state-manager/terraform-state-manager/internal/platformadmin"
 )
 
 // AuthCookieName is the HttpOnly cookie carrying the session JWT.
@@ -24,14 +26,22 @@ const APIKeyPrefix = "tsm"
 
 // AuthMiddleware validates the session JWT (from the Authorization header or the
 // auth cookie), checks revocation, loads the user, and populates the request
-// context with user_id, scopes (from claims), and jwt_claims. Header tokens that
-// are not JWTs fall through to API-key authentication (registry order: JWT is
-// stateless and tried first; keys cost a prefix lookup + bcrypt compare). orgRepo
-// is used only on the API-key path, to cap a key's stored scopes by the owner's
-// current combined scopes (see authenticateAPIKey). userRevocations enforces the
-// per-user revoke-all watermark an authority reduction writes (#330); nil skips
-// that check.
-func AuthMiddleware(userRepo *idstore.UserRepository, tokenRepo *idstore.TokenRepository, apiKeyRepo *idstore.APIKeyRepository, orgRepo *idstore.OrganizationRepository, userRevocations *repositories.UserTokenRevocationRepository) gin.HandlerFunc {
+// context with user_id, scopes (from claims, elevated by the platform-admin
+// carrier), and jwt_claims. Header tokens that are not JWTs fall through to
+// API-key authentication (registry order: JWT is stateless and tried first; keys
+// cost a prefix lookup + bcrypt compare). orgRepo is used only on the API-key
+// path, to cap a key's stored scopes by the owner's current combined scopes (see
+// authenticateAPIKey). userRevocations enforces the per-user revoke-all watermark
+// an authority reduction writes (#330); nil skips that check.
+//
+// platformAdmins is the per-request platform-admin elevation and may be nil (a
+// deployment without a database connection, or a unit-test rig), in which case no
+// elevation happens at all — the carrier can only ADD authority, so an unwired
+// one withholds it rather than granting anything.
+//
+// THE ELEVATION IS ON THIS PATH AND NOT ON THE API-KEY PATH BELOW. That
+// asymmetry is the design, not an omission: see authenticateAPIKey.
+func AuthMiddleware(userRepo *idstore.UserRepository, tokenRepo *idstore.TokenRepository, apiKeyRepo *idstore.APIKeyRepository, orgRepo *idstore.OrganizationRepository, userRevocations *repositories.UserTokenRevocationRepository, platformAdmins *platformadmin.Service) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		// A verified mTLS client certificate (set by mtls.AuthMiddleware earlier in
 		// the chain) already authenticated this request and populated scopes.
@@ -108,9 +118,42 @@ func AuthMiddleware(userRepo *idstore.UserRepository, tokenRepo *idstore.TokenRe
 			return
 		}
 
-		setAuthContext(c, user.ID, claims, fromCookie)
+		scopes, err := elevate(c.Request.Context(), platformAdmins, user.ID, claims.Scopes)
+		if err != nil {
+			// An authority question that did not resolve is not a completed
+			// "no". Answering 403 here would silently downgrade a platform
+			// administrator to a permission denial during exactly the incident
+			// in which they need the admin surface, so this is a server fault —
+			// the same answer the revocation checks above give when they cannot
+			// establish their own precondition.
+			c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "Auth check failed"})
+			return
+		}
+
+		setAuthContext(c, user.ID, claims, fromCookie, scopes)
 		c.Next()
 	}
+}
+
+// elevate resolves the caller's effective scopes through the platform-admin
+// carrier, per request.
+//
+// PER REQUEST, NOT CACHED. One indexed read on a table with a handful of rows is
+// what buys immediate revocation: a cache with any TTL at all reintroduces the
+// window a long-lived session would have had, which is the whole hazard the
+// carrier exists to close.
+//
+// A nil service means no carrier is wired, so the caller's own scopes stand
+// unchanged. That is fail-closed in the direction that matters — the carrier only
+// ever ADDS `admin` in this phase, so an absent one grants nothing.
+func elevate(ctx context.Context, platformAdmins *platformadmin.Service, userID string, scopes []string) ([]string, error) {
+	if scopes == nil {
+		scopes = []string{}
+	}
+	if platformAdmins == nil {
+		return scopes, nil
+	}
+	return platformAdmins.SessionScopes(ctx, userID, scopes)
 }
 
 // OptionalAuthMiddleware populates the auth context when a valid session token is
@@ -118,7 +161,13 @@ func AuthMiddleware(userRepo *idstore.UserRepository, tokenRepo *idstore.TokenRe
 // and must work even without (or with an expired) session. It honours the same
 // revoke-all watermark as AuthMiddleware (#330), so a revoked session is treated
 // as no session rather than as an authenticated one.
-func OptionalAuthMiddleware(userRepo *idstore.UserRepository, tokenRepo *idstore.TokenRepository, userRevocations *repositories.UserTokenRevocationRepository) gin.HandlerFunc {
+//
+// It elevates through the same carrier, so the scope set it publishes cannot
+// disagree with AuthMiddleware's. A carrier lookup FAILURE here leaves the
+// session unelevated instead of aborting: this middleware's contract is that it
+// never fails a request, and every route behind it is either unauthenticated-safe
+// or idempotent.
+func OptionalAuthMiddleware(userRepo *idstore.UserRepository, tokenRepo *idstore.TokenRepository, userRevocations *repositories.UserTokenRevocationRepository, platformAdmins *platformadmin.Service) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		token, fromCookie := extractToken(c)
 		if token == "" {
@@ -144,7 +193,13 @@ func OptionalAuthMiddleware(userRepo *idstore.UserRepository, tokenRepo *idstore
 		}
 		// Authority derivation, as in AuthMiddleware above.
 		if user, err := userRepo.GetUserByID(c.Request.Context(), claims.UserID, idstore.OrgScopeAllOrganizations()); err == nil && user != nil {
-			setAuthContext(c, user.ID, claims, fromCookie)
+			scopes, eErr := elevate(c.Request.Context(), platformAdmins, user.ID, claims.Scopes)
+			if eErr != nil {
+				// Unelevated, never the token's claim re-read: an unresolved
+				// authority question must not become an elevation.
+				scopes = claims.Scopes
+			}
+			setAuthContext(c, user.ID, claims, fromCookie, scopes)
 		}
 		c.Next()
 	}
@@ -153,10 +208,19 @@ func OptionalAuthMiddleware(userRepo *idstore.UserRepository, tokenRepo *idstore
 // authenticateAPIKey resolves a Bearer token as an API key: indexed prefix
 // lookup → bcrypt compare → expiry check → owning user must still exist → the
 // key's stored scopes are capped by the owner's current combined scopes →
-// context populated. Capping (grantedSubset) makes a key's effective privileges
-// track its owner across role downgrades and de-provisioning; without it a key
-// minted while the owner held admin would keep admin after they lost it (#223).
-// Last-used is recorded async so the request never blocks on the bookkeeping write.
+// `admin` stripped unconditionally → context populated. Capping (grantedSubset)
+// makes a key's effective privileges track its owner across role downgrades and
+// de-provisioning; without it a key minted while the owner held admin would keep
+// admin after they lost it (#223). Last-used is recorded async so the request
+// never blocks on the bookkeeping write.
+//
+// IT TAKES NO CARRIER, AND CANNOT. This function has no platformadmin.Service
+// parameter, so the API-key path is structurally incapable of consulting the
+// carrier — "a key must not inherit its owner's platform-admin" is enforced by
+// there being nothing here to call, rather than by remembering not to call it. A
+// key is a long-lived, often unattended credential, frequently held by CI; an
+// elevation that rode along would hand every pipeline token the highest privilege
+// in the product, revocable only by deleting the key.
 func authenticateAPIKey(c *gin.Context, keys *idstore.APIKeyRepository, users *idstore.UserRepository, orgs *idstore.OrganizationRepository, token string) bool {
 	if len(token) < idauth.DisplayPrefixLength {
 		return false
@@ -205,6 +269,15 @@ func authenticateAPIKey(c *gin.Context, keys *idstore.APIKeyRepository, users *i
 			}
 			scopes = grantedSubset(scopes, live)
 		}
+		// STRIPPED, not merely never added. `admin` is excluded from
+		// assignableKeyScopes (#252) so no key minted through this API carries
+		// it, but a key's stored scope set is not a live authority statement
+		// about anybody — an older role model, a hand-written INSERT, or a seed
+		// can put it there — and grantedSubset above will happily keep it when
+		// the owner is an admin. KeyScopes is a free function that takes no
+		// context, no connection and no user, so this line cannot become an
+		// elevation no matter what it is handed.
+		scopes = idplatformadmin.KeyScopes(scopes)
 		c.Set("user_id", userID)
 		c.Set("scopes", scopes)
 		c.Set("auth_method", "apikey")
@@ -243,7 +316,14 @@ func extractToken(c *gin.Context) (token string, fromCookie bool) {
 	return "", false
 }
 
-func setAuthContext(c *gin.Context, userID string, claims *auth.Claims, fromCookie bool) {
+// setAuthContext publishes the authenticated principal and its EFFECTIVE scopes.
+//
+// scopes is passed in rather than read from claims.Scopes here, because by this
+// point they are no longer the same thing: the carrier has been consulted and
+// may have added `admin` that the token never carried. Reading the claims again
+// at this last step is precisely how an elevation gets computed and then
+// discarded.
+func setAuthContext(c *gin.Context, userID string, claims *auth.Claims, fromCookie bool, scopes []string) {
 	c.Set("user_id", userID)
 	c.Set("jwt_claims", claims)
 	if fromCookie {
@@ -251,7 +331,6 @@ func setAuthContext(c *gin.Context, userID string, claims *auth.Claims, fromCook
 	} else {
 		c.Set("auth_method", "jwt")
 	}
-	scopes := claims.Scopes
 	if scopes == nil {
 		scopes = []string{}
 	}

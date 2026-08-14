@@ -42,6 +42,23 @@ default organization. The first user gets a role via either:
 Group mappings reconcile on every login; leaving a mapped group removes the
 membership it granted.
 
+### Platform administrators
+
+Separately from role templates, this deployment keeps its own record of **who
+administers it** (`platform_admins`). The setup wizard's owner step writes the
+first entry; after that, manage it at Administration → `GET/POST/DELETE
+/api/v1/admin/platform-admins`. It is read on every request, so a revocation
+takes effect immediately rather than when the session expires, and the last
+remaining administrator cannot be revoked — grant somebody else first.
+
+A deployment that completed setup before this table existed starts empty and
+keeps working: an administrator is still an administrator through their role
+template. Add them to the carrier with `POST /api/v1/admin/platform-admins` so
+the record exists before authority moves onto it.
+
+API keys never carry `admin` and never inherit their owner's platform-admin;
+administrative actions go through an interactive session.
+
 ## 4. Add your first state source
 
 Sources (HCP Terraform, Azure Blob, S3, GCS, git, Consul, PostgreSQL,

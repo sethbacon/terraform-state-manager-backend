@@ -76,7 +76,7 @@ func authRouter(userRepo *idstore.UserRepository, tokenRepo *idstore.TokenReposi
 
 func authRouterWithKeys(userRepo *idstore.UserRepository, tokenRepo *idstore.TokenRepository, keyRepo *idstore.APIKeyRepository) *gin.Engine {
 	r := gin.New()
-	r.Use(AuthMiddleware(userRepo, tokenRepo, keyRepo, nil, nil))
+	r.Use(AuthMiddleware(userRepo, tokenRepo, keyRepo, nil, nil, nil))
 	r.GET("/", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{
 			"user_id":     c.GetString("user_id"),
@@ -111,7 +111,7 @@ func TestAuthMiddleware_MTLSPreAuthPassesThrough(t *testing.T) {
 	r := gin.New()
 	// Simulates mtls.AuthMiddleware running earlier in the chain.
 	r.Use(func(c *gin.Context) { c.Set("auth_method", "mtls"); c.Next() })
-	r.Use(AuthMiddleware(nil, nil, nil, nil, nil))
+	r.Use(AuthMiddleware(nil, nil, nil, nil, nil, nil))
 	r.GET("/", func(c *gin.Context) { c.Status(http.StatusOK) })
 
 	w := httptest.NewRecorder()
@@ -202,7 +202,7 @@ func TestAuthMiddleware_UserNotFound(t *testing.T) {
 
 func TestOptionalAuthMiddleware_NoToken(t *testing.T) {
 	r := gin.New()
-	r.Use(OptionalAuthMiddleware(nil, nil, nil))
+	r.Use(OptionalAuthMiddleware(nil, nil, nil, nil))
 	r.GET("/", func(c *gin.Context) {
 		_, authed := c.Get("user_id")
 		c.JSON(http.StatusOK, gin.H{"authed": authed})
@@ -220,7 +220,7 @@ func TestOptionalAuthMiddleware_NoToken(t *testing.T) {
 
 func TestOptionalAuthMiddleware_InvalidTokenStillPasses(t *testing.T) {
 	r := gin.New()
-	r.Use(OptionalAuthMiddleware(nil, nil, nil))
+	r.Use(OptionalAuthMiddleware(nil, nil, nil, nil))
 	r.GET("/", func(c *gin.Context) { c.Status(http.StatusOK) })
 
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
@@ -239,7 +239,7 @@ func TestOptionalAuthMiddleware_ValidToken(t *testing.T) {
 	expectUserFound(userMock, "user-1")
 
 	r := gin.New()
-	r.Use(OptionalAuthMiddleware(userRepo, tokenRepo, nil))
+	r.Use(OptionalAuthMiddleware(userRepo, tokenRepo, nil, nil))
 	r.GET("/", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"user_id": c.GetString("user_id")})
 	})
@@ -355,7 +355,7 @@ func TestAuthMiddleware_APIKeyScopesCappedByLiveOwnerScopes(t *testing.T) {
 			AddRow("o1", "default", nil, time.Now(), "viewer", "Viewer", []byte(`["state:read"]`)))
 
 	r := gin.New()
-	r.Use(AuthMiddleware(userRepo, nil, keyRepo, orgRepo, nil))
+	r.Use(AuthMiddleware(userRepo, nil, keyRepo, orgRepo, nil, nil))
 	r.GET("/", func(c *gin.Context) {
 		sc, _ := c.Get("scopes")
 		c.JSON(http.StatusOK, gin.H{"scopes": sc})
@@ -461,7 +461,7 @@ func expectWatermark(mock sqlmock.Sqlmock, revoked bool) {
 
 func watermarkRouter(userRepo *idstore.UserRepository, tokenRepo *idstore.TokenRepository, rev *repositories.UserTokenRevocationRepository) *gin.Engine {
 	r := gin.New()
-	r.Use(AuthMiddleware(userRepo, tokenRepo, nil, nil, rev))
+	r.Use(AuthMiddleware(userRepo, tokenRepo, nil, nil, rev, nil))
 	r.GET("/", func(c *gin.Context) { c.JSON(http.StatusOK, gin.H{"user_id": c.GetString("user_id")}) })
 	return r
 }
@@ -534,7 +534,7 @@ func TestOptionalAuthMiddleware_WatermarkLeavesRequestUnauthenticated(t *testing
 	expectWatermark(revMock, true)
 
 	r := gin.New()
-	r.Use(OptionalAuthMiddleware(userRepo, tokenRepo, revRepo))
+	r.Use(OptionalAuthMiddleware(userRepo, tokenRepo, revRepo, nil))
 	r.GET("/", func(c *gin.Context) {
 		_, authed := c.Get("user_id")
 		c.JSON(http.StatusOK, gin.H{"authed": authed})

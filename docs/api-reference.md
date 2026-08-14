@@ -229,6 +229,39 @@ Covers admin bootstrap, OIDC test/save, and source test/save.
 | `/admin/roles`, `/admin/audit-logs`, `/admin/stats`                                                              | `admin` | Role templates, audit trail, stats                               |
 | `GET /admin/audit-logs/export`                                                                                   | `admin` | Full filtered audit trail as CSV/JSON (capped at 10000 rows)     |
 | `/admin/sso`, `/admin/oidc/config`, `/admin/oidc/group-mapping`, `/admin/identity-group-mappings`, `/admin/mtls` | `admin` | Read configured providers; manage the OIDC group-mapping overlay |
+| `GET/POST /admin/platform-admins` · `DELETE /admin/platform-admins/{user_id}` | `admin` | Who administers **this** deployment (see below)                  |
+
+#### Platform administrators
+
+`platform_admins` is TSM's own carrier for "who administers this deployment" —
+per-app authorization state, kept out of organization membership and out of the
+token. It is consulted on **every request**, so removing a grant takes effect on
+the next one rather than when the longest session expires.
+
+- `GET` lists every grant with its provenance (`granted_by`, `granted_at`,
+  `note`). A grant whose user no longer exists is returned with
+  `"orphaned": true` rather than hidden — it elevates nobody, but this listing is
+  the only surface that can remove it.
+- `POST {"user_id": "...", "note": "..."}` grants. `409` if the user already
+  holds it (the original provenance is preserved, never overwritten), `400` if
+  the id names no user.
+- `DELETE` revokes. `409` when it would leave the deployment with no
+  administrator who could actually exercise the privilege — grant somebody else
+  first. `503` means the identity store could not be reached, so nothing was
+  changed and the request can be retried.
+
+Every grant and revocation writes its audit record in the **same transaction** as
+the change; a database trigger refuses the commit otherwise. Records reach
+`audit_logs` through a transactional outbox, so they may appear there a few
+seconds later.
+
+**API keys never carry `admin`**, whatever their stored scopes say, and never
+inherit their owner's platform-admin. Admin actions go through an interactive
+session.
+
+The first administrator comes from the first-run setup wizard's owner step. In a
+deployment that has already completed setup, an existing `admin` uses `POST`
+above.
 
 ### API keys
 

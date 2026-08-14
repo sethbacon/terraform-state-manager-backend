@@ -17,6 +17,7 @@ PACKAGES=(
   "github.com/terraform-state-manager/terraform-state-manager/internal/auth/saml|58"
   "github.com/terraform-state-manager/terraform-state-manager/internal/auth/ldap|35"
   "github.com/terraform-state-manager/terraform-state-manager/internal/middleware|85"
+  "github.com/terraform-state-manager/terraform-state-manager/internal/platformadmin|82"
   "github.com/terraform-state-manager/terraform-state-manager/internal/statesource|72"
   "github.com/terraform-state-manager/terraform-state-manager/internal/db/repositories|77"
 )

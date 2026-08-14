@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"log/slog"
 
+	"github.com/sethbacon/terraform-suite-identity/identity/auditoutbox"
 	identitymailer "github.com/sethbacon/terraform-suite-identity/identity/mailer"
 	identitynotify "github.com/sethbacon/terraform-suite-identity/identity/notify"
 	idstore "github.com/sethbacon/terraform-suite-identity/identity/store"
@@ -32,6 +33,9 @@ type backgroundWorkerDeps struct {
 	health     *HealthHandlers
 	driftDisp  driftDispatcher
 	smtpCfg    *notify.SMTPConfig
+	// auditRelay drains the platform-admin audit outbox into identity.audit_logs.
+	// Nil on a deployment with no carrier (the nil-DB unit-test rig).
+	auditRelay *auditoutbox.Relay
 }
 
 // newBackgroundWorkers attaches the always-on state syncer to the sources plane
@@ -49,6 +53,7 @@ func newBackgroundWorkers(d backgroundWorkerDeps) (stop func()) {
 	if d.database == nil {
 		return stop
 	}
+	stopRelay := d.startAuditRelay()
 	syncer := statesync.New(
 		repositories.NewSourceRepository(d.database),
 		repositories.NewStateAnalysisRepository(d.database),
@@ -67,13 +72,43 @@ func newBackgroundWorkers(d backgroundWorkerDeps) (stop func()) {
 	if !d.cfg.Workers.Enabled {
 		slog.Info("background workers disabled on this replica (workers.enabled=false); " +
 			"schedule firing and periodic state sync run on a worker-enabled replica")
-		return stop
+		return stopRelay
 	}
 	elector := leaderelect.New(d.database, func() (stopWorkers func()) {
 		return d.startWorkers(syncer)
 	})
 	elector.Start()
-	return elector.Stop
+	return func() {
+		elector.Stop()
+		stopRelay()
+	}
+}
+
+// startAuditRelay drains the platform-admin audit outbox into the identity audit
+// log, and returns a stop func.
+//
+// NOT LEADER-GATED, unlike every other periodic loop here, and deliberately so.
+// The relay claims with FOR UPDATE SKIP LOCKED, so several replicas take
+// disjoint batches instead of colliding — the property the leader election
+// exists to provide for the schedule runner and the expiry notifier is one this
+// job already has. Gating it would tie the audit trail's liveness to leadership:
+// a deployment that runs its workers on one replica (the documented TSM shape)
+// would stop delivering audit records the moment that replica went down, and the
+// intents would sit undelivered while every other replica reported healthy.
+//
+// A relay that refuses to start is an ERROR, not a warning: privileged mutations
+// would keep writing intents with nothing to drain them.
+func (d backgroundWorkerDeps) startAuditRelay() (stop func()) {
+	if d.auditRelay == nil {
+		return func() {}
+	}
+	go func() {
+		if err := d.auditRelay.Start(context.Background()); err != nil {
+			slog.Error("audit outbox relay failed to start; platform-admin audit records "+
+				"will accumulate undelivered", "error", err)
+		}
+	}()
+	return func() { _ = d.auditRelay.Stop() }
 }
 
 // startWorkers constructs and starts the periodic worker loops (schedule runner,

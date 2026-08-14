@@ -31,6 +31,7 @@ import (
 	"github.com/terraform-state-manager/terraform-state-manager/internal/db/repositories"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/egress"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/middleware"
+	"github.com/terraform-state-manager/terraform-state-manager/internal/platformadmin"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/services/notify"
 )
 
@@ -115,8 +116,29 @@ func NewRouter(cfg *config.Config, database *sql.DB, identityDB *sql.DB) (*gin.E
 			}
 		}
 	}
-	requireAuth := middleware.AuthMiddleware(authHandlers.UserRepo(), authHandlers.TokenRepo(), authHandlers.APIKeyRepo(), authHandlers.OrgRepo(), userRevocationRepo)
-	optionalAuth := middleware.OptionalAuthMiddleware(authHandlers.UserRepo(), authHandlers.TokenRepo(), userRevocationRepo)
+	// The platform-admin carrier: TSM's own answer to "who administers this
+	// deployment", on the APP connection with its audit outbox beside it, and
+	// resolved against the identity connection where principals live.
+	//
+	// Verified here rather than assumed. The three tables it addresses are all
+	// unqualified and placed by their connection's search_path, so a startup line
+	// naming where each one actually resolved is the difference between finding a
+	// mis-routed carrier now and discovering it as an empty administrator list.
+	// Both connections are nil in the unit-test rig, where there is no carrier and
+	// therefore no elevation.
+	var platformAdmins *platformadmin.Service
+	if database != nil && identityDB != nil {
+		platformAdmins, err = platformadmin.New(database, identityDB)
+		if err != nil {
+			return nil, stop, fmt.Errorf("failed to build the platform-admin carrier: %w", err)
+		}
+		if verr := platformAdmins.Verify(context.Background()); verr != nil {
+			return nil, stop, fmt.Errorf("platform-admin carrier is not usable: %w", verr)
+		}
+	}
+
+	requireAuth := middleware.AuthMiddleware(authHandlers.UserRepo(), authHandlers.TokenRepo(), authHandlers.APIKeyRepo(), authHandlers.OrgRepo(), userRevocationRepo, platformAdmins)
+	optionalAuth := middleware.OptionalAuthMiddleware(authHandlers.UserRepo(), authHandlers.TokenRepo(), userRevocationRepo, platformAdmins)
 
 	var suiteClient *suite.DiscoveryClient
 
@@ -144,7 +166,7 @@ func NewRouter(cfg *config.Config, database *sql.DB, identityDB *sql.DB) (*gin.E
 			v1.PUT("/admin/ui/theme", requireAuth, middleware.RequireScope(auth.ScopeAdmin),
 				UpdateUITheme(settingsRepo, newAuditor(identityDB)))
 		}
-		setupHandlers := setup.NewHandlers(settingsRepo, oidcConfigRepo, repositories.NewSourceRepository(database), identityDB, cfg, authHandlers.SetOIDCProvider)
+		setupHandlers := setup.NewHandlers(settingsRepo, oidcConfigRepo, repositories.NewSourceRepository(database), identityDB, platformAdmins, cfg, authHandlers.SetOIDCProvider)
 		v1.GET("/setup/status", setupHandlers.GetSetupStatus)
 		setupGroup := v1.Group("/setup")
 		setupGroup.Use(middleware.SetupTokenMiddleware(settingsRepo))
@@ -294,6 +316,20 @@ func NewRouter(cfg *config.Config, database *sql.DB, identityDB *sql.DB) (*gin.E
 			ag.GET("/roles", admin.ListRoles())
 			ag.GET("/audit-logs", admin.ListAuditLogs())
 			ag.GET("/audit-logs/export", admin.ExportAuditLogs())
+
+			// The platform-admin carrier: who administers THIS deployment.
+			//
+			// Gated on the same flat admin scope as the rest of this group, and
+			// that is what makes an upgrade survivable: a deployment whose
+			// administrators hold `admin` through a role template today can
+			// populate its own carrier from here, without the chicken-and-egg
+			// that a carrier-gated management API would have. The first-run
+			// wizard (internal/api/setup) is the path for a deployment that has
+			// no administrator at all.
+			platformAdminHandlers := NewPlatformAdminHandlers(platformAdmins)
+			ag.GET("/platform-admins", platformAdminHandlers.ListPlatformAdmins())
+			ag.POST("/platform-admins", platformAdminHandlers.GrantPlatformAdmin())
+			ag.DELETE("/platform-admins/:user_id", platformAdminHandlers.RevokePlatformAdmin())
 
 			// CI workflow templates: operator edit/add/replace of the drift /
 			// version-lab YAML per (provider, kind, profile).
@@ -500,6 +536,7 @@ func NewRouter(cfg *config.Config, database *sql.DB, identityDB *sql.DB) (*gin.E
 			health:     health,
 			driftDisp:  driftDisp,
 			smtpCfg:    smtpCfg,
+			auditRelay: platformAdmins.Relay(),
 		})
 	}
 

@@ -28,7 +28,7 @@ func statusBody(t *testing.T, roleSeedOwner string) map[string]any {
 
 	cfg := &config.Config{}
 	cfg.Suite.RoleSeedOwner = roleSeedOwner
-	h := NewHandlers(repositories.NewSystemSettingsRepository(db), nil, nil, nil, cfg, nil)
+	h := NewHandlers(repositories.NewSystemSettingsRepository(db), nil, nil, nil, nil, cfg, nil)
 
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
@@ -70,7 +70,7 @@ func TestGetSetupStatus_CoupledDefersIdentity(t *testing.T) {
 func TestValidateToken_OK(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
-	h := NewHandlers(nil, nil, nil, nil, &config.Config{}, nil)
+	h := NewHandlers(nil, nil, nil, nil, nil, &config.Config{}, nil)
 	r.POST("/setup/validate-token", h.ValidateToken)
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/setup/validate-token", nil))
