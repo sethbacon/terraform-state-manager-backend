@@ -1,5 +1,17 @@
 # Changelog
 
+## [3.4.0](https://github.com/sethbacon/terraform-state-manager-backend/compare/v3.3.0...v3.4.0) (2026-08-14)
+
+
+### Features
+
+* **drift:** bound the dispatched summary and carry the contract's new markers ([#379](https://github.com/sethbacon/terraform-state-manager-backend/issues/379)) ([9c181e8](https://github.com/sethbacon/terraform-state-manager-backend/commit/9c181e83c8d29a85685dbeff8dcb9b8d1ab4e067))
+
+
+### Bug Fixes
+
+* **drift:** run the contract's conformance corpus, and reconcile the jq summarizer ([#378](https://github.com/sethbacon/terraform-state-manager-backend/issues/378)) ([3fc5541](https://github.com/sethbacon/terraform-state-manager-backend/commit/3fc5541d86ab99dcee55f25ee3a9eb90fbccf509))
+
 ## [3.3.0](https://github.com/sethbacon/terraform-state-manager-backend/compare/v3.2.0...v3.3.0) (2026-08-13)
 
 
