@@ -1,0 +1,2298 @@
+{
+  "schema": "drift-contract-conformance/v1",
+  "note": "The shared conformance corpus for the TSM drift contract. One input plan per\nvector plus the EXPECTED output, hand-authored as intent and never read back\nfrom an implementation. Every implementation of the contract runs this file\nand compares byte-for-byte:\n  - TypeScript (canonical) - 4cloudguru/terraform-drift-contract, __tests__/conformance.test.ts\n  - Go driftingest         - terraform-state-manager-backend, internal/services/driftingest\n  - jq                     - terraform-state-manager-backend, the dispatched CI templates\nThis file is byte-identical in both repositories; each side asserts the same\nSHA-256 of it, so an edit to one copy reddens that repository immediately.\nFields: `expect` is the canonical summarize() Result. `expect_module_calls`,\nwhen present, is the canonical moduleCallsPlan() output. `go` and `jq` record\na STATED difference for that vector - either {\"rejects\": why} when that\nimplementation refuses the document outright, or {\"expect\": ..., \"why\": ...}\nwhen it answers differently. A difference with no entry here is a regression.\nThe jq expectation, when not stated, is `expect` with every attrs array\ndropped: the dispatched summary is {address, actions} only and has no\nattribute values at all.",
+  "vectors": [
+    {
+      "id": "counts/create",
+      "why": "A pure create counts once as added and carries no attrs (before is null, not an object).",
+      "plan": {
+        "resource_changes": [
+          {
+            "address": "aws_s3_bucket.a",
+            "change": {
+              "actions": [
+                "create"
+              ],
+              "before": null,
+              "after": {
+                "bucket": "a"
+              }
+            }
+          }
+        ]
+      },
+      "expect": {
+        "added": 1,
+        "changed": 0,
+        "destroyed": 0,
+        "drifted": true,
+        "summary": [
+          {
+            "address": "aws_s3_bucket.a",
+            "actions": [
+              "create"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "counts/update",
+      "why": "An in-place update counts as changed and emits the differing top-level keys.",
+      "plan": {
+        "resource_changes": [
+          {
+            "address": "aws_instance.a",
+            "change": {
+              "actions": [
+                "update"
+              ],
+              "before": {
+                "size": 1
+              },
+              "after": {
+                "size": 2
+              }
+            }
+          }
+        ]
+      },
+      "expect": {
+        "added": 0,
+        "changed": 1,
+        "destroyed": 0,
+        "drifted": true,
+        "summary": [
+          {
+            "address": "aws_instance.a",
+            "actions": [
+              "update"
+            ],
+            "attrs": [
+              {
+                "name": "size",
+                "before": "1",
+                "after": "2"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "counts/delete",
+      "why": "A pure delete counts once as destroyed; after is null so there are no attrs.",
+      "plan": {
+        "resource_changes": [
+          {
+            "address": "aws_instance.a",
+            "change": {
+              "actions": [
+                "delete"
+              ],
+              "before": {
+                "size": 1
+              },
+              "after": null
+            }
+          }
+        ]
+      },
+      "expect": {
+        "added": 0,
+        "changed": 0,
+        "destroyed": 1,
+        "drifted": true,
+        "summary": [
+          {
+            "address": "aws_instance.a",
+            "actions": [
+              "delete"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "counts/replace-delete-create",
+      "why": "PINNED: counts are replace-aware and NOT mutually exclusive — a replacement bumps both added and destroyed, and changed stays 0 while drifted is true.",
+      "plan": {
+        "resource_changes": [
+          {
+            "address": "aws_instance.a",
+            "change": {
+              "actions": [
+                "delete",
+                "create"
+              ],
+              "before": {
+                "ami": "a"
+              },
+              "after": {
+                "ami": "b"
+              }
+            }
+          }
+        ]
+      },
+      "expect": {
+        "added": 1,
+        "changed": 0,
+        "destroyed": 1,
+        "drifted": true,
+        "summary": [
+          {
+            "address": "aws_instance.a",
+            "actions": [
+              "delete",
+              "create"
+            ],
+            "attrs": [
+              {
+                "name": "ami",
+                "before": "a",
+                "after": "b"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "counts/replace-create-delete",
+      "why": "The create-before-destroy ordering counts identically; membership decides, not position.",
+      "plan": {
+        "resource_changes": [
+          {
+            "address": "aws_instance.a",
+            "change": {
+              "actions": [
+                "create",
+                "delete"
+              ],
+              "before": {
+                "ami": "a"
+              },
+              "after": {
+                "ami": "b"
+              }
+            }
+          }
+        ]
+      },
+      "expect": {
+        "added": 1,
+        "changed": 0,
+        "destroyed": 1,
+        "drifted": true,
+        "summary": [
+          {
+            "address": "aws_instance.a",
+            "actions": [
+              "create",
+              "delete"
+            ],
+            "attrs": [
+              {
+                "name": "ami",
+                "before": "a",
+                "after": "b"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "counts/mixed-plan",
+      "why": "One plan exercising every count in file order, with a skipped no-op and a skipped read interleaved.",
+      "plan": {
+        "resource_changes": [
+          {
+            "address": "aws_s3_bucket.new",
+            "change": {
+              "actions": [
+                "create"
+              ],
+              "before": null,
+              "after": {
+                "b": 1
+              }
+            }
+          },
+          {
+            "address": "aws_instance.same",
+            "change": {
+              "actions": [
+                "no-op"
+              ],
+              "before": {
+                "a": 1
+              },
+              "after": {
+                "a": 1
+              }
+            }
+          },
+          {
+            "address": "aws_instance.tweak",
+            "change": {
+              "actions": [
+                "update"
+              ],
+              "before": {
+                "a": 1
+              },
+              "after": {
+                "a": 2
+              }
+            }
+          },
+          {
+            "address": "data.aws_ami.look",
+            "change": {
+              "actions": [
+                "read"
+              ],
+              "before": null,
+              "after": {
+                "id": "ami-1"
+              }
+            }
+          },
+          {
+            "address": "aws_instance.gone",
+            "change": {
+              "actions": [
+                "delete"
+              ],
+              "before": {
+                "a": 1
+              },
+              "after": null
+            }
+          }
+        ]
+      },
+      "expect": {
+        "added": 1,
+        "changed": 1,
+        "destroyed": 1,
+        "drifted": true,
+        "summary": [
+          {
+            "address": "aws_s3_bucket.new",
+            "actions": [
+              "create"
+            ]
+          },
+          {
+            "address": "aws_instance.tweak",
+            "actions": [
+              "update"
+            ],
+            "attrs": [
+              {
+                "name": "a",
+                "before": "1",
+                "after": "2"
+              }
+            ]
+          },
+          {
+            "address": "aws_instance.gone",
+            "actions": [
+              "delete"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "skip/no-op-exactly",
+      "why": "PINNED: exactly [\"no-op\"] is skipped entirely — no counts and no summary row.",
+      "plan": {
+        "resource_changes": [
+          {
+            "address": "aws_instance.a",
+            "change": {
+              "actions": [
+                "no-op"
+              ],
+              "before": {
+                "a": 1
+              },
+              "after": {
+                "a": 1
+              }
+            }
+          }
+        ]
+      },
+      "expect": {
+        "added": 0,
+        "changed": 0,
+        "destroyed": 0,
+        "drifted": false,
+        "summary": []
+      }
+    },
+    {
+      "id": "skip/read-exactly",
+      "why": "PINNED and the vector for contract issue #20: exactly [\"read\"] is skipped. The dispatched jq summarizer used to keep this row, so the same refresh-only plan produced one row from a dispatched run and none from the Action.",
+      "plan": {
+        "resource_changes": [
+          {
+            "address": "data.aws_ami.x",
+            "change": {
+              "actions": [
+                "read"
+              ],
+              "before": null,
+              "after": {
+                "id": "ami-1"
+              }
+            }
+          }
+        ]
+      },
+      "expect": {
+        "added": 0,
+        "changed": 0,
+        "destroyed": 0,
+        "drifted": false,
+        "summary": []
+      }
+    },
+    {
+      "id": "skip/no-op-not-alone",
+      "why": "The skip is on the EXACT list, not on membership: [\"no-op\",\"create\"] is kept and counted.",
+      "plan": {
+        "resource_changes": [
+          {
+            "address": "aws_instance.a",
+            "change": {
+              "actions": [
+                "no-op",
+                "create"
+              ],
+              "before": null,
+              "after": {
+                "a": 1
+              }
+            }
+          }
+        ]
+      },
+      "expect": {
+        "added": 1,
+        "changed": 0,
+        "destroyed": 0,
+        "drifted": true,
+        "summary": [
+          {
+            "address": "aws_instance.a",
+            "actions": [
+              "no-op",
+              "create"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "skip/read-not-alone",
+      "why": "Same for [\"read\",\"create\"]: kept and counted.",
+      "plan": {
+        "resource_changes": [
+          {
+            "address": "data.aws_ami.x",
+            "change": {
+              "actions": [
+                "read",
+                "create"
+              ],
+              "before": null,
+              "after": {
+                "a": 1
+              }
+            }
+          }
+        ]
+      },
+      "expect": {
+        "added": 1,
+        "changed": 0,
+        "destroyed": 0,
+        "drifted": true,
+        "summary": [
+          {
+            "address": "data.aws_ami.x",
+            "actions": [
+              "read",
+              "create"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "drifted/output-only-diff",
+      "why": "The vector for contract issue #21. `terraform plan -detailed-exitcode` returns 2 for this plan because the output changed, but no resource changed — so `drifted` is FALSE. The dispatched jq used to take drifted from that exit code and posted true for the identical plan.",
+      "plan": {
+        "resource_changes": [],
+        "output_changes": {
+          "url": {
+            "actions": [
+              "update"
+            ],
+            "before": "a",
+            "after": "b"
+          }
+        }
+      },
+      "expect": {
+        "added": 0,
+        "changed": 0,
+        "destroyed": 0,
+        "drifted": false,
+        "summary": []
+      }
+    },
+    {
+      "id": "drifted/refresh-only",
+      "why": "Issues #20 and #21 together: a refresh-only plan whose only changes are data-source reads plus an output. Every implementation must report zero counts, drifted false and an empty summary.",
+      "plan": {
+        "resource_changes": [
+          {
+            "address": "data.aws_ami.a",
+            "change": {
+              "actions": [
+                "read"
+              ],
+              "before": null,
+              "after": {
+                "id": "ami-1"
+              }
+            }
+          },
+          {
+            "address": "data.aws_ami.b",
+            "change": {
+              "actions": [
+                "read"
+              ],
+              "before": null,
+              "after": {
+                "id": "ami-2"
+              }
+            }
+          }
+        ],
+        "output_changes": {
+          "url": {
+            "actions": [
+              "update"
+            ],
+            "before": "a",
+            "after": "b"
+          }
+        }
+      },
+      "expect": {
+        "added": 0,
+        "changed": 0,
+        "destroyed": 0,
+        "drifted": false,
+        "summary": []
+      }
+    },
+    {
+      "id": "clean/empty-resource-changes",
+      "why": "A genuinely clean plan. Note that a malformed document produces this same Result — see shape/resource-changes-not-array and contract issue #31 finding 43.",
+      "plan": {
+        "resource_changes": []
+      },
+      "expect": {
+        "added": 0,
+        "changed": 0,
+        "destroyed": 0,
+        "drifted": false,
+        "summary": []
+      }
+    },
+    {
+      "id": "attrs/absent-is-null",
+      "why": "PINNED: an absent key on one side canonicalises to null, so a removed attribute reports before/after rather than being dropped.",
+      "plan": {
+        "resource_changes": [
+          {
+            "address": "aws_instance.a",
+            "change": {
+              "actions": [
+                "update"
+              ],
+              "before": {
+                "a": 1,
+                "b": 2
+              },
+              "after": {
+                "a": 1
+              }
+            }
+          }
+        ]
+      },
+      "expect": {
+        "added": 0,
+        "changed": 1,
+        "destroyed": 0,
+        "drifted": true,
+        "summary": [
+          {
+            "address": "aws_instance.a",
+            "actions": [
+              "update"
+            ],
+            "attrs": [
+              {
+                "name": "b",
+                "before": "2",
+                "after": null
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "attrs/explicit-null-equals-absent",
+      "why": "PINNED, the other half: an explicit null and an absent key are EQUAL, so no phantom {before:null, after:null} row is emitted and the entry carries no attrs at all.",
+      "plan": {
+        "resource_changes": [
+          {
+            "address": "aws_instance.a",
+            "change": {
+              "actions": [
+                "update"
+              ],
+              "before": {
+                "a": 1,
+                "b": null
+              },
+              "after": {
+                "a": 1
+              }
+            }
+          }
+        ]
+      },
+      "expect": {
+        "added": 0,
+        "changed": 1,
+        "destroyed": 0,
+        "drifted": true,
+        "summary": [
+          {
+            "address": "aws_instance.a",
+            "actions": [
+              "update"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "attrs/proto-key-is-an-own-read",
+      "why": "The literal key `__proto__` must be read as an own property. A bare o[k] yields Object.prototype, which serialises as {} and made a removed __proto__ attribute compare equal to an empty object and vanish.",
+      "plan": {
+        "resource_changes": [
+          {
+            "address": "aws_instance.a",
+            "change": {
+              "actions": [
+                "update"
+              ],
+              "before": {
+                "__proto__": 1,
+                "a": 1
+              },
+              "after": {
+                "a": 1
+              }
+            }
+          }
+        ]
+      },
+      "expect": {
+        "added": 0,
+        "changed": 1,
+        "destroyed": 0,
+        "drifted": true,
+        "summary": [
+          {
+            "address": "aws_instance.a",
+            "actions": [
+              "update"
+            ],
+            "attrs": [
+              {
+                "name": "__proto__",
+                "before": "1",
+                "after": null
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "attrs/none-when-before-is-not-an-object",
+      "why": "attrs are emitted only when before AND after are both JSON objects.",
+      "plan": {
+        "resource_changes": [
+          {
+            "address": "aws_instance.a",
+            "change": {
+              "actions": [
+                "update"
+              ],
+              "before": "a string",
+              "after": {
+                "a": 1
+              }
+            }
+          }
+        ]
+      },
+      "expect": {
+        "added": 0,
+        "changed": 1,
+        "destroyed": 0,
+        "drifted": true,
+        "summary": [
+          {
+            "address": "aws_instance.a",
+            "actions": [
+              "update"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "attrs/truncate-past-300-code-points",
+      "why": "PINNED: values are capped at 300 code points with a U+2026 marker.",
+      "plan": {
+        "resource_changes": [
+          {
+            "address": "aws_instance.a",
+            "change": {
+              "actions": [
+                "update"
+              ],
+              "before": {
+                "data": "0123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789"
+              },
+              "after": {
+                "data": "x"
+              }
+            }
+          }
+        ]
+      },
+      "expect": {
+        "added": 0,
+        "changed": 1,
+        "destroyed": 0,
+        "drifted": true,
+        "summary": [
+          {
+            "address": "aws_instance.a",
+            "actions": [
+              "update"
+            ],
+            "attrs": [
+              {
+                "name": "data",
+                "before": "012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789…",
+                "after": "x"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "attrs/astral-under-the-cap-is-not-truncated",
+      "why": "The cap counts CODE POINTS, not UTF-16 units: 155 astral characters are 310 units but 155 code points, so nothing is truncated. This is the boundary the TypeScript fast path (length <= 300) and the Go rune count must agree on.",
+      "plan": {
+        "resource_changes": [
+          {
+            "address": "aws_instance.a",
+            "change": {
+              "actions": [
+                "update"
+              ],
+              "before": {
+                "data": "𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞"
+              },
+              "after": {
+                "data": "x"
+              }
+            }
+          }
+        ]
+      },
+      "expect": {
+        "added": 0,
+        "changed": 1,
+        "destroyed": 0,
+        "drifted": true,
+        "summary": [
+          {
+            "address": "aws_instance.a",
+            "actions": [
+              "update"
+            ],
+            "attrs": [
+              {
+                "name": "data",
+                "before": "𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞",
+                "after": "x"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "masking/before-mirror-only",
+      "why": "PINNED: the mask is a UNION over both mirrors. A config-derived mark applies to the planned value only, so a credential routinely arrives marked on exactly one side; masking per-side emitted the other verbatim.",
+      "plan": {
+        "resource_changes": [
+          {
+            "address": "aws_instance.a",
+            "change": {
+              "actions": [
+                "update"
+              ],
+              "before": {
+                "pw": "OLD-SECRET"
+              },
+              "after": {
+                "pw": "NEW-SECRET"
+              },
+              "before_sensitive": {
+                "pw": true
+              },
+              "after_sensitive": {}
+            }
+          }
+        ]
+      },
+      "expect": {
+        "added": 0,
+        "changed": 1,
+        "destroyed": 0,
+        "drifted": true,
+        "summary": [
+          {
+            "address": "aws_instance.a",
+            "actions": [
+              "update"
+            ],
+            "attrs": [
+              {
+                "name": "pw",
+                "before": "(sensitive)",
+                "after": "(sensitive)"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "masking/after-mirror-only",
+      "why": "The mirror image of the above.",
+      "plan": {
+        "resource_changes": [
+          {
+            "address": "aws_instance.a",
+            "change": {
+              "actions": [
+                "update"
+              ],
+              "before": {
+                "pw": "OLD-SECRET"
+              },
+              "after": {
+                "pw": "NEW-SECRET"
+              },
+              "before_sensitive": {},
+              "after_sensitive": {
+                "pw": true
+              }
+            }
+          }
+        ]
+      },
+      "expect": {
+        "added": 0,
+        "changed": 1,
+        "destroyed": 0,
+        "drifted": true,
+        "summary": [
+          {
+            "address": "aws_instance.a",
+            "actions": [
+              "update"
+            ],
+            "attrs": [
+              {
+                "name": "pw",
+                "before": "(sensitive)",
+                "after": "(sensitive)"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "masking/both-mirrors",
+      "why": "The symmetric case, unchanged by the union.",
+      "plan": {
+        "resource_changes": [
+          {
+            "address": "aws_instance.a",
+            "change": {
+              "actions": [
+                "update"
+              ],
+              "before": {
+                "pw": "OLD-SECRET"
+              },
+              "after": {
+                "pw": "NEW-SECRET"
+              },
+              "before_sensitive": {
+                "pw": true
+              },
+              "after_sensitive": {
+                "pw": true
+              }
+            }
+          }
+        ]
+      },
+      "expect": {
+        "added": 0,
+        "changed": 1,
+        "destroyed": 0,
+        "drifted": true,
+        "summary": [
+          {
+            "address": "aws_instance.a",
+            "actions": [
+              "update"
+            ],
+            "attrs": [
+              {
+                "name": "pw",
+                "before": "(sensitive)",
+                "after": "(sensitive)"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "masking/neither-mirror-is-fail-open",
+      "why": "PINNED and deliberate (contract issue #10): a plan carrying no sensitivity metadata gets NO masking. Masking here would mask every attribute of every such plan. All implementations fail open identically; see SECURITY.md.",
+      "plan": {
+        "resource_changes": [
+          {
+            "address": "aws_instance.a",
+            "change": {
+              "actions": [
+                "update"
+              ],
+              "before": {
+                "pw": "OLD-SECRET"
+              },
+              "after": {
+                "pw": "NEW-SECRET"
+              }
+            }
+          }
+        ]
+      },
+      "expect": {
+        "added": 0,
+        "changed": 1,
+        "destroyed": 0,
+        "drifted": true,
+        "summary": [
+          {
+            "address": "aws_instance.a",
+            "actions": [
+              "update"
+            ],
+            "attrs": [
+              {
+                "name": "pw",
+                "before": "OLD-SECRET",
+                "after": "NEW-SECRET"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "masking/nested-mark",
+      "why": "A non-empty nested object under the key marks it sensitive.",
+      "plan": {
+        "resource_changes": [
+          {
+            "address": "aws_instance.a",
+            "change": {
+              "actions": [
+                "update"
+              ],
+              "before": {
+                "pw": "OLD-SECRET"
+              },
+              "after": {
+                "pw": "NEW-SECRET"
+              },
+              "before_sensitive": {
+                "pw": {
+                  "inner": true
+                }
+              },
+              "after_sensitive": {}
+            }
+          }
+        ]
+      },
+      "expect": {
+        "added": 0,
+        "changed": 1,
+        "destroyed": 0,
+        "drifted": true,
+        "summary": [
+          {
+            "address": "aws_instance.a",
+            "actions": [
+              "update"
+            ],
+            "attrs": [
+              {
+                "name": "pw",
+                "before": "(sensitive)",
+                "after": "(sensitive)"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "masking/empty-nested-mark-is-not-sensitive",
+      "why": "An EMPTY nested object does not mark it — Python-style truthiness, mirrored by pyTruthy in Go.",
+      "plan": {
+        "resource_changes": [
+          {
+            "address": "aws_instance.a",
+            "change": {
+              "actions": [
+                "update"
+              ],
+              "before": {
+                "pw": "OLD-SECRET"
+              },
+              "after": {
+                "pw": "NEW-SECRET"
+              },
+              "before_sensitive": {
+                "pw": {}
+              },
+              "after_sensitive": {
+                "pw": {}
+              }
+            }
+          }
+        ]
+      },
+      "expect": {
+        "added": 0,
+        "changed": 1,
+        "destroyed": 0,
+        "drifted": true,
+        "summary": [
+          {
+            "address": "aws_instance.a",
+            "actions": [
+              "update"
+            ],
+            "attrs": [
+              {
+                "name": "pw",
+                "before": "OLD-SECRET",
+                "after": "NEW-SECRET"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "masking/non-empty-array-mark",
+      "why": "A non-empty array mirror (the shape a list attribute produces) marks the key.",
+      "plan": {
+        "resource_changes": [
+          {
+            "address": "aws_instance.a",
+            "change": {
+              "actions": [
+                "update"
+              ],
+              "before": {
+                "pw": "OLD-SECRET"
+              },
+              "after": {
+                "pw": "NEW-SECRET"
+              },
+              "before_sensitive": {
+                "pw": [
+                  true
+                ]
+              },
+              "after_sensitive": {}
+            }
+          }
+        ]
+      },
+      "expect": {
+        "added": 0,
+        "changed": 1,
+        "destroyed": 0,
+        "drifted": true,
+        "summary": [
+          {
+            "address": "aws_instance.a",
+            "actions": [
+              "update"
+            ],
+            "attrs": [
+              {
+                "name": "pw",
+                "before": "(sensitive)",
+                "after": "(sensitive)"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "masking/whole-value-mirror-true",
+      "why": "A mirror that is not an object is the whole-value flag: true masks every key.",
+      "plan": {
+        "resource_changes": [
+          {
+            "address": "aws_instance.a",
+            "change": {
+              "actions": [
+                "update"
+              ],
+              "before": {
+                "pw": "OLD-SECRET"
+              },
+              "after": {
+                "pw": "NEW-SECRET"
+              },
+              "before_sensitive": true,
+              "after_sensitive": true
+            }
+          }
+        ]
+      },
+      "expect": {
+        "added": 0,
+        "changed": 1,
+        "destroyed": 0,
+        "drifted": true,
+        "summary": [
+          {
+            "address": "aws_instance.a",
+            "actions": [
+              "update"
+            ],
+            "attrs": [
+              {
+                "name": "pw",
+                "before": "(sensitive)",
+                "after": "(sensitive)"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "masking/whole-value-mirror-false",
+      "why": "PINNED: a present-but-falsy mirror masks nothing. This is the same fail-open decision as masking/neither-mirror; it is recorded so it cannot change silently.",
+      "plan": {
+        "resource_changes": [
+          {
+            "address": "aws_instance.a",
+            "change": {
+              "actions": [
+                "update"
+              ],
+              "before": {
+                "pw": "OLD-SECRET"
+              },
+              "after": {
+                "pw": "NEW-SECRET"
+              },
+              "before_sensitive": false,
+              "after_sensitive": false
+            }
+          }
+        ]
+      },
+      "expect": {
+        "added": 0,
+        "changed": 1,
+        "destroyed": 0,
+        "drifted": true,
+        "summary": [
+          {
+            "address": "aws_instance.a",
+            "actions": [
+              "update"
+            ],
+            "attrs": [
+              {
+                "name": "pw",
+                "before": "OLD-SECRET",
+                "after": "NEW-SECRET"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "masking/mask-runs-before-fmt",
+      "why": "PINNED ordering: a marked value 310 code points long emits the literal \"(sensitive)\", NOT a 300-code-point prefix of the secret. The mask must run before the formatter, not after it.",
+      "plan": {
+        "resource_changes": [
+          {
+            "address": "aws_instance.a",
+            "change": {
+              "actions": [
+                "update"
+              ],
+              "before": {
+                "pw": "SSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSS"
+              },
+              "after": {
+                "pw": "x"
+              },
+              "before_sensitive": {
+                "pw": true
+              },
+              "after_sensitive": {}
+            }
+          }
+        ]
+      },
+      "expect": {
+        "added": 0,
+        "changed": 1,
+        "destroyed": 0,
+        "drifted": true,
+        "summary": [
+          {
+            "address": "aws_instance.a",
+            "actions": [
+              "update"
+            ],
+            "attrs": [
+              {
+                "name": "pw",
+                "before": "(sensitive)",
+                "after": "(sensitive)"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "serialize/non-ascii-emitted-raw",
+      "why": "Non-ASCII is emitted raw, never \\uXXXX-escaped. (The retracted json.dumps claim would have escaped it.)",
+      "plan": {
+        "resource_changes": [
+          {
+            "address": "aws_instance.a",
+            "change": {
+              "actions": [
+                "update"
+              ],
+              "before": {
+                "k": {
+                  "note": "café über"
+                }
+              },
+              "after": {
+                "k": 2
+              }
+            }
+          }
+        ]
+      },
+      "expect": {
+        "added": 0,
+        "changed": 1,
+        "destroyed": 0,
+        "drifted": true,
+        "summary": [
+          {
+            "address": "aws_instance.a",
+            "actions": [
+              "update"
+            ],
+            "attrs": [
+              {
+                "name": "k",
+                "before": "{\"note\":\"café über\"}",
+                "after": "2"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "serialize/non-ascii-key-emitted-raw",
+      "why": "Same for object keys.",
+      "plan": {
+        "resource_changes": [
+          {
+            "address": "aws_instance.a",
+            "change": {
+              "actions": [
+                "update"
+              ],
+              "before": {
+                "k": {
+                  "café": 1
+                }
+              },
+              "after": {
+                "k": 2
+              }
+            }
+          }
+        ]
+      },
+      "expect": {
+        "added": 0,
+        "changed": 1,
+        "destroyed": 0,
+        "drifted": true,
+        "summary": [
+          {
+            "address": "aws_instance.a",
+            "actions": [
+              "update"
+            ],
+            "attrs": [
+              {
+                "name": "k",
+                "before": "{\"café\":1}",
+                "after": "2"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "serialize/above-bmp-key-order",
+      "why": "Contract issue #17: keys sort by CODE POINT. U+FFFF sorts BEFORE U+1F600. JavaScript’s default comparator sorts by UTF-16 code unit and put the emoji first, disagreeing with the Go mirror (UTF-8 byte order) and with jq for a key set an attacker can choose.",
+      "plan": {
+        "resource_changes": [
+          {
+            "address": "aws_instance.a",
+            "change": {
+              "actions": [
+                "update"
+              ],
+              "before": {
+                "k": {
+                  "￿": 1,
+                  "😀": 2
+                }
+              },
+              "after": {
+                "k": 2
+              }
+            }
+          }
+        ]
+      },
+      "expect": {
+        "added": 0,
+        "changed": 1,
+        "destroyed": 0,
+        "drifted": true,
+        "summary": [
+          {
+            "address": "aws_instance.a",
+            "actions": [
+              "update"
+            ],
+            "attrs": [
+              {
+                "name": "k",
+                "before": "{\"￿\":1,\"😀\":2}",
+                "after": "2"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "serialize/line-and-paragraph-separator-escaped",
+      "why": "Contract issue #17: U+2028 and U+2029 are escaped inside a serialised value. Go’s encoding/json escapes them unconditionally with no flag to disable it, so this is the side that moved; it is also the safer form, since a raw U+2028 terminates a line in a JS context.",
+      "plan": {
+        "resource_changes": [
+          {
+            "address": "aws_instance.a",
+            "change": {
+              "actions": [
+                "update"
+              ],
+              "before": {
+                "k": {
+                  "s": "a b c"
+                }
+              },
+              "after": {
+                "k": 2
+              }
+            }
+          }
+        ]
+      },
+      "expect": {
+        "added": 0,
+        "changed": 1,
+        "destroyed": 0,
+        "drifted": true,
+        "summary": [
+          {
+            "address": "aws_instance.a",
+            "actions": [
+              "update"
+            ],
+            "attrs": [
+              {
+                "name": "k",
+                "before": "{\"s\":\"a\\u2028b\\u2029c\"}",
+                "after": "2"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "serialize/html-characters-emitted-raw",
+      "why": "Contract issue #17: `<`, `>` and `&` are emitted raw. Go’s encoding/json HTML-escapes them by DEFAULT, so the mirror must serialise through an encoder with SetEscapeHTML(false). These three characters appear in every IAM policy document and user_data script, making this the highest-frequency divergence of the set.",
+      "plan": {
+        "resource_changes": [
+          {
+            "address": "aws_instance.a",
+            "change": {
+              "actions": [
+                "update"
+              ],
+              "before": {
+                "k": {
+                  "policy": "a<b&c>d"
+                }
+              },
+              "after": {
+                "k": 2
+              }
+            }
+          }
+        ]
+      },
+      "expect": {
+        "added": 0,
+        "changed": 1,
+        "destroyed": 0,
+        "drifted": true,
+        "summary": [
+          {
+            "address": "aws_instance.a",
+            "actions": [
+              "update"
+            ],
+            "attrs": [
+              {
+                "name": "k",
+                "before": "{\"policy\":\"a<b&c>d\"}",
+                "after": "2"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "serialize/nested-key-sort-is-code-point",
+      "why": "Uppercase sorts before lowercase: code points, not a locale collation.",
+      "plan": {
+        "resource_changes": [
+          {
+            "address": "aws_instance.a",
+            "change": {
+              "actions": [
+                "update"
+              ],
+              "before": {
+                "k": {
+                  "b": 1,
+                  "a": 2,
+                  "C": 3
+                }
+              },
+              "after": {
+                "k": 2
+              }
+            }
+          }
+        ]
+      },
+      "expect": {
+        "added": 0,
+        "changed": 1,
+        "destroyed": 0,
+        "drifted": true,
+        "summary": [
+          {
+            "address": "aws_instance.a",
+            "actions": [
+              "update"
+            ],
+            "attrs": [
+              {
+                "name": "k",
+                "before": "{\"C\":3,\"a\":2,\"b\":1}",
+                "after": "2"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "serialize/negative-zero",
+      "why": "Contract issue #18: negative zero serialises as -0. JSON.stringify(-0) yields \"0\", which lost the sign Terraform reported and disagreed with the Go mirror.",
+      "plan": {
+        "resource_changes": [
+          {
+            "address": "aws_instance.a",
+            "change": {
+              "actions": [
+                "update"
+              ],
+              "before": {
+                "k": {
+                  "x": -0
+                }
+              },
+              "after": {
+                "k": 2
+              }
+            }
+          }
+        ]
+      },
+      "expect": {
+        "added": 0,
+        "changed": 1,
+        "destroyed": 0,
+        "drifted": true,
+        "summary": [
+          {
+            "address": "aws_instance.a",
+            "actions": [
+              "update"
+            ],
+            "attrs": [
+              {
+                "name": "k",
+                "before": "{\"x\":-0}",
+                "after": "2"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "serialize/whole-float-normalises",
+      "why": "2.0 and 2 are the same double and serialise identically in both implementations.",
+      "plan": {
+        "resource_changes": [
+          {
+            "address": "aws_instance.a",
+            "change": {
+              "actions": [
+                "update"
+              ],
+              "before": {
+                "k": {
+                  "cpu": 2
+                }
+              },
+              "after": {
+                "k": 2
+              }
+            }
+          }
+        ]
+      },
+      "expect": {
+        "added": 0,
+        "changed": 1,
+        "destroyed": 0,
+        "drifted": true,
+        "summary": [
+          {
+            "address": "aws_instance.a",
+            "actions": [
+              "update"
+            ],
+            "attrs": [
+              {
+                "name": "k",
+                "before": "{\"cpu\":2}",
+                "after": "2"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "serialize/top-level-string-passes-through-raw",
+      "why": "A top-level string attribute value is NOT serialised — it passes through as-is, so `<` and even a raw U+2028 reach the summary unescaped. Both implementations do this; only NESTED strings go through the serializer.",
+      "plan": {
+        "resource_changes": [
+          {
+            "address": "aws_instance.a",
+            "change": {
+              "actions": [
+                "update"
+              ],
+              "before": {
+                "k": "a<b>c d"
+              },
+              "after": {
+                "k": "z"
+              }
+            }
+          }
+        ]
+      },
+      "expect": {
+        "added": 0,
+        "changed": 1,
+        "destroyed": 0,
+        "drifted": true,
+        "summary": [
+          {
+            "address": "aws_instance.a",
+            "actions": [
+              "update"
+            ],
+            "attrs": [
+              {
+                "name": "k",
+                "before": "a<b>c d",
+                "after": "z"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "serialize/above-bmp-attr-key-order",
+      "why": "Contract issue #17, on the OTHER key set: the attrs array itself is ordered by the union of before/after keys, and that sort must be code-point too.",
+      "plan": {
+        "resource_changes": [
+          {
+            "address": "aws_instance.a",
+            "change": {
+              "actions": [
+                "update"
+              ],
+              "before": {
+                "￿": 1,
+                "😀": 2
+              },
+              "after": {
+                "￿": 9,
+                "😀": 9
+              }
+            }
+          }
+        ]
+      },
+      "expect": {
+        "added": 0,
+        "changed": 1,
+        "destroyed": 0,
+        "drifted": true,
+        "summary": [
+          {
+            "address": "aws_instance.a",
+            "actions": [
+              "update"
+            ],
+            "attrs": [
+              {
+                "name": "￿",
+                "before": "1",
+                "after": "9"
+              },
+              {
+                "name": "😀",
+                "before": "2",
+                "after": "9"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "serialize/zero-and-negative-zero-are-a-change",
+      "why": "Contract issue #18: because -0 serialises as -0, a 0 -> -0 change is reported. Before the fix TypeScript rendered both as \"0\" and dropped the attribute while the Go mirror reported it.",
+      "plan": {
+        "resource_changes": [
+          {
+            "address": "aws_instance.a",
+            "change": {
+              "actions": [
+                "update"
+              ],
+              "before": {
+                "x": 0
+              },
+              "after": {
+                "x": -0
+              }
+            }
+          }
+        ]
+      },
+      "expect": {
+        "added": 0,
+        "changed": 1,
+        "destroyed": 0,
+        "drifted": true,
+        "summary": [
+          {
+            "address": "aws_instance.a",
+            "actions": [
+              "update"
+            ],
+            "attrs": [
+              {
+                "name": "x",
+                "before": "0",
+                "after": "-0"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "serialize/integers-past-2-53-collapse",
+      "why": "PINNED and NOT a divergence: JSON parsing maps every number to an IEEE-754 double in BOTH implementations, so two distinct 20-digit serials become the same value and the attribute is dropped. Contract issue #18 reported this as a TypeScript-vs-reference divergence; it is not one — the implementations agree, and changing it is a parse-boundary decision in every consumer, not an edit inside summarize(). This vector exists so that agreement is asserted rather than assumed.",
+      "plan": {
+        "resource_changes": [
+          {
+            "address": "aws_instance.a",
+            "change": {
+              "actions": [
+                "update"
+              ],
+              "before": {
+                "serial": 12345678901234567000
+              },
+              "after": {
+                "serial": 12345678901234567000
+              }
+            }
+          }
+        ]
+      },
+      "expect": {
+        "added": 0,
+        "changed": 1,
+        "destroyed": 0,
+        "drifted": true,
+        "summary": [
+          {
+            "address": "aws_instance.a",
+            "actions": [
+              "update"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "serialize/bool-and-number-are-distinct",
+      "why": "true and 1 are different canonical forms, so the change is reported.",
+      "plan": {
+        "resource_changes": [
+          {
+            "address": "aws_instance.a",
+            "change": {
+              "actions": [
+                "update"
+              ],
+              "before": {
+                "x": true
+              },
+              "after": {
+                "x": 1
+              }
+            }
+          }
+        ]
+      },
+      "expect": {
+        "added": 0,
+        "changed": 1,
+        "destroyed": 0,
+        "drifted": true,
+        "summary": [
+          {
+            "address": "aws_instance.a",
+            "actions": [
+              "update"
+            ],
+            "attrs": [
+              {
+                "name": "x",
+                "before": "true",
+                "after": "1"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "serialize/string-and-number-are-distinct",
+      "why": "Equality compares CANONICAL forms (\"1\" vs 1), so this is a change — even though both sides RENDER as the identical string \"1\", because a top-level string passes through unquoted. The rendered attr looking unchanged is expected, not a bug.",
+      "plan": {
+        "resource_changes": [
+          {
+            "address": "aws_instance.a",
+            "change": {
+              "actions": [
+                "update"
+              ],
+              "before": {
+                "x": "1"
+              },
+              "after": {
+                "x": 1
+              }
+            }
+          }
+        ]
+      },
+      "expect": {
+        "added": 0,
+        "changed": 1,
+        "destroyed": 0,
+        "drifted": true,
+        "summary": [
+          {
+            "address": "aws_instance.a",
+            "actions": [
+              "update"
+            ],
+            "attrs": [
+              {
+                "name": "x",
+                "before": "1",
+                "after": "1"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "shape/missing-address",
+      "why": "Contract issue #15 residual: two entries with no address both key on \"\". Real plans always populate address; this is recorded, not fixed, because the address is the summary’s primary key.",
+      "plan": {
+        "resource_changes": [
+          {
+            "change": {
+              "actions": [
+                "create"
+              ]
+            }
+          },
+          {
+            "change": {
+              "actions": [
+                "delete"
+              ]
+            }
+          }
+        ]
+      },
+      "expect": {
+        "added": 1,
+        "changed": 0,
+        "destroyed": 1,
+        "drifted": true,
+        "summary": [
+          {
+            "address": "",
+            "actions": [
+              "create"
+            ]
+          },
+          {
+            "address": "",
+            "actions": [
+              "delete"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "shape/long-address-is-not-truncated",
+      "why": "PINNED (contract issue #15): the address is deliberately NOT capped, because it is how a drift record is matched to a resource. It IS type-checked. See SECURITY.md.",
+      "plan": {
+        "resource_changes": [
+          {
+            "address": "0123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789",
+            "change": {
+              "actions": [
+                "create"
+              ]
+            }
+          }
+        ]
+      },
+      "expect": {
+        "added": 1,
+        "changed": 0,
+        "destroyed": 0,
+        "drifted": true,
+        "summary": [
+          {
+            "address": "0123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789",
+            "actions": [
+              "create"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "shape/non-string-address",
+      "why": "Contract issue #15: a non-string address is emitted as \"\" rather than put into a field the exported type declares string.",
+      "plan": {
+        "resource_changes": [
+          {
+            "address": {
+              "not": "a string"
+            },
+            "change": {
+              "actions": [
+                "create"
+              ]
+            }
+          }
+        ]
+      },
+      "expect": {
+        "added": 1,
+        "changed": 0,
+        "destroyed": 0,
+        "drifted": true,
+        "summary": [
+          {
+            "address": "",
+            "actions": [
+              "create"
+            ]
+          }
+        ]
+      },
+      "go": {
+        "rejects": "driftingest types address as string, so json.Unmarshal fails and /drift/ingest answers 422 for the whole document. Fail-closed, and a different answer from the contract’s."
+      },
+      "jq": {
+        "why": "The dispatched jq copies .address through with no type check, so the stored row carries an object in a string field.",
+        "expect": {
+          "added": 1,
+          "changed": 0,
+          "destroyed": 0,
+          "drifted": true,
+          "summary": [
+            {
+              "address": {
+                "not": "a string"
+              },
+              "actions": [
+                "create"
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "shape/resource-changes-not-an-array",
+      "why": "Contract issue #31 finding 43: a malformed document reports drifted:false, identical to a genuinely clean plan. Recorded here so the three answers to the same garbage are written down.",
+      "plan": {
+        "resource_changes": "oops"
+      },
+      "expect": {
+        "added": 0,
+        "changed": 0,
+        "destroyed": 0,
+        "drifted": false,
+        "summary": []
+      },
+      "go": {
+        "rejects": "json.Unmarshal fails on the string, so /drift/ingest answers 422 — the only implementation that tells the operator anything."
+      }
+    },
+    {
+      "id": "shape/actions-not-an-array",
+      "why": "A wrong-typed actions list degrades to an uncounted-but-PRESENT row rather than a silently dropped one, and never puts a non-array into a field SummaryEntry declares string[].",
+      "plan": {
+        "resource_changes": [
+          {
+            "address": "aws_instance.a",
+            "change": {
+              "actions": "no-op"
+            }
+          }
+        ]
+      },
+      "expect": {
+        "added": 0,
+        "changed": 0,
+        "destroyed": 0,
+        "drifted": false,
+        "summary": [
+          {
+            "address": "aws_instance.a",
+            "actions": []
+          }
+        ]
+      },
+      "go": {
+        "rejects": "json.Unmarshal fails on the string actions; /drift/ingest answers 422."
+      },
+      "jq": {
+        "why": "The dispatched jq copies .change.actions through with no type check.",
+        "expect": {
+          "added": 0,
+          "changed": 0,
+          "destroyed": 0,
+          "drifted": false,
+          "summary": [
+            {
+              "address": "aws_instance.a",
+              "actions": "no-op"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "shape/no-actions-key",
+      "why": "Terraform always writes actions, so this reaches only a hand-built plan — but the three implementations answer differently and that difference is a real shape difference for a consumer that iterates the array.",
+      "plan": {
+        "resource_changes": [
+          {
+            "address": "aws_instance.a",
+            "change": {}
+          }
+        ]
+      },
+      "expect": {
+        "added": 0,
+        "changed": 0,
+        "destroyed": 0,
+        "drifted": false,
+        "summary": [
+          {
+            "address": "aws_instance.a",
+            "actions": []
+          }
+        ]
+      },
+      "go": {
+        "why": "Go marshals its nil []string as null where the contract emits [].",
+        "expect": {
+          "added": 0,
+          "changed": 0,
+          "destroyed": 0,
+          "drifted": false,
+          "summary": [
+            {
+              "address": "aws_instance.a",
+              "actions": null
+            }
+          ]
+        }
+      },
+      "jq": {
+        "why": "jq copies the absent field through as null, like Go.",
+        "expect": {
+          "added": 0,
+          "changed": 0,
+          "destroyed": 0,
+          "drifted": false,
+          "summary": [
+            {
+              "address": "aws_instance.a",
+              "actions": null
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "shape/null-entry-in-resource-changes",
+      "why": "A JSON null inside resource_changes is valid JSON. The contract skips it; the dispatched jq used to emit a {address:null, actions:null} row for it, which is the same row-set divergence as issue #20 in the same expression, so it was fixed in the same change.",
+      "plan": {
+        "resource_changes": [
+          null,
+          {
+            "address": "aws_instance.a",
+            "change": {
+              "actions": [
+                "create"
+              ]
+            }
+          }
+        ]
+      },
+      "expect": {
+        "added": 1,
+        "changed": 0,
+        "destroyed": 0,
+        "drifted": true,
+        "summary": [
+          {
+            "address": "aws_instance.a",
+            "actions": [
+              "create"
+            ]
+          }
+        ]
+      },
+      "go": {
+        "why": "A JSON null unmarshals into a zero-valued ResourceChange, which is not skipped, so Go emits a leading empty row.",
+        "expect": {
+          "added": 1,
+          "changed": 0,
+          "destroyed": 0,
+          "drifted": true,
+          "summary": [
+            {
+              "address": "",
+              "actions": null
+            },
+            {
+              "address": "aws_instance.a",
+              "actions": [
+                "create"
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "provenance/projected-and-scrubbed",
+      "why": "The plan’s configuration block carries no sensitivity metadata at all, so it is projected to the two fields the backend reads, with source credentials scrubbed. expressions, the recursive module subtree and every other member are dropped by construction.",
+      "plan": {
+        "resource_changes": [],
+        "configuration": {
+          "root_module": {
+            "module_calls": {
+              "vpc": {
+                "source": "git::https://x-access-token:ghp_TOKENSECRET@github.com/org/mod.git?ref=v1.2.3&sshkey=B64PRIVKEY&token=TTT",
+                "version_constraint": "~> 5.0",
+                "expressions": {
+                  "db_password": {
+                    "constant_value": "hunter2-PLAINTEXT-LEAK"
+                  }
+                },
+                "module": {
+                  "outputs": {
+                    "o": {
+                      "value": "NESTED-CONFIG-LEAK"
+                    }
+                  }
+                }
+              },
+              "bare": {
+                "source": "acme/vpc/aws",
+                "version_constraint": "1.0.0"
+              },
+              "notobj": [
+                "a",
+                "b"
+              ]
+            }
+          }
+        }
+      },
+      "expect": {
+        "added": 0,
+        "changed": 0,
+        "destroyed": 0,
+        "drifted": false,
+        "summary": []
+      },
+      "go": {
+        "rejects": "driftingest.Plan types module_calls as a map of structs, so the `notobj` entry (an array) fails json.Unmarshal and /drift/ingest answers 422 for the WHOLE document — discarding an otherwise valid summary. Fail-closed, pre-existing, and an availability difference rather than a disclosure; the contract coerces to {} and summarizes normally. Go does not implement moduleCallsPlan() at all — it only reads source/version_constraint into driftingest.Configuration — so the provenance projection below is asserted against the jq mirror."
+      },
+      "expect_module_calls": {
+        "configuration": {
+          "root_module": {
+            "module_calls": {
+              "bare": {
+                "source": "acme/vpc/aws",
+                "version_constraint": "1.0.0"
+              },
+              "notobj": {},
+              "vpc": {
+                "source": "git::https://(redacted)@github.com/org/mod.git?ref=v1.2.3&sshkey=(redacted)&token=(redacted)",
+                "version_constraint": "~> 5.0"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "id": "provenance/above-bmp-module-name-order",
+      "why": "Contract issue #17 on the module-name key set: jq’s `keys` sorts by code point, so the TypeScript sort had to move to match the dispatched payload for the identical plan.",
+      "plan": {
+        "resource_changes": [],
+        "configuration": {
+          "root_module": {
+            "module_calls": {
+              "￿": {
+                "source": "ns/a/aws"
+              },
+              "😀": {
+                "source": "ns/b/aws"
+              },
+              "zz": {
+                "source": "ns/c/aws"
+              }
+            }
+          }
+        }
+      },
+      "expect": {
+        "added": 0,
+        "changed": 0,
+        "destroyed": 0,
+        "drifted": false,
+        "summary": []
+      },
+      "expect_module_calls": {
+        "configuration": {
+          "root_module": {
+            "module_calls": {
+              "zz": {
+                "source": "ns/c/aws"
+              },
+              "￿": {
+                "source": "ns/a/aws"
+              },
+              "😀": {
+                "source": "ns/b/aws"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "id": "provenance/values-capped-at-300",
+      "why": "Every emitted provenance string goes through the same 300-code-point cap as an attribute value.",
+      "plan": {
+        "resource_changes": [],
+        "configuration": {
+          "root_module": {
+            "module_calls": {
+              "long": {
+                "source": "https://example.com/0123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789"
+              }
+            }
+          }
+        }
+      },
+      "expect": {
+        "added": 0,
+        "changed": 0,
+        "destroyed": 0,
+        "drifted": false,
+        "summary": []
+      },
+      "expect_module_calls": {
+        "configuration": {
+          "root_module": {
+            "module_calls": {
+              "long": {
+                "source": "https://example.com/0123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789…"
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
+}
