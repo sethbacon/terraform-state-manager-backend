@@ -463,6 +463,7 @@ var reviewedPlatformWideSites = map[string]string{
 	"internal/api/audit_ingest.go:resolveSiblingIDs":         "existence probe on a service-token route with no tenant principal; decides whether a federated id resolves at all",
 	"internal/credlifecycle/sweeper.go:UserDeprovisioned":    "see the package doc: a TSM key is bound to its principal, not to an organization",
 	"internal/credlifecycle/sweeper.go:revokeOverAskingKeys": "as UserDeprovisioned",
+	"internal/platformadmin/resolver.go:UserExists":          "authority derivation for a PLATFORM-wide grant: the question is whether a platform-admin carrier row still names a live principal, and there is no tenant to scope by — narrowing it to some organization would make a live administrator read as an orphan merely because their membership lay outside the scope, which is exactly the reading the never-zero floor must not take",
 }
 
 // TestNoPlatformWideOrgScopeInAuditHandlers keeps the audit trail tenant-bound.

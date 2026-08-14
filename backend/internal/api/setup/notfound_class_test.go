@@ -41,7 +41,7 @@ func newConfigureAdminEnv(t *testing.T) (*Handlers, sqlmock.Sqlmock) {
 	t.Cleanup(func() { _ = db.Close() })
 	cfg := &config.Config{}
 	cfg.Suite.RoleSeedOwner = "self"
-	return NewHandlers(repositories.NewSystemSettingsRepository(db), nil, nil, db, cfg, nil), mock
+	return NewHandlers(repositories.NewSystemSettingsRepository(db), nil, nil, db, nil, cfg, nil), mock
 }
 
 // expectOwnerLookups scripts everything up to (but not including) the role

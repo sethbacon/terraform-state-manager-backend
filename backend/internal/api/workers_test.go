@@ -9,6 +9,7 @@ import (
 
 	"github.com/terraform-state-manager/terraform-state-manager/internal/config"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/db/repositories"
+	"github.com/terraform-state-manager/terraform-state-manager/internal/platformadmin"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/services/notify"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/services/statesync"
 )
@@ -127,4 +128,61 @@ func TestStartWorkers_ConstructsAndStops(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("startWorkers stop() did not return; a worker loop teardown hangs")
 	}
+}
+
+// TestNewBackgroundWorkers_StartsTheAuditRelayEvenWithWorkersDisabled.
+//
+// Every other periodic loop here is leader-gated, and the audit relay
+// deliberately is not. It claims with FOR UPDATE SKIP LOCKED, so several
+// replicas take disjoint batches rather than colliding — the property leader
+// election exists to provide is one this job already has. Gating it would tie
+// the audit trail's liveness to leadership: TSM's documented shape runs workers
+// on exactly ONE replica, so a leader-gated relay would stop delivering
+// platform-admin audit records the moment that replica went down, while every
+// other replica reported healthy and the intents piled up undelivered.
+//
+// Observed rather than assumed: the relay's first cycle is scripted on its own
+// handle, and the test waits for those expectations to be MET.
+func TestNewBackgroundWorkers_StartsTheAuditRelayEvenWithWorkersDisabled(t *testing.T) {
+	db, _, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+	relayDB, relayMock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New (relay): %v", err)
+	}
+	defer relayDB.Close()
+
+	svc, err := platformadmin.New(relayDB, relayDB)
+	if err != nil {
+		t.Fatalf("platformadmin.New: %v", err)
+	}
+
+	// One full cycle against an empty outbox: claim, commit, report the backlog,
+	// prune delivered history.
+	relayMock.ExpectBegin()
+	relayMock.ExpectQuery(`FROM "audit_outbox"`).
+		WillReturnRows(sqlmock.NewRows([]string{"event_id", "occurred_at", "action", "actor_user_id",
+			"actor_email", "organization_id", "resource_type", "resource_id", "ip_address", "metadata", "attempts"}))
+	relayMock.ExpectCommit()
+	relayMock.ExpectQuery(`FROM "audit_outbox"`).
+		WillReturnRows(sqlmock.NewRows([]string{"count", "failed", "oldest"}).AddRow(0, 0, nil))
+	relayMock.ExpectExec(`DELETE FROM "audit_outbox"`).WillReturnResult(sqlmock.NewResult(0, 0))
+
+	d := newWorkerTestDeps(t, db, false) // workers DISABLED on this replica
+	d.auditRelay = svc.Relay()
+	stop := newBackgroundWorkers(d)
+	t.Cleanup(stop)
+
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if err := relayMock.ExpectationsWereMet(); err == nil {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("the audit outbox relay never ran a cycle on a workers-disabled replica: %v",
+		relayMock.ExpectationsWereMet())
 }

@@ -13,6 +13,7 @@ import (
 	"github.com/terraform-state-manager/terraform-state-manager/internal/auth"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/config"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/db/repositories"
+	"github.com/terraform-state-manager/terraform-state-manager/internal/platformadmin"
 )
 
 // Handlers serves the setup-wizard endpoints.
@@ -23,7 +24,11 @@ type Handlers struct {
 	// identityDB backs the owner step's user/membership writes; the idstore repos
 	// are built lazily in ConfigureAdmin so a nil-DB construction never panics.
 	identityDB *sql.DB
-	cfg        *config.Config
+	// platformAdmins is the carrier the owner step writes the FIRST platform-admin
+	// grant into. Nil where there is no carrier (the nil-DB rigs), in which case
+	// the owner step still creates the user and the role assignment.
+	platformAdmins *platformadmin.Service
+	cfg            *config.Config
 	// activateOIDC swaps the live auth handler's OIDC provider at runtime. It is
 	// injected by the router (the api package owns AuthHandlers, and setup must
 	// not import api — that would be an import cycle).
@@ -37,10 +42,19 @@ func NewHandlers(
 	oidc *repositories.OIDCConfigRepository,
 	sources *repositories.SourceRepository,
 	identityDB *sql.DB,
+	platformAdmins *platformadmin.Service,
 	cfg *config.Config,
 	activateOIDC func(*auth.OIDCProvider),
 ) *Handlers {
-	return &Handlers{settings: settings, oidc: oidc, sources: sources, identityDB: identityDB, cfg: cfg, activateOIDC: activateOIDC}
+	return &Handlers{
+		settings:       settings,
+		oidc:           oidc,
+		sources:        sources,
+		identityDB:     identityDB,
+		platformAdmins: platformAdmins,
+		cfg:            cfg,
+		activateOIDC:   activateOIDC,
+	}
 }
 
 // GetSetupStatus reports first-run setup state (public — no auth).

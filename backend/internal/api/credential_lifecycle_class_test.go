@@ -188,7 +188,7 @@ func assertPreExistingSessionRejected(t *testing.T, site, userID string) {
 	r := gin.New()
 	r.Use(middleware.AuthMiddleware(
 		idstore.NewUserRepository(db), idstore.NewTokenRepository(db), nil, nil,
-		repositories.NewUserTokenRevocationRepository(db)))
+		repositories.NewUserTokenRevocationRepository(db), nil))
 	r.GET("/", func(c *gin.Context) { c.Status(http.StatusOK) })
 
 	token, err := auth.GenerateJWT(userID, "a@b.c", []string{string(auth.ScopeAdmin)}, time.Hour)
@@ -227,7 +227,7 @@ func assertRevokedKeyRejected(t *testing.T, site string) {
 
 	r := gin.New()
 	r.Use(middleware.AuthMiddleware(
-		idstore.NewUserRepository(db), nil, idstore.NewAPIKeyRepository(db), nil, nil))
+		idstore.NewUserRepository(db), nil, idstore.NewAPIKeyRepository(db), nil, nil, nil))
 	r.GET("/", func(c *gin.Context) { c.Status(http.StatusOK) })
 
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
