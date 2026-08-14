@@ -5,13 +5,20 @@
 // driftingest with the summary adapted to drift_runs' [{address, actions}] form.
 //
 // The AUTHORITY for these semantics is the canonical TypeScript implementation —
-// summarize.ts in @4cloudguru/terraform-drift-contract, together with its test
-// vectors. Earlier comments here cited a Python `drift_summary.py` as the
-// canonical dispatch summarizer; no such file exists in any repository of this
-// suite, so it was not something an implementation could be diffed against.
+// summarize.ts in @4cloudguru/terraform-drift-contract. Earlier comments here
+// cited a Python `drift_summary.py` as the canonical dispatch summarizer; no
+// such file exists in any repository of this suite, so it was not something an
+// implementation could be diffed against.
+//
+// The diffing is mechanised by testdata/conformance/vectors.json, a
+// byte-identical copy of the contract's corpus that this package, the dispatched
+// jq templates and the contract itself all run. See conformance_test.go: a
+// semantic change here that the contract has not made reddens the shared digest,
+// and vice versa.
 package driftingest
 
 import (
+	"bytes"
 	"encoding/json"
 	"sort"
 	"strings"
@@ -223,6 +230,31 @@ func sortedUnion(a, b map[string]json.RawMessage) []string {
 	return keys
 }
 
+// marshalCanon is the ONE serializer this package emits and compares with, and
+// the byte form it produces is the contract's — `stableStringify` in
+// @4cloudguru/terraform-drift-contract, asserted vector by vector against
+// testdata/conformance/vectors.json.
+//
+// encoding/json HTML-escapes `<`, `>` and `&` by default, and those three
+// characters appear in every IAM policy document, user_data script and
+// connection string — so `{"policy":"a<b&c>d"}` was stored here as
+// `{"policy":"a<b&c>d"}` and by the report action as the raw
+// text, for the identical plan. SetEscapeHTML(false) is the only knob needed:
+// non-ASCII is already emitted raw, map keys are already sorted as UTF-8 bytes
+// (which is code-point order), and the encoder's unconditional U+2028/U+2029
+// escaping is the one axis where the contract moved to meet THIS side.
+//
+// Encoder.Encode appends a newline; the canonical form has none.
+func marshalCanon(v interface{}) string {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(v); err != nil {
+		return "null"
+	}
+	return strings.TrimSuffix(buf.String(), "\n")
+}
+
 // fmtVal is the Go port of the contract's `fmt()`: JSON null/absent → nil;
 // a JSON string passes through raw (unquoted); anything else is compact
 // canonical JSON (Go sorts map keys), truncated past 300 runes with U+2026.
@@ -239,8 +271,7 @@ func fmtVal(raw json.RawMessage) *string {
 		out := truncate(s)
 		return &out
 	}
-	b, _ := json.Marshal(v)
-	out := truncate(string(b))
+	out := truncate(marshalCanon(v))
 	return &out
 }
 
@@ -320,8 +351,10 @@ func canon(raw json.RawMessage) string {
 	if err := json.Unmarshal(raw, &v); err != nil {
 		return s
 	}
-	b, _ := json.Marshal(v)
-	return string(b)
+	// The SAME serializer the value is emitted with: if equality canonicalised
+	// `<` one way and fmtVal emitted it another, a change could be reported with
+	// a form the comparison never saw.
+	return marshalCanon(v)
 }
 
 // ModuleRef is one captured registry-module dependency of a state: the module's

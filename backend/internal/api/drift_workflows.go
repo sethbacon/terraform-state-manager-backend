@@ -57,12 +57,37 @@ jobs:
           terraform plan -detailed-exitcode -out=tfplan -input=false
           PLAN_EXIT=$?
           set -e
+          # 0 = no diff, 2 = a diff. Anything else is a failed plan, and posting a
+          # drift result derived from a plan that did not run is worse than posting
+          # nothing — the callback is one-shot, so a wrong answer cannot be corrected.
+          if [ "$PLAN_EXIT" != "0" ] && [ "$PLAN_EXIT" != "2" ]; then
+            echo "terraform plan failed (exit $PLAN_EXIT)" >&2
+            exit "$PLAN_EXIT"
+          fi
           terraform show -json tfplan > plan.json
           ADD=$(jq '[.resource_changes[]? | select(.change.actions | index("create"))] | length' plan.json)
           CHG=$(jq '[.resource_changes[]? | select(.change.actions | index("update"))] | length' plan.json)
           DEL=$(jq '[.resource_changes[]? | select(.change.actions | index("delete"))] | length' plan.json)
-          DRIFTED=$( [ "$PLAN_EXIT" = "2" ] && echo true || echo false )
-          SUMMARY=$(jq -c '[.resource_changes[]? | select(.change.actions != ["no-op"]) | {address: .address, actions: .change.actions}]' plan.json)
+          # DRIFTED is the CONTRACT's definition — (added + changed + destroyed) > 0
+          # — not the plan's exit code. terraform plan -detailed-exitcode answers 2 for
+          # a non-empty diff of ANY kind, including an output-only change that produces
+          # no resource_changes entries at all, so this posted drifted=true for a plan
+          # the report action and the /drift/ingest path both call clean, and the
+          # dashboard and alerting key off that field. Conformance vector:
+          # drifted/output-only-diff.
+          DRIFTED=$( [ "$((ADD + CHG + DEL))" -gt 0 ] && echo true || echo false )
+          # The row set matches the contract: an entry whose actions are EXACTLY
+          # ["no-op"] or EXACTLY ["read"] is skipped, so a refresh-only plan yields no
+          # rows rather than one row per data source; and a JSON null entry is ignored
+          # rather than emitted as {address: null, actions: null}. Rows are
+          # {address, actions} only — this path carries no attribute values and so has
+          # nothing to mask. An absent address emits "" rather than null, matching the
+# contract; a wrong-TYPED address is still copied through, which the corpus
+# states. Conformance vectors: skip/read-exactly, drifted/refresh-only,
+          # shape/null-entry-in-resource-changes.
+          SUMMARY=$(jq -c '[.resource_changes[]? | select(type == "object")
+            | select(.change.actions != ["no-op"] and .change.actions != ["read"])
+            | {address: (.address // ""), actions: .change.actions}]' plan.json)
           # Module provenance (optional): the configuration's module calls plus the
           # resolved module lockfile, so TSM records which registry modules this
           # state uses and how fresh they are. Both ride the existing jq -n payload
@@ -163,12 +188,37 @@ steps:
       terraform plan -detailed-exitcode -out=tfplan -input=false
       PLAN_EXIT=$?
       set -e
+      # 0 = no diff, 2 = a diff. Anything else is a failed plan, and posting a
+      # drift result derived from a plan that did not run is worse than posting
+      # nothing — the callback is one-shot, so a wrong answer cannot be corrected.
+      if [ "$PLAN_EXIT" != "0" ] && [ "$PLAN_EXIT" != "2" ]; then
+        echo "terraform plan failed (exit $PLAN_EXIT)" >&2
+        exit "$PLAN_EXIT"
+      fi
       terraform show -json tfplan > plan.json
       ADD=$(jq '[.resource_changes[]? | select(.change.actions | index("create"))] | length' plan.json)
       CHG=$(jq '[.resource_changes[]? | select(.change.actions | index("update"))] | length' plan.json)
       DEL=$(jq '[.resource_changes[]? | select(.change.actions | index("delete"))] | length' plan.json)
-      DRIFTED=$( [ "$PLAN_EXIT" = "2" ] && echo true || echo false )
-      SUMMARY=$(jq -c '[.resource_changes[]? | select(.change.actions != ["no-op"]) | {address: .address, actions: .change.actions}]' plan.json)
+      # DRIFTED is the CONTRACT's definition — (added + changed + destroyed) > 0
+      # — not the plan's exit code. terraform plan -detailed-exitcode answers 2 for
+      # a non-empty diff of ANY kind, including an output-only change that produces
+      # no resource_changes entries at all, so this posted drifted=true for a plan
+      # the report action and the /drift/ingest path both call clean, and the
+      # dashboard and alerting key off that field. Conformance vector:
+      # drifted/output-only-diff.
+      DRIFTED=$( [ "$((ADD + CHG + DEL))" -gt 0 ] && echo true || echo false )
+      # The row set matches the contract: an entry whose actions are EXACTLY
+      # ["no-op"] or EXACTLY ["read"] is skipped, so a refresh-only plan yields no
+      # rows rather than one row per data source; and a JSON null entry is ignored
+      # rather than emitted as {address: null, actions: null}. Rows are
+      # {address, actions} only — this path carries no attribute values and so has
+      # nothing to mask. An absent address emits "" rather than null, matching the
+# contract; a wrong-TYPED address is still copied through, which the corpus
+# states. Conformance vectors: skip/read-exactly, drifted/refresh-only,
+      # shape/null-entry-in-resource-changes.
+      SUMMARY=$(jq -c '[.resource_changes[]? | select(type == "object")
+        | select(.change.actions != ["no-op"] and .change.actions != ["read"])
+        | {address: (.address // ""), actions: .change.actions}]' plan.json)
       # Module provenance (optional): the configuration's module calls plus the
       # resolved module lockfile, so TSM records which registry modules this state
       # uses and how fresh they are. Both ride the existing jq -n payload via
