@@ -35,6 +35,16 @@ type DriftRecord struct {
 	Detections           int             `json:"detections"`
 	FirstDetectedAt      string          `json:"first_detected_at"`
 	LastDetectedAt       string          `json:"last_detected_at"`
+
+	// Completeness markers from the drift contract, describing what the check
+	// did NOT do. Emitted unconditionally (no omitempty): "false" here is the
+	// positive claim that the check was complete, which is exactly the thing a
+	// consumer must not have to infer from an absent field.
+	Truncated      bool `json:"truncated"`
+	OmittedEntries int  `json:"omitted_entries"`
+	OmittedAttrs   int  `json:"omitted_attrs"`
+	Unparseable    bool `json:"unparseable"`
+	Unmasked       bool `json:"unmasked"`
 }
 
 // DriftSeverity classifies drift the way ogtsm did: destroyed resources are
@@ -57,7 +67,8 @@ func NewDriftRecordRepository(db *sql.DB) *DriftRecordRepository {
 
 const driftRecordColumns = `id, source_id, state_key, pipeline_connection_id, last_run_id, origin, severity,
 	added, changed, destroyed, summary, status, acknowledged_by, acknowledged_at::text, ack_note,
-	resolved_at::text, external_ref, detections, first_detected_at::text, last_detected_at::text`
+	resolved_at::text, external_ref, detections, first_detected_at::text, last_detected_at::text,
+	truncated, omitted_entries, omitted_attrs, unparseable, unmasked`
 
 func scanDriftRecord(scanner interface{ Scan(dest ...any) error }) (*DriftRecord, error) {
 	var r DriftRecord
@@ -65,7 +76,8 @@ func scanDriftRecord(scanner interface{ Scan(dest ...any) error }) (*DriftRecord
 	var summary []byte
 	if err := scanner.Scan(&r.ID, &srcID, &r.StateKey, &connID, &runID, &r.Origin, &r.Severity,
 		&r.Added, &r.Changed, &r.Destroyed, &summary, &r.Status, &r.AcknowledgedBy, &ackAt, &r.AckNote,
-		&resolvedAt, &extRef, &r.Detections, &r.FirstDetectedAt, &r.LastDetectedAt); err != nil {
+		&resolvedAt, &extRef, &r.Detections, &r.FirstDetectedAt, &r.LastDetectedAt,
+		&r.Truncated, &r.OmittedEntries, &r.OmittedAttrs, &r.Unparseable, &r.Unmasked); err != nil {
 		return nil, err
 	}
 	if srcID.Valid {
@@ -104,6 +116,28 @@ type Detection struct {
 	Destroyed            int
 	Summary              []byte
 	ExternalRef          *string
+
+	// Completeness markers, carried from whichever producer observed the plan.
+	// Overwritten (not accumulated) on re-detection, exactly like the counts
+	// beside them: the record describes the LATEST observation, so a later
+	// complete check must be able to clear an earlier truncated one.
+	Truncated      bool
+	OmittedEntries int
+	OmittedAttrs   int
+	Unparseable    bool
+	Unmasked       bool
+}
+
+// MarkTruncation widens Truncated to agree with the omission counts. The flag is
+// only ever widened, never narrowed: a producer that reports omissions but
+// forgets the flag is repaired, while one that reports the flag with no counts
+// (bounded by something it could not count) is believed. Under-reporting a bound
+// is the direction that misleads a consumer into reading an absent resource as
+// evidence of absence.
+func (d *Detection) MarkTruncation() {
+	if d.OmittedEntries > 0 || d.OmittedAttrs > 0 {
+		d.Truncated = true
+	}
 }
 
 // UpsertDetection records a drift observation: it updates the live
@@ -116,11 +150,14 @@ func (r *DriftRecordRepository) UpsertDetection(ctx context.Context, d *Detectio
 	if len(d.Summary) > 0 {
 		summaryArg = string(d.Summary)
 	}
+	d.MarkTruncation()
 	row := r.db.QueryRowContext(ctx, `
 		INSERT INTO drift_records
 			(source_id, state_key, pipeline_connection_id, last_run_id, origin, severity,
-			 added, changed, destroyed, summary, external_ref)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, COALESCE($10::jsonb,'[]'::jsonb), $11)
+			 added, changed, destroyed, summary, external_ref,
+			 truncated, omitted_entries, omitted_attrs, unparseable, unmasked)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, COALESCE($10::jsonb,'[]'::jsonb), $11,
+			 $12, $13, $14, $15, $16)
 		ON CONFLICT (source_id, state_key) WHERE status <> 'resolved'
 		DO UPDATE SET
 			pipeline_connection_id = COALESCE(EXCLUDED.pipeline_connection_id, drift_records.pipeline_connection_id),
@@ -132,11 +169,17 @@ func (r *DriftRecordRepository) UpsertDetection(ctx context.Context, d *Detectio
 			destroyed        = EXCLUDED.destroyed,
 			summary          = EXCLUDED.summary,
 			external_ref     = COALESCE(EXCLUDED.external_ref, drift_records.external_ref),
+			truncated        = EXCLUDED.truncated,
+			omitted_entries  = EXCLUDED.omitted_entries,
+			omitted_attrs    = EXCLUDED.omitted_attrs,
+			unparseable      = EXCLUDED.unparseable,
+			unmasked         = EXCLUDED.unmasked,
 			detections       = drift_records.detections + 1,
 			last_detected_at = now()
 		RETURNING `+driftRecordColumns,
 		d.SourceID, d.StateKey, d.PipelineConnectionID, d.RunID, d.Origin, DriftSeverity(d.Destroyed),
-		d.Added, d.Changed, d.Destroyed, summaryArg, d.ExternalRef)
+		d.Added, d.Changed, d.Destroyed, summaryArg, d.ExternalRef,
+		d.Truncated, d.OmittedEntries, d.OmittedAttrs, d.Unparseable, d.Unmasked)
 	rec, err := scanDriftRecord(row)
 	if err != nil {
 		// A resolved record can still hold this external_ref (pipeline retry
