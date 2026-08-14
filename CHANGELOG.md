@@ -1,5 +1,12 @@
 # Changelog
 
+## [3.5.0](https://github.com/sethbacon/terraform-state-manager-backend/compare/v3.4.0...v3.5.0) (2026-08-14)
+
+
+### Bug Fixes
+
+* **drift:** persist the contract's completeness markers instead of dropping them ([#382](https://github.com/sethbacon/terraform-state-manager-backend/issues/382)) ([ced4fd2](https://github.com/sethbacon/terraform-state-manager-backend/commit/ced4fd24fc4588c3a151d6a40f4cde89e986153f))
+
 ## [3.4.0](https://github.com/sethbacon/terraform-state-manager-backend/compare/v3.3.0...v3.4.0) (2026-08-14)
 
 
