@@ -21,13 +21,20 @@ func sourceRowFor(e *sourcesEnv, id string) {
 var driftRecCols = []string{"id", "source_id", "state_key", "pipeline_connection_id", "last_run_id",
 	"origin", "severity", "added", "changed", "destroyed", "summary", "status", "acknowledged_by",
 	"acknowledged_at", "ack_note", "resolved_at", "external_ref", "detections", "first_detected_at",
-	"last_detected_at"}
+	"last_detected_at", "truncated", "omitted_entries", "omitted_attrs", "unparseable", "unmasked"}
 
+// driftRecRow is a complete, readable, fully-masked record — the markers all say
+// "the check finished". driftRecRowMarked covers the interesting cases.
 func driftRecRow(id, status, severity string) *sqlmock.Rows {
+	return driftRecRowMarked(id, status, severity, false, 0, 0, false, false)
+}
+
+func driftRecRowMarked(id, status, severity string, truncated bool, omittedEntries, omittedAttrs int, unparseable, unmasked bool) *sqlmock.Rows {
 	return sqlmock.NewRows(driftRecCols).
 		AddRow(id, "s1", "envs/prod.tfstate", nil, nil, "ingest", severity, 1, 1, 1,
 			[]byte(`[{"address":"aws_instance.web","actions":["update"]}]`), status,
-			"", nil, "", nil, "run-77", 1, "2026-06-11", "2026-06-11")
+			"", nil, "", nil, "run-77", 1, "2026-06-11", "2026-06-11",
+			truncated, omittedEntries, omittedAttrs, unparseable, unmasked)
 }
 
 func TestIngestDrift_ParsesPlanAndCreatesRecord(t *testing.T) {

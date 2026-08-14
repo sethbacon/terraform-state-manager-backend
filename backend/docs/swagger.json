@@ -2003,7 +2003,7 @@
                         "CookieAuth": []
                     }
                 ],
-                "description": "Pipelines TSM did not dispatch POST plan results here. Supply counts/summary or a raw `terraform show -json` plan. external_ref deduplicates retries. Requires state:drift.",
+                "description": "Pipelines TSM did not dispatch POST plan results here. Supply counts/summary or a raw `terraform show -json` plan. external_ref deduplicates retries. Requires state:drift. Accepts the drift contract's completeness markers (truncated, omitted_entries, omitted_attrs, unparseable, unmasked) and stores them on the record; a raw plan supplied here is parsed server-side and its markers win. An unparseable result never auto-resolves a record: a raw plan that cannot be parsed answers 422, and a sender-reported unparseable answers 200 with status \"unverified\".",
                 "consumes": [
                     "application/json"
                 ],
@@ -2244,7 +2244,7 @@
                         "CallbackToken": []
                     }
                 ],
-                "description": "CI job posts drift results here, authenticated by the per-run one-shot X-TSM-Callback-Token. Not a user endpoint.",
+                "description": "CI job posts drift results here, authenticated by the per-run one-shot X-TSM-Callback-Token. Not a user endpoint. Accepts the drift contract's completeness markers (truncated, omitted_entries, omitted_attrs, unparseable, unmasked) and stores them on the drift record; an unparseable result never auto-resolves a live record. Unknown fields are ignored so a newer runner can post to an older server.",
                 "consumes": [
                     "application/json"
                 ],

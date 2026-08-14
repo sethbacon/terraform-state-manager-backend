@@ -12,12 +12,13 @@ import (
 var driftRecordCols = []string{"id", "source_id", "state_key", "pipeline_connection_id", "last_run_id",
 	"origin", "severity", "added", "changed", "destroyed", "summary", "status", "acknowledged_by",
 	"acknowledged_at", "ack_note", "resolved_at", "external_ref", "detections", "first_detected_at",
-	"last_detected_at"}
+	"last_detected_at", "truncated", "omitted_entries", "omitted_attrs", "unparseable", "unmasked"}
 
 func driftRecordRow(id, status string) *sqlmock.Rows {
 	return sqlmock.NewRows(driftRecordCols).
 		AddRow(id, "s1", "app.tfstate", nil, nil, "run", "warning", 1, 2, 0, []byte(`[]`), status,
-			"", nil, "", nil, nil, 1, "2026-06-11", "2026-06-11")
+			"", nil, "", nil, nil, 1, "2026-06-11", "2026-06-11",
+			false, 0, 0, false, false)
 }
 
 func TestDriftSeverity(t *testing.T) {
@@ -54,6 +55,63 @@ func TestDriftRecordRepository_UpsertDetection(t *testing.T) {
 	mock.ExpectQuery("INSERT INTO drift_records").WillReturnError(errDB)
 	if _, err := r.UpsertDetection(ctx, &Detection{SourceID: "s1", StateKey: "k", Origin: "run"}); err == nil {
 		t.Error("db error must surface")
+	}
+}
+
+// TestDetection_MarkTruncation pins the one-way widening: omission counts imply
+// the flag, and the flag survives without counts. Narrowing is what would let a
+// bounded summary be read as a complete one.
+func TestDetection_MarkTruncation(t *testing.T) {
+	cases := []struct {
+		name                         string
+		truncated                    bool
+		omittedEntries, omittedAttrs int
+		want                         bool
+	}{
+		{"complete stays complete", false, 0, 0, false},
+		{"omitted entries imply truncated", false, 3, 0, true},
+		{"omitted attrs imply truncated", false, 0, 7, true},
+		{"flag without counts is believed", true, 0, 0, true},
+		{"already agreeing is unchanged", true, 2, 2, true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			d := &Detection{Truncated: c.truncated, OmittedEntries: c.omittedEntries, OmittedAttrs: c.omittedAttrs}
+			d.MarkTruncation()
+			if d.Truncated != c.want {
+				t.Errorf("Truncated = %v, want %v", d.Truncated, c.want)
+			}
+		})
+	}
+}
+
+// TestDriftRecordRepository_PersistsCompletenessMarkers is the storage half of
+// the round trip: the markers must be bound into the INSERT and read back off
+// the returned row, not merely accepted by the handler above.
+func TestDriftRecordRepository_PersistsCompletenessMarkers(t *testing.T) {
+	db, mock := newMock(t)
+	r := NewDriftRecordRepository(db)
+
+	mock.ExpectQuery("INSERT INTO drift_records").
+		WithArgs("s1", "app.tfstate", nil, nil, "ingest", "warning", 1, 0, 0, nil, nil,
+			true, 5, 9, true, true).
+		WillReturnRows(sqlmock.NewRows(driftRecordCols).
+			AddRow("r1", "s1", "app.tfstate", nil, nil, "ingest", "warning", 1, 0, 0,
+				[]byte(`[]`), "open", "", nil, "", nil, nil, 1, "2026-06-11", "2026-06-11",
+				true, 5, 9, true, true))
+
+	rec, err := r.UpsertDetection(ctx, &Detection{
+		SourceID: "s1", StateKey: "app.tfstate", Origin: "ingest", Added: 1,
+		Truncated: true, OmittedEntries: 5, OmittedAttrs: 9, Unparseable: true, Unmasked: true,
+	})
+	if err != nil {
+		t.Fatalf("UpsertDetection: %v", err)
+	}
+	if !rec.Truncated || rec.OmittedEntries != 5 || rec.OmittedAttrs != 9 || !rec.Unparseable || !rec.Unmasked {
+		t.Errorf("markers lost in the round trip: %+v", rec)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("markers must be bound into the INSERT: %v", err)
 	}
 }
 

@@ -190,6 +190,22 @@ Covers admin bootstrap, OIDC test/save, and source test/save.
 | `POST /drift/records/{id}/acknowledge` · `…/resolve`            | `state:drift`                | Record workflow                                                        |
 | `POST /drift/runs/{id}/results`                                 | one-shot run token           | CI machine callback                                                    |
 
+> **Completeness markers.** Both intake paths (`/drift/ingest` and
+> `/drift/runs/{id}/results`) accept the drift contract's five markers —
+> `truncated`, `omitted_entries`, `omitted_attrs`, `unparseable`, `unmasked` —
+> and persist them on the drift record, so a stored record answers "was this
+> check complete?" rather than only "how much drift". They are returned on every
+> record; `false`/`0` is the positive claim that the check finished.
+>
+> `unparseable` is fail-closed: a result whose plan could not be read is not a
+> verified-clean result, so it never auto-resolves a live record. `/drift/ingest`
+> answers `422` for a raw plan **it** cannot parse, and `{"status":"unverified"}`
+> when the sender reports its own parse failed.
+>
+> Unknown fields are ignored rather than rejected: the run callback token is
+> one-shot, so a rejected body could not be retried, and users commit the
+> generated workflow into their own repo where TSM cannot update it.
+
 ### Version Lab (health)
 
 | Path                                                       | Scope                          | Purpose                               |

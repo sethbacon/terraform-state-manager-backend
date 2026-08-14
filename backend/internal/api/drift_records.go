@@ -24,16 +24,45 @@ import (
 // maxIngestPlanBytes caps the terraform show -json payload accepted by ingest.
 const maxIngestPlanBytes = 5 << 20 // 5 MiB
 
+// completeness carries the drift contract's five markers — what a check did NOT
+// do — from a request body to the stored record. Grouped rather than passed as
+// five more positional arguments so a marker cannot be threaded into the wrong
+// slot, and so adding the next one touches the struct instead of every caller.
+//
+// Both receiving DTOs embed it, which is also what keeps the push endpoint and
+// the dispatched-run callback accepting the identical vocabulary.
+type completeness struct {
+	Truncated      bool `json:"truncated"`
+	OmittedEntries int  `json:"omitted_entries"`
+	OmittedAttrs   int  `json:"omitted_attrs"`
+	Unparseable    bool `json:"unparseable"`
+	Unmasked       bool `json:"unmasked"`
+}
+
+// apply copies the markers onto a Detection bound for storage.
+func (m completeness) apply(d *repositories.Detection) {
+	d.Truncated, d.OmittedEntries, d.OmittedAttrs = m.Truncated, m.OmittedEntries, m.OmittedAttrs
+	d.Unparseable, d.Unmasked = m.Unparseable, m.Unmasked
+}
+
+// fromResult replaces the sender's claims with the markers computed from a plan
+// this server parsed itself. Server-side parsing is ground truth; a sender that
+// also sent markers was describing a document we have now read directly.
+func (m *completeness) fromResult(res *driftingest.Result) {
+	m.Truncated, m.OmittedEntries, m.OmittedAttrs = res.Truncated(), res.OmittedEntries, res.OmittedAttrs
+	m.Unparseable, m.Unmasked = res.Unparseable, res.Unmasked
+}
+
 // recordDriftOutcome maintains drift_records from a run result: a drifted
 // completion upserts the live record for the state, a clean completion resolves
 // it. Runs without a source_id + state_key cannot be mapped to a record (the
 // pair is the record identity) and are skipped; failures don't touch records.
-func (h *DriftHandlers) recordDriftOutcome(ctx context.Context, run *repositories.DriftRun, status string, added, changed, destroyed int, drifted bool, summary []byte) {
+func (h *DriftHandlers) recordDriftOutcome(ctx context.Context, run *repositories.DriftRun, status string, added, changed, destroyed int, drifted bool, summary []byte, marks completeness) {
 	if h.recordRepo == nil || status != "completed" || run.SourceID == nil || run.StateKey == "" {
 		return
 	}
 	if drifted {
-		_, err := h.recordRepo.UpsertDetection(ctx, &repositories.Detection{
+		d := &repositories.Detection{
 			SourceID:             *run.SourceID,
 			StateKey:             run.StateKey,
 			PipelineConnectionID: run.PipelineConnectionID,
@@ -43,15 +72,51 @@ func (h *DriftHandlers) recordDriftOutcome(ctx context.Context, run *repositorie
 			Changed:              changed,
 			Destroyed:            destroyed,
 			Summary:              summary,
-		})
-		if err != nil {
+		}
+		marks.apply(d)
+		if _, err := h.recordRepo.UpsertDetection(ctx, d); err != nil {
 			driftLog.Error("failed to upsert drift record from run", "run", run.ID, "error", err)
 		}
+		return
+	}
+	// Zero counts from a document the producer could not read are ignorance, not
+	// a clean result. Auto-resolving on one would let an unreadable plan silently
+	// close a live drift record — the fail-open the marker exists to name. The
+	// run itself is still recorded; the record is simply left as it was, so the
+	// finding survives until something actually verifies it.
+	if marks.Unparseable {
+		driftLog.Warn("drift result was unparseable; leaving the record unresolved",
+			"run", run.ID, "state", run.StateKey)
 		return
 	}
 	if _, err := h.recordRepo.ResolveClean(ctx, *run.SourceID, run.StateKey); err != nil {
 		driftLog.Error("failed to resolve drift record after clean run", "run", run.ID, "error", err)
 	}
+}
+
+// driftIngestPayload is the body /drift/ingest accepts. Named (rather than
+// declared inline) so the marker set is visible next to the callback's, and so
+// tests can reflect over the keys this endpoint actually decodes.
+//
+// Decoding is deliberately lenient — see driftRunResultPayload for why.
+type driftIngestPayload struct {
+	SourceID    string          `json:"source_id"`
+	StateKey    string          `json:"state_key"`
+	ExternalRef string          `json:"external_ref"`
+	Plan        json.RawMessage `json:"plan"`
+	Added       int             `json:"added"`
+	Changed     int             `json:"changed"`
+	Destroyed   int             `json:"destroyed"`
+	Drifted     *bool           `json:"drifted"`
+	Summary     json.RawMessage `json:"summary"`
+	Detail      string          `json:"detail"`
+	// ModuleLocks is an optional .terraform/modules/modules.json upload; it
+	// supplies resolved module versions the plan's configuration lacks.
+	ModuleLocks json.RawMessage `json:"module_locks"`
+	// Markers describing what the sender's own check did not do. Honoured when
+	// the sender supplies counts/summary; overwritten by the server's own
+	// reading when a raw plan is supplied instead.
+	completeness
 }
 
 // IngestDrift accepts a drift result pushed by a pipeline TSM did not dispatch.
@@ -60,7 +125,7 @@ func (h *DriftHandlers) recordDriftOutcome(ctx context.Context, run *repositorie
 // dispatched workflows compute with jq). external_ref (e.g. the CI run id)
 // makes retries idempotent.
 // @Summary      Ingest drift result (push)
-// @Description  Pipelines TSM did not dispatch POST plan results here. Supply counts/summary or a raw `terraform show -json` plan. external_ref deduplicates retries. Requires state:drift.
+// @Description  Pipelines TSM did not dispatch POST plan results here. Supply counts/summary or a raw `terraform show -json` plan. external_ref deduplicates retries. Requires state:drift. Accepts the drift contract's completeness markers (truncated, omitted_entries, omitted_attrs, unparseable, unmasked) and stores them on the record; a raw plan supplied here is parsed server-side and its markers win. An unparseable result never auto-resolves a record: a raw plan that cannot be parsed answers 422, and a sender-reported unparseable answers 200 with status "unverified".
 // @Tags         Drift
 // @Accept       json
 // @Produce      json
@@ -81,21 +146,7 @@ func (h *DriftHandlers) IngestDrift() gin.HandlerFunc {
 			c.JSON(http.StatusRequestEntityTooLarge, gin.H{"error": "payload exceeds 5 MiB; send counts/summary instead of the full plan"})
 			return
 		}
-		var req struct {
-			SourceID    string          `json:"source_id"`
-			StateKey    string          `json:"state_key"`
-			ExternalRef string          `json:"external_ref"`
-			Plan        json.RawMessage `json:"plan"`
-			Added       int             `json:"added"`
-			Changed     int             `json:"changed"`
-			Destroyed   int             `json:"destroyed"`
-			Drifted     *bool           `json:"drifted"`
-			Summary     json.RawMessage `json:"summary"`
-			Detail      string          `json:"detail"`
-			// ModuleLocks is an optional .terraform/modules/modules.json upload; it
-			// supplies resolved module versions the plan's configuration lacks.
-			ModuleLocks json.RawMessage `json:"module_locks"`
-		}
+		var req driftIngestPayload
 		if err := json.Unmarshal(raw, &req); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid JSON body"})
 			return
@@ -146,6 +197,9 @@ func (h *DriftHandlers) IngestDrift() gin.HandlerFunc {
 			added, changed, destroyed = res.Added, res.Changed, res.Destroyed
 			summary, _ = json.Marshal(res.Summary)
 			drifted = res.Drifted()
+			// We read the plan ourselves, so our markers replace whatever the
+			// sender claimed about it.
+			req.completeness.fromResult(res)
 			// Best-effort: capture registry-module provenance from the plan's
 			// configuration block. Never fails the ingest — the drift record is the
 			// primary product; provenance powers the optional "modules in use" /
@@ -162,6 +216,21 @@ func (h *DriftHandlers) IngestDrift() gin.HandlerFunc {
 		}
 
 		if !drifted {
+			// A sender that could not read its own plan has reported ignorance,
+			// not cleanliness. Resolving the live record on that would let an
+			// unreadable plan close an open finding — indistinguishable, once
+			// stored, from a verified-clean check. A raw plan we parse ourselves
+			// already answers 422 above; this is the same rule for a sender that
+			// did its own parsing and told us it failed. The result is accepted
+			// (200, so a forward-compatible sender is not broken) but nothing is
+			// resolved and the record is left exactly as it was.
+			if req.Unparseable {
+				h.audit.write(c, "drift.ingest", "drift_record", req.SourceID,
+					map[string]interface{}{"state_key": req.StateKey, "unparseable": true, "resolved": false, "external_ref": req.ExternalRef})
+				c.JSON(http.StatusOK, gin.H{"status": "unverified", "resolved": false,
+					"reason": "result reported unparseable; the drift record was left unresolved"})
+				return
+			}
 			resolved, err := h.recordRepo.ResolveClean(ctx, req.SourceID, req.StateKey)
 			if err != nil {
 				serverError(c, err, "failed to record clean result")
@@ -173,7 +242,7 @@ func (h *DriftHandlers) IngestDrift() gin.HandlerFunc {
 			return
 		}
 
-		rec, err := h.recordRepo.UpsertDetection(ctx, &repositories.Detection{
+		det := &repositories.Detection{
 			SourceID:    req.SourceID,
 			StateKey:    req.StateKey,
 			Origin:      "ingest",
@@ -182,7 +251,9 @@ func (h *DriftHandlers) IngestDrift() gin.HandlerFunc {
 			Destroyed:   destroyed,
 			Summary:     summary,
 			ExternalRef: extRef,
-		})
+		}
+		req.completeness.apply(det)
+		rec, err := h.recordRepo.UpsertDetection(ctx, det)
 		if err != nil {
 			serverError(c, err, "failed to record drift")
 			return

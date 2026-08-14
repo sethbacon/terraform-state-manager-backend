@@ -381,10 +381,42 @@ func (h *DriftHandlers) GetRun() gin.HandlerFunc {
 	}
 }
 
+// driftRunResultPayload is the body the dispatched CI job posts to the run
+// callback. TSM GENERATES the producer of this payload (the jq in
+// drift_workflows.go), so the two must agree; that agreement is enforced by
+// TestDriftCallbackPayload_EveryGeneratedKeyIsDecoded rather than by strict
+// decoding.
+//
+// Decoding stays lenient on purpose. The callback token is one-shot, so a body
+// rejected for carrying an unknown key cannot be retried — the run would be
+// stranded and its drift result lost permanently, which is strictly worse than
+// ignoring a key. Users also commit the generated workflow into their own repo,
+// where TSM cannot update it, so a newer template must degrade against an older
+// server instead of failing.
+type driftRunResultPayload struct {
+	Token     string          `json:"token"`
+	Status    string          `json:"status"`
+	Added     int             `json:"added"`
+	Changed   int             `json:"changed"`
+	Destroyed int             `json:"destroyed"`
+	Drifted   *bool           `json:"drifted"`
+	Detail    string          `json:"detail"`
+	Summary   json.RawMessage `json:"summary"`
+	// Optional module provenance: the plan's configuration (module calls)
+	// and the resolved module lockfile. Small (module_calls + modules.json,
+	// not the full plan), so no size cap is needed. Absent on older runners.
+	Plan        json.RawMessage `json:"plan"`
+	ModuleLocks json.RawMessage `json:"module_locks"`
+	// Markers describing what the run's own check did not do. This endpoint
+	// never re-parses the plan (only its module_calls projection arrives), so
+	// the producer's markers are the only account of completeness there is.
+	completeness
+}
+
 // RunResults is the machine callback the CI job posts drift results to. It is
 // authenticated by the per-run callback token (no user session).
 // @Summary      Drift run callback (machine)
-// @Description  CI job posts drift results here, authenticated by the per-run one-shot X-TSM-Callback-Token. Not a user endpoint.
+// @Description  CI job posts drift results here, authenticated by the per-run one-shot X-TSM-Callback-Token. Not a user endpoint. Accepts the drift contract's completeness markers (truncated, omitted_entries, omitted_attrs, unparseable, unmasked) and stores them on the drift record; an unparseable result never auto-resolves a live record. Unknown fields are ignored so a newer runner can post to an older server.
 // @Tags         Drift
 // @Accept       json
 // @Produce      json
@@ -398,21 +430,7 @@ func (h *DriftHandlers) RunResults() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		ctx := c.Request.Context()
 
-		var body struct {
-			Token     string          `json:"token"`
-			Status    string          `json:"status"`
-			Added     int             `json:"added"`
-			Changed   int             `json:"changed"`
-			Destroyed int             `json:"destroyed"`
-			Drifted   *bool           `json:"drifted"`
-			Detail    string          `json:"detail"`
-			Summary   json.RawMessage `json:"summary"`
-			// Optional module provenance: the plan's configuration (module calls)
-			// and the resolved module lockfile. Small (module_calls + modules.json,
-			// not the full plan), so no size cap is needed. Absent on older runners.
-			Plan        json.RawMessage `json:"plan"`
-			ModuleLocks json.RawMessage `json:"module_locks"`
-		}
+		var body driftRunResultPayload
 		_ = c.ShouldBindJSON(&body)
 
 		token := c.GetHeader("X-TSM-Callback-Token")
@@ -456,7 +474,7 @@ func (h *DriftHandlers) RunResults() gin.HandlerFunc {
 			return
 		}
 
-		h.recordDriftOutcome(ctx, run, status, body.Added, body.Changed, body.Destroyed, drifted, body.Summary)
+		h.recordDriftOutcome(ctx, run, status, body.Added, body.Changed, body.Destroyed, drifted, body.Summary, body.completeness)
 		h.notifyDriftResult(run.ID, status, body.Added, body.Changed, body.Destroyed, drifted, body.Detail)
 
 		// Best-effort module provenance for dispatched runs: if the runner uploaded
