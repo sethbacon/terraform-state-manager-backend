@@ -341,14 +341,18 @@ func (s *Service) List(ctx context.Context) ([]Entry, error) {
 	// re-asking will not change it. A FAILURE is never memoised, because it is
 	// not an answer.
 	seen := make(map[string]*Person, len(grants))
-	resolve := func(userID string) (*Person, error) {
+	// role names WHICH id failed, because the two are not interchangeable to
+	// whoever reads the log: a granter's id is generally NOT in platform_admins,
+	// so reporting it as a failed "grant" sends an operator looking for a row
+	// that was never there.
+	resolve := func(role, userID string) (*Person, error) {
 		if p, ok := seen[userID]; ok {
 			return p, nil
 		}
 		user, err := s.resolver.lookup(ctx, userID)
 		if err != nil {
-			return nil, fmt.Errorf("%w: resolving platform-admin grant %s: %w",
-				idplatformadmin.ErrIdentityUnavailable, userID, err)
+			return nil, fmt.Errorf("%w: resolving the %s of a platform-admin grant, user %s: %w",
+				idplatformadmin.ErrIdentityUnavailable, role, userID, err)
 		}
 		var p *Person
 		if user != nil {
@@ -360,13 +364,13 @@ func (s *Service) List(ctx context.Context) ([]Entry, error) {
 
 	entries := make([]Entry, 0, len(grants))
 	for _, g := range grants {
-		holder, err := resolve(g.UserID)
+		holder, err := resolve("holder", g.UserID)
 		if err != nil {
 			return nil, err
 		}
 		entry := Entry{Grant: g, Exists: holder != nil, User: holder}
 		if g.GrantedBy != nil {
-			granter, err := resolve(*g.GrantedBy)
+			granter, err := resolve("granter", *g.GrantedBy)
 			if err != nil {
 				return nil, err
 			}
