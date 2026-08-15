@@ -21,6 +21,7 @@ import (
 	idoidc "github.com/sethbacon/terraform-suite-identity/identity/auth/oidc"
 	idstore "github.com/sethbacon/terraform-suite-identity/identity/store"
 
+	"github.com/terraform-state-manager/terraform-state-manager/internal/approles"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/auth"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/auth/ldap"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/auth/saml"
@@ -34,9 +35,12 @@ const sessionTTL = 24 * time.Hour
 
 // AuthHandlers serves the authentication endpoints.
 type AuthHandlers struct {
-	cfg           *config.Config
-	userRepo      *idstore.UserRepository
-	orgRepo       *idstore.OrganizationRepository
+	cfg      *config.Config
+	userRepo *idstore.UserRepository
+	// orgRepo carries TSM's per-app role mirror: the IdP group reconciliation
+	// below is the highest-volume role writer in this application, and every one
+	// of its grants, reassignments and revocations is dual-written through it.
+	orgRepo       *approles.Members
 	roleRepo      *idstore.RoleTemplateRepository
 	tokenRepo     *idstore.TokenRepository
 	apiKeyRepo    *idstore.APIKeyRepository
@@ -65,7 +69,12 @@ func WithAuthCredentialSweeper(s *credlifecycle.Sweeper) AuthOption {
 // NewAuthHandlers constructs the auth handlers. identityDB must resolve to the
 // identity schema (search_path=identity,public). The OIDC provider is initialised
 // only when OIDC is enabled in config.
-func NewAuthHandlers(cfg *config.Config, identityDB *sql.DB, opts ...AuthOption) (*AuthHandlers, error) {
+//
+// appDB is the APPLICATION connection, which is where TSM's own role tables
+// live; it is what attaches the per-app role mirror to every membership write
+// the IdP group reconciliation performs. See NewAdminHandlers for why it is a
+// parameter and not an option.
+func NewAuthHandlers(cfg *config.Config, identityDB, appDB *sql.DB, opts ...AuthOption) (*AuthHandlers, error) {
 	// The login state store must be shared across replicas: the login redirect
 	// (Save) and the callback (Load) are separate HTTP requests, and behind a
 	// load balancer they land on different pods — a per-process map fails
@@ -78,7 +87,7 @@ func NewAuthHandlers(cfg *config.Config, identityDB *sql.DB, opts ...AuthOption)
 	h := &AuthHandlers{
 		cfg:         cfg,
 		userRepo:    idstore.NewUserRepository(identityDB),
-		orgRepo:     idstore.NewOrganizationRepository(identityDB),
+		orgRepo:     approles.NewMembers(identityDB, appDB),
 		roleRepo:    idstore.NewRoleTemplateRepository(identityDB),
 		tokenRepo:   idstore.NewTokenRepository(identityDB),
 		apiKeyRepo:  idstore.NewAPIKeyRepository(identityDB),
@@ -150,10 +159,10 @@ func NewAuthHandlers(cfg *config.Config, identityDB *sql.DB, opts ...AuthOption)
 func loginScope() idstore.OrgScope { return idstore.OrgScopeAllOrganizations() }
 
 // UserRepo and TokenRepo expose the identity repositories for the auth middleware.
-func (h *AuthHandlers) UserRepo() *idstore.UserRepository        { return h.userRepo }
-func (h *AuthHandlers) TokenRepo() *idstore.TokenRepository      { return h.tokenRepo }
-func (h *AuthHandlers) APIKeyRepo() *idstore.APIKeyRepository    { return h.apiKeyRepo }
-func (h *AuthHandlers) OrgRepo() *idstore.OrganizationRepository { return h.orgRepo }
+func (h *AuthHandlers) UserRepo() *idstore.UserRepository     { return h.userRepo }
+func (h *AuthHandlers) TokenRepo() *idstore.TokenRepository   { return h.tokenRepo }
+func (h *AuthHandlers) APIKeyRepo() *idstore.APIKeyRepository { return h.apiKeyRepo }
+func (h *AuthHandlers) OrgRepo() *approles.Members            { return h.orgRepo }
 
 func generateState() (string, error) {
 	b := make([]byte, 32)

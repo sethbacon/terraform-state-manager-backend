@@ -26,7 +26,7 @@ func newAPIKeysEnv(t *testing.T) *apiKeysEnv {
 	t.Cleanup(func() { db.Close() })
 
 	scopes := []string{"state:read", "state:drift"}
-	h := NewAPIKeysHandlers(db)
+	h := NewAPIKeysHandlers(db, nil)
 	h.audit = newAuditor(nil) // keep audit writes off the sqlmock rig
 	r := gin.New()
 	r.Use(func(c *gin.Context) {

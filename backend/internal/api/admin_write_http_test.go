@@ -12,6 +12,7 @@ import (
 	"github.com/lib/pq"
 	idstore "github.com/sethbacon/terraform-suite-identity/identity/store"
 
+	"github.com/terraform-state-manager/terraform-state-manager/internal/approles"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/credlifecycle"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/db/repositories"
 )
@@ -29,11 +30,11 @@ func newAdminWriteEnv(t *testing.T) *sourcesEnv {
 
 	// The credential sweeper is wired exactly as the router wires it, so the
 	// offboarding routes are exercised on their production path (#330).
-	h := NewAdminHandlers(db, WithAdminCredentialSweeper(
+	h := NewAdminHandlers(db, nil, WithAdminCredentialSweeper(
 		credlifecycle.NewSweeper(
 			repositories.NewUserTokenRevocationRepository(db),
 			idstore.NewAPIKeyRepository(db),
-			idstore.NewOrganizationRepository(db))))
+			approles.NewMembers(db, nil))))
 	r := gin.New()
 	admin := r.Group("/api/v1/admin")
 	admin.POST("/users", h.CreateUser())
@@ -368,11 +369,11 @@ func TestAdminEraseUser_StripsMembershipsInEveryOrganization(t *testing.T) {
 	}
 	t.Cleanup(func() { db.Close() })
 
-	h := NewAdminHandlers(db, WithAdminCredentialSweeper(
+	h := NewAdminHandlers(db, nil, WithAdminCredentialSweeper(
 		credlifecycle.NewSweeper(
 			repositories.NewUserTokenRevocationRepository(db),
 			idstore.NewAPIKeyRepository(db),
-			idstore.NewOrganizationRepository(db))))
+			approles.NewMembers(db, nil))))
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
 	r.Use(func(c *gin.Context) { c.Set("user_id", "caller-1"); c.Next() })

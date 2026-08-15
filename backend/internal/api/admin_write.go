@@ -212,6 +212,15 @@ func (h *AdminHandlers) DeleteUser() gin.HandlerFunc {
 			serverError(c, err, "failed to delete user")
 			return
 		}
+		// identity.organization_members.user_id is ON DELETE CASCADE, so the
+		// delete above withdrew every role this principal held — without any
+		// membership statement of its own, and therefore without passing through
+		// the mirror on h.orgRepo. TSM's own organization_member_roles has no
+		// foreign key to cascade with (identity may be another database), so the
+		// cascade is mirrored explicitly here. Unconditional: ErrNotFound above
+		// means the user was already gone, which is precisely the case whose
+		// leftover rows would otherwise never be collected.
+		h.orgRepo.PurgeUserRoles(ctx, id)
 		h.writeAudit(c, "user.delete", "user", id, map[string]interface{}{
 			"api_keys_revoked": out.KeysRevoked, "sessions_revoked": out.TokensRevoked})
 		c.Status(http.StatusNoContent)

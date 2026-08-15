@@ -87,7 +87,7 @@ func TestForceUnlock_AdminScopePassesGate(t *testing.T) {
 // DB then yields 503 — notably NOT 401 — proving the handler was reached).
 func TestAuditIngest_RequiresSuiteServiceToken(t *testing.T) {
 	cfg := &config.Config{Suite: config.SuiteConfig{ServiceToken: "s3cret-suite-token", IdentitySharedStore: true}}
-	h := NewAuditIngestHandlers(nil, cfg)
+	h := NewAuditIngestHandlers(nil, nil, cfg)
 
 	r := gin.New()
 	r.POST("/api/v1/audit/ingest",

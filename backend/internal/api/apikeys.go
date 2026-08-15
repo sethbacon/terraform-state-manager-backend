@@ -19,6 +19,7 @@ import (
 	"github.com/sethbacon/terraform-suite-identity/identity/models"
 	idstore "github.com/sethbacon/terraform-suite-identity/identity/store"
 
+	"github.com/terraform-state-manager/terraform-state-manager/internal/approles"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/auth"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/middleware"
 )
@@ -40,15 +41,15 @@ var assignableKeyScopes = []auth.Scope{
 // APIKeysHandlers serves /api/v1/apikeys.
 type APIKeysHandlers struct {
 	keys  *idstore.APIKeyRepository
-	orgs  *idstore.OrganizationRepository
+	orgs  *approles.Members
 	audit auditor
 }
 
 // NewAPIKeysHandlers constructs the handlers over the identity connection.
-func NewAPIKeysHandlers(identityDB *sql.DB) *APIKeysHandlers {
+func NewAPIKeysHandlers(identityDB, appDB *sql.DB) *APIKeysHandlers {
 	return &APIKeysHandlers{
 		keys:  idstore.NewAPIKeyRepository(identityDB),
-		orgs:  idstore.NewOrganizationRepository(identityDB),
+		orgs:  approles.NewMembers(identityDB, appDB),
 		audit: newAuditor(identityDB),
 	}
 }

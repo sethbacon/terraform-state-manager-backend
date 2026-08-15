@@ -120,7 +120,7 @@ func newOIDCCallbackEnv(t *testing.T, idp *oidcTestIdP) (*sourcesEnv, *config.Co
 	cfg := &config.Config{}
 	cfg.Server.PublicURL = "https://tsm.example.com"
 
-	h, err := NewAuthHandlers(cfg, db)
+	h, err := NewAuthHandlers(cfg, db, nil)
 	if err != nil {
 		t.Fatalf("NewAuthHandlers: %v", err)
 	}

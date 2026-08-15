@@ -112,7 +112,7 @@ func newAuditScopeEnv(t *testing.T) *auditScopeEnv {
 		t.Fatalf("sqlmock.New: %v", err)
 	}
 	t.Cleanup(func() { db.Close() })
-	return &auditScopeEnv{h: NewAdminHandlers(db), mock: mock, rec: rec}
+	return &auditScopeEnv{h: NewAdminHandlers(db, nil), mock: mock, rec: rec}
 }
 
 // serveAs runs handler with callerID installed the way the real requireAuth

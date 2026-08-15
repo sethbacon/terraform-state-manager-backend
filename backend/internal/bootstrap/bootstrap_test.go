@@ -26,7 +26,7 @@ func TestRun_SeedsAllRoleTemplatesAndDefaultOrg(t *testing.T) {
 	mock.ExpectExec("INSERT INTO organizations").
 		WillReturnResult(sqlmock.NewResult(0, 1))
 
-	if err := Run(context.Background(), db, true); err != nil {
+	if err := Run(context.Background(), db, nil, true); err != nil {
 		t.Fatalf("Run() error: %v", err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
@@ -44,7 +44,7 @@ func TestRun_RoleTemplateSeedFailure(t *testing.T) {
 	mock.ExpectExec("INSERT INTO role_templates").
 		WillReturnError(errors.New("boom"))
 
-	err = Run(context.Background(), db, true)
+	err = Run(context.Background(), db, nil, true)
 	if err == nil {
 		t.Fatal("Run() succeeded despite a role-template seed failure")
 	}
@@ -64,7 +64,7 @@ func TestRun_DefaultOrgFailure(t *testing.T) {
 	mock.ExpectExec("INSERT INTO organizations").
 		WillReturnError(errors.New("boom"))
 
-	err = Run(context.Background(), db, true)
+	err = Run(context.Background(), db, nil, true)
 	if err == nil {
 		t.Fatal("Run() succeeded despite a default-org failure")
 	}
@@ -82,7 +82,7 @@ func TestRun_SkipsRoleSeedWhenNotOwner(t *testing.T) {
 	mock.ExpectExec("INSERT INTO organizations").
 		WillReturnResult(sqlmock.NewResult(0, 1))
 
-	if err := Run(context.Background(), db, false); err != nil {
+	if err := Run(context.Background(), db, nil, false); err != nil {
 		t.Fatalf("Run() error: %v", err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {

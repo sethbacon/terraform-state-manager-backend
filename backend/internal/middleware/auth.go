@@ -12,6 +12,7 @@ import (
 	idplatformadmin "github.com/sethbacon/terraform-suite-identity/identity/platformadmin"
 	idstore "github.com/sethbacon/terraform-suite-identity/identity/store"
 
+	"github.com/terraform-state-manager/terraform-state-manager/internal/approles"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/auth"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/db/repositories"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/platformadmin"
@@ -41,7 +42,7 @@ const APIKeyPrefix = "tsm"
 //
 // THE ELEVATION IS ON THIS PATH AND NOT ON THE API-KEY PATH BELOW. That
 // asymmetry is the design, not an omission: see authenticateAPIKey.
-func AuthMiddleware(userRepo *idstore.UserRepository, tokenRepo *idstore.TokenRepository, apiKeyRepo *idstore.APIKeyRepository, orgRepo *idstore.OrganizationRepository, userRevocations *repositories.UserTokenRevocationRepository, platformAdmins *platformadmin.Service) gin.HandlerFunc {
+func AuthMiddleware(userRepo *idstore.UserRepository, tokenRepo *idstore.TokenRepository, apiKeyRepo *idstore.APIKeyRepository, orgRepo *approles.Members, userRevocations *repositories.UserTokenRevocationRepository, platformAdmins *platformadmin.Service) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		// A verified mTLS client certificate (set by mtls.AuthMiddleware earlier in
 		// the chain) already authenticated this request and populated scopes.
@@ -221,7 +222,7 @@ func OptionalAuthMiddleware(userRepo *idstore.UserRepository, tokenRepo *idstore
 // key is a long-lived, often unattended credential, frequently held by CI; an
 // elevation that rode along would hand every pipeline token the highest privilege
 // in the product, revocable only by deleting the key.
-func authenticateAPIKey(c *gin.Context, keys *idstore.APIKeyRepository, users *idstore.UserRepository, orgs *idstore.OrganizationRepository, token string) bool {
+func authenticateAPIKey(c *gin.Context, keys *idstore.APIKeyRepository, users *idstore.UserRepository, orgs *approles.Members, token string) bool {
 	if len(token) < idauth.DisplayPrefixLength {
 		return false
 	}

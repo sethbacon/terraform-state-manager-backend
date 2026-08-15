@@ -25,7 +25,7 @@ func newAdminOrgScopeEnv(t *testing.T, callerUserID string) *sourcesEnv {
 	}
 	t.Cleanup(func() { db.Close() })
 
-	h := NewAdminHandlers(db)
+	h := NewAdminHandlers(db, nil)
 	r := gin.New()
 	r.Use(func(c *gin.Context) {
 		if callerUserID != "" {
@@ -506,7 +506,7 @@ func TestListUsers_NarrowsToCallerAdminOrgs(t *testing.T) {
 	}
 	t.Cleanup(func() { db.Close() })
 
-	h := NewAdminHandlers(db)
+	h := NewAdminHandlers(db, nil)
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
 	r.Use(func(c *gin.Context) { c.Set("user_id", auditScopeCaller); c.Next() })

@@ -19,7 +19,7 @@ func newAdminHandlers(t *testing.T) (*AdminHandlers, sqlmock.Sqlmock) {
 		t.Fatalf("sqlmock.New: %v", err)
 	}
 	t.Cleanup(func() { db.Close() })
-	return NewAdminHandlers(db), mock
+	return NewAdminHandlers(db, nil), mock
 }
 
 // serveAdmin runs handler with NO caller in the context. Since identity

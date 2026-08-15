@@ -49,7 +49,7 @@ func newConfigureAdminEnvWithCarrier(t *testing.T) (*Handlers, sqlmock.Sqlmock, 
 	}
 	cfg := &config.Config{}
 	cfg.Suite.RoleSeedOwner = "self"
-	h := NewHandlers(repositories.NewSystemSettingsRepository(identityDB), nil, nil, identityDB, svc, cfg, nil)
+	h := NewHandlers(repositories.NewSystemSettingsRepository(identityDB), nil, nil, identityDB, nil, svc, cfg, nil)
 	return h, identityMock, appMock
 }
 

@@ -27,6 +27,7 @@ import (
 	"github.com/sethbacon/terraform-suite-identity/identity/models"
 	idstore "github.com/sethbacon/terraform-suite-identity/identity/store"
 
+	"github.com/terraform-state-manager/terraform-state-manager/internal/approles"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/config"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/credlifecycle"
 )
@@ -44,7 +45,7 @@ const (
 type Handlers struct {
 	cfg      *config.Config
 	userRepo *idstore.UserRepository
-	orgRepo  *idstore.OrganizationRepository
+	orgRepo  *approles.Members
 	// creds invalidates the credential families that snapshot a deprovisioned
 	// user's authority.
 	//
@@ -71,11 +72,14 @@ func WithCredentialSweeper(s *credlifecycle.Sweeper) Option {
 
 // NewHandlers creates a SCIM handler set. identityDB resolves to the identity
 // schema (search_path), like the other identity-backed handlers.
-func NewHandlers(cfg *config.Config, identityDB *sql.DB, opts ...Option) *Handlers {
+//
+// appDB is the APPLICATION connection, which attaches TSM's per-app role mirror
+// so deprovisionUser's membership strip is withdrawn from both places.
+func NewHandlers(cfg *config.Config, identityDB, appDB *sql.DB, opts ...Option) *Handlers {
 	h := &Handlers{
 		cfg:      cfg,
 		userRepo: idstore.NewUserRepository(identityDB),
-		orgRepo:  idstore.NewOrganizationRepository(identityDB),
+		orgRepo:  approles.NewMembers(identityDB, appDB),
 	}
 	for _, opt := range opts {
 		opt(h)

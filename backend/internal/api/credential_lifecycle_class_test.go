@@ -16,6 +16,7 @@ import (
 	idstore "github.com/sethbacon/terraform-suite-identity/identity/store"
 
 	"github.com/terraform-state-manager/terraform-state-manager/internal/api/scim"
+	"github.com/terraform-state-manager/terraform-state-manager/internal/approles"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/auth"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/auth/ldap"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/auth/saml"
@@ -119,14 +120,14 @@ func expectKeyList(mock sqlmock.Sqlmock, userID, keyID, scopes string) {
 
 // newClassAdminHandlers builds AdminHandlers exactly as the router does.
 func newClassAdminHandlers(db *sql.DB) *AdminHandlers {
-	return NewAdminHandlers(db, WithAdminCredentialSweeper(classSweeper(db)))
+	return NewAdminHandlers(db, nil, WithAdminCredentialSweeper(classSweeper(db)))
 }
 
 func classSweeper(db *sql.DB) *credlifecycle.Sweeper {
 	return credlifecycle.NewSweeper(
 		repositories.NewUserTokenRevocationRepository(db),
 		idstore.NewAPIKeyRepository(db),
-		idstore.NewOrganizationRepository(db))
+		approles.NewMembers(db, nil))
 }
 
 // newClassAuthHandlers builds AuthHandlers with the sweeper wired, for the IdP
@@ -137,7 +138,7 @@ func newClassAuthHandlers(t *testing.T, db *sql.DB, mutate func(*config.Config))
 	if mutate != nil {
 		mutate(cfg)
 	}
-	h, err := NewAuthHandlers(cfg, db, WithAuthCredentialSweeper(classSweeper(db)))
+	h, err := NewAuthHandlers(cfg, db, nil, WithAuthCredentialSweeper(classSweeper(db)))
 	if err != nil {
 		t.Fatalf("NewAuthHandlers: %v", err)
 	}
@@ -146,7 +147,7 @@ func newClassAuthHandlers(t *testing.T, db *sql.DB, mutate func(*config.Config))
 
 // newClassSCIMRouter builds the real SCIM handler set with the sweeper wired.
 func newClassSCIMRouter(db *sql.DB) *gin.Engine {
-	h := scim.NewHandlers(&config.Config{}, db, scim.WithCredentialSweeper(classSweeper(db)))
+	h := scim.NewHandlers(&config.Config{}, db, nil, scim.WithCredentialSweeper(classSweeper(db)))
 	r := gin.New()
 	r.PUT("/scim/v2/Users/:id", h.PutUser())
 	r.PATCH("/scim/v2/Users/:id", h.PatchUser())

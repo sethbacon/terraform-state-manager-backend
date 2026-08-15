@@ -9,6 +9,8 @@ import (
 
 	"github.com/sethbacon/terraform-suite-identity/identity/models"
 	idstore "github.com/sethbacon/terraform-suite-identity/identity/store"
+
+	"github.com/terraform-state-manager/terraform-state-manager/internal/approles"
 )
 
 // ConfigureAdmin creates the first OWNER: an email-only user in the identity
@@ -52,7 +54,7 @@ func (h *Handlers) ConfigureAdmin(c *gin.Context) {
 	ctx := c.Request.Context()
 	email := strings.ToLower(strings.TrimSpace(req.Email))
 
-	orgRepo := idstore.NewOrganizationRepository(h.identityDB)
+	orgRepo := approles.NewMembers(h.identityDB, h.appDB)
 	userRepo := idstore.NewUserRepository(h.identityDB)
 
 	defaultOrg, err := orgRepo.GetDefaultOrganization(ctx)
