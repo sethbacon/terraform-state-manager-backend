@@ -104,7 +104,8 @@ func TestRunResults_CapturesModuleProvenance(t *testing.T) {
 
 	runRow := sqlmock.NewRows(driftCols).
 		AddRow("d1", "p1", "s1", "envs/prod.tfstate", "", "", "dispatched",
-			nil, nil, nil, nil, nil, "", "tokX", "alice", "2026-06-11", "2026-06-11")
+			nil, nil, nil, nil, nil, "", "tokX", "alice", "2026-06-11", "2026-06-11",
+			false, 0, 0, false, false)
 	e.mock.ExpectQuery("FROM drift_runs WHERE id").WithArgs("d1").WillReturnRows(runRow)
 	e.mock.ExpectExec("UPDATE drift_runs SET callback_token=''").WithArgs("d1", "tokX").
 		WillReturnResult(sqlmock.NewResult(0, 1))

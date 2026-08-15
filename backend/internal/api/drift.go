@@ -329,6 +329,7 @@ func (h *DriftHandlers) dispatchDrift(ctx context.Context, tgt DriftTarget, acto
 
 // ListRuns returns drift runs, newest first, with server-side pagination.
 // @Summary      List drift runs
+// @Description  Drift runs newest-first. Each run carries the drift contract's completeness markers (truncated, omitted_entries, omitted_attrs, unparseable, unmasked) describing what that run's own check did not do — zero counts alone cannot distinguish a verified-clean run from one that never finished checking.
 // @Tags         Drift
 // @Produce      json
 // @Param        status  query  string  false  "filter by status (dispatched|running|completed|failed)"
@@ -410,13 +411,13 @@ type driftRunResultPayload struct {
 	// Markers describing what the run's own check did not do. This endpoint
 	// never re-parses the plan (only its module_calls projection arrives), so
 	// the producer's markers are the only account of completeness there is.
-	completeness
+	repositories.Completeness
 }
 
 // RunResults is the machine callback the CI job posts drift results to. It is
 // authenticated by the per-run callback token (no user session).
 // @Summary      Drift run callback (machine)
-// @Description  CI job posts drift results here, authenticated by the per-run one-shot X-TSM-Callback-Token. Not a user endpoint. Accepts the drift contract's completeness markers (truncated, omitted_entries, omitted_attrs, unparseable, unmasked) and stores them on the drift record; an unparseable result never auto-resolves a live record. Unknown fields are ignored so a newer runner can post to an older server.
+// @Description  CI job posts drift results here, authenticated by the per-run one-shot X-TSM-Callback-Token. Not a user endpoint. Accepts the drift contract's completeness markers (truncated, omitted_entries, omitted_attrs, unparseable, unmasked) and stores them on BOTH the run and the drift record, so per-run history can tell a check that verified clean from one that never finished. An unparseable result never auto-resolves a live record. Unknown fields are ignored so a newer runner can post to an older server.
 // @Tags         Drift
 // @Accept       json
 // @Produce      json
@@ -469,12 +470,12 @@ func (h *DriftHandlers) RunResults() gin.HandlerFunc {
 		if body.Drifted != nil {
 			drifted = *body.Drifted
 		}
-		if err := h.driftRepo.UpdateResult(ctx, run.ID, status, body.Added, body.Changed, body.Destroyed, drifted, body.Summary, body.Detail); err != nil {
+		if err := h.driftRepo.UpdateResult(ctx, run.ID, status, body.Added, body.Changed, body.Destroyed, drifted, body.Summary, body.Detail, body.Completeness); err != nil {
 			serverError(c, err, "failed to record results")
 			return
 		}
 
-		h.recordDriftOutcome(ctx, run, status, body.Added, body.Changed, body.Destroyed, drifted, body.Summary, body.completeness)
+		h.recordDriftOutcome(ctx, run, status, body.Added, body.Changed, body.Destroyed, drifted, body.Summary, body.Completeness)
 		h.notifyDriftResult(run.ID, status, body.Added, body.Changed, body.Destroyed, drifted, body.Detail)
 
 		// Best-effort module provenance for dispatched runs: if the runner uploaded

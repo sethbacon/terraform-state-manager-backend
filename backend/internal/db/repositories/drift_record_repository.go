@@ -37,14 +37,8 @@ type DriftRecord struct {
 	LastDetectedAt       string          `json:"last_detected_at"`
 
 	// Completeness markers from the drift contract, describing what the check
-	// did NOT do. Emitted unconditionally (no omitempty): "false" here is the
-	// positive claim that the check was complete, which is exactly the thing a
-	// consumer must not have to infer from an absent field.
-	Truncated      bool `json:"truncated"`
-	OmittedEntries int  `json:"omitted_entries"`
-	OmittedAttrs   int  `json:"omitted_attrs"`
-	Unparseable    bool `json:"unparseable"`
-	Unmasked       bool `json:"unmasked"`
+	// did NOT do. Promoted, so the record's JSON keys are unchanged.
+	Completeness
 }
 
 // DriftSeverity classifies drift the way ogtsm did: destroyed resources are
@@ -121,23 +115,7 @@ type Detection struct {
 	// Overwritten (not accumulated) on re-detection, exactly like the counts
 	// beside them: the record describes the LATEST observation, so a later
 	// complete check must be able to clear an earlier truncated one.
-	Truncated      bool
-	OmittedEntries int
-	OmittedAttrs   int
-	Unparseable    bool
-	Unmasked       bool
-}
-
-// MarkTruncation widens Truncated to agree with the omission counts. The flag is
-// only ever widened, never narrowed: a producer that reports omissions but
-// forgets the flag is repaired, while one that reports the flag with no counts
-// (bounded by something it could not count) is believed. Under-reporting a bound
-// is the direction that misleads a consumer into reading an absent resource as
-// evidence of absence.
-func (d *Detection) MarkTruncation() {
-	if d.OmittedEntries > 0 || d.OmittedAttrs > 0 {
-		d.Truncated = true
-	}
+	Completeness
 }
 
 // UpsertDetection records a drift observation: it updates the live

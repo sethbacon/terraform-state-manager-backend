@@ -27,6 +27,13 @@ type DriftRun struct {
 	Actor                string          `json:"actor"`
 	CreatedAt            string          `json:"created_at"`
 	UpdatedAt            string          `json:"updated_at"`
+
+	// Completeness markers describing what THIS run's check did not do. Stored
+	// on the run rather than derived from its record because a clean run writes
+	// no record, an unparseable run touches none by design, and re-detection
+	// overwrites a record in place — so for per-run history the record is either
+	// absent or describes a later check. See migration 000031.
+	Completeness
 }
 
 // DriftRepository is the DAO for drift_runs.
@@ -40,7 +47,8 @@ func NewDriftRepository(db *sql.DB) *DriftRepository {
 
 const driftColumns = `id, pipeline_connection_id, source_id, COALESCE(state_key,''), COALESCE(repo_ref,''),
 	COALESCE(working_dir,''), status, added, changed, destroyed, drifted, summary, COALESCE(detail,''),
-	callback_token, COALESCE(actor,''), created_at::text, updated_at::text`
+	callback_token, COALESCE(actor,''), created_at::text, updated_at::text,
+	truncated, omitted_entries, omitted_attrs, unparseable, unmasked`
 
 func scanDrift(scanner interface{ Scan(dest ...any) error }) (*DriftRun, error) {
 	var d DriftRun
@@ -50,7 +58,8 @@ func scanDrift(scanner interface{ Scan(dest ...any) error }) (*DriftRun, error) 
 	var summary []byte
 	if err := scanner.Scan(&d.ID, &connID, &srcID, &d.StateKey, &d.RepoRef, &d.WorkingDir, &d.Status,
 		&added, &changed, &destroyed, &drifted, &summary, &d.Detail, &d.CallbackToken, &d.Actor,
-		&d.CreatedAt, &d.UpdatedAt); err != nil {
+		&d.CreatedAt, &d.UpdatedAt,
+		&d.Truncated, &d.OmittedEntries, &d.OmittedAttrs, &d.Unparseable, &d.Unmasked); err != nil {
 		return nil, err
 	}
 	if connID.Valid {
@@ -161,7 +170,6 @@ func (r *DriftRepository) UpdateStatus(ctx context.Context, id, status, detail s
 	return err
 }
 
-// UpdateResult records the drift outcome reported by the CI job.
 // ConsumeCallbackToken atomically clears the run's callback token if (and only
 // if) it still equals the supplied value, returning true when it did. This makes
 // the machine callback one-shot: a replayed callback (same token, second time)
@@ -179,17 +187,28 @@ func (r *DriftRepository) ConsumeCallbackToken(ctx context.Context, id, token st
 	return n > 0, nil
 }
 
-func (r *DriftRepository) UpdateResult(ctx context.Context, id, status string, added, changed, destroyed int, drifted bool, summary []byte, detail string) error {
+// UpdateResult records the drift outcome reported by the CI job.
+//
+// The counts say how much drift; marks say whether the run finished looking for
+// it. Both are stored, because zero counts alone cannot distinguish a run that
+// verified clean from one that never completed its check — and for a clean or
+// unparseable run there is no record to derive that from (see migration 000031).
+// MarkTruncation runs here for the same reason it runs on the record path, so
+// one callback cannot leave the two rows disagreeing about the same check.
+func (r *DriftRepository) UpdateResult(ctx context.Context, id, status string, added, changed, destroyed int, drifted bool, summary []byte, detail string, marks Completeness) error {
 	var summaryArg any
 	if len(summary) > 0 {
 		summaryArg = string(summary)
 	}
+	marks.MarkTruncation()
 	_, err := r.db.ExecContext(ctx, `
 		UPDATE drift_runs
 		SET status=$2, added=$3, changed=$4, destroyed=$5, drifted=$6, summary=$7::jsonb,
-		    detail=COALESCE(NULLIF($8,''), detail), updated_at=now()
+		    detail=COALESCE(NULLIF($8,''), detail), updated_at=now(),
+		    truncated=$9, omitted_entries=$10, omitted_attrs=$11, unparseable=$12, unmasked=$13
 		WHERE id=$1`,
-		id, status, added, changed, destroyed, drifted, summaryArg, detail)
+		id, status, added, changed, destroyed, drifted, summaryArg, detail,
+		marks.Truncated, marks.OmittedEntries, marks.OmittedAttrs, marks.Unparseable, marks.Unmasked)
 	return err
 }
 

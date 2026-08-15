@@ -2299,6 +2299,7 @@
                         "CookieAuth": []
                     }
                 ],
+                "description": "Drift runs newest-first. Each run carries the drift contract's completeness markers (truncated, omitted_entries, omitted_attrs, unparseable, unmasked) describing what that run's own check did not do — zero counts alone cannot distinguish a verified-clean run from one that never finished checking.",
                 "produces": [
                     "application/json"
                 ],
@@ -2381,7 +2382,7 @@
                         "CallbackToken": []
                     }
                 ],
-                "description": "CI job posts drift results here, authenticated by the per-run one-shot X-TSM-Callback-Token. Not a user endpoint. Accepts the drift contract's completeness markers (truncated, omitted_entries, omitted_attrs, unparseable, unmasked) and stores them on the drift record; an unparseable result never auto-resolves a live record. Unknown fields are ignored so a newer runner can post to an older server.",
+                "description": "CI job posts drift results here, authenticated by the per-run one-shot X-TSM-Callback-Token. Not a user endpoint. Accepts the drift contract's completeness markers (truncated, omitted_entries, omitted_attrs, unparseable, unmasked) and stores them on BOTH the run and the drift record, so per-run history can tell a check that verified clean from one that never finished. An unparseable result never auto-resolves a live record. Unknown fields are ignored so a newer runner can post to an older server.",
                 "consumes": [
                     "application/json"
                 ],

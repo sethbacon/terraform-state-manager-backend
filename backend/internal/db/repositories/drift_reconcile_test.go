@@ -13,7 +13,7 @@ import (
 func dispatchedDriftRow(id, token string) *sqlmock.Rows {
 	return sqlmock.NewRows(driftCols).
 		AddRow(id, "p1", nil, "app.tfstate", "", "", "dispatched", nil, nil, nil, nil, nil, "", token, "alice",
-			"2026-06-21 10:00:00", "2026-06-21 10:00:00")
+			"2026-06-21 10:00:00", "2026-06-21 10:00:00", false, 0, 0, false, false)
 }
 
 func TestDriftRepository_ListExpiredDispatched(t *testing.T) {
