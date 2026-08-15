@@ -87,7 +87,7 @@ func NewAuthHandlers(cfg *config.Config, identityDB, appDB *sql.DB, opts ...Auth
 	h := &AuthHandlers{
 		cfg:         cfg,
 		userRepo:    idstore.NewUserRepository(identityDB),
-		orgRepo:     approles.NewMembers(identityDB, appDB),
+		orgRepo:     approles.NewMembers(identityDB, appDB, approles.RoleSource(cfg.Authz.RoleSource)),
 		roleRepo:    idstore.NewRoleTemplateRepository(identityDB),
 		tokenRepo:   idstore.NewTokenRepository(identityDB),
 		apiKeyRepo:  idstore.NewAPIKeyRepository(identityDB),
@@ -433,11 +433,21 @@ func (h *AuthHandlers) MeHandler() gin.HandlerFunc {
 		uid, _ := userID.(string)
 
 		// Sentinel first: a token naming a deleted user must keep answering 404,
-		// not 500. GetUserWithOrgRoles propagates GetUserByID's ErrNotFound, and
-		// a user with no memberships is NOT a miss (it returns an empty slice),
-		// so this cannot swallow a legitimately membership-less account.
-		userWithRoles, err := h.userRepo.GetUserWithOrgRoles(c.Request.Context(), uid, loginScope())
-		if errors.Is(err, idstore.ErrNotFound) || (err == nil && userWithRoles == nil) {
+		// not 500.
+		//
+		// GetUserByID, NOT GetUserWithOrgRoles, since
+		// sethbacon/terraform-suite-identity#206 Phase 3b. That accessor resolves
+		// each membership's role by joining the SHARED identity schema's
+		// role_templates, which is no longer where this application's roles live —
+		// so its Memberships would have put identity's role name and scopes in the
+		// same response as allowed_scopes, which comes from THIS application's
+		// tables. On a coupled deployment /auth/me would then show a principal one
+		// role while granting them another, on the one endpoint whose whole job is
+		// to tell a user what they are. It propagates the same ErrNotFound (that
+		// is where GetUserWithOrgRoles got it), and dropping it also drops the
+		// membership query whose result is now discarded.
+		user, err := h.userRepo.GetUserByID(c.Request.Context(), uid, loginScope())
+		if errors.Is(err, idstore.ErrNotFound) || (err == nil && user == nil) {
 			c.JSON(http.StatusNotFound, gin.H{"error": "User not found"})
 			return
 		}
@@ -446,13 +456,20 @@ func (h *AuthHandlers) MeHandler() gin.HandlerFunc {
 			return
 		}
 
+		// Unscoped for the same reason GetUserCombinedScopes below is: the caller
+		// is asking about themselves.
+		userMemberships, mErr := h.orgRepo.GetUserMemberships(c.Request.Context(), uid)
+		if mErr != nil {
+			serverError(c, mErr, "Failed to get user information")
+			return
+		}
+
 		scopes, err := h.orgRepo.GetUserCombinedScopes(c.Request.Context(), uid)
 		if err != nil {
 			scopes = []string{}
 		}
-
-		memberships := make([]gin.H, 0, len(userWithRoles.Memberships))
-		for _, m := range userWithRoles.Memberships {
+		memberships := make([]gin.H, 0, len(userMemberships))
+		for _, m := range userMemberships {
 			memberships = append(memberships, gin.H{
 				"organization_id":      m.OrganizationID,
 				"organization_name":    m.OrganizationName,
@@ -463,9 +480,9 @@ func (h *AuthHandlers) MeHandler() gin.HandlerFunc {
 
 		resp := gin.H{
 			"user": gin.H{
-				"id":    userWithRoles.ID,
-				"email": userWithRoles.Email,
-				"name":  userWithRoles.Name,
+				"id":    user.ID,
+				"email": user.Email,
+				"name":  user.Name,
 			},
 			"memberships":    memberships,
 			"allowed_scopes": scopes,

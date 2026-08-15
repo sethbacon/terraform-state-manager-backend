@@ -1,4 +1,4 @@
--- 000031_app_role_authorization (down)
+-- 000032_app_role_authorization (down)
 --
 -- ORDER IS LOAD-BEARING: organization_member_roles carries the foreign key to
 -- role_templates, so the assignments go first.

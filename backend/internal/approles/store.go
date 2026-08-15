@@ -15,27 +15,42 @@
 // PER-APP: membership stays a fact in identity, the role that member holds in
 // this application moves here.
 //
-// # What this package is in Phase 3a
+// # What this package is now (Phase 3b)
 //
-// A mirror, and nothing else. Every authorization decision TSM makes still comes
-// from identity.organization_members joined to identity.role_templates. This
-// package writes the same facts a second time, into TSM's own tables, so that
-// the phase which switches reads has something correct to switch to. Nothing
-// observable changes.
+// THE AUTHORITY. Phase 3a made these tables a mirror and left every authorization
+// decision reading identity.organization_members joined to identity.role_templates.
+// Phase 3b moved the reads: which role a principal holds in this application is
+// answered from organization_member_roles joined to THIS application's
+// role_templates, and identity answers only "is this principal a member of this
+// organization" — the fact it owns.
 //
-// Three things keep the mirror honest:
+// Both places are still written, under either RoleSource, which is what makes
+// TSM_AUTHZ_ROLE_SOURCE=identity a working rollback rather than a downgrade to
+// stale data.
+//
+// Five things keep it honest:
 //
 //   - Members (members.go) wraps the shared organization repository and
 //     overrides every method that can set, change or remove a role. A caller
 //     holds a *Members and cannot reach the unwrapped repository, so writing a
 //     new assignment path that skips the mirror is not something one can forget
 //     to do — it is something one cannot spell.
+//   - reads.go overrides every role-carrying READ, including the ones the library
+//     derives from its own receiver. Go has no virtual dispatch, so a derived
+//     accessor left promoted keeps answering from identity while the base read it
+//     calls answers from here — a principal shown one role and granted another.
 //   - Reconcile (reconcile.go) rebuilds both tables from identity at every
 //     startup, so a mirror write that failed, a row removed by CASCADE, and a
 //     row written by the sibling registry all converge instead of accumulating.
-//   - dual_write_class_test.go refuses to certify a tree in which the shared
-//     repository is constructed anywhere else, or in which a Members method
-//     writes one side and not the other.
+//     It now reports what it is about to change first, because every repair it
+//     makes is an authorization change.
+//   - CheckDrift (drift.go) compares the two sources. It is the pre-flip gate
+//     (`server authz-drift`), the boot-time report, and the standing detector.
+//   - dual_write_class_test.go and read_coverage_class_test.go refuse to certify a
+//     tree in which the shared repository is constructed anywhere else, a Members
+//     method writes one side and not the other, or a role-carrying read is left
+//     promoted — the last of those deriving its universe from the LIBRARY'S OWN
+//     SOURCE, so an upgrade that adds an accessor fails the guard.
 //
 // # Two connections
 //
@@ -62,7 +77,7 @@ import (
 //
 // SPELLED ONCE, AND UNQUALIFIED, like internal/platformadmin's carrier names:
 // the app connection's search_path places them, which is the routing every other
-// unqualified name in this repo uses. Migration 000031 refuses to run on a
+// unqualified name in this repo uses. Migration 000032 refuses to run on a
 // connection whose search_path reaches identity, so "unqualified" cannot quietly
 // mean "identity's copy".
 const (
@@ -181,7 +196,7 @@ func (s *Store) resolve(ctx context.Context, table string) (string, error) {
 		return "", fmt.Errorf("approles: resolving %s: %w", table, err)
 	}
 	if !qualified.Valid {
-		return "", fmt.Errorf("approles: %s does not exist on the application connection (migration 000031 has not been applied)", table)
+		return "", fmt.Errorf("approles: %s does not exist on the application connection (migration 000032 has not been applied)", table)
 	}
 	return qualified.String, nil
 }
@@ -212,6 +227,107 @@ func (s *Store) UpsertTemplate(ctx context.Context, t Template) error {
 		return fmt.Errorf("approles: upserting role template %q: %w", t.Name, err)
 	}
 	return nil
+}
+
+// AdoptTemplate records a role definition identity has and this application does
+// not, WITHOUT overwriting one it already holds.
+//
+// THE DIFFERENCE FROM UpsertTemplate IS THE WHOLE OF PHASE 3B'S TEMPLATE STORY.
+// In Phase 3a the reconcile upserted identity's rows over this table on every
+// boot, because identity's rows WERE the effective mapping and the mirror had to
+// equal them. Now this table is the effective mapping, and an upsert would mean
+// identity — in a coupled deployment, the sibling registry — silently redefining
+// what a TSM role grants, on a table that decides authorization, once per
+// restart. So identity may still SUPPLY a definition this deployment has never
+// seen (without one, an assignment pointing at it would violate the foreign key
+// and the principal would lose their role), but it may no longer REDEFINE one.
+//
+// Pairs with RepointTemplateName, which must run first: a name held here under a
+// different id has to be released before this insert, or the unique index on name
+// rejects it.
+func (s *Store) AdoptTemplate(ctx context.Context, t Template) error {
+	scopes, err := json.Marshal(nonNilScopes(t.Scopes))
+	if err != nil {
+		return fmt.Errorf("approles: encoding scopes for role template %q: %w", t.Name, err)
+	}
+	const q = `
+		INSERT INTO role_templates (id, name, display_name, description, scopes, is_system, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5::jsonb, $6, now(), now())
+		ON CONFLICT (id) DO NOTHING`
+	if _, err := s.db.ExecContext(ctx, q, t.ID, t.Name, t.DisplayName, t.Description, string(scopes), t.IsSystem); err != nil {
+		return fmt.Errorf("approles: adopting role template %q: %w", t.Name, err)
+	}
+	return nil
+}
+
+// DefineTemplate writes THIS BUILD's definition of a role, keyed by NAME.
+//
+// This is the app-side seed (bootstrap.seedRoleTemplates), and it is keyed by
+// name rather than id on purpose: the id is a value carried over from identity so
+// that an assignment restated from identity resolves here, while the NAME is what
+// this build actually claims to define. Conflicting on name therefore REPLACES
+// the definition and PRESERVES the id — id is deliberately absent from the update
+// list — so seeding cannot orphan an assignment, and cannot mint a second row for
+// a role that already exists under identity's uuid.
+//
+// A name this deployment has never seen gets a fresh uuid. That is safe precisely
+// because no assignment can reference a name identity does not have: assignments
+// are restated from identity, carrying identity's ids.
+//
+// MUST RUN AFTER THE ADOPT PASS. Reversed, a fresh install would mint its own
+// uuid for `editor`, the adopt pass would then find identity's `editor` under a
+// different uuid, RepointTemplateName would delete the row just seeded, and this
+// build's scopes would be replaced by identity's. Reconcile owns that ordering.
+func (s *Store) DefineTemplate(ctx context.Context, t Template) error {
+	scopes, err := json.Marshal(nonNilScopes(t.Scopes))
+	if err != nil {
+		return fmt.Errorf("approles: encoding scopes for role template %q: %w", t.Name, err)
+	}
+	const q = `
+		INSERT INTO role_templates (id, name, display_name, description, scopes, is_system, created_at, updated_at)
+		VALUES (COALESCE($1::uuid, gen_random_uuid()), $2, $3, $4, $5::jsonb, $6, now(), now())
+		ON CONFLICT (name) DO UPDATE
+		   SET display_name = EXCLUDED.display_name,
+		       description  = EXCLUDED.description,
+		       scopes       = EXCLUDED.scopes,
+		       is_system    = EXCLUDED.is_system,
+		       updated_at   = now()`
+	var id interface{}
+	if t.ID != "" {
+		id = t.ID
+	}
+	if _, err := s.db.ExecContext(ctx, q, id, t.Name, t.DisplayName, t.Description, string(scopes), t.IsSystem); err != nil {
+		return fmt.Errorf("approles: defining role template %q: %w", t.Name, err)
+	}
+	return nil
+}
+
+// ListTemplates returns every role definition this application holds, keyed by
+// name, for the drift comparison and the reconcile's adopted-template report.
+func (s *Store) ListTemplates(ctx context.Context) (map[string]Template, error) {
+	const q = `SELECT id, name, COALESCE(display_name, ''), description, COALESCE(scopes, '[]'::jsonb), is_system FROM role_templates`
+	rows, err := s.db.QueryContext(ctx, q)
+	if err != nil {
+		return nil, fmt.Errorf("approles: listing role templates: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	out := make(map[string]Template)
+	for rows.Next() {
+		var t Template
+		var scopes []byte
+		if err := rows.Scan(&t.ID, &t.Name, &t.DisplayName, &t.Description, &scopes, &t.IsSystem); err != nil {
+			return nil, fmt.Errorf("approles: reading a role template: %w", err)
+		}
+		if err := json.Unmarshal(scopes, &t.Scopes); err != nil {
+			return nil, fmt.Errorf("approles: decoding scopes for role template %q: %w", t.Name, err)
+		}
+		out[t.Name] = t
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("approles: listing role templates: %w", err)
+	}
+	return out, nil
 }
 
 // RepointTemplateName moves a name onto a new id, for the case UpsertTemplate's
@@ -376,6 +492,99 @@ func (s *Store) DeleteRolesForOrganization(ctx context.Context, orgID string, sc
 		return fmt.Errorf("approles: removing roles for org=%s: %w", orgID, err)
 	}
 	return nil
+}
+
+// RolesForUser returns the role this application records for a principal in each
+// organization, keyed by organization_id.
+//
+// ONE QUERY, NOT ONE PER ROW. The overlay in reads.go decorates a membership list
+// that can be tens of rows long and is re-derived on the API-key hot path; a
+// per-row lookup would turn one authorization decision into N round trips.
+//
+// A missing key is a membership with no recorded role, and the caller's map
+// lookup yields the zero Role — no id, no name, no scopes. That is the fail-closed
+// direction and it is deliberate; see the header of reads.go.
+func (s *Store) RolesForUser(ctx context.Context, userID string, scope idstore.OrgScope) (map[string]Role, error) {
+	query := `
+		SELECT r.organization_id, r.role_template_id, t.name, t.display_name, COALESCE(t.scopes, '[]'::jsonb)
+		  FROM organization_member_roles r
+		  LEFT JOIN role_templates t ON t.id = r.role_template_id
+		 WHERE r.user_id = $1`
+	args := []interface{}{userID}
+	query, args = andScope(query, scope, "r.organization_id", args)
+	return s.rolesByKey(ctx, query, args, "roles for user "+userID)
+}
+
+// RolesForOrganization returns the role this application records for each member
+// of an organization, keyed by user_id.
+func (s *Store) RolesForOrganization(ctx context.Context, orgID string, scope idstore.OrgScope) (map[string]Role, error) {
+	query := `
+		SELECT r.user_id, r.role_template_id, t.name, t.display_name, COALESCE(t.scopes, '[]'::jsonb)
+		  FROM organization_member_roles r
+		  LEFT JOIN role_templates t ON t.id = r.role_template_id
+		 WHERE r.organization_id = $1`
+	args := []interface{}{orgID}
+	query, args = andScope(query, scope, "r.organization_id", args)
+	return s.rolesByKey(ctx, query, args, "roles for organization "+orgID)
+}
+
+// RoleForPair returns the role this application records for one (organization,
+// user) pair, and whether a row exists at all.
+//
+// The boolean distinguishes "no row" from "a row with a NULL role". Both deny
+// identically today, and the caller in reads.go treats them the same — but the
+// two are different states in this table, one of them is what CheckDrift counts
+// as `missing`, and collapsing them here would leave the drift comparison and the
+// read path disagreeing about what they are looking at.
+func (s *Store) RoleForPair(ctx context.Context, orgID, userID string, scope idstore.OrgScope) (Role, bool, error) {
+	query := `
+		SELECT r.role_template_id, t.name, t.display_name, COALESCE(t.scopes, '[]'::jsonb)
+		  FROM organization_member_roles r
+		  LEFT JOIN role_templates t ON t.id = r.role_template_id
+		 WHERE r.organization_id = $1 AND r.user_id = $2`
+	args := []interface{}{orgID, userID}
+	query, args = andScope(query, scope, "r.organization_id", args)
+
+	var role Role
+	var scopes []byte
+	err := s.db.QueryRowContext(ctx, query, args...).Scan(&role.TemplateID, &role.Name, &role.DisplayName, &scopes)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Role{}, false, nil
+	}
+	if err != nil {
+		return Role{}, false, fmt.Errorf("approles: reading the role for org=%s user=%s: %w", orgID, userID, err)
+	}
+	if err := json.Unmarshal(scopes, &role.Scopes); err != nil {
+		return Role{}, false, fmt.Errorf("approles: decoding scopes for org=%s user=%s: %w", orgID, userID, err)
+	}
+	return role, true, nil
+}
+
+// rolesByKey runs one of the two keyed role reads and collects it into a map.
+func (s *Store) rolesByKey(ctx context.Context, query string, args []interface{}, what string) (map[string]Role, error) {
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("approles: reading %s: %w", what, err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	out := make(map[string]Role)
+	for rows.Next() {
+		var key string
+		var role Role
+		var scopes []byte
+		if err := rows.Scan(&key, &role.TemplateID, &role.Name, &role.DisplayName, &scopes); err != nil {
+			return nil, fmt.Errorf("approles: reading %s: %w", what, err)
+		}
+		if err := json.Unmarshal(scopes, &role.Scopes); err != nil {
+			return nil, fmt.Errorf("approles: decoding scopes while reading %s: %w", what, err)
+		}
+		out[key] = role
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("approles: reading %s: %w", what, err)
+	}
+	return out, nil
 }
 
 // Generation returns the APP DATABASE's clock, for the reconcile's sweep.

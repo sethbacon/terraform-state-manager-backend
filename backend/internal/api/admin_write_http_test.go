@@ -31,11 +31,11 @@ func newAdminWriteEnv(t *testing.T) *sourcesEnv {
 
 	// The credential sweeper is wired exactly as the router wires it, so the
 	// offboarding routes are exercised on their production path (#330).
-	h := NewAdminHandlers(db, nil, WithAdminCredentialSweeper(
+	h := NewAdminHandlers(db, nil, approles.RoleSourceIdentity, WithAdminCredentialSweeper(
 		credlifecycle.NewSweeper(
 			repositories.NewUserTokenRevocationRepository(db),
 			idstore.NewAPIKeyRepository(db),
-			approles.NewMembers(db, nil))))
+			approles.NewMembers(db, nil, approles.RoleSourceIdentity))))
 	r := gin.New()
 	admin := r.Group("/api/v1/admin")
 	admin.POST("/users", h.CreateUser())
@@ -370,11 +370,11 @@ func TestAdminEraseUser_StripsMembershipsInEveryOrganization(t *testing.T) {
 	}
 	t.Cleanup(func() { db.Close() })
 
-	h := NewAdminHandlers(db, nil, WithAdminCredentialSweeper(
+	h := NewAdminHandlers(db, nil, approles.RoleSourceIdentity, WithAdminCredentialSweeper(
 		credlifecycle.NewSweeper(
 			repositories.NewUserTokenRevocationRepository(db),
 			idstore.NewAPIKeyRepository(db),
-			approles.NewMembers(db, nil))))
+			approles.NewMembers(db, nil, approles.RoleSourceIdentity))))
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
 	r.Use(func(c *gin.Context) { c.Set("user_id", "caller-1"); c.Next() })
@@ -454,11 +454,11 @@ func TestDeleteUser_PurgesTheMirrorOnlyWhenTheDeleteApplied(t *testing.T) {
 		}
 		t.Cleanup(func() { _ = appDB.Close() })
 
-		h := NewAdminHandlers(identityDB, appDB, WithAdminCredentialSweeper(
+		h := NewAdminHandlers(identityDB, appDB, approles.RoleSourceIdentity, WithAdminCredentialSweeper(
 			credlifecycle.NewSweeper(
 				repositories.NewUserTokenRevocationRepository(identityDB),
 				idstore.NewAPIKeyRepository(identityDB),
-				approles.NewMembers(identityDB, nil))))
+				approles.NewMembers(identityDB, nil, approles.RoleSourceIdentity))))
 		r := gin.New()
 		r.DELETE("/api/v1/admin/users/:id", h.DeleteUser())
 

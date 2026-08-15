@@ -10,6 +10,7 @@ import (
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
 	"github.com/gin-gonic/gin"
 	idmodels "github.com/sethbacon/terraform-suite-identity/identity/models"
+	"github.com/terraform-state-manager/terraform-state-manager/internal/approles"
 )
 
 func newAdminHandlers(t *testing.T) (*AdminHandlers, sqlmock.Sqlmock) {
@@ -19,7 +20,7 @@ func newAdminHandlers(t *testing.T) (*AdminHandlers, sqlmock.Sqlmock) {
 		t.Fatalf("sqlmock.New: %v", err)
 	}
 	t.Cleanup(func() { db.Close() })
-	return NewAdminHandlers(db, nil), mock
+	return NewAdminHandlers(db, nil, approles.RoleSourceIdentity), mock
 }
 
 // serveAdmin runs handler with NO caller in the context. Since identity

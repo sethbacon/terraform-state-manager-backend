@@ -325,7 +325,7 @@ func newOrgRepoMW(t *testing.T) (*approles.Members, sqlmock.Sqlmock) {
 		t.Fatalf("sqlmock.New (org): %v", err)
 	}
 	t.Cleanup(func() { db.Close() })
-	return approles.NewMembers(db, nil), mock
+	return approles.NewMembers(db, nil, approles.RoleSourceIdentity), mock
 }
 
 // mwMembershipCols mirrors GetUserCombinedScopes' membership projection.

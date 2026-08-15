@@ -233,7 +233,7 @@ features (module freshness, the "Consumed by" join, audit federation).
 |---|---|---|---|---|
 | `TSM_SUITE_SIBLING_URL` | (empty) | | | Base URL of the sibling registry. Empty = standalone (no discovery, cross-app features inert) |
 | `TSM_SUITE_POLL_INTERVAL` | `60s` | | | How often the sibling manifest is re-fetched |
-| `TSM_SUITE_ROLE_SEED_OWNER` | `self` | | | Which app seeds the shared identity schema's system role templates: `self` \| `registry` \| `tsm`. **See the hazard below** |
+| `TSM_SUITE_ROLE_SEED_OWNER` | `self` | | | Which app seeds the **shared** identity schema's system role templates: `self` \| `registry` \| `tsm`. Since the reads moved (see [Authorization source](#authorization-source)) this no longer decides what **this** app's roles grant. **See the hazard below** |
 | `TSM_SUITE_IDENTITY_SHARED_STORE` | `false` | | | Operator assertion that this app uses the shared identity store + single IdP. Advertised in the manifest; the SPA only drops the "you may need to sign in" hint when **both** apps assert it |
 | `TSM_SUITE_SERVICE_TOKEN` | (empty) | | **yes** | Shared secret the sibling presents (`X-Suite-Service-Token`) for server-to-server reads (`GET /consumers`). Empty = that endpoint stays disabled. Set to the **same** value as the sibling registry's `TFR_SUITE_SIBLING_TOKEN` to enable the "Consumed by" join |
 
@@ -243,6 +243,75 @@ features (module freshness, the "Consumed by" join, audit federation).
 > database**, exactly one must own the seed (`registry` or `tsm`); otherwise they
 > overwrite each other's role scopes on **every restart**. Set this together with
 > `TSM_IDENTITY_DATABASE_*` whenever you share an identity store.
+
+> **What this flag no longer does.** It used to decide what a role means *here*,
+> because authorization read the shared table it arbitrates. It does not any
+> more: this app seeds and reads its **own** `role_templates`
+> ([Authorization source](#authorization-source)). It still governs the shared
+> copy — which the sibling registry and the authorization rollback path both read
+> — and it is still what the first-run setup wizard uses to decide whether this
+> app owns identity at all (owner creation, OIDC configuration). So it stays,
+> with a narrower job, until the shared authorization surface is removed.
+
+## Authorization source
+
+| Variable | Default | Required | Secret | Description |
+|---|---|---|---|---|
+| `TSM_AUTHZ_ROLE_SOURCE` | `app` | | | Which tables answer "what role does this principal hold here": `app` (this application's own `organization_member_roles` + `role_templates`) or `identity` (the shared schema, the previous behaviour) |
+| `TSM_AUTHZ_DRIFT_INTERVAL` | `15m` | | | How often the server re-compares the two sources and reports the difference. `0` disables the loop |
+
+Membership is a fact the identity schema owns. **Which role that member holds in
+this application** is a row in this application's own schema, and `app` — the
+default — is what reads it.
+
+> **Run the gate before you upgrade.** A gap between the two sources does not
+> surface as an error. It surfaces as a user silently holding the wrong role:
+> losing access they should have, or keeping access they should not. Nothing in
+> the request path reports it. So before rolling a deployment onto a build whose
+> `TSM_AUTHZ_ROLE_SOURCE` defaults to `app`, run:
+>
+> ```console
+> $ tsm-server authz-drift
+> ```
+>
+> It exits **non-zero** while anything is unreconciled — a missing or stale role
+> record, a role assignment that differs, or a role *definition* whose scopes
+> differ between the two schemas. Zero is what permits the upgrade. The binary
+> need not be the one currently running: it connects to the two databases and
+> reads them, so the new build's `authz-drift` answers for the old build's data.
+>
+> If it is non-zero: restart the backend (the startup reconcile restates every
+> assignment from identity, sweeps what identity no longer has, and now logs what
+> it changed), then run it again. Drift that **survives a restart** means the
+> reconcile is failing rather than that a single write slipped, and the startup
+> log will say why.
+
+> **Rollback.** Set `TSM_AUTHZ_ROLE_SOURCE=identity` and restart. Both tables are
+> written under either value — the dual write is not conditional on this setting —
+> so the shared schema is still current and nothing has to be migrated back. This
+> is a restart, not a restore.
+
+**Standing detection.** The running server re-compares the two sources every
+`TSM_AUTHZ_DRIFT_INTERVAL` and exports:
+
+| Metric | Meaning |
+|---|---|
+| `tsm_authz_role_drift{kind="missing"}` | Identity has the membership; this app records no role. The principal has **lost** access they should have |
+| `tsm_authz_role_drift{kind="stale"}` | This app records a role identity no longer has. The principal has **kept** access they should not — the one to page on |
+| `tsm_authz_role_drift{kind="mismatched"}` | Both sides have it, naming different roles |
+| `tsm_authz_role_drift{kind="scope_divergent"}` | Same role id on both sides, different scopes. Right role name, wrong permissions |
+| `tsm_authz_role_template_drift` | Role definitions whose scopes differ between the two schemas. Expected and non-zero on a coupled deployment |
+| `tsm_authz_role_drift_compared` | Records examined. **Zero is not agreement** — it means nothing was compared |
+| `tsm_authz_role_drift_last_check_timestamp_seconds` | When the comparison last completed |
+
+Alert on the counts **and** on the age of the last check. A detector that has
+stopped running exports a stale zero, which reads exactly like a healthy one.
+
+**Coupled deployments change behaviour here.** If `TSM_SUITE_ROLE_SEED_OWNER` is
+not `self` or `tsm`, this deployment has been authorizing against the *sibling's*
+definition of every role name. From the first boot on a build defaulting to `app`,
+it authorizes against its own. Run `authz-drift` on the current build first: its
+`template_drift` output names exactly which roles will change and how.
 
 ## Endpoints a deployment should know
 

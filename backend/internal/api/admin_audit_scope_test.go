@@ -18,6 +18,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/lib/pq"
 	idstore "github.com/sethbacon/terraform-suite-identity/identity/store"
+	"github.com/terraform-state-manager/terraform-state-manager/internal/approles"
 )
 
 // admin_audit_scope_test.go covers the tenant narrowing on audit-log READS as a
@@ -112,7 +113,7 @@ func newAuditScopeEnv(t *testing.T) *auditScopeEnv {
 		t.Fatalf("sqlmock.New: %v", err)
 	}
 	t.Cleanup(func() { db.Close() })
-	return &auditScopeEnv{h: NewAdminHandlers(db, nil), mock: mock, rec: rec}
+	return &auditScopeEnv{h: NewAdminHandlers(db, nil, approles.RoleSourceIdentity), mock: mock, rec: rec}
 }
 
 // serveAs runs handler with callerID installed the way the real requireAuth
@@ -463,6 +464,7 @@ var reviewedPlatformWideSites = map[string]string{
 	"internal/api/admin_write.go:DeleteUser":                 "mirrors identity's ON DELETE CASCADE, which removed this principal's memberships in EVERY organization; reached only after the SCOPED delete above is established to have applied, so the tenancy was enforced on the delete and this follows it",
 	"internal/api/audit_ingest.go:resolveSiblingIDs":         "existence probe on a service-token route with no tenant principal; decides whether a federated id resolves at all",
 	"internal/approles/reconcile.go:reconcileScope":          "startup reconciliation from no principal: it makes this application's tables agree with identity's ENTIRE membership table, so there is no caller to narrow it to, and narrowing it would leave other tenants' assignments un-restated and then swept as stale",
+	"internal/approles/reads.go:roleReadScope":               "authority derivation for the two accessors the shared library itself marks UNSCOPED BY DESIGN (GetUserMemberships, GetUserScopesForOrg): they compute WHERE a principal may act, so gating them on a scope derived from that answer is circular. Every other read override in that file forwards the caller's scope, and the rows this one decorates were already filtered by the identity leg under it — so the overlay cannot disclose a membership the caller could not already see",
 	"internal/credlifecycle/sweeper.go:UserDeprovisioned":    "see the package doc: a TSM key is bound to its principal, not to an organization",
 	"internal/credlifecycle/sweeper.go:revokeOverAskingKeys": "as UserDeprovisioned",
 	"internal/platformadmin/resolver.go:UserExists":          "authority derivation for a PLATFORM-wide grant: the question is whether a platform-admin carrier row still names a live principal, and there is no tenant to scope by — narrowing it to some organization would make a live administrator read as an orphan merely because their membership lay outside the scope, which is exactly the reading the never-zero floor must not take",

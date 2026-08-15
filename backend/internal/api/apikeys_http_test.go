@@ -8,6 +8,7 @@ import (
 
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
 	"github.com/gin-gonic/gin"
+	"github.com/terraform-state-manager/terraform-state-manager/internal/approles"
 )
 
 // apiKeysEnv wires APIKeysHandlers behind a context stub standing in for the
@@ -26,7 +27,7 @@ func newAPIKeysEnv(t *testing.T) *apiKeysEnv {
 	t.Cleanup(func() { db.Close() })
 
 	scopes := []string{"state:read", "state:drift"}
-	h := NewAPIKeysHandlers(db, nil)
+	h := NewAPIKeysHandlers(db, nil, approles.RoleSourceIdentity)
 	h.audit = newAuditor(nil) // keep audit writes off the sqlmock rig
 	r := gin.New()
 	r.Use(func(c *gin.Context) {

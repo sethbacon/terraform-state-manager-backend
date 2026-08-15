@@ -55,7 +55,7 @@ func (h *Handlers) ConfigureAdmin(c *gin.Context) {
 	ctx := c.Request.Context()
 	email := strings.ToLower(strings.TrimSpace(req.Email))
 
-	orgRepo := approles.NewMembers(h.identityDB, h.appDB)
+	orgRepo := approles.NewMembers(h.identityDB, h.appDB, approles.RoleSource(h.cfg.Authz.RoleSource))
 	userRepo := idstore.NewUserRepository(h.identityDB)
 
 	defaultOrg, err := orgRepo.GetDefaultOrganization(ctx)

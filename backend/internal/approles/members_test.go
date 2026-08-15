@@ -114,7 +114,7 @@ func twoConnections(t *testing.T) (*Members, sqlmock.Sqlmock, sqlmock.Sqlmock, f
 	if err != nil {
 		t.Fatalf("sqlmock.New (app): %v", err)
 	}
-	m := NewMembers(identityDB, appDB)
+	m := NewMembers(identityDB, appDB, RoleSourceIdentity)
 	return m, identityMock, appMock, func() {
 		_ = identityDB.Close()
 		_ = appDB.Close()
@@ -395,7 +395,7 @@ func TestNoAppConnection_DegradesToTheIdentityLegAlone(t *testing.T) {
 	defer func() { _ = identityDB.Close() }()
 	var sw sweeps
 
-	m := NewMembers(identityDB, nil)
+	m := NewMembers(identityDB, nil, RoleSourceIdentity)
 	if m.Store() != nil {
 		t.Fatal("a Members built without an app connection reported a mirror store")
 	}
@@ -409,9 +409,16 @@ func TestNoAppConnection_DegradesToTheIdentityLegAlone(t *testing.T) {
 	}
 }
 
-// A mirror failure must not turn a completed identity write into a reported
-// failure: the caller would retry a grant that already applied.
-func TestMirrorFailureDoesNotFailTheOperation(t *testing.T) {
+// A MIRROR FAILURE FAILS THE OPERATION. This assertion is the INVERSE of the one
+// it replaces, and the inversion is Phase 3b.
+//
+// While identity was the authority, a failed mirror leg was a row nobody read, so
+// reporting it would have told a caller their grant failed when it had not. Now
+// these tables ARE the authority: swallowing the failure returns 200 for a role
+// change this application did not make, and the principal keeps whatever the
+// mirror still says. A demotion is the case that matters — 200, an audit entry
+// recording it, and the administrator scopes still granted.
+func TestAMirrorFailureFailsTheOperation(t *testing.T) {
 	m, identityMock, appMock, done := twoConnections(t)
 	defer done()
 
@@ -422,8 +429,98 @@ func TestMirrorFailureDoesNotFailTheOperation(t *testing.T) {
 		WithArgs("editor").
 		WillReturnError(errors.New("mirror is down"))
 
-	if err := m.AddMemberWithParams(context.Background(), "org-1", "user-1", "editor", idstore.OrgScopeOrganizations("org-1")); err != nil {
-		t.Fatalf("a mirror failure was surfaced as an operation failure: %v", err)
+	err := m.AddMemberWithParams(context.Background(), "org-1", "user-1", "editor", idstore.OrgScopeOrganizations("org-1"))
+	if err == nil {
+		t.Fatal("a mirror failure was reported as success: the caller believes a role change applied that " +
+			"this application's authorization tables do not record")
+	}
+	if !strings.Contains(err.Error(), "mirror is down") {
+		t.Fatalf("the underlying failure was not reported: %v", err)
+	}
+}
+
+// THE FAILURE ON THE ROW ITSELF, which is the one that matters and the one the
+// test above does NOT reach: it stages its fault at the role-NAME lookup, so a
+// version that propagated the lookup error and swallowed the SetRole error passed
+// it. Mutation found that. The write to organization_member_roles is what decides
+// what this principal may do, so its failure is the failure this test exists for.
+//
+// Table-driven over both legs of mirrorSetByName so neither can be covered while
+// the other is not.
+func TestAMirrorWriteFailureFailsTheOperation(t *testing.T) {
+	cases := []struct {
+		name  string
+		stage func(appMock sqlmock.Sqlmock)
+	}{
+		{
+			name: "the role name cannot be resolved",
+			stage: func(appMock sqlmock.Sqlmock) {
+				appMock.ExpectQuery(regexp.QuoteMeta(`SELECT id FROM role_templates WHERE name = $1`)).
+					WithArgs("editor").
+					WillReturnError(errors.New("mirror is down"))
+			},
+		},
+		{
+			name: "the role record cannot be written",
+			stage: func(appMock sqlmock.Sqlmock) {
+				appMock.ExpectQuery(regexp.QuoteMeta(`SELECT id FROM role_templates WHERE name = $1`)).
+					WithArgs("editor").
+					WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(templateID))
+				appMock.ExpectExec("INSERT INTO organization_member_roles").
+					WillReturnError(errors.New("mirror is down"))
+			},
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			m, identityMock, appMock, done := twoConnections(t)
+			defer done()
+
+			expectIdentityRoleLookup(identityMock, "editor")
+			identityMock.ExpectExec("INSERT INTO organization_members").
+				WillReturnResult(sqlmock.NewResult(0, 1))
+			c.stage(appMock)
+
+			err := m.AddMemberWithParams(context.Background(), "org-1", "user-1", "editor", idstore.OrgScopeOrganizations("org-1"))
+			if err == nil {
+				t.Fatal("reported success: the caller believes a role change applied that this application's " +
+					"authorization tables do not record, and the principal keeps whatever the mirror still says")
+			}
+			if !strings.Contains(err.Error(), "mirror is down") {
+				t.Fatalf("the underlying failure was not reported: %v", err)
+			}
+		})
+	}
+}
+
+// A REVOCATION WHOSE MIRROR LEG FAILS MUST NOT TOUCH IDENTITY.
+//
+// The mirror goes first on a revocation, so a failure there means nothing has
+// been withdrawn anywhere and the caller's retry is a retry of an operation that
+// did not happen. Proceeding to identity would leave it saying "not a member"
+// while this application — the authority — still granted the role: a withdrawal
+// that reads as done and is not.
+//
+// Asserted by the identity mock having NO expectation: any statement on that
+// connection fails this test, which is the assertion ExpectationsWereMet cannot
+// make.
+func TestAFailedRevocationMirrorDoesNotReachIdentity(t *testing.T) {
+	m, identityMock, appMock, done := twoConnections(t)
+	defer done()
+
+	appMock.ExpectExec("DELETE FROM organization_member_roles").
+		WillReturnError(errors.New("mirror is down"))
+
+	var sw sweeps
+	err := m.RemoveMember(context.Background(), "org-1", "user-1", idstore.OrgScopeOrganizations("org-1"), sw.reducer())
+	if err == nil {
+		t.Fatal("a failed mirror revocation was reported as success")
+	}
+	if !strings.Contains(err.Error(), "mirror is down") {
+		t.Fatalf("the underlying failure was not reported: %v", err)
+	}
+	if err := identityMock.ExpectationsWereMet(); err != nil {
+		t.Errorf("identity leg: %v", err)
 	}
 }
 
@@ -442,7 +539,7 @@ func TestReadsArePromotedUnchanged(t *testing.T) {
 		WillReturnRows(sqlmock.NewRows([]string{"organization_id", "user_id", "role_template_id", "created_at"}).
 			AddRow("org-1", "user-1", sql.NullString{}, time.Now()))
 
-	m := NewMembers(identityDB, nil)
+	m := NewMembers(identityDB, nil, RoleSourceIdentity)
 	if _, _, err := m.CheckMembership(context.Background(), "org-1", "user-1", idstore.OrgScopeOrganizations("org-1")); err != nil {
 		t.Fatalf("a promoted read stopped working: %v", err)
 	}
@@ -495,6 +592,12 @@ func TestMirrorSetByID_AdoptsATemplateItHasNotSeen(t *testing.T) {
 	identityMock.ExpectQuery("SELECT id, name, display_name, description, scopes, is_system").
 		WillReturnRows(sqlmock.NewRows([]string{"id", "name", "display_name", "description", "scopes", "is_system", "created_at", "updated_at"}).
 			AddRow(roleID, "late", "Late", nil, []byte(`["state:read"]`), true, time.Now(), time.Now()))
+	// The name is released first: Phase 3b's app-side seed can have minted a LOCAL
+	// uuid for this name, and without this the insert below violates the unique
+	// index on name and the grant is never mirrored.
+	appMock.ExpectExec(regexp.QuoteMeta(`DELETE FROM role_templates WHERE name = $1 AND id <> $2`)).
+		WithArgs("late", roleID).
+		WillReturnResult(sqlmock.NewResult(0, 0))
 	appMock.ExpectExec("INSERT INTO role_templates").
 		WithArgs(roleID, "late", "Late", nil, sqlmock.AnyArg(), true).
 		WillReturnResult(sqlmock.NewResult(0, 1))

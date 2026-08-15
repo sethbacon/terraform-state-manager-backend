@@ -9,6 +9,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/lib/pq"
 
+	"github.com/terraform-state-manager/terraform-state-manager/internal/approles"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/auth"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/middleware"
 )
@@ -30,7 +31,7 @@ func newAdminOrgRoutingEnv(t *testing.T, callerUserID string, scopes []string) *
 	}
 	t.Cleanup(func() { db.Close() })
 
-	h := NewAdminHandlers(db, nil)
+	h := NewAdminHandlers(db, nil, approles.RoleSourceIdentity)
 	r := gin.New()
 	r.Use(func(c *gin.Context) {
 		if callerUserID != "" {

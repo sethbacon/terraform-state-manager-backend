@@ -34,6 +34,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"database/sql"
 	"fmt"
 	"log"
 	"log/slog"
@@ -54,6 +55,7 @@ import (
 
 	"github.com/terraform-state-manager/terraform-state-manager/internal/api"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/api/setup"
+	"github.com/terraform-state-manager/terraform-state-manager/internal/approles"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/auth"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/bootstrap"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/config"
@@ -122,11 +124,19 @@ func run() error {
 			verify = true
 		}
 		return runRekeyTargets(cfg, verify)
+	case "authz-drift":
+		// authz-drift — compare this application's role tables against the shared
+		// identity schema and exit non-zero while they disagree.
+		//
+		// READ-ONLY, and therefore takes no verify/convert argument: unlike
+		// bind-targets and rekey-targets there is no writing mode to typo one's
+		// way into. Repairing is approles.Reconcile's job, at boot.
+		return runAuthzDrift(cfg)
 	case "version":
 		fmt.Printf("Terraform State Manager v%s (built %s)\n", Version, BuildDate)
 		return nil
 	default:
-		return fmt.Errorf("unknown command: %s\nAvailable commands: serve, migrate, bind-targets, rekey-targets, version", command)
+		return fmt.Errorf("unknown command: %s\nAvailable commands: serve, migrate, bind-targets, rekey-targets, authz-drift, version", command)
 	}
 }
 
@@ -258,6 +268,26 @@ func serve(cfg *config.Config) error {
 		return fmt.Errorf("failed to bootstrap identity data: %w", err)
 	}
 	slog.Info("identity schema ready (role templates + default org seeded)")
+
+	// WHICH TABLES DECIDE AUTHORIZATION, IN THE STARTUP LOG.
+	//
+	// This is the same reasoning approles.Store.Verify applies to the resolved
+	// table names: a deployment reading the wrong source is indistinguishable
+	// from a correct one in every other observable, so the answer is stated once
+	// at boot rather than inferred later from who can do what. Refused rather
+	// than defaulted — an operator who typed `TSM_AUTHZ_ROLE_SOURCE=idenity` must
+	// see it here, not discover months later that the flip never happened.
+	roleSource, err := approles.ParseRoleSource(cfg.Authz.RoleSource)
+	if err != nil {
+		return err
+	}
+	slog.Info("authorization role source", "source", string(roleSource),
+		"rollback", "set TSM_AUTHZ_ROLE_SOURCE=identity and restart to read the shared identity schema again")
+
+	// The standing detector. It reports and never corrects; the repair is
+	// bootstrap.Run's reconcile above, which has just run.
+	stopDriftWatch := startAuthzDriftWatch(database, identityDB, cfg.Authz.DriftInterval)
+	defer stopDriftWatch()
 
 	// Daily cleanup of expired JWT revocation entries.
 	tokenRepo := idstore.NewTokenRepository(identityDB)
@@ -479,6 +509,186 @@ func handleSetupToken(repo *repositories.SystemSettingsRepository) error {
 // OpenWithContext and the legacy acceptance can be deleted. It exits non-zero
 // when rows remain, so it can gate that change in a script rather than needing
 // someone to read the output.
+// authzDriftWorker is the name the drift loop reports staleness under.
+const authzDriftWorker = "authz-drift"
+
+// startAuthzDriftWatch runs the role-drift comparison on an interval and reports
+// what it finds. It returns a function that stops the loop.
+//
+// # Why a periodic reporter, and not a shadow read in the request path
+//
+// A shadow comparison inside the read path — resolve the scopes both ways on
+// every derivation, compare, emit a metric — was the other candidate, and it is
+// worse here for two reasons. It runs on the API-key hot path
+// (internal/middleware re-derives a key owner's live scopes on EVERY request), so
+// it would double that query per request to detect a condition that changes on
+// the timescale of a membership write. And it only ever sees the principals who
+// happen to authenticate: a service account that has silently kept an
+// administrator role it should have lost is invisible to it until somebody uses
+// the credential, which is the moment it stops mattering that it was detectable.
+//
+// This sees the whole estate, on a bounded schedule, whether anybody logs in or
+// not. What it gives up is latency — a divergence introduced now is reported
+// within one interval, not on the next request.
+//
+// # It reports; it does not correct
+//
+// Correcting here would make a background loop the thing that rewrites
+// authorization, with no boundary an operator could put around it.
+// approles.Reconcile corrects, at boot, and now says what it changed.
+//
+// # What it will and will not catch
+//
+// CATCHES: a mirror write whose identity leg committed and whose app leg did not;
+// a membership removed by ON DELETE CASCADE when an organization or user is
+// deleted; a row written to identity by the sibling registry; a role definition
+// whose scopes differ between the two schemas.
+//
+// DOES NOT CATCH: a fault that corrupts BOTH sides identically (they agree, so
+// there is nothing to compare); an authorization decision that is wrong for a
+// reason other than the role — a stale JWT still carrying scopes from before a
+// downgrade is internal/credlifecycle's problem, not this one; and anything at
+// all during a window in which the comparison itself is failing, which is why
+// tsm_authz_role_drift_last_check_timestamp_seconds is exported and must be
+// alerted on alongside the counts.
+func startAuthzDriftWatch(appDB, identityDB *sql.DB, interval time.Duration) func() {
+	if interval <= 0 || appDB == nil || identityDB == nil {
+		slog.Info("role-drift comparison disabled", "interval", interval)
+		return func() {}
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	telemetry.RegisterWorker(authzDriftWorker, interval)
+	// ONCE, BEFORE THE FIRST TICK. Without it every tsm_authz_role_drift series is
+	// ABSENT for a full interval after each restart — and permanently absent on a
+	// crashlooping replica — so the alert the operator was told to write ("alert on
+	// the counts AND on the age of the last check") has nothing to evaluate during
+	// exactly the window a bad deploy is most likely to be discovered in.
+	reportAuthzDrift(ctx, appDB, identityDB)
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				telemetry.WorkerTick(authzDriftWorker)
+				reportAuthzDrift(ctx, appDB, identityDB)
+			}
+		}
+	}()
+	slog.Info("role-drift comparison started", "interval", interval)
+	return func() {
+		cancel()
+		telemetry.UnregisterWorker(authzDriftWorker)
+	}
+}
+
+// reportAuthzDrift runs one comparison and records it.
+//
+// The two families are logged at DIFFERENT LEVELS because they mean different
+// things once the flip has happened. An assignment disagreement is always a
+// fault. A role-DEFINITION disagreement is the intended end state of
+// sethbacon/terraform-suite-identity#206 on a coupled deployment — this
+// application defines its own `editor` and the shared schema still holds the
+// sibling's — so reporting it at ERROR would train an operator to ignore the
+// series that also carries the real one.
+func reportAuthzDrift(ctx context.Context, appDB, identityDB *sql.DB) {
+	res, err := approles.CheckDrift(ctx, appDB, identityDB)
+	if err != nil {
+		if ctx.Err() != nil {
+			return
+		}
+		telemetry.AuthzDriftCheckFailed()
+		slog.Error("role-drift comparison failed", "error", err)
+		return
+	}
+	telemetry.AuthzDriftObserved(res.Compared, res.Missing, res.Stale, res.Mismatched,
+		res.ScopeDivergent, len(res.TemplateDrift))
+	if res.AssignmentDrift() > 0 {
+		slog.Error("role assignments disagree between this application's tables and the shared identity schema",
+			"missing", res.Missing, "stale", res.Stale, "mismatched", res.Mismatched,
+			"detail", res.String())
+	}
+	if res.ScopeDivergent > 0 || len(res.TemplateDrift) > 0 {
+		slog.Warn("role definitions differ between this application and the shared identity schema",
+			"affected_memberships", res.ScopeDivergent, "templates", len(res.TemplateDrift),
+			"detail", res.String())
+	}
+}
+
+// runAuthzDrift is the gate for sethbacon/terraform-suite-identity#206 Phase 3b.
+//
+// # What it is for
+//
+// The reads moved. Which role a principal holds in this application is now
+// answered by organization_member_roles joined to this application's own
+// role_templates, not by identity.organization_members joined to identity's. A
+// gap between the two does not surface as an error: it surfaces as a user
+// silently holding the wrong role — losing access they should have, or keeping
+// access they should not — and nothing in the request path reports it.
+//
+// So the flip is gated on this command rather than on a release note. RUN IT
+// AGAINST A DEPLOYMENT BEFORE UPGRADING IT ONTO A BUILD WHOSE
+// TSM_AUTHZ_ROLE_SOURCE DEFAULTS TO "app", and require a zero exit. The binary
+// need not be the one that is running: this connects to the two databases and
+// reads them, so the new build's `authz-drift` answers for the old build's data,
+// which is exactly the order an upgrade happens in.
+//
+// # Non-zero while anything is unreconciled
+//
+// The estate's precedent is `bind-secrets verify` and `rekey-targets verify`: an
+// exit code a runbook step can gate on, not a report a human has to read
+// correctly. It is non-zero for ANY disagreement, including a role definition
+// whose scopes differ between the two schemas — the case Phase 3a's DriftQuery
+// could not see, and the one that after the flip means the right role name
+// granting the wrong permissions.
+//
+// # What a non-zero exit means, and what to do
+//
+// Restart the backend. approles.Reconcile restates every assignment from
+// identity and sweeps what identity no longer has, and now logs what it changed.
+// Then run this again. Drift that SURVIVES a restart is the report worth acting
+// on: it means the reconcile is failing rather than that a single mirror write
+// slipped, and the startup log will say why.
+func runAuthzDrift(cfg *config.Config) error {
+	telemetry.SetupLogger(cfg.Logging.Format, cfg.Logging.Level)
+
+	database, err := db.Connect(cfg.Database.GetDSN(), cfg.Database.MaxConnections, cfg.Database.MinIdleConnections)
+	if err != nil {
+		return fmt.Errorf("failed to connect to database: %w", err)
+	}
+	defer func() { _ = database.Close() }()
+
+	// The SAME search_path the server gives each pool. The comparison reads
+	// unqualified names on both connections, so a pool built differently here
+	// would compare a different pair of tables than the one the server reads —
+	// and would do it silently, reporting agreement between two tables nothing
+	// authorizes from.
+	identityDB, err := db.Connect(
+		cfg.IdentityDatabase.GetDSNWithSearchPath("identity,public"),
+		cfg.IdentityDatabase.MaxConnections, cfg.IdentityDatabase.MinIdleConnections,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to connect to identity schema: %w", err)
+	}
+	defer func() { _ = identityDB.Close() }()
+
+	res, err := approles.CheckDrift(context.Background(), database, identityDB)
+	if err != nil {
+		return fmt.Errorf("authz-drift: %w", err)
+	}
+	if res.Clean() {
+		slog.Info("authz-drift clean", "result", res.String())
+		return nil
+	}
+	slog.Error("authz-drift found this application's role tables and the shared identity schema in disagreement",
+		"result", res.String())
+	return fmt.Errorf("authz-drift: %d role assignments and %d role definitions disagree; "+
+		"do not switch authorization onto this application's tables until this reports zero",
+		res.AssignmentDrift()+res.ScopeDivergent, len(res.TemplateDrift))
+}
+
 func runBindTargets(cfg *config.Config, verify bool) error {
 	database, err := db.Connect(cfg.Database.GetDSN(), cfg.Database.MaxConnections, cfg.Database.MinIdleConnections)
 	if err != nil {

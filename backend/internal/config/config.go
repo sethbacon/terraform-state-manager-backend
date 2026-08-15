@@ -30,6 +30,7 @@ type Config struct {
 	Logging          LoggingConfig       `mapstructure:"logging"`
 	Telemetry        TelemetryConfig     `mapstructure:"telemetry"`
 	Auth             AuthConfig          `mapstructure:"auth"`
+	Authz            AuthzConfig         `mapstructure:"authz"`
 	Workers          WorkersConfig       `mapstructure:"workers"`
 	Suite            SuiteConfig         `mapstructure:"suite"`
 	Notifications    NotificationsConfig `mapstructure:"notifications"`
@@ -40,6 +41,45 @@ type Config struct {
 	StateSource StateSourceConfig `mapstructure:"statesource"`
 	// BackupRetention bounds the state_backups table (#257).
 	BackupRetention BackupRetentionConfig `mapstructure:"backup_retention"`
+}
+
+// AuthzConfig controls where authorization decisions read a principal's role
+// from, and how often the two candidate sources are compared.
+//
+// # RoleSource is the rollback lever for Phase 3b
+//
+// Under sethbacon/terraform-suite-identity#206, identity is SHARED and
+// authorization is PER-APP: membership stays a fact in the identity schema, and
+// which role a member holds HERE is a row in this application's own
+// organization_member_roles. "app" (the default) is that model. "identity" is the
+// Phase 3a position — every role read comes from identity.organization_members
+// joined to identity.role_templates, exactly as it did before the reads moved.
+//
+// BOTH TABLES ARE WRITTEN UNDER EITHER VALUE. The dual write is not conditional
+// on this setting, so the source that is not being read stays current rather than
+// going stale, and switching back is a restart rather than a restore. That is the
+// whole reason this is a runtime setting and not a code change: an operator who
+// finds a role wrong in production sets TSM_AUTHZ_ROLE_SOURCE=identity, restarts,
+// and is running the previous phase's behaviour with no data movement, no
+// migration, and no window in which authorization is undefined.
+//
+// BEFORE UPGRADING ONTO A BUILD THAT DEFAULTS TO "app", run `server authz-drift`
+// against the deployment and require a zero exit. A gap between the two sources
+// does not surface as an error — it surfaces as a principal silently holding the
+// wrong role — so the flip is gated on that command rather than on a release note.
+//
+// # DriftInterval is the standing detector
+//
+// How often the running server re-compares the two sources and reports the
+// difference (it never corrects; approles.Reconcile does that, at boot). Zero
+// disables the loop. The comparison is two ordered scans of the membership tables,
+// so it is bounded work on a generous interval rather than a per-request shadow
+// read on the API-key hot path.
+//
+// Env: TSM_AUTHZ_ROLE_SOURCE, TSM_AUTHZ_DRIFT_INTERVAL.
+type AuthzConfig struct {
+	RoleSource    string        `mapstructure:"role_source"`
+	DriftInterval time.Duration `mapstructure:"drift_interval"`
 }
 
 // DriftConfig tunes the background reconciler that expires drift runs stuck in
@@ -508,8 +548,26 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("failed to unmarshal config: %w", err)
 	}
 	cfg.resolveIdentityDatabase()
+	cfg.Authz.RoleSource = normaliseRoleSource(cfg.Authz.RoleSource)
 	return &cfg, nil
 }
+
+// normaliseRoleSource lowercases and trims authz.role_source AT LOAD.
+//
+// NORMALISED HERE, ONCE, because the handler constructors convert this string to
+// an approles.RoleSource with a plain cast — a cast cannot reject anything, and
+// approles.ParseRoleSource (which does) is called only by the serve path, for the
+// startup line. With `TSM_AUTHZ_ROLE_SOURCE=App` the boot therefore SUCCEEDED and
+// logged `source=app`, while every repository held the un-normalised "App" and
+// denied every role read as an undecided source: an authorization outage that
+// announced itself as healthy, on the one setting an operator reaches for when
+// something is already wrong.
+//
+// It normalises but does not validate. A value that is neither `app` nor
+// `identity` still has to fail the boot rather than fall back, and that refusal
+// belongs where the error can name the bad value and stop the process —
+// cmd/server's ParseRoleSource — not in a loader that has no way to refuse.
+func normaliseRoleSource(v string) string { return strings.ToLower(strings.TrimSpace(v)) }
 
 // validSSLModes are the libpq sslmode values the Postgres driver accepts.
 var validSSLModes = map[string]struct{}{
@@ -690,6 +748,11 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("notifications.api_key_expiry_warning_days", 7)
 	v.SetDefault("notifications.api_key_expiry_check_interval_hours", 24)
 	v.SetDefault("notifications.events.api_key_expiring", true)
+
+	// Per-app authorization. "app" is Phase 3b (this application's own tables);
+	// "identity" is the Phase 3a rollback position. See AuthzConfig.
+	v.SetDefault("authz.role_source", "app")
+	v.SetDefault("authz.drift_interval", 15*time.Minute)
 
 	// Suite runtime discovery
 	v.SetDefault("suite.sibling_url", "")

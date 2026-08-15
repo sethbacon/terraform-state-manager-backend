@@ -46,10 +46,10 @@ type APIKeysHandlers struct {
 }
 
 // NewAPIKeysHandlers constructs the handlers over the identity connection.
-func NewAPIKeysHandlers(identityDB, appDB *sql.DB) *APIKeysHandlers {
+func NewAPIKeysHandlers(identityDB, appDB *sql.DB, source approles.RoleSource) *APIKeysHandlers {
 	return &APIKeysHandlers{
 		keys:  idstore.NewAPIKeyRepository(identityDB),
-		orgs:  approles.NewMembers(identityDB, appDB),
+		orgs:  approles.NewMembers(identityDB, appDB, source),
 		audit: newAuditor(identityDB),
 	}
 }
