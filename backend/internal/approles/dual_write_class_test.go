@@ -39,11 +39,13 @@ import (
 //	        PurgeUserRoles. That deletion withdraws every role by CASCADE without
 //	        touching this repository at all, so it is the one authority-reducing
 //	        path axis 1 cannot see.
-//	AXIS 4  every Members method that takes an OrgScope and writes the mirror
-//	        consults it. Added after the suite's tenant-scope signature (#719)
-//	        found exactly this defect in this package's first CI run: a mirror
-//	        leg that ignores tenancy writes another tenant's row, and on the
-//	        revocation paths it does so BEFORE the identity leg could refuse.
+//	AXIS 4  every Store statement over the tenant-owned table binds the caller's
+//	        OrgScope. Added after the suite's tenant-scope signature (#719) found
+//	        exactly this defect in this package's first CI run: a mirror leg that
+//	        ignores tenancy writes another tenant's row, and on the revocation
+//	        paths it does so BEFORE the identity leg could refuse. The predicate
+//	        lives in the SQL rather than in an `if` above it, so a new accessor
+//	        cannot omit it and a scope nobody decided matches nothing.
 //
 // EMPTY UNIVERSES ARE REFUSED. Each axis asserts it actually inspected
 // something: zero files scanned, zero Members methods found, zero DeleteUser
@@ -314,98 +316,83 @@ func TestEveryMirroredWriteWritesBothSides(t *testing.T) {
 	}
 }
 
-// TestEveryScopedWriteScopesItsMirror is AXIS 4.
+// TestEveryTenantOwnedStatementBindsTheScope is AXIS 4.
 //
 // The suite's tenant-scope signature (#719) found this class in this very
-// package on its first CI run, which is why it is an axis and not a comment: a
-// mirror leg that ignores the caller's OrgScope writes another tenant's row, and
-// a REVOCATION mirrors BEFORE the identity leg's predicate has refused anything.
-// Nothing reads the mirror in Phase 3a, so the only thing standing between that
-// and the phase which does is this check.
+// package on its first CI run. The first fix put an `if` around the mirror leg
+// in the layer above; this is the second, and the difference is the whole point.
+// A caller-side check closes the paths that remember it and leaves the data
+// layer unable to refuse the ones that do not — precisely the shape the identity
+// module's #138/#162 rejected, and why OrgScope.SQL is exported.
 //
-// The rule: any Members method that takes an OrgScope and writes the mirror must
-// consult the scope. Deliberately keyed on "consults it at all" rather than on
-// where — a call to m.permits in the body is a thing one either wrote or did not,
-// and pinning the exact shape would fail on every legitimate refactor.
-func TestEveryScopedWriteScopesItsMirror(t *testing.T) {
-	files := scanTree(t)
+// The rule: any Store method whose statement names organization_member_roles —
+// the table that carries an organization_id — must take an OrgScope and splice
+// it in with andScope. role_templates is deliberately NOT covered: it has no
+// organization column, so there is no tenancy to express and a predicate there
+// would be theatre.
+//
+// Keyed on the TABLE NAME appearing in the method's own source, so a new
+// accessor is covered the moment it is written rather than when somebody
+// remembers to add it to a list.
+func TestEveryTenantOwnedStatementBindsTheScope(t *testing.T) {
+	const tenantOwnedTable = "organization_member_roles"
+
+	root := backendRoot(t)
+	src, err := os.ReadFile(filepath.Join(root, "internal/approles/store.go"))
+	if err != nil {
+		t.Fatalf("reading store.go: %v", err)
+	}
+	fset := token.NewFileSet()
+	parsed, err := parser.ParseFile(fset, "store.go", src, parser.SkipObjectResolution)
+	if err != nil {
+		t.Fatalf("parsing store.go: %v", err)
+	}
 
 	var checked, unscoped []string
-	for _, f := range files {
-		if !strings.HasPrefix(f.rel, "internal/approles/") {
+	for _, decl := range parsed.Decls {
+		fn, isFn := decl.(*ast.FuncDecl)
+		if !isFn || fn.Recv == nil || fn.Body == nil || !receiverIsStore(fn) {
 			continue
 		}
-		for _, decl := range f.file.Decls {
-			fn, isFn := decl.(*ast.FuncDecl)
-			if !isFn || fn.Recv == nil || fn.Body == nil || !receiverIsMembers(fn) {
-				continue
-			}
-			if !takesOrgScope(fn) {
-				continue
-			}
-			var writesMirror, consultsScope bool
-			ast.Inspect(fn.Body, func(n ast.Node) bool {
-				call, isCall := n.(*ast.CallExpr)
-				if !isCall {
-					return true
-				}
-				sel := calleeName(call)
-				if sel == "" {
-					return true
-				}
-				if mirrorHelpers[sel] {
-					writesMirror = true
-				}
-				if scopeConsulters[sel] {
-					consultsScope = true
-				}
-				return true
-			})
-			if !writesMirror {
-				continue
-			}
-			if consultsScope {
-				checked = append(checked, fn.Name.Name)
-			} else {
-				unscoped = append(unscoped, fn.Name.Name)
-			}
+		body := string(src[fset.Position(fn.Body.Pos()).Offset:fset.Position(fn.Body.End()).Offset])
+		if !strings.Contains(body, tenantOwnedTable) {
+			continue
 		}
+		if !takesOrgScope(fn) {
+			unscoped = append(unscoped, fn.Name.Name+" (takes no OrgScope)")
+			continue
+		}
+		if !strings.Contains(body, "andScope(") {
+			unscoped = append(unscoped, fn.Name.Name+" (takes an OrgScope but never splices it)")
+			continue
+		}
+		checked = append(checked, fn.Name.Name)
 	}
 
 	if len(checked)+len(unscoped) == 0 {
-		t.Fatal("no scoped Members method that writes the mirror was found: the guard inspected an empty universe")
+		t.Fatalf("no Store method names %s: the guard inspected an empty universe "+
+			"(the table was renamed, or store.go stopped being where these statements live)", tenantOwnedTable)
 	}
 	if len(unscoped) > 0 {
 		sort.Strings(unscoped)
-		t.Fatalf("these Members methods take the caller's OrgScope and mirror without consulting it: %v.\n"+
-			"A revocation mirrors BEFORE the identity leg's scope predicate runs, so an out-of-tenancy caller "+
-			"would have another tenant's mirrored row deleted and then be told the membership was not found. "+
-			"Guard the mirror leg with m.permits(scope, orgID), or scopeOrganizations(scope) for the bulk paths.", unscoped)
+		t.Fatalf("these Store methods write %s without binding the caller's tenancy into the statement: %v.\n"+
+			"OrgScope.SQL is exported for exactly this — it never returns an empty clause, so the platform-wide "+
+			"scope is a literal TRUE and an undecided caller's zero value is a literal FALSE. Splice it with "+
+			"andScope(query, scope, \"organization_id\", args).", tenantOwnedTable, unscoped)
 	}
 }
 
-// scopeConsulters are the ways a method may satisfy axis 4: the per-organization
-// predicate, or the bulk translation that narrows a strip to the scope's
-// organizations.
-var scopeConsulters = map[string]bool{"permits": true, "scopeOrganizations": true}
-
-// calleeName returns a call's function name for BOTH forms — `x.Foo(...)` and
-// the bare `Foo(...)`.
-//
-// selectorName alone handles only the first, so axis 4 reported
-// RemoveAllMembershipsForUser as unscoped on its first run: that method consults
-// the scope through `scopeOrganizations(scope)`, a package-level function called
-// as an ARGUMENT, whose Fun is a plain identifier and not a selector. A guard
-// that cannot see the compliant form condemns the compliant code.
-func calleeName(call *ast.CallExpr) string {
-	switch fun := call.Fun.(type) {
-	case *ast.Ident:
-		return fun.Name
-	case *ast.SelectorExpr:
-		return fun.Sel.Name
-	default:
-		return ""
+// receiverIsStore reports whether a method is declared on *Store.
+func receiverIsStore(fn *ast.FuncDecl) bool {
+	if len(fn.Recv.List) != 1 {
+		return false
 	}
+	star, isStar := fn.Recv.List[0].Type.(*ast.StarExpr)
+	if !isStar {
+		return false
+	}
+	id, isID := star.X.(*ast.Ident)
+	return isID && id.Name == "Store"
 }
 
 // takesOrgScope reports whether a method accepts the shared store's tenancy

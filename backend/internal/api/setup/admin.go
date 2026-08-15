@@ -1,6 +1,7 @@
 package setup
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"strings"
@@ -89,7 +90,14 @@ func (h *Handlers) ConfigureAdmin(c *gin.Context) {
 		// wizard could never be re-entered. The sentinel makes that case
 		// distinguishable, and the only safe answer for a privilege grant that
 		// wrote no row is to refuse.
-		uerr := orgRepo.UpdateMemberRole(ctx, defaultOrg.ID, user.ID, "admin", bootstrapScope)
+		// The reducer is a no-op HERE, and that is the one place in this
+		// application where it legitimately is: this is an authority INCREASE
+		// (the first owner is being promoted to admin) running during first-boot
+		// setup, before any credential for that principal can exist. There is
+		// nothing to invalidate. Recorded the same way in
+		// credential_lifecycle_class_test.go's exemption list.
+		noSweep := func(context.Context, string) error { return nil }
+		uerr := orgRepo.UpdateMemberRole(ctx, defaultOrg.ID, user.ID, "admin", bootstrapScope, noSweep)
 		if errors.Is(uerr, idstore.ErrNotFound) {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to grant the owner the admin role: no membership to promote"})
 			return

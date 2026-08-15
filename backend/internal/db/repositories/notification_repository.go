@@ -21,4 +21,3 @@ type NotificationChannelRepository = identitynotify.ChannelRepository
 
 // NewNotificationChannelRepository constructs the repository over the app connection.
 var NewNotificationChannelRepository = identitynotify.NewChannelRepository
-

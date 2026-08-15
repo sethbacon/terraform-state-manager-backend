@@ -55,7 +55,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/lib/pq"
+	idstore "github.com/sethbacon/terraform-suite-identity/identity/store"
 )
 
 // The tables this package addresses.
@@ -263,6 +263,36 @@ func (s *Store) TemplateExists(ctx context.Context, id string) (bool, error) {
 	return true, nil
 }
 
+// andScope splices the caller's tenancy into a statement over
+// organization_member_roles, mirroring the shared store's own andScope.
+//
+// TENANCY IS A PROPERTY OF THE STATEMENT, NOT OF THE CALLER. An earlier version
+// of this package checked the scope in the layer above (Members.permits) and
+// left these statements unqualified. That closed the hole, but it is the shape
+// the identity module's #138/#162 rejected: a hand-rolled guard per call site,
+// where every new access axis has to remember to re-apply it and an omission is
+// invisible. OrgScope.SQL is exported for exactly this — "the predicate builder,
+// for a consumer's own tables" — so the predicate lives in the SQL and an
+// unscoped caller cannot express a statement that reaches another tenant.
+//
+// FAIL-CLOSED BY THE TYPE'S CONTRACT. SQL never returns an empty clause: the
+// platform-wide scope is the literal TRUE and the empty set is the literal
+// FALSE, both visible in the statement the database receives. So a zero-value
+// OrgScope — the value a caller who has not decided holds — matches nothing
+// rather than everything.
+//
+// Callers MUST pass args as it stands at the splice point: the placeholder index
+// is derived from its length. Apply the scope FIRST, before any other filter, as
+// the shared store does.
+func andScope(query string, scope idstore.OrgScope, column string, args []interface{}) (string, []interface{}) {
+	clause, scopeArgs := scope.SQL(column, len(args)+1)
+	// #nosec G202 -- clause comes from OrgScope.SQL: one of "TRUE", "FALSE", or a
+	// fixed template over a column constant spelled in this file and a $N
+	// placeholder. Scope values travel as query arguments and are never
+	// interpolated.
+	return query + " AND " + clause, append(args, scopeArgs...)
+}
+
 // SetRole records that a member holds roleTemplateID in an organization.
 //
 // A nil roleTemplateID is a member with no role, which identity represents too
@@ -273,15 +303,26 @@ func (s *Store) TemplateExists(ctx context.Context, id string) (bool, error) {
 // created_at is preserved across an update: this is the same assignment being
 // restated, and overwriting it would make every reconcile look like a fresh
 // grant to anybody reading the table for provenance.
-func (s *Store) SetRole(ctx context.Context, orgID, userID string, roleTemplateID *string) error {
-	const q = `
+// INSERT ... SELECT ... WHERE <scope>, not a plain VALUES, for the same reason
+// the shared store's AddMemberWithRoleTemplate sources its insert from a scoped
+// SELECT: the create axis has no existing row for a WHERE to filter, so without
+// this the strongest of the three axes would be the one left open. Recording a
+// role is a privilege GRANT. Out of scope, the SELECT produces no row, the
+// insert writes nothing, and the ON CONFLICT arm is never reached.
+func (s *Store) SetRole(ctx context.Context, orgID, userID string, roleTemplateID *string, scope idstore.OrgScope) error {
+	query := `
 		INSERT INTO organization_member_roles (organization_id, user_id, role_template_id, created_at, updated_at, mirrored_at)
-		VALUES ($1, $2, $3, now(), now(), now())
+		SELECT v.organization_id, v.user_id, v.role_template_id, now(), now(), now()
+		FROM (VALUES ($1::uuid, $2::uuid, $3::uuid)) AS v(organization_id, user_id, role_template_id)
+		WHERE TRUE`
+	args := []interface{}{orgID, userID, roleTemplateID}
+	query, args = andScope(query, scope, "v.organization_id", args)
+	query += `
 		ON CONFLICT (organization_id, user_id) DO UPDATE
 		   SET role_template_id = EXCLUDED.role_template_id,
 		       updated_at       = now(),
 		       mirrored_at      = now()`
-	if _, err := s.db.ExecContext(ctx, q, orgID, userID, roleTemplateID); err != nil {
+	if _, err := s.db.ExecContext(ctx, query, args...); err != nil {
 		return fmt.Errorf("approles: recording role for org=%s user=%s: %w", orgID, userID, err)
 	}
 	return nil
@@ -292,40 +333,30 @@ func (s *Store) SetRole(ctx context.Context, orgID, userID string, roleTemplateI
 // Removing nothing is not an error. This runs BEFORE its identity counterpart
 // (see members.go's ordering rule) and is replayed by the reconcile, so "the row
 // was already gone" is the desired end state, not a miss.
-func (s *Store) DeleteRole(ctx context.Context, orgID, userID string) error {
-	const q = `DELETE FROM organization_member_roles WHERE organization_id = $1 AND user_id = $2`
-	if _, err := s.db.ExecContext(ctx, q, orgID, userID); err != nil {
+func (s *Store) DeleteRole(ctx context.Context, orgID, userID string, scope idstore.OrgScope) error {
+	query := `DELETE FROM organization_member_roles WHERE organization_id = $1 AND user_id = $2`
+	args := []interface{}{orgID, userID}
+	query, args = andScope(query, scope, "organization_id", args)
+	if _, err := s.db.ExecContext(ctx, query, args...); err != nil {
 		return fmt.Errorf("approles: removing role for org=%s user=%s: %w", orgID, userID, err)
 	}
 	return nil
 }
 
-// DeleteRolesForUser removes a user's role records. When orgIDs is nil the
-// user's records in EVERY organization are removed; when it is non-nil only
-// those organizations are touched, and an empty slice removes nothing.
+// DeleteRolesForUser removes a user's role records within scope.
 //
-// The nil/empty distinction is deliberate and matches the shared store's
-// OrgScope, whose zero value denies everything and whose OrgScopeAllOrganizations
-// reaches everywhere. Collapsing them would turn a scope that was meant to touch
-// nothing into a platform-wide strip.
-func (s *Store) DeleteRolesForUser(ctx context.Context, userID string, orgIDs []string) error {
-	if orgIDs == nil {
-		const q = `DELETE FROM organization_member_roles WHERE user_id = $1`
-		if _, err := s.db.ExecContext(ctx, q, userID); err != nil {
-			return fmt.Errorf("approles: removing all roles for user=%s: %w", userID, err)
-		}
-		return nil
-	}
-	if len(orgIDs) == 0 {
-		return nil
-	}
-	// `= ANY($2)` with pq.Array, matching the shared store's OrgScope.SQL: lib/pq
-	// sends the array without an explicit type OID, so Postgres infers uuid[]
-	// from the compared column rather than needing a cast that would drop the
-	// index.
-	const q = `DELETE FROM organization_member_roles WHERE user_id = $1 AND organization_id = ANY($2)`
-	if _, err := s.db.ExecContext(ctx, q, userID, pq.Array(orgIDs)); err != nil {
-		return fmt.Errorf("approles: removing scoped roles for user=%s: %w", userID, err)
+// The scope IS the "which organizations" argument: an earlier version took a nil
+// slice for "everywhere" and an empty one for "nowhere", which is the same
+// distinction OrgScope already makes and makes better — nil versus empty is one
+// character and reads identically at a call site, while
+// OrgScopeAllOrganizations() is greppable and is exactly what
+// TestPlatformWideOrgScopeSitesAreReviewed enumerates.
+func (s *Store) DeleteRolesForUser(ctx context.Context, userID string, scope idstore.OrgScope) error {
+	query := `DELETE FROM organization_member_roles WHERE user_id = $1`
+	args := []interface{}{userID}
+	query, args = andScope(query, scope, "organization_id", args)
+	if _, err := s.db.ExecContext(ctx, query, args...); err != nil {
+		return fmt.Errorf("approles: removing roles for user=%s: %w", userID, err)
 	}
 	return nil
 }
@@ -337,9 +368,11 @@ func (s *Store) DeleteRolesForUser(ctx context.Context, userID string, orgIDs []
 // membership statement of its own. This table has no foreign key to reach it
 // (identity may be another database), so the cascade has to be mirrored
 // explicitly — see Members.Delete.
-func (s *Store) DeleteRolesForOrganization(ctx context.Context, orgID string) error {
-	const q = `DELETE FROM organization_member_roles WHERE organization_id = $1`
-	if _, err := s.db.ExecContext(ctx, q, orgID); err != nil {
+func (s *Store) DeleteRolesForOrganization(ctx context.Context, orgID string, scope idstore.OrgScope) error {
+	query := `DELETE FROM organization_member_roles WHERE organization_id = $1`
+	args := []interface{}{orgID}
+	query, args = andScope(query, scope, "organization_id", args)
+	if _, err := s.db.ExecContext(ctx, query, args...); err != nil {
 		return fmt.Errorf("approles: removing roles for org=%s: %w", orgID, err)
 	}
 	return nil
@@ -372,9 +405,11 @@ func (s *Store) Generation(ctx context.Context) (time.Time, error) {
 // would delete every one of them — turning a transient identity outage into a
 // wiped mirror. Reconcile enforces that; this method cannot, which is why it is
 // stated here rather than only there.
-func (s *Store) SweepStaleAssignments(ctx context.Context, generation time.Time) (int64, error) {
-	const q = `DELETE FROM organization_member_roles WHERE mirrored_at < $1`
-	res, err := s.db.ExecContext(ctx, q, generation)
+func (s *Store) SweepStaleAssignments(ctx context.Context, generation time.Time, scope idstore.OrgScope) (int64, error) {
+	query := `DELETE FROM organization_member_roles WHERE mirrored_at < $1`
+	args := []interface{}{generation}
+	query, args = andScope(query, scope, "organization_id", args)
+	res, err := s.db.ExecContext(ctx, query, args...)
 	if err != nil {
 		return 0, fmt.Errorf("approles: sweeping stale role records: %w", err)
 	}

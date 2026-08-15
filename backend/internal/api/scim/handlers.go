@@ -124,11 +124,18 @@ func (h *Handlers) deprovisionUser(ctx context.Context, userID, reason string) e
 	// memberships left to strip is an already-deprovisioned user, which is the
 	// desired end state and must not fail an IdP-driven deactivation that the
 	// client will replay.
-	removed, err := h.orgRepo.RemoveAllMembershipsForUser(ctx, userID, idstore.OrgScopeAllOrganizations())
+	// The sweep is now an ARGUMENT to the strip rather than a statement after it,
+	// which is what makes the pairing this function exists to enforce structural
+	// rather than conventional: the strip cannot be spelled without it.
+	var out credlifecycle.Outcome
+	removed, err := h.orgRepo.RemoveAllMembershipsForUser(ctx, userID, idstore.OrgScopeAllOrganizations(),
+		func(ctx context.Context, uid string) error {
+			out = h.creds.UserDeprovisioned(ctx, uid, reason)
+			return nil // best-effort: see the doc above, SCIM clients replay 5xx
+		})
 	if err != nil {
 		return err
 	}
-	out := h.creds.UserDeprovisioned(ctx, userID, reason)
 	slog.Info("scim: credentials revoked for deprovisioned user",
 		"id", userID, "reason", reason,
 		"organizations_emptied", removed.OrganizationIDs(),

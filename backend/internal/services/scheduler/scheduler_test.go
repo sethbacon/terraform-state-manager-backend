@@ -21,11 +21,11 @@ func TestComputeNextRun_Cron(t *testing.T) {
 func TestComputeNextRun_Keywords(t *testing.T) {
 	from := time.Date(2026, 6, 9, 10, 0, 0, 0, time.UTC)
 	cases := map[string]time.Duration{
-		"daily":      24 * time.Hour,
-		"weekly":     7 * 24 * time.Hour,
-		"every 15m":  15 * time.Minute,
-		"every 2h":   2 * time.Hour,
-		"every 10s":  time.Minute, // sub-minute is clamped up to 1 minute
+		"daily":     24 * time.Hour,
+		"weekly":    7 * 24 * time.Hour,
+		"every 15m": 15 * time.Minute,
+		"every 2h":  2 * time.Hour,
+		"every 10s": time.Minute, // sub-minute is clamped up to 1 minute
 	}
 	for expr, delta := range cases {
 		got := ComputeNextRun(expr, from)

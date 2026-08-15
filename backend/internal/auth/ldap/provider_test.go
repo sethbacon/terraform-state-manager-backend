@@ -16,12 +16,12 @@ func baseCfg() config.LDAPConfig {
 
 func TestNewProvider_Validation(t *testing.T) {
 	cases := map[string]func(*config.LDAPConfig){
-		"disabled":            func(c *config.LDAPConfig) { c.Enabled = false },
-		"no host":             func(c *config.LDAPConfig) { c.Host = "" },
-		"no base_dn":          func(c *config.LDAPConfig) { c.BaseDN = "" },
-		"no bind_dn":          func(c *config.LDAPConfig) { c.BindDN = "" },
-		"no user_filter":      func(c *config.LDAPConfig) { c.UserFilter = "" },
-		"filter without %s":   func(c *config.LDAPConfig) { c.UserFilter = "(uid=fixed)" },
+		"disabled":          func(c *config.LDAPConfig) { c.Enabled = false },
+		"no host":           func(c *config.LDAPConfig) { c.Host = "" },
+		"no base_dn":        func(c *config.LDAPConfig) { c.BaseDN = "" },
+		"no bind_dn":        func(c *config.LDAPConfig) { c.BindDN = "" },
+		"no user_filter":    func(c *config.LDAPConfig) { c.UserFilter = "" },
+		"filter without %s": func(c *config.LDAPConfig) { c.UserFilter = "(uid=fixed)" },
 	}
 	for name, mut := range cases {
 		t.Run(name, func(t *testing.T) {

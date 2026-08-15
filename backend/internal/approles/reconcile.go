@@ -116,13 +116,27 @@ func Reconcile(ctx context.Context, appDB, identityDB *sql.DB) (Report, error) {
 		return rep, err
 	}
 
-	removed, err := store.SweepStaleAssignments(ctx, generation)
+	removed, err := store.SweepStaleAssignments(ctx, generation, reconcileScope())
 	if err != nil {
 		return rep, err
 	}
 	rep.StaleRemoved = removed
 	return rep, nil
 }
+
+// reconcileScope is the tenancy the startup reconcile writes under.
+//
+// PLATFORM-WIDE, AND SPELLED RATHER THAN IMPLIED. This is not a request: it runs
+// at boot, from no principal, and its job is to make this application's tables
+// agree with identity's ENTIRE membership table. There is no caller to narrow it
+// to, and narrowing it to some organization would leave every other tenant's
+// assignments un-restated and then sweep them as stale — a scope mistake here
+// empties the mirror rather than leaking from it.
+//
+// Written as a call to the shared constructor so it appears in
+// TestPlatformWideOrgScopeSitesAreReviewed's enumeration and has to be signed
+// off there, which is the estate's mechanism for exactly this claim.
+func reconcileScope() idstore.OrgScope { return idstore.OrgScopeAllOrganizations() }
 
 // reconcileTemplates copies every identity role template into TSM's own table,
 // preserving identity's uuid so organization_member_roles can store the same
@@ -204,7 +218,7 @@ func reconcileAssignments(ctx context.Context, store *Store, identityDB *sql.DB,
 				v := roleTemplateID.String
 				role = &v
 			}
-			if err := store.SetRole(ctx, orgID, userID, role); err != nil {
+			if err := store.SetRole(ctx, orgID, userID, role, reconcileScope()); err != nil {
 				_ = rows.Close()
 				return err
 			}

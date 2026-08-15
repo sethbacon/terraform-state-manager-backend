@@ -8,6 +8,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"log/slog"
@@ -20,6 +21,9 @@ import (
 	idauth "github.com/sethbacon/terraform-suite-identity/identity/auth"
 	idmodels "github.com/sethbacon/terraform-suite-identity/identity/models"
 	idstore "github.com/sethbacon/terraform-suite-identity/identity/store"
+
+	"github.com/terraform-state-manager/terraform-state-manager/internal/approles"
+	"github.com/terraform-state-manager/terraform-state-manager/internal/credlifecycle"
 )
 
 // notFound reports whether err is the identity store's not-found sentinel.
@@ -32,6 +36,22 @@ import (
 // about a specific one) or "already in the desired state" (idempotent DELETE).
 // One helper so the choice is visible at each site rather than re-derived.
 func notFound(err error) bool { return errors.Is(err, idstore.ErrNotFound) }
+
+// sweepReduced adapts this app's credential sweeper to approles.AuthorityReducer,
+// so an authority-reducing role write cannot be spelled without the sweep that
+// retires the credentials which froze that authority (#330).
+//
+// The Outcome is dropped, matching what these routes already did with it: the
+// sweep is best-effort on the reduction paths, the authority change has already
+// committed, and turning a sweep failure into a 5xx would tell the caller their
+// change did not apply when it did. EraseUser is the exception and supplies its
+// own reducer, because there an incomplete sweep IS fatal.
+func sweepReduced(creds *credlifecycle.Sweeper, reason string) approles.AuthorityReducer {
+	return func(ctx context.Context, userID string) error {
+		creds.AuthorityReduced(ctx, userID, reason)
+		return nil
+	}
+}
 
 // buildAuditLog assembles an AuditLog from the request context (acting user,
 // client IP) and the given fields. A non-empty orgID stamps the owning
@@ -237,8 +257,15 @@ func (h *AdminHandlers) DeleteUser() gin.HandlerFunc {
 		// Rows left behind by a user who was already gone are collected by the
 		// startup reconcile (approles.Reconcile's sweep), which is the mechanism
 		// for exactly that and needs no privilege from this request.
+		//
+		// PLATFORM-WIDE, matching the CASCADE it mirrors: identity removed this
+		// principal's memberships in EVERY organization, not just the caller's,
+		// so a narrower strip would leave the mirror describing memberships that
+		// no longer exist. Reaching that far is safe only because the guard above
+		// has established that the scoped delete actually applied — the scope was
+		// enforced on the delete, and this follows it.
 		if deleted {
-			h.orgRepo.PurgeUserRoles(ctx, id)
+			h.orgRepo.PurgeUserRoles(ctx, id, idstore.OrgScopeAllOrganizations())
 		}
 		h.writeAudit(c, "user.delete", "user", id, map[string]interface{}{
 			"api_keys_revoked": out.KeysRevoked, "sessions_revoked": out.TokensRevoked})
@@ -425,18 +452,28 @@ func (h *AdminHandlers) EraseUser() gin.HandlerFunc {
 		// is both a compliance failure and an authority the anonymized row can
 		// still be used to exercise. See admin_audit_scope_test.go, which
 		// records this as a reviewed platform-wide call site.
-		removed, err := h.orgRepo.RemoveAllMembershipsForUser(ctx, id, idstore.OrgScopeAllOrganizations())
-		if err != nil {
-			serverError(c, err, "failed to revoke memberships")
+		// GDPR erasure keeps the user row as a resolvable tombstone, so both
+		// credential families survive the membership strip: a still-valid API key
+		// would keep authenticating at its stored scopes, and a live session
+		// would keep serving the scope union just removed (#330). Supplied as the
+		// strip's reducer so the two cannot come apart — and unlike the other
+		// reduction routes, an INCOMPLETE sweep is fatal here, because "erased"
+		// is a compliance claim about credentials as well as rows.
+		var out credlifecycle.Outcome
+		removed, err := h.orgRepo.RemoveAllMembershipsForUser(ctx, id, idstore.OrgScopeAllOrganizations(),
+			func(ctx context.Context, uid string) error {
+				out = h.creds.UserDeprovisioned(ctx, uid, "admin: user erased (GDPR)")
+				if out.Incomplete {
+					return errCredentialSweepIncomplete
+				}
+				return nil
+			})
+		if errors.Is(err, errCredentialSweepIncomplete) {
+			serverError(c, err, "failed to revoke credentials")
 			return
 		}
-		// GDPR erasure keeps the user row as a resolvable tombstone, so both
-		// credential families survive it: a still-valid API key would keep
-		// authenticating at its stored scopes, and a live session would keep
-		// serving the scope union the memberships just removed (#330).
-		out := h.creds.UserDeprovisioned(ctx, id, "admin: user erased (GDPR)")
-		if out.Incomplete {
-			serverError(c, errCredentialSweepIncomplete, "failed to revoke credentials")
+		if err != nil {
+			serverError(c, err, "failed to revoke memberships")
 			return
 		}
 		h.writeAudit(c, "user.erase", "user", id, map[string]interface{}{
@@ -586,22 +623,18 @@ func (h *AdminHandlers) DeleteOrganization() gin.HandlerFunc {
 		id := c.Param("id")
 		// organization_members.organization_id is ON DELETE CASCADE, so dropping
 		// the organization silently reduces every member's authority — a
-		// reduction with no membership statement of its own. Snapshot the members
-		// FIRST: after the delete there is nobody left to sweep (#330).
-		scope := routeOrgScope(c)
-		members, err := h.orgRepo.ListMembers(ctx, id, scope)
-		if err != nil {
-			serverError(c, err, "failed to list organization members")
-			return
-		}
+		// reduction with no membership statement of its own. The snapshot that
+		// makes those members sweepable after the cascade now lives inside
+		// Members.Delete, so "list before you delete" is no longer a convention
+		// this route has to remember (#330).
+		//
 		// Idempotent DELETE (see DeleteUser): an already-absent organization
 		// answered 204 before v0.24.0 and keeps answering 204.
-		if err := h.orgRepo.Delete(ctx, id, scope); err != nil && !notFound(err) {
+		scope := routeOrgScope(c)
+		if err := h.orgRepo.Delete(ctx, id, scope,
+			sweepReduced(h.creds, "admin: organization deleted")); err != nil && !notFound(err) {
 			serverError(c, err, "failed to delete organization")
 			return
-		}
-		for _, m := range members {
-			h.creds.AuthorityReduced(ctx, m.UserID, "admin: organization deleted")
 		}
 		h.writeOrgAudit(c, "organization.delete", "organization", id, id, nil)
 		c.Status(http.StatusNoContent)
@@ -716,14 +749,15 @@ func (h *AdminHandlers) UpdateOrganizationMember() gin.HandlerFunc {
 		// the user's retained scopes rather than assuming a change happened.
 		// Whether this endpoint SHOULD 404 on a non-member is a deliberate API
 		// decision, tracked separately from the identity upgrade.
-		if err := h.orgRepo.UpdateMemberRoleTemplate(ctx, orgID, userID, roleID, routeOrgScope(c)); err != nil && !notFound(err) {
+		// A reassignment can narrow what the member holds, and both credential
+		// families froze the previous scope set. The sweep is the write's own
+		// argument now, and still runs after it, so the retained authority is
+		// re-derived from the new role template (#330).
+		if err := h.orgRepo.UpdateMemberRoleTemplate(ctx, orgID, userID, roleID, routeOrgScope(c),
+			sweepReduced(h.creds, "admin: organization member role changed")); err != nil && !notFound(err) {
 			serverError(c, err, "failed to update member")
 			return
 		}
-		// A reassignment can narrow what the member holds, and both credential
-		// families froze the previous scope set. Run after the write so the
-		// retained authority is re-derived from the new role template (#330).
-		h.creds.AuthorityReduced(ctx, userID, "admin: organization member role changed")
 		h.writeOrgAudit(c, "organization.member.update", "organization", orgID, orgID, map[string]interface{}{"user_id": userID})
 		c.JSON(http.StatusOK, gin.H{"status": "updated"})
 	}
@@ -745,14 +779,14 @@ func (h *AdminHandlers) RemoveOrganizationMember() gin.HandlerFunc {
 		// member answered 204 before v0.24.0 and keeps answering 204. The sweep
 		// below still runs, which is the safe direction — it recomputes the
 		// authority the user retains rather than trusting that a row moved.
-		if err := h.orgRepo.RemoveMember(ctx, orgID, userID, routeOrgScope(c)); err != nil && !notFound(err) {
+		// The membership is gone; the credentials minted while it existed are
+		// not. The sweep is the removal's own argument, against the authority the
+		// user retains in their remaining organizations (#330).
+		if err := h.orgRepo.RemoveMember(ctx, orgID, userID, routeOrgScope(c),
+			sweepReduced(h.creds, "admin: organization membership removed")); err != nil && !notFound(err) {
 			serverError(c, err, "failed to remove member")
 			return
 		}
-		// The membership is gone; the credentials minted while it existed are
-		// not. Sweep both families against the authority the user retains in
-		// their remaining organizations (#330).
-		h.creds.AuthorityReduced(ctx, userID, "admin: organization membership removed")
 		h.writeOrgAudit(c, "organization.member.remove", "organization", orgID, orgID, map[string]interface{}{"user_id": userID})
 		c.Status(http.StatusNoContent)
 	}

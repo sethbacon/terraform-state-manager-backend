@@ -21,6 +21,10 @@ The State Manager gets its own `role_templates` and `organization_member_roles` 
 
 **Ordering rule**: the two legs are on connections that cannot share a transaction, so the writes are ordered such that a crash between them leaves the *less privileged* state — grants write identity first, revocations write the mirror first.
 
+**Tenancy lives in the SQL.** Every statement over `organization_member_roles` binds the caller's `OrgScope` through `OrgScope.SQL`, which never returns an empty clause: the platform-wide scope is a literal `TRUE`, an undecided caller's zero value is a literal `FALSE`. A first attempt checked the scope in the layer above and left the statements unqualified; that closes the paths which remember and leaves the data layer unable to refuse the ones that do not, which is the shape the library's own #138/#162 rejected. The suite's tenant-scope signature found it on the branch's first CI run.
+
+**The credential sweep is a mandatory argument to the mutation**, not a statement the caller runs afterwards — `AuthorityReducer`, the same inversion `identity/platformadmin.AuditIntentWriter` uses. TSM's two credential families freeze a principal's authority at issue time, so a role write that does not sweep takes nothing away (#330); making the sweep a parameter means the reduction cannot be spelled without it, while the *flavour* stays the caller's, which is what preserves the deliberate keys-only asymmetry on the IdP login path.
+
 **The backfill copies what the app resolves today, not what it defines.** `approles.Reconcile` copies `identity.role_templates` verbatim, ids included, and restates every membership. In a standalone deployment that is this build's own seed, written moments earlier. In a coupled one it is the sibling's definition — which is what this deployment authorizes against right now, and Phase 3a must not change authorization. The divergence is reported as a startup warning rather than corrected.
 
 **Reads do not move.** Every authorization decision still comes from `identity.organization_members` joined to `identity.role_templates`. Nothing observable changes.

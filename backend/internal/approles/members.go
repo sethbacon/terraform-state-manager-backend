@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"log/slog"
 
 	"github.com/google/uuid"
@@ -77,6 +78,44 @@ type Members struct {
 	templates *idstore.RoleTemplateRepository
 }
 
+// AuthorityReducer invalidates the credentials that carry a SNAPSHOT of the
+// authority a role write has just reduced.
+//
+// # Why this is a parameter of the mutation and not of the constructor
+//
+// TSM has two credential families that freeze a principal's authority at issue
+// time — JWT sessions (scopes embedded at login) and API keys (scopes frozen on
+// the row) — so removing a membership or narrowing a role does not, by itself,
+// take anything away (#330). The sweep that does live in internal/credlifecycle,
+// which imports THIS package; the reverse import would be a cycle.
+//
+// So the dependency is inverted, in exactly the shape
+// identity/platformadmin.AuditIntentWriter takes: this package defines the
+// contract, the application supplies the implementation, and it is passed to the
+// MUTATION rather than held on the receiver. That has three consequences worth
+// stating:
+//
+//   - No construction cycle. credlifecycle.Sweeper holds a *Members for its
+//     reads; a Members that demanded a Sweeper at construction could never be
+//     built.
+//   - MANDATORY, enforced by the compiler. These methods shadow the embedded
+//     repository's methods BY NAME, so the four-argument call a caller used to
+//     write no longer compiles and there is no nil to pass by accident. An
+//     optional guard is how a guard goes silently absent.
+//   - The FLAVOUR is the caller's. The IdP login paths must sweep keys only —
+//     moving the JWT watermark microseconds before minting the session token
+//     would revoke the token being issued (see credlifecycle.Sweeper.KeysOnly) —
+//     while the admin routes must sweep both, and SCIM deprovisioning sweeps
+//     everything unconditionally. A sweep chosen inside this package could not
+//     tell them apart; one supplied per call site keeps that documented
+//     asymmetry exactly where it was decided.
+//
+// An error is returned rather than credlifecycle's Outcome because this package
+// must not know what a credential family is. It is reported by the method that
+// ran the reduction, so a caller that treats an incomplete sweep as fatal — the
+// GDPR erasure route does — still can.
+type AuthorityReducer func(ctx context.Context, userID string) error
+
 // NewMembers wraps the shared organization repository with TSM's role mirror.
 //
 // identityDB is where membership and the shared role templates live; appDB is
@@ -114,9 +153,7 @@ func (m *Members) AddMemberWithRoleTemplate(ctx context.Context, orgID, userID s
 	if err := m.identityOrgs.AddMemberWithRoleTemplate(ctx, orgID, userID, roleTemplateID, scope); err != nil {
 		return err
 	}
-	if m.permits(scope, orgID) {
-		m.mirrorSetByID(ctx, orgID, userID, roleTemplateID)
-	}
+	m.mirrorSetByID(ctx, orgID, userID, roleTemplateID, scope)
 	return nil
 }
 
@@ -127,9 +164,7 @@ func (m *Members) AddMemberWithParams(ctx context.Context, orgID, userID, roleTe
 	if err := m.identityOrgs.AddMemberWithParams(ctx, orgID, userID, roleTemplateName, scope); err != nil {
 		return err
 	}
-	if m.permits(scope, orgID) {
-		m.mirrorSetByName(ctx, orgID, userID, roleTemplateName)
-	}
+	m.mirrorSetByName(ctx, orgID, userID, roleTemplateName, scope)
 	return nil
 }
 
@@ -138,27 +173,33 @@ func (m *Members) AddMemberWithParams(ctx context.Context, orgID, userID, roleTe
 // GRANT: identity first. A reassignment can be a reduction as well as an
 // escalation, but the safe ordering for the pair as a whole is the one that
 // never leaves this app holding authority identity does not.
-func (m *Members) UpdateMemberRoleTemplate(ctx context.Context, orgID, userID string, roleTemplateID *string, scope idstore.OrgScope) error {
-	if err := m.identityOrgs.UpdateMemberRoleTemplate(ctx, orgID, userID, roleTemplateID, scope); err != nil {
-		return err
+func (m *Members) UpdateMemberRoleTemplate(ctx context.Context, orgID, userID string, roleTemplateID *string, scope idstore.OrgScope, reduce AuthorityReducer) error {
+	err := m.identityOrgs.UpdateMemberRoleTemplate(ctx, orgID, userID, roleTemplateID, scope)
+	if err == nil {
+		m.mirrorSetByID(ctx, orgID, userID, roleTemplateID, scope)
 	}
-	if m.permits(scope, orgID) {
-		m.mirrorSetByID(ctx, orgID, userID, roleTemplateID)
+	// A reassignment is a REDUCTION whenever the new template grants less than
+	// the old one, and the sweep re-derives the retained set rather than
+	// comparing, so it runs on both outcomes for the same reason RemoveMember's
+	// does.
+	if serr := reduceAuthority(ctx, reduce, userID); serr != nil {
+		return serr
 	}
-	return nil
+	return err
 }
 
 // UpdateMemberRole changes a member's role by NAME, and mirrors it.
 //
 // GRANT: identity first.
-func (m *Members) UpdateMemberRole(ctx context.Context, orgID, userID, roleTemplateName string, scope idstore.OrgScope) error {
-	if err := m.identityOrgs.UpdateMemberRole(ctx, orgID, userID, roleTemplateName, scope); err != nil {
-		return err
+func (m *Members) UpdateMemberRole(ctx context.Context, orgID, userID, roleTemplateName string, scope idstore.OrgScope, reduce AuthorityReducer) error {
+	err := m.identityOrgs.UpdateMemberRole(ctx, orgID, userID, roleTemplateName, scope)
+	if err == nil {
+		m.mirrorSetByName(ctx, orgID, userID, roleTemplateName, scope)
 	}
-	if m.permits(scope, orgID) {
-		m.mirrorSetByName(ctx, orgID, userID, roleTemplateName)
+	if serr := reduceAuthority(ctx, reduce, userID); serr != nil {
+		return serr
 	}
-	return nil
+	return err
 }
 
 // RemoveMember withdraws a membership, and removes the mirrored assignment.
@@ -171,11 +212,18 @@ func (m *Members) UpdateMemberRole(ctx context.Context, orgID, userID, roleTempl
 // call was asking for — leaving a mirrored assignment behind for it would
 // preserve exactly the record the caller asked to be rid of. Every caller in TSM
 // already absorbs that sentinel for the same reason.
-func (m *Members) RemoveMember(ctx context.Context, orgID, userID string, scope idstore.OrgScope) error {
-	if m.permits(scope, orgID) {
-		m.mirrorDelete(ctx, orgID, userID)
+func (m *Members) RemoveMember(ctx context.Context, orgID, userID string, scope idstore.OrgScope, reduce AuthorityReducer) error {
+	m.mirrorDelete(ctx, orgID, userID, scope)
+	err := m.identityOrgs.RemoveMember(ctx, orgID, userID, scope)
+	// The sweep runs even when the removal reported ErrNotFound, and that is the
+	// pre-existing decision this method inherited from its call site: the sweep
+	// re-derives what the principal RETAINS rather than assuming a row moved, so
+	// it is correct on a no-op and skipping it would depend on a row count to
+	// decide whether authority changed.
+	if serr := reduceAuthority(ctx, reduce, userID); serr != nil {
+		return serr
 	}
-	return m.identityOrgs.RemoveMember(ctx, orgID, userID, scope)
+	return err
 }
 
 // RemoveAllMembershipsForUser strips a user's memberships within scope, and
@@ -189,14 +237,14 @@ func (m *Members) RemoveMember(ctx context.Context, orgID, userID string, scope 
 // running both is idempotent; running only the first would over-delete when the
 // scope was wider than the effect, and running only the second would put the
 // window on the wrong side.
-func (m *Members) RemoveAllMembershipsForUser(ctx context.Context, userID string, scope idstore.OrgScope) (idstore.OrgScope, error) {
-	m.mirrorDeleteForUser(ctx, userID, scopeOrganizations(scope))
+func (m *Members) RemoveAllMembershipsForUser(ctx context.Context, userID string, scope idstore.OrgScope, reduce AuthorityReducer) (idstore.OrgScope, error) {
+	m.mirrorDeleteForUser(ctx, userID, scope)
 	removed, err := m.identityOrgs.RemoveAllMembershipsForUser(ctx, userID, scope)
 	if err != nil {
 		return removed, err
 	}
-	m.mirrorDeleteForUser(ctx, userID, scopeOrganizations(removed))
-	return removed, nil
+	m.mirrorDeleteForUser(ctx, userID, removed)
+	return removed, reduceAuthority(ctx, reduce, userID)
 }
 
 // Delete removes an organization, and removes every mirrored assignment in it.
@@ -211,11 +259,34 @@ func (m *Members) RemoveAllMembershipsForUser(ctx context.Context, userID string
 // generic a name to key a class guard on, which is exactly why the guard is
 // keyed on the CONSTRUCTOR instead — anything that can reach this repository has
 // to come through NewMembers and therefore through this override.
-func (m *Members) Delete(ctx context.Context, orgID string, scope idstore.OrgScope) error {
-	if m.permits(scope, orgID) {
-		m.mirrorDeleteForOrganization(ctx, orgID)
+func (m *Members) Delete(ctx context.Context, orgID string, scope idstore.OrgScope, reduce AuthorityReducer) error {
+	// SNAPSHOT FIRST. The delete cascades organization_members away, so after it
+	// there is nobody left to sweep — and this is the one reduction whose subject
+	// is a SET of principals rather than one. Enumerating here rather than at the
+	// call site is what stops "remember to list the members before you delete the
+	// organization" from being a convention each new caller has to rediscover.
+	//
+	// A listing failure is fatal: deleting the organization anyway would withdraw
+	// every member's authority with no possibility of sweeping the credentials
+	// that froze it.
+	members, err := m.identityOrgs.ListMembers(ctx, orgID, scope)
+	if err != nil {
+		return err
 	}
-	return m.identityOrgs.Delete(ctx, orgID, scope)
+	m.mirrorDeleteForOrganization(ctx, orgID, scope)
+	if err := m.identityOrgs.Delete(ctx, orgID, scope); err != nil && !errors.Is(err, idstore.ErrNotFound) {
+		return err
+	} else if err != nil {
+		// Already gone: nothing cascaded, so there is nothing to sweep, and the
+		// sentinel is returned for the caller's own idempotence decision.
+		return err
+	}
+	for _, member := range members {
+		if serr := reduceAuthority(ctx, reduce, member.UserID); serr != nil {
+			return serr
+		}
+	}
+	return nil
 }
 
 // PurgeUserRoles removes every mirrored assignment for a user, for the one path
@@ -230,9 +301,29 @@ func (m *Members) Delete(ctx context.Context, orgID string, scope idstore.OrgSco
 // pairing instead: a function that calls DeleteUser and does not call this is
 // not certified.
 //
+// The scope is the CALLER'S, and it is a parameter rather than an assumed
+// platform-wide strip. identity's CASCADE reaches every organization, so the
+// mirror's counterpart has to be spelled OrgScopeAllOrganizations() at a call
+// site that has established the delete applied — which makes it visible to
+// TestPlatformWideOrgScopeSitesAreReviewed instead of hidden inside this method.
+//
 // Idempotent, and safe to call for a user who held nothing.
-func (m *Members) PurgeUserRoles(ctx context.Context, userID string) {
-	m.mirrorDeleteForUser(ctx, userID, nil)
+func (m *Members) PurgeUserRoles(ctx context.Context, userID string, scope idstore.OrgScope) {
+	m.mirrorDeleteForUser(ctx, userID, scope)
+}
+
+// reduceAuthority runs the caller's credential sweep, refusing a nil one.
+//
+// FAIL-CLOSED ON A MISSING SWEEP. A nil reducer is not "no sweep needed", it is
+// a caller that did not decide, and the whole point of taking this as a
+// mandatory parameter is that the answer is never left to a zero value. Every
+// method here is one that reduces derived authority; running one with no sweep
+// leaves the credentials that froze that authority working.
+func reduceAuthority(ctx context.Context, reduce AuthorityReducer, userID string) error {
+	if reduce == nil {
+		return fmt.Errorf("approles: authority was reduced for user %s with no credential sweep supplied", userID)
+	}
+	return reduce(ctx, userID)
 }
 
 // mirrorSetByID records an assignment whose role is named by identity's template
@@ -245,7 +336,7 @@ func (m *Members) PurgeUserRoles(ctx context.Context, userID string) {
 // template is fetched and recorded first, because the foreign key would
 // otherwise reject the assignment and the mirror would lose a grant that did
 // happen.
-func (m *Members) mirrorSetByID(ctx context.Context, orgID, userID string, roleTemplateID *string) {
+func (m *Members) mirrorSetByID(ctx context.Context, orgID, userID string, roleTemplateID *string, scope idstore.OrgScope) {
 	if m.store == nil {
 		return
 	}
@@ -256,7 +347,7 @@ func (m *Members) mirrorSetByID(ctx context.Context, orgID, userID string, roleT
 			return
 		}
 	}
-	if err := m.store.SetRole(ctx, orgID, userID, roleTemplateID); err != nil {
+	if err := m.store.SetRole(ctx, orgID, userID, roleTemplateID, scope); err != nil {
 		slog.Error("approles: identity recorded the role assignment but this application's mirror did not",
 			"organization_id", orgID, "user_id", userID, "error", err)
 	}
@@ -271,7 +362,7 @@ func (m *Members) mirrorSetByID(ctx context.Context, orgID, userID string, roleT
 // ids), so the distinction is invisible; from the phase that switches reads
 // onward it is the difference between "the editor role" meaning TSM's editor and
 // meaning whichever app seeded that name last.
-func (m *Members) mirrorSetByName(ctx context.Context, orgID, userID, roleTemplateName string) {
+func (m *Members) mirrorSetByName(ctx context.Context, orgID, userID, roleTemplateName string, scope idstore.OrgScope) {
 	if m.store == nil {
 		return
 	}
@@ -291,7 +382,7 @@ func (m *Members) mirrorSetByName(ctx context.Context, orgID, userID, roleTempla
 			"organization_id", orgID, "user_id", userID, "role", roleTemplateName, "error", err)
 		return
 	}
-	if err := m.store.SetRole(ctx, orgID, userID, &id); err != nil {
+	if err := m.store.SetRole(ctx, orgID, userID, &id, scope); err != nil {
 		slog.Error("approles: identity recorded the role assignment but this application's mirror did not",
 			"organization_id", orgID, "user_id", userID, "role", roleTemplateName, "error", err)
 	}
@@ -344,81 +435,44 @@ func (m *Members) adoptTemplateByName(ctx context.Context, name string) (string,
 	return t.ID, nil
 }
 
-func (m *Members) mirrorDelete(ctx context.Context, orgID, userID string) {
+func (m *Members) mirrorDelete(ctx context.Context, orgID, userID string, scope idstore.OrgScope) {
 	if m.store == nil {
 		return
 	}
-	if err := m.store.DeleteRole(ctx, orgID, userID); err != nil {
+	if err := m.store.DeleteRole(ctx, orgID, userID, scope); err != nil {
 		slog.Error("approles: this application's mirror still records a role that is being withdrawn",
 			"organization_id", orgID, "user_id", userID, "error", err)
 	}
 }
 
-func (m *Members) mirrorDeleteForUser(ctx context.Context, userID string, orgIDs []string) {
+func (m *Members) mirrorDeleteForUser(ctx context.Context, userID string, scope idstore.OrgScope) {
 	if m.store == nil {
 		return
 	}
-	if err := m.store.DeleteRolesForUser(ctx, userID, orgIDs); err != nil {
+	if err := m.store.DeleteRolesForUser(ctx, userID, scope); err != nil {
 		slog.Error("approles: this application's mirror still records roles that are being withdrawn",
-			"user_id", userID, "organizations", orgIDs, "error", err)
+			"user_id", userID, "organizations", scope.OrganizationIDs(), "error", err)
 	}
 }
 
-func (m *Members) mirrorDeleteForOrganization(ctx context.Context, orgID string) {
+func (m *Members) mirrorDeleteForOrganization(ctx context.Context, orgID string, scope idstore.OrgScope) {
 	if m.store == nil {
 		return
 	}
-	if err := m.store.DeleteRolesForOrganization(ctx, orgID); err != nil {
+	if err := m.store.DeleteRolesForOrganization(ctx, orgID, scope); err != nil {
 		slog.Error("approles: this application's mirror still records roles in an organization being deleted",
 			"organization_id", orgID, "error", err)
 	}
 }
 
-// permits reports whether the caller's tenancy admits writing this
-// organization's mirrored roles.
-//
-// THE MIRROR MUST NOT REACH FURTHER THAN THE WRITE IT MIRRORS. Every identity
-// leg here is scoped — the shared store applies the caller's OrgScope as a SQL
-// predicate and reports ErrNotFound when it matches nothing (identity #138,
-// #162) — but a REVOCATION writes the mirror FIRST, before that predicate has
-// had a chance to refuse anything. Without this check, a caller whose scope does
-// not admit orgID would have the mirrored row deleted anyway and then be told
-// the membership was not found: a cross-tenant write reported as a no-op. In
-// Phase 3a nothing reads the mirror so nobody loses access, which is exactly why
-// it would go unnoticed until the phase that starts reading it.
-//
-// Applied on the grant paths too, where the identity leg's own predicate already
-// establishes the same thing. That is redundant and deliberately so: "the mirror
-// never touches an organization the caller's scope does not permit" is then a
-// property of THIS function, checkable by reading it, rather than an argument
-// about what each identity method does with its scope argument.
-//
-// PurgeUserRoles is not routed through here and cannot be: it strips a principal
-// whose identity row has already been deleted, so there is no organization left
-// to test and no membership left for a scope to admit. Its caller's own
-// DeleteUser carried the tenancy.
-func (m *Members) permits(scope idstore.OrgScope, orgID string) bool {
-	return scope.PermitsOrganization(orgID)
-}
-
-// scopeOrganizations translates an OrgScope into the argument
-// Store.DeleteRolesForUser takes: nil for "every organization", the allowlist
-// otherwise.
-//
-// The nil/slice distinction is the same one OrgScope makes and must not be
-// flattened: OrgScopeAllOrganizations reaches everywhere, and a scope that
-// matches nothing must remove nothing rather than everything. An empty non-nil
-// slice is returned for the latter, which DeleteRolesForUser treats as a no-op.
-func scopeOrganizations(scope idstore.OrgScope) []string {
-	if scope.IsAllOrganizations() {
-		return nil
-	}
-	ids := scope.OrganizationIDs()
-	if ids == nil {
-		return []string{}
-	}
-	return ids
-}
+// THE TENANCY CHECK USED TO LIVE HERE, as Members.permits and
+// scopeOrganizations, and it no longer does. Both translated the caller's scope
+// into an `if` around the mirror leg and left the statements themselves
+// unqualified — which closed the hole for the paths that remembered and left the
+// data layer unable to refuse the ones that did not. The predicate now lives in
+// the statements (Store.andScope), so an out-of-tenancy write matches no row
+// instead of being skipped by a caller-side branch, and a new Store accessor
+// cannot omit it without failing the class guard.
 
 // templateFromIdentity converts identity's role template into this package's
 // transfer shape, preserving the id.

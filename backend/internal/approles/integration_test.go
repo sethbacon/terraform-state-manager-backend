@@ -105,6 +105,13 @@ func newEnv(t *testing.T) *env {
 	}
 }
 
+// noSweepNeeded is the integration rig's credential sweep. These tests are about
+// ROWS in the two authorization tables; the sweep's own behaviour is the subject
+// of internal/api's #330 class test, which drives it end to end through the
+// routes. It returns nil rather than being nil, because a nil reducer is refused
+// (TestAMissingSweepIsRefused) — which is the point of making it mandatory.
+func noSweepNeeded(context.Context, string) error { return nil }
+
 func connect(t *testing.T, dsn, searchPath string) *sql.DB {
 	t.Helper()
 	parsed, err := url.Parse(dsn)
@@ -410,7 +417,7 @@ func TestIntegrationDualWriteEndToEnd(t *testing.T) {
 		t.Fatalf("after add, mirrored role = %q, want %q", got, editorID)
 	}
 
-	if err := e.members.UpdateMemberRoleTemplate(ctx, org, user, &viewerID, all); err != nil {
+	if err := e.members.UpdateMemberRoleTemplate(ctx, org, user, &viewerID, all, noSweepNeeded); err != nil {
 		t.Fatalf("UpdateMemberRoleTemplate: %v", err)
 	}
 	if got, _ := e.mirroredRole(t, org, user); got != viewerID {
@@ -418,7 +425,7 @@ func TestIntegrationDualWriteEndToEnd(t *testing.T) {
 	}
 	assertNoDrift(t, e)
 
-	if err := e.members.RemoveMember(ctx, org, user, all); err != nil {
+	if err := e.members.RemoveMember(ctx, org, user, all, noSweepNeeded); err != nil {
 		t.Fatalf("RemoveMember: %v", err)
 	}
 	if _, ok := e.mirroredRole(t, org, user); ok {
@@ -430,7 +437,7 @@ func TestIntegrationDualWriteEndToEnd(t *testing.T) {
 	if err := e.members.AddMemberWithParams(ctx, org, user, "editor", all); err != nil {
 		t.Fatalf("re-add: %v", err)
 	}
-	if err := e.members.Delete(ctx, org, all); err != nil {
+	if err := e.members.Delete(ctx, org, all, noSweepNeeded); err != nil {
 		t.Fatalf("Delete organization: %v", err)
 	}
 	if _, ok := e.mirroredRole(t, org, user); ok {
@@ -445,7 +452,7 @@ func TestIntegrationDualWriteEndToEnd(t *testing.T) {
 	if _, err := e.identityDB.Exec(`DELETE FROM identity.users WHERE id = $1`, user); err != nil {
 		t.Fatalf("delete user: %v", err)
 	}
-	e.members.PurgeUserRoles(ctx, user)
+	e.members.PurgeUserRoles(ctx, user, idstore.OrgScopeAllOrganizations())
 	if _, ok := e.mirroredRole(t, org2, user); ok {
 		t.Fatal("deleting the user left its mirrored roles behind")
 	}
@@ -541,14 +548,14 @@ func TestIntegrationDriftQueryReportsAllThreeKinds(t *testing.T) {
 		t.Fatalf("seed missing: %v", err)
 	}
 	// stale: the mirror only.
-	if err := e.store.SetRole(ctx, org, stale, &roleA); err != nil {
+	if err := e.store.SetRole(ctx, org, stale, &roleA, idstore.OrgScopeAllOrganizations()); err != nil {
 		t.Fatalf("seed stale: %v", err)
 	}
 	// mismatched: both, different roles.
 	if err := e.members.AddMemberWithParams(ctx, org, mismatched, "editor", all); err != nil {
 		t.Fatalf("seed mismatched: %v", err)
 	}
-	if err := e.store.SetRole(ctx, org, mismatched, &roleB); err != nil {
+	if err := e.store.SetRole(ctx, org, mismatched, &roleB, idstore.OrgScopeAllOrganizations()); err != nil {
 		t.Fatalf("skew mismatched: %v", err)
 	}
 
@@ -702,11 +709,11 @@ func TestIntegrationMirrorIsTenantScoped(t *testing.T) {
 
 	// A caller whose tenancy is `other` acting on `victim`.
 	outside := idstore.OrgScopeOrganizations(other)
-	_ = e.members.RemoveMember(ctx, victim, user, outside)
+	_ = e.members.RemoveMember(ctx, victim, user, outside, noSweepNeeded)
 	if _, ok := e.mirroredRole(t, victim, user); !ok {
 		t.Fatal("an out-of-tenancy RemoveMember deleted another organization's mirrored role")
 	}
-	_ = e.members.Delete(ctx, victim, outside)
+	_ = e.members.Delete(ctx, victim, outside, noSweepNeeded)
 	if _, ok := e.mirroredRole(t, victim, user); !ok {
 		t.Fatal("an out-of-tenancy organization delete removed another organization's mirrored roles")
 	}
@@ -714,7 +721,7 @@ func TestIntegrationMirrorIsTenantScoped(t *testing.T) {
 	assertNoDrift(t, e)
 
 	// In tenancy, the same calls do apply.
-	if err := e.members.RemoveMember(ctx, victim, user, idstore.OrgScopeOrganizations(victim)); err != nil {
+	if err := e.members.RemoveMember(ctx, victim, user, idstore.OrgScopeOrganizations(victim), noSweepNeeded); err != nil {
 		t.Fatalf("in-tenancy RemoveMember: %v", err)
 	}
 	if _, ok := e.mirroredRole(t, victim, user); ok {

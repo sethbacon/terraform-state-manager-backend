@@ -70,6 +70,21 @@ import (
 //     implementation, but the direction is an authority INCREASE (it promotes the
 //     first owner to admin) and it runs during first-boot setup, before any
 //     credential for that principal can exist. There is nothing to invalidate.
+//     It is the ONE site that supplies a no-op reducer, and it says so.
+//
+// WHERE THE SWEEP IS CALLED FROM CHANGED, AND THE ROWS BELOW DID NOT.
+// Since the per-app role tables landed (sethbacon/terraform-suite-identity#206,
+// Phase 3a), an authority-reducing role write takes its sweep as a MANDATORY
+// ARGUMENT — approles.AuthorityReducer, the same shape
+// identity/platformadmin.AuditIntentWriter takes — instead of the caller running
+// it as a separate statement afterwards. The pairing is therefore enforced by
+// the compiler rather than by each route remembering, and the FLAVOUR stays the
+// caller's, which is what keeps the KeysOnly asymmetry above intact.
+//
+// That every row here still passes unchanged is the evidence the relocation was
+// behaviour-preserving: this table drives the routes end to end and asserts both
+// families at each site, so a sweep that moved and stopped happening, or that
+// changed flavour, fails here.
 
 // akListCols mirrors ListAPIKeysByUser's scanAPIKeyWithUserName projection.
 var akListCols = apiKeyListCols

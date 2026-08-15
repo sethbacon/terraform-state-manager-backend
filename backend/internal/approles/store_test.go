@@ -2,6 +2,7 @@ package approles
 
 import (
 	"context"
+	"database/sql/driver"
 	"errors"
 	"regexp"
 	"strings"
@@ -9,6 +10,7 @@ import (
 	"time"
 
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
+	idstore "github.com/sethbacon/terraform-suite-identity/identity/store"
 )
 
 func newStore(t *testing.T) (*Store, sqlmock.Sqlmock) {
@@ -21,47 +23,73 @@ func newStore(t *testing.T) (*Store, sqlmock.Sqlmock) {
 	return NewStore(db), mock
 }
 
-// "Every organization" and "no organizations" must issue DIFFERENT statements.
-// Collapsing them is a one-character mistake (nil versus an empty slice) that
-// turns a scope permitting nothing into a platform-wide strip, and it produces
-// no error at any layer.
-func TestDeleteRolesForUser_EverythingIsNotNothing(t *testing.T) {
-	t.Run("nil strips every organization", func(t *testing.T) {
-		s, mock := newStore(t)
-		mock.ExpectExec(regexp.QuoteMeta(`DELETE FROM organization_member_roles WHERE user_id = $1`)).
-			WithArgs("user-1").
-			WillReturnResult(sqlmock.NewResult(0, 3))
-		if err := s.DeleteRolesForUser(context.Background(), "user-1", nil); err != nil {
-			t.Fatalf("DeleteRolesForUser: %v", err)
-		}
-		if err := mock.ExpectationsWereMet(); err != nil {
-			t.Errorf("unmet: %v", err)
-		}
-	})
+// THE SCOPE IS IN THE STATEMENT, and OrgScope.SQL never emits an empty clause:
+// the platform-wide scope is the literal TRUE, an allowlist is a bound ANY(),
+// and the zero value — what a caller who has not decided about tenancy holds —
+// is the literal FALSE. That last one is the load-bearing case: the fail-open
+// shape this type exists to prevent is a predicate that vanishes, and the only
+// way to see it is to read the statement the database actually receives.
+func TestDeleteRolesForUser_BindsTheScopeIntoTheStatement(t *testing.T) {
+	cases := []struct {
+		name  string
+		scope idstore.OrgScope
+		// want is the exact statement, so a predicate that silently disappeared
+		// fails here rather than at the phase that starts reading these rows.
+		want string
+		args []driver.Value
+	}{
+		{
+			name:  "platform-wide reaches everything, as a literal TRUE",
+			scope: idstore.OrgScopeAllOrganizations(),
+			want:  `DELETE FROM organization_member_roles WHERE user_id = $1 AND TRUE`,
+			args:  []driver.Value{"user-1"},
+		},
+		{
+			name:  "an allowlist narrows to its organizations",
+			scope: idstore.OrgScopeOrganizations("org-1"),
+			want:  `DELETE FROM organization_member_roles WHERE user_id = $1 AND organization_id = ANY($2)`,
+			args:  []driver.Value{"user-1", sqlmock.AnyArg()},
+		},
+		{
+			name:  "the undecided zero value reaches nothing, as a literal FALSE",
+			scope: idstore.OrgScope{},
+			want:  `DELETE FROM organization_member_roles WHERE user_id = $1 AND FALSE`,
+			args:  []driver.Value{"user-1"},
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			s, mock := newStore(t)
+			mock.ExpectExec(regexp.QuoteMeta(c.want)).
+				WithArgs(c.args...).
+				WillReturnResult(sqlmock.NewResult(0, 1))
+			if err := s.DeleteRolesForUser(context.Background(), "user-1", c.scope); err != nil {
+				t.Fatalf("DeleteRolesForUser: %v", err)
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Fatalf("statement did not match: %v", err)
+			}
+		})
+	}
+}
 
-	t.Run("empty allowlist strips nothing", func(t *testing.T) {
-		s, mock := newStore(t)
-		// No expectation at all: issuing ANY statement fails this test.
-		if err := s.DeleteRolesForUser(context.Background(), "user-1", []string{}); err != nil {
-			t.Fatalf("DeleteRolesForUser: %v", err)
-		}
-		if err := mock.ExpectationsWereMet(); err != nil {
-			t.Errorf("a scope permitting nothing issued a statement: %v", err)
-		}
-	})
-
-	t.Run("allowlist narrows to its organizations", func(t *testing.T) {
-		s, mock := newStore(t)
-		mock.ExpectExec(regexp.QuoteMeta(`DELETE FROM organization_member_roles WHERE user_id = $1 AND organization_id = ANY($2)`)).
-			WithArgs("user-1", sqlmock.AnyArg()).
-			WillReturnResult(sqlmock.NewResult(0, 1))
-		if err := s.DeleteRolesForUser(context.Background(), "user-1", []string{"org-1"}); err != nil {
-			t.Fatalf("DeleteRolesForUser: %v", err)
-		}
-		if err := mock.ExpectationsWereMet(); err != nil {
-			t.Errorf("unmet: %v", err)
-		}
-	})
+// The create axis has no existing row for a WHERE to filter, so the insert
+// sources from a scoped SELECT — the shape the shared store's
+// AddMemberWithRoleTemplate takes, and for the same reason: recording a role is
+// a privilege GRANT, and leaving the strongest axis unscoped while scoping the
+// other two is the omission that matters.
+func TestSetRole_SourcesTheInsertFromAScopedSelect(t *testing.T) {
+	s, mock := newStore(t)
+	role := templateID
+	mock.ExpectExec(regexp.QuoteMeta(`WHERE TRUE AND v.organization_id = ANY($4)`)).
+		WithArgs("org-1", "user-1", role, sqlmock.AnyArg()).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	if err := s.SetRole(context.Background(), "org-1", "user-1", &role, idstore.OrgScopeOrganizations("org-1")); err != nil {
+		t.Fatalf("SetRole: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("statement did not match: %v", err)
+	}
 }
 
 // The sentinel is what lets the mirror tell "this deployment has no such role"
@@ -137,10 +165,10 @@ func TestGeneration_ComesFromTheDatabase(t *testing.T) {
 func TestSweepStaleAssignments_ReportsWhatItRemoved(t *testing.T) {
 	s, mock := newStore(t)
 	cutoff := time.Now()
-	mock.ExpectExec(regexp.QuoteMeta(`DELETE FROM organization_member_roles WHERE mirrored_at < $1`)).
+	mock.ExpectExec(regexp.QuoteMeta(`DELETE FROM organization_member_roles WHERE mirrored_at < $1 AND TRUE`)).
 		WithArgs(cutoff).
 		WillReturnResult(sqlmock.NewResult(0, 7))
-	n, err := s.SweepStaleAssignments(context.Background(), cutoff)
+	n, err := s.SweepStaleAssignments(context.Background(), cutoff, idstore.OrgScopeAllOrganizations())
 	if err != nil {
 		t.Fatalf("SweepStaleAssignments: %v", err)
 	}
