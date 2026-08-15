@@ -13,7 +13,7 @@ import (
 func TestConfigureAdmin_CoupledReturns409(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.Suite.RoleSeedOwner = "registry" // coupled — sibling owns identity
-	h := NewHandlers(nil, nil, nil, nil, nil, cfg, nil)
+	h := NewHandlers(nil, nil, nil, nil, nil, nil, cfg, nil)
 	if w := postJSON(h.ConfigureAdmin, `{"email":"owner@example.com"}`); w.Code != http.StatusConflict {
 		t.Fatalf("coupled ConfigureAdmin = %d, want 409 (%s)", w.Code, w.Body.String())
 	}
@@ -22,7 +22,7 @@ func TestConfigureAdmin_CoupledReturns409(t *testing.T) {
 func TestConfigureAdmin_BadEmailReturns400(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.Suite.RoleSeedOwner = "self"
-	h := NewHandlers(nil, nil, nil, nil, nil, cfg, nil)
+	h := NewHandlers(nil, nil, nil, nil, nil, nil, cfg, nil)
 	if w := postJSON(h.ConfigureAdmin, `{"email":"not-an-email"}`); w.Code != http.StatusBadRequest {
 		t.Fatalf("invalid email ConfigureAdmin = %d, want 400", w.Code)
 	}
@@ -50,7 +50,7 @@ func settingsMock(t *testing.T, admin, oidc, sources, expectComplete bool) *repo
 func TestCompleteSetup_MissingSourceReturns400(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.Suite.RoleSeedOwner = "self"
-	h := NewHandlers(settingsMock(t, true, true, false, false), nil, nil, nil, nil, cfg, nil)
+	h := NewHandlers(settingsMock(t, true, true, false, false), nil, nil, nil, nil, nil, cfg, nil)
 	if w := postJSON(h.CompleteSetup, ``); w.Code != http.StatusBadRequest {
 		t.Fatalf("no source CompleteSetup = %d, want 400 (%s)", w.Code, w.Body.String())
 	}
@@ -60,21 +60,21 @@ func TestCompleteSetup_MissingSourceReturns400(t *testing.T) {
 func TestCompleteSetup_AllSatisfiedReturns200(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.Suite.RoleSeedOwner = "self"
-	h := NewHandlers(settingsMock(t, true, true, true, true), nil, nil, nil, nil, cfg, nil)
+	h := NewHandlers(settingsMock(t, true, true, true, true), nil, nil, nil, nil, nil, cfg, nil)
 	if w := postJSON(h.CompleteSetup, ``); w.Code != http.StatusOK {
 		t.Fatalf("satisfied CompleteSetup = %d, want 200 (%s)", w.Code, w.Body.String())
 	}
 }
 
 func TestSaveSource_MissingFieldsReturns400(t *testing.T) {
-	h := NewHandlers(nil, nil, nil, nil, nil, &config.Config{}, nil)
+	h := NewHandlers(nil, nil, nil, nil, nil, nil, &config.Config{}, nil)
 	if w := postJSON(h.SaveSource, `{}`); w.Code != http.StatusBadRequest {
 		t.Fatalf("SaveSource missing fields = %d, want 400", w.Code)
 	}
 }
 
 func TestTestSource_MissingFieldsReturns400(t *testing.T) {
-	h := NewHandlers(nil, nil, nil, nil, nil, &config.Config{}, nil)
+	h := NewHandlers(nil, nil, nil, nil, nil, nil, &config.Config{}, nil)
 	if w := postJSON(h.TestSource, `{}`); w.Code != http.StatusBadRequest {
 		t.Fatalf("TestSource missing fields = %d, want 400", w.Code)
 	}

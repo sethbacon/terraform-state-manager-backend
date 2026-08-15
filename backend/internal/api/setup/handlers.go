@@ -24,6 +24,12 @@ type Handlers struct {
 	// identityDB backs the owner step's user/membership writes; the idstore repos
 	// are built lazily in ConfigureAdmin so a nil-DB construction never panics.
 	identityDB *sql.DB
+	// appDB is the APPLICATION connection, which is what attaches TSM's per-app
+	// role mirror to the owner step's membership grant (internal/approles). The
+	// wizard mints this deployment's FIRST role assignment, so a wizard that
+	// wrote only identity would leave the per-app tables describing a deployment
+	// with no administrator at all.
+	appDB *sql.DB
 	// platformAdmins is the carrier the owner step writes the FIRST platform-admin
 	// grant into. Nil where there is no carrier (the nil-DB rigs), in which case
 	// the owner step still creates the user and the role assignment.
@@ -42,6 +48,7 @@ func NewHandlers(
 	oidc *repositories.OIDCConfigRepository,
 	sources *repositories.SourceRepository,
 	identityDB *sql.DB,
+	appDB *sql.DB,
 	platformAdmins *platformadmin.Service,
 	cfg *config.Config,
 	activateOIDC func(*auth.OIDCProvider),
@@ -51,6 +58,7 @@ func NewHandlers(
 		oidc:           oidc,
 		sources:        sources,
 		identityDB:     identityDB,
+		appDB:          appDB,
 		platformAdmins: platformAdmins,
 		cfg:            cfg,
 		activateOIDC:   activateOIDC,

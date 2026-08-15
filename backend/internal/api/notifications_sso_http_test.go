@@ -182,7 +182,7 @@ func newSSOEnv(t *testing.T, mutate func(*config.Config)) *sourcesEnv {
 		mutate(cfg)
 	}
 
-	h, err := NewAuthHandlers(cfg, db)
+	h, err := NewAuthHandlers(cfg, db, nil)
 	if err != nil {
 		t.Fatalf("NewAuthHandlers: %v", err)
 	}

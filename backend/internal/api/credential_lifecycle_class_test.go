@@ -16,6 +16,7 @@ import (
 	idstore "github.com/sethbacon/terraform-suite-identity/identity/store"
 
 	"github.com/terraform-state-manager/terraform-state-manager/internal/api/scim"
+	"github.com/terraform-state-manager/terraform-state-manager/internal/approles"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/auth"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/auth/ldap"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/auth/saml"
@@ -69,6 +70,21 @@ import (
 //     implementation, but the direction is an authority INCREASE (it promotes the
 //     first owner to admin) and it runs during first-boot setup, before any
 //     credential for that principal can exist. There is nothing to invalidate.
+//     It is the ONE site that supplies a no-op reducer, and it says so.
+//
+// WHERE THE SWEEP IS CALLED FROM CHANGED, AND THE ROWS BELOW DID NOT.
+// Since the per-app role tables landed (sethbacon/terraform-suite-identity#206,
+// Phase 3a), an authority-reducing role write takes its sweep as a MANDATORY
+// ARGUMENT — approles.AuthorityReducer, the same shape
+// identity/platformadmin.AuditIntentWriter takes — instead of the caller running
+// it as a separate statement afterwards. The pairing is therefore enforced by
+// the compiler rather than by each route remembering, and the FLAVOUR stays the
+// caller's, which is what keeps the KeysOnly asymmetry above intact.
+//
+// That every row here still passes unchanged is the evidence the relocation was
+// behaviour-preserving: this table drives the routes end to end and asserts both
+// families at each site, so a sweep that moved and stopped happening, or that
+// changed flavour, fails here.
 
 // akListCols mirrors ListAPIKeysByUser's scanAPIKeyWithUserName projection.
 var akListCols = apiKeyListCols
@@ -119,14 +135,14 @@ func expectKeyList(mock sqlmock.Sqlmock, userID, keyID, scopes string) {
 
 // newClassAdminHandlers builds AdminHandlers exactly as the router does.
 func newClassAdminHandlers(db *sql.DB) *AdminHandlers {
-	return NewAdminHandlers(db, WithAdminCredentialSweeper(classSweeper(db)))
+	return NewAdminHandlers(db, nil, WithAdminCredentialSweeper(classSweeper(db)))
 }
 
 func classSweeper(db *sql.DB) *credlifecycle.Sweeper {
 	return credlifecycle.NewSweeper(
 		repositories.NewUserTokenRevocationRepository(db),
 		idstore.NewAPIKeyRepository(db),
-		idstore.NewOrganizationRepository(db))
+		approles.NewMembers(db, nil))
 }
 
 // newClassAuthHandlers builds AuthHandlers with the sweeper wired, for the IdP
@@ -137,7 +153,7 @@ func newClassAuthHandlers(t *testing.T, db *sql.DB, mutate func(*config.Config))
 	if mutate != nil {
 		mutate(cfg)
 	}
-	h, err := NewAuthHandlers(cfg, db, WithAuthCredentialSweeper(classSweeper(db)))
+	h, err := NewAuthHandlers(cfg, db, nil, WithAuthCredentialSweeper(classSweeper(db)))
 	if err != nil {
 		t.Fatalf("NewAuthHandlers: %v", err)
 	}
@@ -146,7 +162,7 @@ func newClassAuthHandlers(t *testing.T, db *sql.DB, mutate func(*config.Config))
 
 // newClassSCIMRouter builds the real SCIM handler set with the sweeper wired.
 func newClassSCIMRouter(db *sql.DB) *gin.Engine {
-	h := scim.NewHandlers(&config.Config{}, db, scim.WithCredentialSweeper(classSweeper(db)))
+	h := scim.NewHandlers(&config.Config{}, db, nil, scim.WithCredentialSweeper(classSweeper(db)))
 	r := gin.New()
 	r.PUT("/scim/v2/Users/:id", h.PutUser())
 	r.PATCH("/scim/v2/Users/:id", h.PatchUser())

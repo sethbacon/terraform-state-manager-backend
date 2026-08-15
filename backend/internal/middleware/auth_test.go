@@ -14,6 +14,7 @@ import (
 	idauth "github.com/sethbacon/terraform-suite-identity/identity/auth"
 	idstore "github.com/sethbacon/terraform-suite-identity/identity/store"
 
+	"github.com/terraform-state-manager/terraform-state-manager/internal/approles"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/auth"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/db/repositories"
 )
@@ -317,14 +318,14 @@ func TestAuthMiddleware_APIKeyAuthenticates(t *testing.T) {
 	}
 }
 
-func newOrgRepoMW(t *testing.T) (*idstore.OrganizationRepository, sqlmock.Sqlmock) {
+func newOrgRepoMW(t *testing.T) (*approles.Members, sqlmock.Sqlmock) {
 	t.Helper()
 	db, mock, err := sqlmock.New()
 	if err != nil {
 		t.Fatalf("sqlmock.New (org): %v", err)
 	}
 	t.Cleanup(func() { db.Close() })
-	return idstore.NewOrganizationRepository(db), mock
+	return approles.NewMembers(db, nil), mock
 }
 
 // mwMembershipCols mirrors GetUserCombinedScopes' membership projection.

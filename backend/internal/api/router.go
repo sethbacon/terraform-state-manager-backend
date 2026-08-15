@@ -23,6 +23,7 @@ import (
 	"github.com/terraform-state-manager/terraform-state-manager/docs"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/api/scim"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/api/setup"
+	"github.com/terraform-state-manager/terraform-state-manager/internal/approles"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/auth"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/auth/mtls"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/config"
@@ -85,10 +86,10 @@ func NewRouter(cfg *config.Config, database *sql.DB, identityDB *sql.DB) (*gin.E
 	credSweeper := credlifecycle.NewSweeper(
 		userRevocationRepo,
 		idstore.NewAPIKeyRepository(identityDB),
-		idstore.NewOrganizationRepository(identityDB),
+		approles.NewMembers(identityDB, database),
 	)
 
-	authHandlers, err := NewAuthHandlers(cfg, identityDB, WithAuthCredentialSweeper(credSweeper))
+	authHandlers, err := NewAuthHandlers(cfg, identityDB, database, WithAuthCredentialSweeper(credSweeper))
 	if err != nil {
 		return nil, stop, err
 	}
@@ -166,7 +167,7 @@ func NewRouter(cfg *config.Config, database *sql.DB, identityDB *sql.DB) (*gin.E
 			v1.PUT("/admin/ui/theme", requireAuth, middleware.RequireScope(auth.ScopeAdmin),
 				UpdateUITheme(settingsRepo, newAuditor(identityDB)))
 		}
-		setupHandlers := setup.NewHandlers(settingsRepo, oidcConfigRepo, repositories.NewSourceRepository(database), identityDB, platformAdmins, cfg, authHandlers.SetOIDCProvider)
+		setupHandlers := setup.NewHandlers(settingsRepo, oidcConfigRepo, repositories.NewSourceRepository(database), identityDB, database, platformAdmins, cfg, authHandlers.SetOIDCProvider)
 		v1.GET("/setup/status", setupHandlers.GetSetupStatus)
 		setupGroup := v1.Group("/setup")
 		setupGroup.Use(middleware.SetupTokenMiddleware(settingsRepo))
@@ -211,7 +212,7 @@ func NewRouter(cfg *config.Config, database *sql.DB, identityDB *sql.DB) (*gin.E
 		// API keys (registry-modeled self-service): any authenticated user
 		// manages their own keys; admin sees all. No extra scope gate — the
 		// handlers enforce ownership and scope-grant limits themselves.
-		apiKeys := NewAPIKeysHandlers(identityDB)
+		apiKeys := NewAPIKeysHandlers(identityDB, database)
 		ak := v1.Group("/apikeys", requireAuth)
 		{
 			ak.GET("", apiKeys.ListAPIKeys())
@@ -273,7 +274,7 @@ func NewRouter(cfg *config.Config, database *sql.DB, identityDB *sql.DB) (*gin.E
 
 		// Cross-app: a sibling app federates its audit entries here (shared-store
 		// only — enforced in the handler, and advertised via audit.ingest.v1).
-		auditIngest := NewAuditIngestHandlers(identityDB, cfg)
+		auditIngest := NewAuditIngestHandlers(identityDB, database, cfg)
 		v1.POST("/audit/ingest", middleware.RequireSuiteServiceToken(cfg.Suite.ServiceToken), auditIngest.Ingest())
 
 		// Home dashboard: cross-source aggregated overview.
@@ -290,7 +291,7 @@ func NewRouter(cfg *config.Config, database *sql.DB, identityDB *sql.DB) (*gin.E
 		v1.GET("/reports/states/export", requireAuth, middleware.RequireScope(auth.ScopeStateRead), sources.ReportStatesExport())
 
 		// Identity management (admin scope): users, organizations, roles, audit log.
-		admin := NewAdminHandlers(identityDB, WithAdminCredentialSweeper(credSweeper))
+		admin := NewAdminHandlers(identityDB, database, WithAdminCredentialSweeper(credSweeper))
 		ag := v1.Group("/admin", requireAuth, middleware.RequireScope(auth.ScopeAdmin))
 		{
 			ag.GET("/stats", admin.Stats())
@@ -545,7 +546,7 @@ func NewRouter(cfg *config.Config, database *sql.DB, identityDB *sql.DB) (*gin.E
 	// (admin satisfies it); no cookie auth, so it is outside the CSRF-protected
 	// /api/v1 group. IdP clients present Authorization: Bearer <token>.
 	if cfg.Auth.SCIM.Enabled {
-		scimHandlers := scim.NewHandlers(cfg, identityDB, scim.WithCredentialSweeper(credSweeper))
+		scimHandlers := scim.NewHandlers(cfg, identityDB, database, scim.WithCredentialSweeper(credSweeper))
 		sc := r.Group("/scim/v2", requireAuth, middleware.RequireScope(auth.ScopeSCIMProvision))
 		{
 			sc.GET("/Users", scimHandlers.ListUsers())

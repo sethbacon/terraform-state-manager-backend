@@ -21,6 +21,7 @@ An Architecture Decision Record captures an important architectural decision mad
 | [002](002-fail-closed-state-writes.md)               | Fail-Closed State Writes                       | Accepted |
 | [003](003-advisory-lock-ttl.md)                      | Advisory Locks with a 15-Minute Stale TTL      | Accepted |
 | [004](004-role-seed-ownership.md)                    | Role-Seed Ownership in a Shared Identity Schema | Accepted |
+| [005](005-per-app-authorization-tables.md)           | Per-App Authorization Tables                   | Accepted |
 
 ## Creating a New ADR
 

@@ -21,6 +21,7 @@ import (
 	idmodels "github.com/sethbacon/terraform-suite-identity/identity/models"
 	idstore "github.com/sethbacon/terraform-suite-identity/identity/store"
 
+	"github.com/terraform-state-manager/terraform-state-manager/internal/approles"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/config"
 )
 
@@ -57,18 +58,18 @@ type AuditIngestHandlers struct {
 	// userRepo and orgRepo resolve the sibling's actor and organization ids
 	// against this database before the entry is written. See resolveSiblingIDs.
 	userRepo    *idstore.UserRepository
-	orgRepo     *idstore.OrganizationRepository
+	orgRepo     *approles.Members
 	sharedStore bool
 }
 
 // NewAuditIngestHandlers wires the receiver. A nil identityDB (unit-test rigs)
 // leaves the repos unset; the handler then reports the store unavailable.
-func NewAuditIngestHandlers(identityDB *sql.DB, cfg *config.Config) *AuditIngestHandlers {
+func NewAuditIngestHandlers(identityDB, appDB *sql.DB, cfg *config.Config) *AuditIngestHandlers {
 	h := &AuditIngestHandlers{sharedStore: cfg.Suite.IdentitySharedStore}
 	if identityDB != nil {
 		h.auditRepo = idstore.NewAuditRepository(identityDB)
 		h.userRepo = idstore.NewUserRepository(identityDB)
-		h.orgRepo = idstore.NewOrganizationRepository(identityDB)
+		h.orgRepo = approles.NewMembers(identityDB, appDB)
 	}
 	return h
 }

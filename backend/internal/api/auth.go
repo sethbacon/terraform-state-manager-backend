@@ -21,6 +21,7 @@ import (
 	idoidc "github.com/sethbacon/terraform-suite-identity/identity/auth/oidc"
 	idstore "github.com/sethbacon/terraform-suite-identity/identity/store"
 
+	"github.com/terraform-state-manager/terraform-state-manager/internal/approles"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/auth"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/auth/ldap"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/auth/saml"
@@ -34,9 +35,12 @@ const sessionTTL = 24 * time.Hour
 
 // AuthHandlers serves the authentication endpoints.
 type AuthHandlers struct {
-	cfg           *config.Config
-	userRepo      *idstore.UserRepository
-	orgRepo       *idstore.OrganizationRepository
+	cfg      *config.Config
+	userRepo *idstore.UserRepository
+	// orgRepo carries TSM's per-app role mirror: the IdP group reconciliation
+	// below is the highest-volume role writer in this application, and every one
+	// of its grants, reassignments and revocations is dual-written through it.
+	orgRepo       *approles.Members
 	roleRepo      *idstore.RoleTemplateRepository
 	tokenRepo     *idstore.TokenRepository
 	apiKeyRepo    *idstore.APIKeyRepository
@@ -65,7 +69,12 @@ func WithAuthCredentialSweeper(s *credlifecycle.Sweeper) AuthOption {
 // NewAuthHandlers constructs the auth handlers. identityDB must resolve to the
 // identity schema (search_path=identity,public). The OIDC provider is initialised
 // only when OIDC is enabled in config.
-func NewAuthHandlers(cfg *config.Config, identityDB *sql.DB, opts ...AuthOption) (*AuthHandlers, error) {
+//
+// appDB is the APPLICATION connection, which is where TSM's own role tables
+// live; it is what attaches the per-app role mirror to every membership write
+// the IdP group reconciliation performs. See NewAdminHandlers for why it is a
+// parameter and not an option.
+func NewAuthHandlers(cfg *config.Config, identityDB, appDB *sql.DB, opts ...AuthOption) (*AuthHandlers, error) {
 	// The login state store must be shared across replicas: the login redirect
 	// (Save) and the callback (Load) are separate HTTP requests, and behind a
 	// load balancer they land on different pods — a per-process map fails
@@ -78,7 +87,7 @@ func NewAuthHandlers(cfg *config.Config, identityDB *sql.DB, opts ...AuthOption)
 	h := &AuthHandlers{
 		cfg:         cfg,
 		userRepo:    idstore.NewUserRepository(identityDB),
-		orgRepo:     idstore.NewOrganizationRepository(identityDB),
+		orgRepo:     approles.NewMembers(identityDB, appDB),
 		roleRepo:    idstore.NewRoleTemplateRepository(identityDB),
 		tokenRepo:   idstore.NewTokenRepository(identityDB),
 		apiKeyRepo:  idstore.NewAPIKeyRepository(identityDB),
@@ -150,10 +159,10 @@ func NewAuthHandlers(cfg *config.Config, identityDB *sql.DB, opts ...AuthOption)
 func loginScope() idstore.OrgScope { return idstore.OrgScopeAllOrganizations() }
 
 // UserRepo and TokenRepo expose the identity repositories for the auth middleware.
-func (h *AuthHandlers) UserRepo() *idstore.UserRepository        { return h.userRepo }
-func (h *AuthHandlers) TokenRepo() *idstore.TokenRepository      { return h.tokenRepo }
-func (h *AuthHandlers) APIKeyRepo() *idstore.APIKeyRepository    { return h.apiKeyRepo }
-func (h *AuthHandlers) OrgRepo() *idstore.OrganizationRepository { return h.orgRepo }
+func (h *AuthHandlers) UserRepo() *idstore.UserRepository     { return h.userRepo }
+func (h *AuthHandlers) TokenRepo() *idstore.TokenRepository   { return h.tokenRepo }
+func (h *AuthHandlers) APIKeyRepo() *idstore.APIKeyRepository { return h.apiKeyRepo }
+func (h *AuthHandlers) OrgRepo() *approles.Members            { return h.orgRepo }
 
 func generateState() (string, error) {
 	b := make([]byte, 32)
@@ -685,7 +694,14 @@ func (h *AuthHandlers) reconcileManagedMemberships(ctx context.Context, userID s
 				// managed set: aborting it here would leave every LATER
 				// organization unreconciled and fail the login outright, for an
 				// element that is already in a settled state. Skip and continue.
-				updErr := h.orgRepo.UpdateMemberRole(ctx, org.ID, userID, role, idstore.OrgScopeOrganizations(org.ID))
+				// KEYS ONLY, and that asymmetry is the documented one: this runs
+				// microseconds before the same request mints the user's session
+				// token, and moving the JWT watermark here would revoke the token
+				// being issued (see credlifecycle.Sweeper.KeysOnly and
+				// sweepIdPReduction). Supplying the flavour per call site is
+				// exactly why the reducer is the mutation's argument.
+				updErr := h.orgRepo.UpdateMemberRole(ctx, org.ID, userID, role, idstore.OrgScopeOrganizations(org.ID),
+					h.sweepIdPReduction("idp group mapping: role reassigned"))
 				if errors.Is(updErr, idstore.ErrNotFound) {
 					slog.Info("group mapping: membership vanished before the role update; skipping",
 						"user_id", userID, "org", orgName)
@@ -694,12 +710,6 @@ func (h *AuthHandlers) reconcileManagedMemberships(ctx context.Context, userID s
 				if updErr != nil {
 					return fmt.Errorf("update member role org=%s user=%s: %w", org.ID, userID, updErr)
 				}
-				// A reassignment is a REDUCTION whenever the new template grants
-				// less than the old one — an IdP group change can demote owner to
-				// viewer. This arm commits that reduction, so it sweeps in its own
-				// right; a sweep on the sibling (removal) arm alone would leave it
-				// uncovered (#330).
-				h.sweepIdPReduction(ctx, userID, "idp group mapping: role reassigned")
 			} else if err := h.orgRepo.AddMemberWithParams(ctx, org.ID, userID, role, idstore.OrgScopeOrganizations(org.ID)); err != nil {
 				return fmt.Errorf("add member org=%s user=%s: %w", org.ID, userID, err)
 			}
@@ -712,11 +722,11 @@ func (h *AuthHandlers) reconcileManagedMemberships(ctx context.Context, userID s
 			// reconciling the remaining organizations rather than aborting the
 			// login; a deprovisioning loop that stops at the first
 			// already-deprovisioned element leaves the rest provisioned.
-			if err := h.orgRepo.RemoveMember(ctx, org.ID, userID, idstore.OrgScopeOrganizations(org.ID)); err != nil &&
+			if err := h.orgRepo.RemoveMember(ctx, org.ID, userID, idstore.OrgScopeOrganizations(org.ID),
+				h.sweepIdPReduction("idp group mapping: membership revoked")); err != nil &&
 				!errors.Is(err, idstore.ErrNotFound) {
 				return fmt.Errorf("revoke membership org=%s user=%s: %w", org.ID, userID, err)
 			}
-			h.sweepIdPReduction(ctx, userID, "idp group mapping: membership revoked")
 			slog.Info("group mapping: revoked membership (no matching group)", "user_id", userID, "org", orgName)
 		}
 	}
@@ -760,13 +770,19 @@ func (h *AuthHandlers) reconcileManagedMemberships(ctx context.Context, userID s
 // needs those retired immediately must use the admin membership routes, which
 // call AuthorityReduced and do move the watermark. See
 // credlifecycle.Sweeper.KeysOnly.
-func (h *AuthHandlers) sweepIdPReduction(ctx context.Context, userID, reason string) {
-	out := h.creds.KeysOnly(ctx, userID, reason)
-	if out.KeysRevoked > 0 || out.Incomplete {
-		slog.Info("idp reconciliation: credential sweep",
-			"user_id", userID, "reason", reason,
-			"api_keys_revoked", out.KeysRevoked, "api_keys_retained", out.KeysRetained,
-			"incomplete", out.Incomplete)
+func (h *AuthHandlers) sweepIdPReduction(reason string) approles.AuthorityReducer {
+	return func(ctx context.Context, userID string) error {
+		out := h.creds.KeysOnly(ctx, userID, reason)
+		if out.KeysRevoked > 0 || out.Incomplete {
+			slog.Info("idp reconciliation: credential sweep",
+				"user_id", userID, "reason", reason,
+				"api_keys_revoked", out.KeysRevoked, "api_keys_retained", out.KeysRetained,
+				"incomplete", out.Incomplete)
+		}
+		// Never fails the login: the authority change has already committed, and
+		// a login that 500s because a credential sweep did is a worse outcome
+		// than the residual the sweep was closing (#330).
+		return nil
 	}
 }
 

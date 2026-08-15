@@ -53,6 +53,7 @@ import (
 
 	idstore "github.com/sethbacon/terraform-suite-identity/identity/store"
 
+	"github.com/terraform-state-manager/terraform-state-manager/internal/approles"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/auth"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/db/repositories"
 )
@@ -98,13 +99,13 @@ type Sweeper struct {
 	apiKeys *idstore.APIKeyRepository
 	// orgs re-derives the authority the principal RETAINS after the change, so
 	// only keys that now over-ask are revoked.
-	orgs *idstore.OrganizationRepository
+	orgs *approles.Members
 }
 
 // NewSweeper builds a Sweeper. Any repository may be nil, in which case the
 // corresponding half is not swept; if every one is nil the constructor returns
 // nil so callers can store the result directly and rely on the no-op receiver.
-func NewSweeper(userRevocations *repositories.UserTokenRevocationRepository, apiKeys *idstore.APIKeyRepository, orgs *idstore.OrganizationRepository) *Sweeper {
+func NewSweeper(userRevocations *repositories.UserTokenRevocationRepository, apiKeys *idstore.APIKeyRepository, orgs *approles.Members) *Sweeper {
 	if userRevocations == nil && apiKeys == nil {
 		return nil
 	}

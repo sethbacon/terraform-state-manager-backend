@@ -30,14 +30,14 @@ func postIngest(h *AuditIngestHandlers, body string) *httptest.ResponseRecorder 
 }
 
 func TestAuditIngest_RejectsWithoutSharedStore(t *testing.T) {
-	h := NewAuditIngestHandlers(nil, sharedStoreCfg(false))
+	h := NewAuditIngestHandlers(nil, nil, sharedStoreCfg(false))
 	if w := postIngest(h, `{"action":"x"}`); w.Code != http.StatusForbidden {
 		t.Fatalf("want 403 when not shared-store, got %d", w.Code)
 	}
 }
 
 func TestAuditIngest_StoreUnavailableWhenNilDB(t *testing.T) {
-	h := NewAuditIngestHandlers(nil, sharedStoreCfg(true))
+	h := NewAuditIngestHandlers(nil, nil, sharedStoreCfg(true))
 	if w := postIngest(h, `{"action":"x"}`); w.Code != http.StatusServiceUnavailable {
 		t.Fatalf("want 503 when no identity DB, got %d", w.Code)
 	}
@@ -46,7 +46,7 @@ func TestAuditIngest_StoreUnavailableWhenNilDB(t *testing.T) {
 func TestAuditIngest_BadBody(t *testing.T) {
 	db, _, _ := sqlmock.New()
 	defer db.Close()
-	h := NewAuditIngestHandlers(db, sharedStoreCfg(true))
+	h := NewAuditIngestHandlers(db, nil, sharedStoreCfg(true))
 	if w := postIngest(h, `{not json`); w.Code != http.StatusBadRequest {
 		t.Fatalf("want 400 on malformed body, got %d", w.Code)
 	}
@@ -55,7 +55,7 @@ func TestAuditIngest_BadBody(t *testing.T) {
 func TestAuditIngest_MissingAction(t *testing.T) {
 	db, _, _ := sqlmock.New()
 	defer db.Close()
-	h := NewAuditIngestHandlers(db, sharedStoreCfg(true))
+	h := NewAuditIngestHandlers(db, nil, sharedStoreCfg(true))
 	if w := postIngest(h, `{"user_id":"u1"}`); w.Code != http.StatusBadRequest {
 		t.Fatalf("want 400 when action missing, got %d", w.Code)
 	}
@@ -91,7 +91,7 @@ func TestAuditIngest_RecordsEntry(t *testing.T) {
 		WithArgs(sqlmock.AnyArg(), "u1", "o1", "module.upload", "module", nil, sqlmock.AnyArg(), nil, sqlmock.AnyArg(), nil).
 		WillReturnRows(auditInsertReturn())
 
-	h := NewAuditIngestHandlers(db, sharedStoreCfg(true))
+	h := NewAuditIngestHandlers(db, nil, sharedStoreCfg(true))
 	body := `{"action":"module.upload","user_id":"u1","organization_id":"o1","resource_type":"module","timestamp":"2026-06-16T10:00:00Z","auth_method":"api_key","status_code":201}`
 	if w := postIngest(h, body); w.Code != http.StatusAccepted {
 		t.Fatalf("want 202, got %d body=%s", w.Code, w.Body.String())
@@ -125,7 +125,7 @@ func TestAuditIngest_NullsUnresolvableActorBeforeInsert(t *testing.T) {
 		WithArgs(sqlmock.AnyArg(), nil, nil, "x", sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), nil).
 		WillReturnRows(auditInsertReturn())
 
-	h := NewAuditIngestHandlers(db, sharedStoreCfg(true))
+	h := NewAuditIngestHandlers(db, nil, sharedStoreCfg(true))
 	if w := postIngest(h, `{"action":"x","user_id":"ghost","organization_id":"o9"}`); w.Code != http.StatusAccepted {
 		t.Fatalf("want 202 for an unresolvable federated actor, got %d", w.Code)
 	}
@@ -147,7 +147,7 @@ func TestAuditIngest_KeepsResolvableOrganization(t *testing.T) {
 		WithArgs(sqlmock.AnyArg(), nil, "o1", "x", sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), nil).
 		WillReturnRows(auditInsertReturn())
 
-	h := NewAuditIngestHandlers(db, sharedStoreCfg(true))
+	h := NewAuditIngestHandlers(db, nil, sharedStoreCfg(true))
 	if w := postIngest(h, `{"action":"x","user_id":"ghost","organization_id":"o1"}`); w.Code != http.StatusAccepted {
 		t.Fatalf("want 202, got %d", w.Code)
 	}

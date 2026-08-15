@@ -33,7 +33,7 @@ func newAuthEnv(t *testing.T, userID string, mutate func(*config.Config)) *sourc
 	if mutate != nil {
 		mutate(cfg)
 	}
-	h, err := NewAuthHandlers(cfg, db)
+	h, err := NewAuthHandlers(cfg, db, nil)
 	if err != nil {
 		t.Fatalf("NewAuthHandlers: %v", err)
 	}

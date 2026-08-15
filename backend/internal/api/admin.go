@@ -12,6 +12,7 @@ import (
 	idmodels "github.com/sethbacon/terraform-suite-identity/identity/models"
 	idstore "github.com/sethbacon/terraform-suite-identity/identity/store"
 
+	"github.com/terraform-state-manager/terraform-state-manager/internal/approles"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/auth"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/credlifecycle"
 )
@@ -20,8 +21,12 @@ import (
 // roles, audit log) backed by the shared terraform-suite-identity repositories.
 // All routes are gated by the admin scope in the router.
 type AdminHandlers struct {
-	userRepo  *idstore.UserRepository
-	orgRepo   *idstore.OrganizationRepository
+	userRepo *idstore.UserRepository
+	// orgRepo is the shared organization repository WITH TSM's per-app role
+	// mirror attached (internal/approles): every membership read here is the
+	// library's, and every write is dual-written into this application's own
+	// organization_member_roles. See approles.Members.
+	orgRepo   *approles.Members
 	roleRepo  *idstore.RoleTemplateRepository
 	auditRepo *idstore.AuditRepository
 	// creds invalidates the credential families that snapshot a principal's
@@ -42,14 +47,21 @@ func WithAdminCredentialSweeper(s *credlifecycle.Sweeper) AdminOption {
 
 // NewAdminHandlers builds the admin handlers over the identity-schema connection.
 //
+// appDB is the APPLICATION connection, and it is a required parameter rather
+// than an option because it is what attaches the per-app role mirror. An option
+// could be omitted, and an omitted mirror is a membership route that writes
+// identity and nothing else — silently, and only on the deployment that forgot
+// it. A nil appDB is legitimate ONLY in a rig with no application database; it
+// yields a Members that performs the identity leg alone.
+//
 // It takes a *sql.DB, like every other handler constructor here: identity
 // v0.25.0 made NewRoleTemplateRepository take one too, so the sqlx handle this
 // signature used to demand — and the sqlx.NewDb wrapper every caller built to
 // satisfy it — existed only to feed that one constructor.
-func NewAdminHandlers(identityDB *sql.DB, opts ...AdminOption) *AdminHandlers {
+func NewAdminHandlers(identityDB, appDB *sql.DB, opts ...AdminOption) *AdminHandlers {
 	h := &AdminHandlers{
 		userRepo:  idstore.NewUserRepository(identityDB),
-		orgRepo:   idstore.NewOrganizationRepository(identityDB),
+		orgRepo:   approles.NewMembers(identityDB, appDB),
 		roleRepo:  idstore.NewRoleTemplateRepository(identityDB),
 		auditRepo: idstore.NewAuditRepository(identityDB),
 	}

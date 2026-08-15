@@ -30,7 +30,7 @@ func newAdminOrgRoutingEnv(t *testing.T, callerUserID string, scopes []string) *
 	}
 	t.Cleanup(func() { db.Close() })
 
-	h := NewAdminHandlers(db)
+	h := NewAdminHandlers(db, nil)
 	r := gin.New()
 	r.Use(func(c *gin.Context) {
 		if callerUserID != "" {

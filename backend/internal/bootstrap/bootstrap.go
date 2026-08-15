@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"fmt"
 
+	"github.com/terraform-state-manager/terraform-state-manager/internal/approles"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/auth"
 )
 
@@ -24,7 +25,20 @@ import (
 // database, only the designated owner seeds role templates, so the apps don't
 // overwrite each other's role scopes. The default organization is always ensured
 // — it is a single-tenant app concern, not a cross-app collision.
-func Run(ctx context.Context, identityDB *sql.DB, seedRoles bool) error {
+// THE RECONCILE IS PART OF THIS FUNCTION, NOT A SECOND CALL BESIDE IT.
+// approles.Reconcile copies "what TSM resolves today" out of the identity schema
+// into TSM's own role_templates and organization_member_roles
+// (sethbacon/terraform-suite-identity#206, Phase 3a). What TSM resolves today is
+// the OUTPUT of the seed above, so the two are ordered, and a caller who ran only
+// the first would leave the mirror describing the previous boot's roles. A
+// separate exported step is a step somebody can forget; folding it in makes the
+// ordering structural, the same way scim.deprovisionUser makes its membership
+// strip and its credential sweep inseparable.
+//
+// appDB is the APPLICATION connection, where the per-app tables live. A nil
+// appDB skips the reconcile, for callers with no app connection to offer; the
+// server always passes one.
+func Run(ctx context.Context, identityDB, appDB *sql.DB, seedRoles bool) error {
 	if seedRoles {
 		if err := seedRoleTemplates(ctx, identityDB); err != nil {
 			return fmt.Errorf("seed role templates: %w", err)
@@ -33,6 +47,14 @@ func Run(ctx context.Context, identityDB *sql.DB, seedRoles bool) error {
 	if err := ensureDefaultOrg(ctx, identityDB); err != nil {
 		return fmt.Errorf("ensure default organization: %w", err)
 	}
+	if appDB == nil {
+		return nil
+	}
+	rep, err := approles.Reconcile(ctx, appDB, identityDB)
+	if err != nil {
+		return fmt.Errorf("reconcile per-app authorization tables: %w", err)
+	}
+	approles.LogReport(rep)
 	return nil
 }
 

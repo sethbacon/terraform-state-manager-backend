@@ -9,6 +9,7 @@ import (
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
 	idstore "github.com/sethbacon/terraform-suite-identity/identity/store"
 
+	"github.com/terraform-state-manager/terraform-state-manager/internal/approles"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/db/repositories"
 )
 
@@ -35,7 +36,7 @@ func newSweeper(t *testing.T) (*Sweeper, sqlmock.Sqlmock) {
 	return NewSweeper(
 		repositories.NewUserTokenRevocationRepository(db),
 		idstore.NewAPIKeyRepository(db),
-		idstore.NewOrganizationRepository(db),
+		approles.NewMembers(db, nil),
 	), mock
 }
 

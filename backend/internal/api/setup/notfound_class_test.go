@@ -41,7 +41,10 @@ func newConfigureAdminEnv(t *testing.T) (*Handlers, sqlmock.Sqlmock) {
 	t.Cleanup(func() { _ = db.Close() })
 	cfg := &config.Config{}
 	cfg.Suite.RoleSeedOwner = "self"
-	return NewHandlers(repositories.NewSystemSettingsRepository(db), nil, nil, db, nil, cfg, nil), mock
+	// No app connection: this rig exercises the identity leg's ErrNotFound
+	// contract, and attaching the per-app role mirror would add statements to a
+	// single-mock script whose whole point is the identity sequence.
+	return NewHandlers(repositories.NewSystemSettingsRepository(db), nil, nil, db, nil, nil, cfg, nil), mock
 }
 
 // expectOwnerLookups scripts everything up to (but not including) the role

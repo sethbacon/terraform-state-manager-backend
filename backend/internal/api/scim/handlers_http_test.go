@@ -36,7 +36,7 @@ func newSCIM(t *testing.T) (*gin.Engine, sqlmock.Sqlmock) {
 
 	cfg := &config.Config{}
 	cfg.Server.PublicURL = "https://tsm.example.com"
-	h := NewHandlers(cfg, db)
+	h := NewHandlers(cfg, db, nil)
 
 	r := gin.New()
 	v2 := r.Group("/scim/v2")

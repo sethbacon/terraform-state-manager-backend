@@ -257,8 +257,8 @@ func TestValidateResponse_MalformedRejected(t *testing.T) {
 	p := newTestSAMLProvider(t, ti, false)
 
 	for name, payload := range map[string]string{
-		"not base64":       "!!! not base64 !!!",
-		"base64 not xml":   base64.StdEncoding.EncodeToString([]byte("hello, not a saml response")),
+		"not base64":         "!!! not base64 !!!",
+		"base64 not xml":     base64.StdEncoding.EncodeToString([]byte("hello, not a saml response")),
 		"empty SAMLResponse": "",
 	} {
 		if _, err := p.ValidateResponse(acsRequest(payload), []string{"id-x"}, testGroupAttr); err == nil {

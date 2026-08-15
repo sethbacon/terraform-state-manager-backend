@@ -8,10 +8,10 @@ import (
 
 // SecurityHeadersConfig holds configuration for security headers.
 type SecurityHeadersConfig struct {
-	EnableHSTS            bool
-	HSTSMaxAge            int
-	HSTSIncludeSubdomains bool
-	HSTSPreload           bool
+	EnableHSTS               bool
+	HSTSMaxAge               int
+	HSTSIncludeSubdomains    bool
+	HSTSPreload              bool
 	EnableFrameOptions       bool
 	FrameOptionsValue        string
 	EnableContentTypeOptions bool
