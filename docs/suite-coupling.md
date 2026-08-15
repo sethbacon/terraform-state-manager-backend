@@ -68,7 +68,7 @@ everywhere in TSM, layering is built-in defaults → optional YAML file
 | `TSM_SUITE_POLL_INTERVAL` | `60s` | How often TSM polls the sibling's manifest. |
 | `TSM_SUITE_IDENTITY_SHARED_STORE` | `false` | Operator assertion that **this app uses the shared identity store + single IdP**. Advertised in the manifest; gates audit-federation ingest and drops the SPA's "you may need to sign in" hint (only when both apps assert it). |
 | `TSM_SUITE_SERVICE_TOKEN` | (empty ⇒ disabled) | Shared secret a sibling presents (`X-Suite-Service-Token`) for server-to-server reads (`GET /consumers`, `POST /audit/ingest`). Set it to the **same value** as the registry's `TFR_SUITE_SIBLING_TOKEN`. |
-| `TSM_SUITE_ROLE_SEED_OWNER` | `self` | Who seeds the shared identity schema's system role templates: `self` \| `registry` \| `tsm`. With a shared store, exactly one app must own the seed. |
+| `TSM_SUITE_ROLE_SEED_OWNER` | `self` | Who seeds the **shared** identity schema's system role templates: `self` \| `registry` \| `tsm`. With a shared store, exactly one app must own that seed. It no longer decides what TSM's own roles grant — TSM seeds and reads its own copy. |
 
 > **The token is symmetric, the URLs are not.** Each app points its
 > `*_SIBLING_URL` at the *other* app. The service token, by contrast, is one
@@ -194,13 +194,30 @@ identity tables, and vice versa.
 
 ### Role-template seeding ownership
 
-TSM owns a set of role templates (`admin`, `editor`, `operator`, `viewer`) that
-it **upserts on every startup**. With a shared store, if both apps seeded their
-own templates they would overwrite each other's role→scope mappings on every
-restart. `TSM_SUITE_ROLE_SEED_OWNER` resolves this:
+TSM owns a set of role templates (`admin`, `editor`, `operator`, `viewer`, …)
+that it **upserts on every startup**. It now writes them **twice**, and the two
+writes have different rules:
 
-- `self` (default, standalone): every app seeds its own store.
-- `registry` or `tsm`: only the named owner seeds; the other app skips seeding.
+- Into **TSM's own** `role_templates`, on the application connection,
+  **unconditionally**. `name` is unique *per application* there, so there is no
+  sibling to collide with. These are the rows TSM authorizes from — see
+  [Authorization source](configuration.md#authorization-source).
+- Into the **shared** `identity.role_templates`, gated by
+  `TSM_SUITE_ROLE_SEED_OWNER`. `identity.role_templates.name` is globally unique,
+  so with a shared store two apps seeding it would still overwrite each other's
+  mappings on every restart. That copy is now read by the **sibling registry**
+  and by TSM's authorization **rollback path**, not by TSM's own authorization.
+
+`TSM_SUITE_ROLE_SEED_OWNER` therefore still matters, with a narrower job:
+
+- `self` (default, standalone): every app seeds the shared store too.
+- `registry` or `tsm`: only the named owner seeds it; the other app skips it.
+
+> **Coupled deployments: your roles changed meaning.** Before the reads moved,
+> TSM authorized from the shared table — so with `role_seed_owner=registry`, TSM's
+> `editor` granted whatever the *registry* defined. It now grants what TSM
+> defines. Run `tsm-server authz-drift` on the current build before upgrading:
+> its `template_drift` output names exactly which roles change and how.
 
 The single-tenant **default organization** is always ensured regardless of seed
 ownership — it is a per-app convenience, not a cross-app collision.
@@ -386,7 +403,8 @@ To enable a fully coupled deployment:
 
 - [ ] Both apps point at **one physical identity database** (`TSM_IDENTITY_DATABASE_HOST` + `_NAME` on TSM; equivalent on the registry).
 - [ ] Set `TSM_SUITE_IDENTITY_SHARED_STORE=true` on TSM (and the registry's equivalent).
-- [ ] Choose exactly one role-seed owner (`TSM_SUITE_ROLE_SEED_OWNER` = `tsm` or `registry`, the same decision on both apps).
+- [ ] Choose exactly one **shared-schema** role-seed owner (`TSM_SUITE_ROLE_SEED_OWNER` = `tsm` or `registry`, the same decision on both apps).
+- [ ] Run `tsm-server authz-drift` on the deployment **before** upgrading it onto a build that authorizes from TSM's own tables, and require a zero exit. Its `template_drift` output names the roles whose meaning changes.
 - [ ] Set `TSM_SUITE_SIBLING_URL` on TSM to the registry's public URL (and the registry's `*_SIBLING_URL` to TSM's).
 - [ ] Provision one shared `TSM_SUITE_SERVICE_TOKEN` equal to the registry's `TFR_SUITE_SIBLING_TOKEN`.
 - [ ] Confirm pod-to-pod reachability both ways (manifest polls, `/consumers`, freshness, audit shipping).

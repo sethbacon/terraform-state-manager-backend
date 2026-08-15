@@ -79,7 +79,7 @@ func NewHandlers(cfg *config.Config, identityDB, appDB *sql.DB, opts ...Option) 
 	h := &Handlers{
 		cfg:      cfg,
 		userRepo: idstore.NewUserRepository(identityDB),
-		orgRepo:  approles.NewMembers(identityDB, appDB),
+		orgRepo:  approles.NewMembers(identityDB, appDB, approles.RoleSource(cfg.Authz.RoleSource)),
 	}
 	for _, opt := range opts {
 		opt(h)

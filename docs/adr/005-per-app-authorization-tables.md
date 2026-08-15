@@ -13,7 +13,7 @@ The agreed suite-wide model is [`sethbacon/terraform-suite-identity#206`](https:
 
 ## Decision
 
-The State Manager gets its own `role_templates` and `organization_member_roles` on the **application** connection (migration `000031`), written in lockstep with the identity tables and reconciled from them at every startup.
+The State Manager gets its own `role_templates` and `organization_member_roles` on the **application** connection (migration `000032`), written in lockstep with the identity tables and reconciled from them at every startup.
 
 **No foreign keys to identity.** `organization_member_roles.(organization_id, user_id)` name identity rows and carry no constraint, because identity may be another schema *or another database* (`TSM_IDENTITY_DATABASE_*`) where a foreign key is not expressible. The foreign key to this app's own `role_templates` **is** expressible and is taken, with `ON DELETE SET NULL` mirroring identity's own column exactly.
 
@@ -44,4 +44,4 @@ The State Manager gets its own `role_templates` and `organization_member_roles` 
 - A mirror failure cannot fail the request (the identity leg has already committed), so divergence is reported through logs and `approles.DriftQuery` rather than surfaced to the caller.
 - Handler constructors now take the application connection as a required parameter. That is deliberate — an option can be omitted and an omitted mirror is silent — but it touches every construction site.
 
-**Unchanged, for now**: `TSM_SUITE_ROLE_SEED_OWNER` still governs the shared seed and is still load-bearing, because reads still come from the table it arbitrates. It becomes inert when reads move to these tables, and is removed with the shared authorization surface in the final phase of #206. ADR 004 stays **Accepted** until then.
+**Unchanged, for now**: `TSM_SUITE_ROLE_SEED_OWNER` still governs the shared seed and is still load-bearing, because reads still come from the table it arbitrates. Reads move in [ADR 006](006-per-app-authorization-reads.md), which found this paragraph's prediction that the flag "becomes inert" to be **wrong**: it also gates the setup wizard's identity-ownership decisions, and the shared seed it arbitrates is still read by the sibling registry and by ADR 006's rollback path. It is removed with the shared authorization surface in the final phase of #206. ADR 004 stays **Accepted** until then.

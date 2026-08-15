@@ -160,6 +160,34 @@ auth:
   scim:
     enabled: false
 
+# Where authorization reads a principal's role from, and how often the two
+# candidate sources are compared.
+#
+# Under sethbacon/terraform-suite-identity#206 identity is SHARED and
+# authorization is PER-APP: membership stays a fact in the identity schema, and
+# which role a member holds HERE is a row in this application's own
+# organization_member_roles. "app" (the default) is that model; "identity" is the
+# previous phase, where every role read came from identity.organization_members
+# joined to identity.role_templates.
+#
+# BOTH TABLES ARE WRITTEN UNDER EITHER VALUE, so the source that is not being read
+# stays current and switching back is a restart rather than a restore. That is the
+# rollback: set TSM_AUTHZ_ROLE_SOURCE=identity and restart.
+#
+# BEFORE UPGRADING ONTO A BUILD THAT DEFAULTS TO "app", run
+#   tsm-server authz-drift
+# against the deployment and require a zero exit. A gap between the two sources
+# does not surface as an error — it surfaces as a principal silently holding the
+# wrong role.
+authz:
+  role_source: "app"        # app | identity  (TSM_AUTHZ_ROLE_SOURCE)
+  # How often the running server re-compares the two sources and reports the
+  # difference (it never corrects; the startup reconcile does that). 0 disables
+  # the loop. Exports tsm_authz_role_drift{kind=...}; alert on the counts AND on
+  # the age of tsm_authz_role_drift_last_check_timestamp_seconds, because a
+  # detector that has stopped running reads exactly like a healthy one.
+  drift_interval: 15m       # TSM_AUTHZ_DRIFT_INTERVAL
+
 # Optional runtime coupling to the sibling suite app (the Terraform registry).
 # sibling_url empty (default) = standalone; cross-app features (module freshness,
 # the "Consumed by" join, audit federation) stay inert. When set, the app polls
@@ -167,11 +195,22 @@ auth:
 suite:
   sibling_url: ""           # base URL of the sibling registry; empty = standalone
   poll_interval: 60s        # how often the sibling manifest is re-fetched
-  # Which app seeds the shared identity schema's system role templates:
+  # Which app seeds the SHARED identity schema's system role templates:
   # self | registry | tsm. "self" (default) = each app seeds its own store
   # (correct for standalone and for separate identity DBs). When two apps SHARE
   # one identity database, exactly one must own the seed ("registry" or "tsm") or
   # they overwrite each other's role scopes on every restart.
+  #
+  # It NO LONGER decides what this application's own roles grant. Since
+  # authz.role_source defaults to "app", this app seeds its OWN role_templates
+  # unconditionally and authorizes from those; this setting now governs only the
+  # shared copy, which the sibling registry and the authz rollback path still
+  # read. NOTE for coupled deployments: your `editor` (and every other role name)
+  # now means what THIS build defines, not what the sibling seeded.
+  #
+  # It is also still what the first-run setup wizard uses to decide whether this
+  # app owns identity at all (owner creation, OIDC configuration), so it cannot
+  # be removed until the shared authorization surface goes.
   role_seed_owner: "self"
   # Operator assertion that THIS app uses the shared identity store + single IdP.
   # Advertised in the manifest; the SPA only drops the "you may need to sign in"

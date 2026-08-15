@@ -1,10 +1,12 @@
 package api
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"log/slog"
 	"net/http"
+	"sort"
 	"strconv"
 	"time"
 
@@ -58,10 +60,10 @@ func WithAdminCredentialSweeper(s *credlifecycle.Sweeper) AdminOption {
 // v0.25.0 made NewRoleTemplateRepository take one too, so the sqlx handle this
 // signature used to demand — and the sqlx.NewDb wrapper every caller built to
 // satisfy it — existed only to feed that one constructor.
-func NewAdminHandlers(identityDB, appDB *sql.DB, opts ...AdminOption) *AdminHandlers {
+func NewAdminHandlers(identityDB, appDB *sql.DB, source approles.RoleSource, opts ...AdminOption) *AdminHandlers {
 	h := &AdminHandlers{
 		userRepo:  idstore.NewUserRepository(identityDB),
-		orgRepo:   approles.NewMembers(identityDB, appDB),
+		orgRepo:   approles.NewMembers(identityDB, appDB, source),
 		roleRepo:  idstore.NewRoleTemplateRepository(identityDB),
 		auditRepo: idstore.NewAuditRepository(identityDB),
 	}
@@ -183,7 +185,18 @@ func (h *AdminHandlers) ListOrganizations() gin.HandlerFunc {
 	}
 }
 
-// ListRoles returns the role templates (the app owns these).
+// ListRoles returns THIS APPLICATION's role templates.
+//
+// From approles, not from the shared identity schema, since
+// sethbacon/terraform-suite-identity#206 Phase 3b. This is the role picker: it is
+// what an administrator reads to decide which role to assign, and what they read
+// to reason about what a role grants. Listing identity's copy after the reads
+// moved would show the SIBLING's scope set for `editor` on a coupled deployment
+// while assigning it granted this build's — the "shown one role, granted another"
+// failure this phase exists to end, surviving on the one screen whose whole
+// subject is roles. It would also omit any role this build defines that identity
+// does not have, making it unlistable and therefore unassignable.
+//
 // @Summary      List role templates
 // @Tags         Admin
 // @Produce      json
@@ -193,13 +206,51 @@ func (h *AdminHandlers) ListOrganizations() gin.HandlerFunc {
 // @Router       /admin/roles [get]
 func (h *AdminHandlers) ListRoles() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		roles, err := h.roleRepo.ListRoleTemplates(c.Request.Context())
+		roles, err := h.appRoles(c.Request.Context())
 		if err != nil {
 			serverError(c, err, "failed to list role templates")
 			return
 		}
 		c.JSON(http.StatusOK, gin.H{"roles": roles})
 	}
+}
+
+// appRoles reads this application's own role definitions, sorted by name for a
+// stable picker.
+//
+// Falls back to the shared identity schema ONLY when there is no application
+// connection to read — the nil-appDB test rigs. A server always has one, and
+// approles.Store.Verify aborts its boot if the tables are absent.
+func (h *AdminHandlers) appRoles(ctx context.Context) ([]approles.Template, error) {
+	store := h.orgRepo.Store()
+	if store == nil {
+		shared, err := h.roleRepo.ListRoleTemplates(ctx)
+		if err != nil {
+			return nil, err
+		}
+		out := make([]approles.Template, 0, len(shared))
+		for _, rt := range shared {
+			if rt == nil {
+				continue
+			}
+			out = append(out, approles.Template{
+				ID: rt.ID.String(), Name: rt.Name, DisplayName: rt.DisplayName,
+				Description: rt.Description, Scopes: rt.Scopes, IsSystem: rt.IsSystem,
+			})
+		}
+		sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+		return out, nil
+	}
+	byName, err := store.ListTemplates(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]approles.Template, 0, len(byName))
+	for _, t := range byName {
+		out = append(out, t)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out, nil
 }
 
 // auditFiltersForUser builds the filter set selecting a single user's entries
@@ -327,7 +378,7 @@ func (h *AdminHandlers) Stats() gin.HandlerFunc {
 		}
 		userCount, _ := h.userRepo.Count(ctx, userScope)
 		orgs, _ := h.orgRepo.List(ctx, 1000, 0, orgScope)
-		roles, _ := h.roleRepo.ListRoleTemplates(ctx)
+		roles, _ := h.appRoles(ctx)
 		c.JSON(http.StatusOK, gin.H{
 			"users":         userCount,
 			"organizations": len(orgs),

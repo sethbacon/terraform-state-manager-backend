@@ -44,7 +44,10 @@
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| Role scopes reset on every restart | two apps share one identity DB but both seed it (`role_seed_owner=self` on both) | set `TSM_SUITE_ROLE_SEED_OWNER` so exactly one app owns the seed (`registry` or `tsm`) |
+| Shared-schema role scopes reset on every restart | two apps share one identity DB but both seed it (`role_seed_owner=self` on both) | set `TSM_SUITE_ROLE_SEED_OWNER` so exactly one app owns that seed (`registry` or `tsm`). TSM's **own** role scopes are unaffected — it seeds and reads its own copy |
+| A user lost access, or kept access they should not have, after an upgrade | TSM's role tables and the shared identity schema disagree | run `tsm-server authz-drift`. Non-zero names the pairs. Restart the backend (the startup reconcile repairs and now logs what it changed) and re-run; drift that **survives a restart** means the reconcile is failing, and the startup log says why. Roll back with `TSM_AUTHZ_ROLE_SOURCE=identity` |
+| Every role read fails with "no role source was configured" | `TSM_AUTHZ_ROLE_SOURCE` is set to something that is neither `app` nor `identity` | the boot refuses an unknown value outright; if the process started, check the startup line `authorization role source` for what it actually resolved |
+| Roles a coupled deployment relied on changed meaning after upgrading | TSM now authorizes from its own role definitions, not the sibling's (the intent of the per-app model) | expected. `tsm-server authz-drift` on the pre-upgrade build names the affected roles via `template_drift`; `TSM_AUTHZ_ROLE_SOURCE=identity` restores the previous behaviour |
 | "Consumed by" panel empty / `GET /consumers` 401 | service tokens don't match (or `TSM_SUITE_SERVICE_TOKEN` empty ⇒ endpoint disabled) | set `TSM_SUITE_SERVICE_TOKEN` to the SAME value as the sibling registry's `TFR_SUITE_SIBLING_TOKEN` |
 | Module freshness / cross-app features missing | sibling not discovered | set `TSM_SUITE_SIBLING_URL`; check `TSM_SUITE_POLL_INTERVAL` and that the sibling manifest is reachable |
 

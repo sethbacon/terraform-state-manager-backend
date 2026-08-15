@@ -40,6 +40,18 @@ import (
 // somebody the sibling's identity already made an admin here — which works
 // because this phase's elevation is additive and the role-template route to
 // `admin` still stands.
+// noSetupSweep is the credential sweep for the first-run wizard, and it is the
+// one place in this application where doing nothing is the right answer: this
+// step CREATES the first owner and promotes them in the same request, during
+// first boot, before any session or API key for that principal can exist. There
+// is nothing to invalidate.
+//
+// Named and shared by the two authority writes in this file rather than spelled
+// as a bare literal at each, so the exemption is one reviewable thing rather than
+// two that can drift apart. Recorded the same way in internal/api's
+// credential_lifecycle_class_test.go exemption list.
+func noSetupSweep(context.Context, string) error { return nil }
+
 func (h *Handlers) ConfigureAdmin(c *gin.Context) {
 	if !h.cfg.Suite.ShouldSeedRoles("tsm") {
 		c.JSON(http.StatusConflict, gin.H{"error": "identity is managed by the suite registry; create the owner there"})
@@ -55,7 +67,7 @@ func (h *Handlers) ConfigureAdmin(c *gin.Context) {
 	ctx := c.Request.Context()
 	email := strings.ToLower(strings.TrimSpace(req.Email))
 
-	orgRepo := approles.NewMembers(h.identityDB, h.appDB)
+	orgRepo := approles.NewMembers(h.identityDB, h.appDB, approles.RoleSource(h.cfg.Authz.RoleSource))
 	userRepo := idstore.NewUserRepository(h.identityDB)
 
 	defaultOrg, err := orgRepo.GetDefaultOrganization(ctx)
@@ -79,7 +91,13 @@ func (h *Handlers) ConfigureAdmin(c *gin.Context) {
 		}
 		user = existing
 	}
-	if err := orgRepo.AddMemberWithParams(ctx, defaultOrg.ID, user.ID, "admin", bootstrapScope); err != nil {
+	// The reducer is a no-op HERE for the same reason it is on the
+	// UpdateMemberRole below: this is first-boot setup, the principal is being
+	// created and promoted in the same request, and no credential of theirs can
+	// exist yet to invalidate. It is spelled rather than defaulted because the
+	// mirror leg of an add is an upsert and CAN reduce elsewhere — see
+	// approles.Members.AddMemberWithRoleTemplate.
+	if err := orgRepo.AddMemberWithParams(ctx, defaultOrg.ID, user.ID, "admin", bootstrapScope, noSetupSweep); err != nil {
 		// Already a member (the insert is a plain INSERT, so a re-run of the
 		// wizard hits the unique constraint): promote to admin.
 		//
@@ -96,8 +114,7 @@ func (h *Handlers) ConfigureAdmin(c *gin.Context) {
 		// setup, before any credential for that principal can exist. There is
 		// nothing to invalidate. Recorded the same way in
 		// credential_lifecycle_class_test.go's exemption list.
-		noSweep := func(context.Context, string) error { return nil }
-		uerr := orgRepo.UpdateMemberRole(ctx, defaultOrg.ID, user.ID, "admin", bootstrapScope, noSweep)
+		uerr := orgRepo.UpdateMemberRole(ctx, defaultOrg.ID, user.ID, "admin", bootstrapScope, noSetupSweep)
 		if errors.Is(uerr, idstore.ErrNotFound) {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to grant the owner the admin role: no membership to promote"})
 			return

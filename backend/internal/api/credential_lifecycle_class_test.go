@@ -135,14 +135,14 @@ func expectKeyList(mock sqlmock.Sqlmock, userID, keyID, scopes string) {
 
 // newClassAdminHandlers builds AdminHandlers exactly as the router does.
 func newClassAdminHandlers(db *sql.DB) *AdminHandlers {
-	return NewAdminHandlers(db, nil, WithAdminCredentialSweeper(classSweeper(db)))
+	return NewAdminHandlers(db, nil, approles.RoleSourceIdentity, WithAdminCredentialSweeper(classSweeper(db)))
 }
 
 func classSweeper(db *sql.DB) *credlifecycle.Sweeper {
 	return credlifecycle.NewSweeper(
 		repositories.NewUserTokenRevocationRepository(db),
 		idstore.NewAPIKeyRepository(db),
-		approles.NewMembers(db, nil))
+		approles.NewMembers(db, nil, approles.RoleSourceIdentity))
 }
 
 // newClassAuthHandlers builds AuthHandlers with the sweeper wired, for the IdP

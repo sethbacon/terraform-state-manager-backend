@@ -36,7 +36,7 @@ func newSweeper(t *testing.T) (*Sweeper, sqlmock.Sqlmock) {
 	return NewSweeper(
 		repositories.NewUserTokenRevocationRepository(db),
 		idstore.NewAPIKeyRepository(db),
-		approles.NewMembers(db, nil),
+		approles.NewMembers(db, nil, approles.RoleSourceIdentity),
 	), mock
 }
 

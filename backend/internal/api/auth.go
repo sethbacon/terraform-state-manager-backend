@@ -87,7 +87,7 @@ func NewAuthHandlers(cfg *config.Config, identityDB, appDB *sql.DB, opts ...Auth
 	h := &AuthHandlers{
 		cfg:         cfg,
 		userRepo:    idstore.NewUserRepository(identityDB),
-		orgRepo:     approles.NewMembers(identityDB, appDB),
+		orgRepo:     approles.NewMembers(identityDB, appDB, approles.RoleSource(cfg.Authz.RoleSource)),
 		roleRepo:    idstore.NewRoleTemplateRepository(identityDB),
 		tokenRepo:   idstore.NewTokenRepository(identityDB),
 		apiKeyRepo:  idstore.NewAPIKeyRepository(identityDB),
@@ -433,11 +433,21 @@ func (h *AuthHandlers) MeHandler() gin.HandlerFunc {
 		uid, _ := userID.(string)
 
 		// Sentinel first: a token naming a deleted user must keep answering 404,
-		// not 500. GetUserWithOrgRoles propagates GetUserByID's ErrNotFound, and
-		// a user with no memberships is NOT a miss (it returns an empty slice),
-		// so this cannot swallow a legitimately membership-less account.
-		userWithRoles, err := h.userRepo.GetUserWithOrgRoles(c.Request.Context(), uid, loginScope())
-		if errors.Is(err, idstore.ErrNotFound) || (err == nil && userWithRoles == nil) {
+		// not 500.
+		//
+		// GetUserByID, NOT GetUserWithOrgRoles, since
+		// sethbacon/terraform-suite-identity#206 Phase 3b. That accessor resolves
+		// each membership's role by joining the SHARED identity schema's
+		// role_templates, which is no longer where this application's roles live —
+		// so its Memberships would have put identity's role name and scopes in the
+		// same response as allowed_scopes, which comes from THIS application's
+		// tables. On a coupled deployment /auth/me would then show a principal one
+		// role while granting them another, on the one endpoint whose whole job is
+		// to tell a user what they are. It propagates the same ErrNotFound (that
+		// is where GetUserWithOrgRoles got it), and dropping it also drops the
+		// membership query whose result is now discarded.
+		user, err := h.userRepo.GetUserByID(c.Request.Context(), uid, loginScope())
+		if errors.Is(err, idstore.ErrNotFound) || (err == nil && user == nil) {
 			c.JSON(http.StatusNotFound, gin.H{"error": "User not found"})
 			return
 		}
@@ -446,13 +456,20 @@ func (h *AuthHandlers) MeHandler() gin.HandlerFunc {
 			return
 		}
 
+		// Unscoped for the same reason GetUserCombinedScopes below is: the caller
+		// is asking about themselves.
+		userMemberships, mErr := h.orgRepo.GetUserMemberships(c.Request.Context(), uid)
+		if mErr != nil {
+			serverError(c, mErr, "Failed to get user information")
+			return
+		}
+
 		scopes, err := h.orgRepo.GetUserCombinedScopes(c.Request.Context(), uid)
 		if err != nil {
 			scopes = []string{}
 		}
-
-		memberships := make([]gin.H, 0, len(userWithRoles.Memberships))
-		for _, m := range userWithRoles.Memberships {
+		memberships := make([]gin.H, 0, len(userMemberships))
+		for _, m := range userMemberships {
 			memberships = append(memberships, gin.H{
 				"organization_id":      m.OrganizationID,
 				"organization_name":    m.OrganizationName,
@@ -463,9 +480,9 @@ func (h *AuthHandlers) MeHandler() gin.HandlerFunc {
 
 		resp := gin.H{
 			"user": gin.H{
-				"id":    userWithRoles.ID,
-				"email": userWithRoles.Email,
-				"name":  userWithRoles.Name,
+				"id":    user.ID,
+				"email": user.Email,
+				"name":  user.Name,
 			},
 			"memberships":    memberships,
 			"allowed_scopes": scopes,
@@ -710,7 +727,8 @@ func (h *AuthHandlers) reconcileManagedMemberships(ctx context.Context, userID s
 				if updErr != nil {
 					return fmt.Errorf("update member role org=%s user=%s: %w", org.ID, userID, updErr)
 				}
-			} else if err := h.orgRepo.AddMemberWithParams(ctx, org.ID, userID, role, idstore.OrgScopeOrganizations(org.ID)); err != nil {
+			} else if err := h.orgRepo.AddMemberWithParams(ctx, org.ID, userID, role, idstore.OrgScopeOrganizations(org.ID),
+				h.sweepIdPReduction("idp: group mapping applied")); err != nil {
 				return fmt.Errorf("add member org=%s user=%s: %w", org.ID, userID, err)
 			}
 			slog.Info("group mapping applied", "user_id", userID, "org", orgName, "role", role)
@@ -745,7 +763,8 @@ func (h *AuthHandlers) reconcileManagedMemberships(ctx context.Context, userID s
 			return fmt.Errorf("check membership default org user=%s: %w", userID, err)
 		}
 		if !isMember {
-			if err := h.orgRepo.AddMemberWithParams(ctx, org.ID, userID, defaultRole, idstore.OrgScopeOrganizations(org.ID)); err != nil {
+			if err := h.orgRepo.AddMemberWithParams(ctx, org.ID, userID, defaultRole, idstore.OrgScopeOrganizations(org.ID),
+				h.sweepIdPReduction("idp: default-role membership applied")); err != nil {
 				return fmt.Errorf("add default member user=%s: %w", userID, err)
 			}
 		}
@@ -803,7 +822,16 @@ func (h *AuthHandlers) assignRole(ctx context.Context, userID, role string) {
 		// First-login-only: never re-assign or escalate an existing member.
 		return
 	}
-	if err := h.orgRepo.AddMemberWithParams(ctx, org.ID, userID, role, idstore.OrgScopeOrganizations(org.ID)); err != nil {
+	// KEYS ONLY, like every other authority write on a login path — see
+	// sweepIdPReduction: moving the JWT watermark microseconds before
+	// GenerateJWT would revoke the very token this request is about to mint.
+	//
+	// It is not a no-op even though the CheckMembership above establishes the
+	// principal is not a member: that boolean is identity's fact, and this
+	// application can still hold a stale role record for the pair (CheckDrift's
+	// `stale` kind), which the mirror's upsert then moves down to `role`.
+	if err := h.orgRepo.AddMemberWithParams(ctx, org.ID, userID, role, idstore.OrgScopeOrganizations(org.ID),
+		h.sweepIdPReduction("login: first-login role assignment")); err != nil {
 		slog.Warn("failed to add membership", "user_id", userID, "role", role, "error", err)
 	}
 }

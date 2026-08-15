@@ -11,6 +11,7 @@ import (
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
 	"github.com/gin-gonic/gin"
 	"github.com/lib/pq"
+	"github.com/terraform-state-manager/terraform-state-manager/internal/approles"
 )
 
 // newAdminOrgScopeEnv wires the /admin/organizations/:id* routes the same way
@@ -25,7 +26,7 @@ func newAdminOrgScopeEnv(t *testing.T, callerUserID string) *sourcesEnv {
 	}
 	t.Cleanup(func() { db.Close() })
 
-	h := NewAdminHandlers(db, nil)
+	h := NewAdminHandlers(db, nil, approles.RoleSourceIdentity)
 	r := gin.New()
 	r.Use(func(c *gin.Context) {
 		if callerUserID != "" {
@@ -506,7 +507,7 @@ func TestListUsers_NarrowsToCallerAdminOrgs(t *testing.T) {
 	}
 	t.Cleanup(func() { db.Close() })
 
-	h := NewAdminHandlers(db, nil)
+	h := NewAdminHandlers(db, nil, approles.RoleSourceIdentity)
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
 	r.Use(func(c *gin.Context) { c.Set("user_id", auditScopeCaller); c.Next() })

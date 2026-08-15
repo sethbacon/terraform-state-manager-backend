@@ -86,7 +86,7 @@ func NewRouter(cfg *config.Config, database *sql.DB, identityDB *sql.DB) (*gin.E
 	credSweeper := credlifecycle.NewSweeper(
 		userRevocationRepo,
 		idstore.NewAPIKeyRepository(identityDB),
-		approles.NewMembers(identityDB, database),
+		approles.NewMembers(identityDB, database, approles.RoleSource(cfg.Authz.RoleSource)),
 	)
 
 	authHandlers, err := NewAuthHandlers(cfg, identityDB, database, WithAuthCredentialSweeper(credSweeper))
@@ -212,7 +212,7 @@ func NewRouter(cfg *config.Config, database *sql.DB, identityDB *sql.DB) (*gin.E
 		// API keys (registry-modeled self-service): any authenticated user
 		// manages their own keys; admin sees all. No extra scope gate — the
 		// handlers enforce ownership and scope-grant limits themselves.
-		apiKeys := NewAPIKeysHandlers(identityDB, database)
+		apiKeys := NewAPIKeysHandlers(identityDB, database, approles.RoleSource(cfg.Authz.RoleSource))
 		ak := v1.Group("/apikeys", requireAuth)
 		{
 			ak.GET("", apiKeys.ListAPIKeys())
@@ -291,7 +291,7 @@ func NewRouter(cfg *config.Config, database *sql.DB, identityDB *sql.DB) (*gin.E
 		v1.GET("/reports/states/export", requireAuth, middleware.RequireScope(auth.ScopeStateRead), sources.ReportStatesExport())
 
 		// Identity management (admin scope): users, organizations, roles, audit log.
-		admin := NewAdminHandlers(identityDB, database, WithAdminCredentialSweeper(credSweeper))
+		admin := NewAdminHandlers(identityDB, database, approles.RoleSource(cfg.Authz.RoleSource), WithAdminCredentialSweeper(credSweeper))
 		ag := v1.Group("/admin", requireAuth, middleware.RequireScope(auth.ScopeAdmin))
 		{
 			ag.GET("/stats", admin.Stats())

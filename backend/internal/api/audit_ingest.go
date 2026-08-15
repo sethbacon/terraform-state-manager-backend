@@ -69,7 +69,7 @@ func NewAuditIngestHandlers(identityDB, appDB *sql.DB, cfg *config.Config) *Audi
 	if identityDB != nil {
 		h.auditRepo = idstore.NewAuditRepository(identityDB)
 		h.userRepo = idstore.NewUserRepository(identityDB)
-		h.orgRepo = approles.NewMembers(identityDB, appDB)
+		h.orgRepo = approles.NewMembers(identityDB, appDB, approles.RoleSource(cfg.Authz.RoleSource))
 	}
 	return h
 }
