@@ -724,7 +724,7 @@
                         "CookieAuth": []
                     }
                 ],
-                "description": "Returns every platform-admin grant with its provenance. A grant whose user no longer exists is returned and flagged as orphaned.",
+                "description": "Returns every platform-admin grant with its provenance, resolved to people: `email` and `name` for the grantee, `granted_by_email` for whoever conferred it. A grant whose user no longer resolves is returned with `orphaned: true` and no identity fields rather than hidden — it is the only surface such a row can be removed from. Identity may live in a separate database, so it is resolved per request rather than joined; when it cannot be reached the endpoint answers 503 and lists nothing, because an administrator list that silently reports live administrators as orphans invites an operator to delete them.",
                 "produces": [
                     "application/json"
                 ],
@@ -1506,7 +1506,7 @@
                         "CookieAuth": []
                     }
                 ],
-                "description": "Returns the authenticated user, organization memberships, and combined allowed scopes.",
+                "description": "Returns the authenticated user, organization memberships, and the allowed scopes in force for this session. `admin` is reported when this request actually carries it, whether it was conferred by a role template or by the platform-admin carrier, and is absent otherwise — notably on API-key authentication, which never inherits its owner's platform-admin.",
                 "produces": [
                     "application/json"
                 ],

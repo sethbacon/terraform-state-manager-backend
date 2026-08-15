@@ -1,6 +1,7 @@
 package api
 
 import (
+	"encoding/json"
 	"net/http"
 	"os"
 	"strings"
@@ -117,6 +118,163 @@ func TestMeHandler(t *testing.T) {
 		WillReturnRows(sqlmock.NewRows(idUserCols))
 	if w := e.do(http.MethodGet, "/api/v1/auth/me", ""); w.Code != http.StatusNotFound {
 		t.Errorf("deleted user: status = %d, want 404", w.Code)
+	}
+}
+
+// GUARD me-allowed-scopes-carrier (#391).
+//
+// allowed_scopes was built solely from the role-template union
+// (approles.Members.GetUserCombinedScopes) while platform-admin authority has
+// had a SECOND carrier since migration 000030: the platform_admins table, which
+// middleware.AuthMiddleware resolves per request and publishes as `scopes`. A
+// carrier-only administrator was therefore authorized at every server-side
+// HasScope(ScopeAdmin) site and reported to their own session as an ordinary
+// user, and the frontend gates all admin navigation on this field.
+//
+// TSM had no cover for this: migration 000030 says NO BACKFILL, so the carrier
+// and the role union are independent from the very first grant — where
+// registry's 000051 backfilled and the two agreed until it retired the union's
+// `admin` entirely.
+//
+// The subtraction cases below are the ones TSM's ADDITIVE model leaves: a
+// role-template `admin` is real authority here and survives, but one the request
+// does not actually carry does not. That is not a hypothetical — the API-key
+// path strips `admin` unconditionally, so without it /auth/me tells an
+// administrator's CI token that it is an administrator.
+func TestMeHandlerReportsTheAdminScopeInForceForTheRequest(t *testing.T) {
+	tests := []struct {
+		name string
+		// effective is what the auth middleware published for this request.
+		effective []string
+		setScopes bool
+		// union is the role-template scope set in this application's tables.
+		union     string
+		wantAdmin bool
+	}{
+		{
+			name:      "carrier-only administrator",
+			effective: []string{"state:read", "admin"},
+			setScopes: true,
+			union:     `["state:read"]`,
+			wantAdmin: true,
+		},
+		{
+			name:      "ordinary user is not elevated",
+			effective: []string{"state:read"},
+			setScopes: true,
+			union:     `["state:read"]`,
+			wantAdmin: false,
+		},
+		{
+			// ADDITIVE: unlike registry, a role-template `admin` still confers
+			// here, and stripping it would be the same defect pointed the other
+			// way — an administrator shown no admin UI.
+			name:      "role-template administrator with no carrier row",
+			effective: []string{"state:read", "admin"},
+			setScopes: true,
+			union:     `["state:read","admin"]`,
+			wantAdmin: true,
+		},
+		{
+			// THE SUBTRACTION. The union says admin; this request does not carry
+			// it (the API-key path strips it, and a template granted since the
+			// token was minted is not in it either). Reporting it would render
+			// the whole admin navigation for a principal whose every admin
+			// request answers 403.
+			name:      "admin-bearing role template the request does not carry",
+			effective: []string{"state:read"},
+			setScopes: true,
+			union:     `["state:read","admin"]`,
+			wantAdmin: false,
+		},
+		{
+			// Fail closed: every authenticated path publishes `scopes`, so an
+			// absent one is a mis-wired route rather than a principal.
+			name:      "no scopes published on the request",
+			setScopes: false,
+			union:     `["state:read"]`,
+			wantAdmin: false,
+		},
+		{
+			name:      "no scopes published, admin-bearing role template",
+			setScopes: false,
+			union:     `["admin"]`,
+			wantAdmin: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			db, mock, err := sqlmock.New()
+			if err != nil {
+				t.Fatalf("sqlmock.New: %v", err)
+			}
+			t.Cleanup(func() { db.Close() })
+			h, err := NewAuthHandlers(&config.Config{}, db, nil)
+			if err != nil {
+				t.Fatalf("NewAuthHandlers: %v", err)
+			}
+			r := gin.New()
+			r.Use(func(c *gin.Context) {
+				c.Set("user_id", "u1")
+				if tt.setScopes {
+					c.Set("scopes", tt.effective)
+				}
+				c.Next()
+			})
+			r.GET("/api/v1/auth/me", h.MeHandler())
+			e := &sourcesEnv{r: r, mock: mock}
+
+			now := time.Now()
+			mock.ExpectQuery("SELECT id, email, name, oidc_sub").WithArgs("u1").
+				WillReturnRows(sqlmock.NewRows(idUserCols).AddRow("u1", "a@b.c", "Alice", "sub-1", now, now))
+			mock.ExpectQuery("FROM organization_members om").WithArgs("u1").
+				WillReturnRows(sqlmock.NewRows(membershipCols).
+					AddRow("o1", "default", nil, now, "editor", "Editor", []byte(tt.union)))
+			mock.ExpectQuery("FROM organization_members om").WithArgs("u1").
+				WillReturnRows(sqlmock.NewRows(membershipCols).
+					AddRow("o1", "default", nil, now, "editor", "Editor", []byte(tt.union)))
+
+			w := e.do(http.MethodGet, "/api/v1/auth/me", "")
+			if w.Code != http.StatusOK {
+				t.Fatalf("status = %d (%s)", w.Code, w.Body.String())
+			}
+			var got struct {
+				AllowedScopes []string `json:"allowed_scopes"`
+			}
+			if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+
+			gotAdmin := false
+			admins := 0
+			for _, s := range got.AllowedScopes {
+				if s == "admin" {
+					gotAdmin = true
+					admins++
+				}
+			}
+			if gotAdmin != tt.wantAdmin {
+				t.Errorf("allowed_scopes = %v, admin present = %v, want %v",
+					got.AllowedScopes, gotAdmin, tt.wantAdmin)
+			}
+			if admins > 1 {
+				t.Errorf("allowed_scopes = %v: admin reported %d times", got.AllowedScopes, admins)
+			}
+			// The finer scopes have one carrier and must survive untouched: this
+			// reconciles the `admin` bit, it does not re-derive the union.
+			if strings.Contains(tt.union, "state:read") {
+				found := false
+				for _, s := range got.AllowedScopes {
+					if s == "state:read" {
+						found = true
+					}
+				}
+				if !found {
+					t.Errorf("allowed_scopes = %v: the role union's own scopes were dropped", got.AllowedScopes)
+				}
+			}
+		})
 	}
 }
 

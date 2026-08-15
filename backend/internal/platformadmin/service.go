@@ -98,6 +98,18 @@ type Actor struct {
 	IPAddress string
 }
 
+// Person is an identity resolved for display: who a carrier row names, and who
+// conferred it.
+//
+// A COPY, not a *idmodels.User. Nothing above needs the OIDC subject or the
+// row's timestamps to render a list of administrators, and a management surface
+// that holds the whole user record starts leaking it. Both fields are what an
+// operator recognises a colleague by.
+type Person struct {
+	Email string
+	Name  string
+}
+
 // Entry is one carrier row as an operator needs to see it.
 //
 // Exists is the whole reason this type is not just a Grant. The carrier holds no
@@ -105,18 +117,34 @@ type Actor struct {
 // elevates nobody and does not count towards the floor, but it is still in the
 // table and the ONLY surface that can remove it is the one listing it. Labelling
 // it beats filtering it: a hidden row cannot be cleaned up.
+//
+// User and Granter are what make the provenance the carrier records legible.
+// granted_by exists so an operator can tell a legitimate grant from one nobody
+// remembers making, and it cannot do that as a bare UUID they have to go and
+// resolve by hand, one row at a time. Both are nil when the id resolves to
+// nobody — a deleted grantee (in which case Exists is false, from the same
+// lookup, never a second one) or a granter who has since left. Granter is also
+// nil when GrantedBy is: the first-boot bootstrap has no acting principal to
+// name, and inventing one would be worse than the gap.
 type Entry struct {
 	idplatformadmin.Grant
-	Exists bool
+	Exists  bool
+	User    *Person
+	Granter *Person
 }
 
 // Service is TSM's platform-admin carrier plus its audit outbox.
 type Service struct {
-	carrier  *idplatformadmin.Carrier
-	outbox   *idauditoutbox.Outbox
-	sink     *idauditoutbox.TableSink
-	relay    *idauditoutbox.Relay
-	resolver idplatformadmin.Resolver
+	carrier *idplatformadmin.Carrier
+	outbox  *idauditoutbox.Outbox
+	sink    *idauditoutbox.TableSink
+	relay   *idauditoutbox.Relay
+
+	// resolver is the CONCRETE type, not idplatformadmin.Resolver, because List
+	// needs the person and not merely the boolean the module's interface
+	// carries. It still satisfies that interface, which is all the floor
+	// predicate below is handed.
+	resolver identityResolver
 
 	// floor builds the never-zero predicate Revoke runs INSIDE its transaction,
 	// between the locking read and the DELETE.
@@ -280,12 +308,26 @@ func hasAdmin(scopes []string) bool {
 }
 
 // List returns every carrier row, oldest grant first, each labelled with whether
-// its principal still resolves.
+// its principal still resolves and carrying the identities of the grantee and of
+// whoever conferred the grant.
+//
+// THE IDENTITIES ARE THE POINT OF granted_by. A list of bare UUIDs is not
+// provenance: the operator reading it to decide whether a grant is legitimate
+// has to resolve every id by hand, and this listing is also the only surface an
+// orphaned row can be removed from, so it is exactly where a human needs to
+// recognise the people involved.
 //
 // A resolution FAILURE is an error for the whole listing rather than a row
 // silently marked absent: an administrator list that quietly reports live
 // administrators as orphans during an identity outage is worse than no list,
-// because the obvious response to it is to delete them.
+// because the obvious response to it is to delete them. That holds for the
+// GRANTER's lookup too — a half-resolved list would invite exactly the same
+// misreading of the rows whose granter happened to fail.
+//
+// Resolution is memoised for the duration of one call. Grants are normally
+// conferred by a handful of people, so a deployment's whole carrier tends to
+// name the same granter over and over; without the memo that is one identity
+// round trip per row per column.
 func (s *Service) List(ctx context.Context) ([]Entry, error) {
 	if s == nil || s.carrier == nil {
 		return nil, ErrNotConfigured
@@ -294,14 +336,43 @@ func (s *Service) List(ctx context.Context) ([]Entry, error) {
 	if err != nil {
 		return nil, err
 	}
-	entries := make([]Entry, 0, len(grants))
-	for _, g := range grants {
-		exists, err := s.resolver.UserExists(ctx, g.UserID)
+
+	// A miss is memoised as a nil person — "resolved to nobody" is an answer and
+	// re-asking will not change it. A FAILURE is never memoised, because it is
+	// not an answer.
+	seen := make(map[string]*Person, len(grants))
+	resolve := func(userID string) (*Person, error) {
+		if p, ok := seen[userID]; ok {
+			return p, nil
+		}
+		user, err := s.resolver.lookup(ctx, userID)
 		if err != nil {
 			return nil, fmt.Errorf("%w: resolving platform-admin grant %s: %w",
-				idplatformadmin.ErrIdentityUnavailable, g.UserID, err)
+				idplatformadmin.ErrIdentityUnavailable, userID, err)
 		}
-		entries = append(entries, Entry{Grant: g, Exists: exists})
+		var p *Person
+		if user != nil {
+			p = &Person{Email: user.Email, Name: user.Name}
+		}
+		seen[userID] = p
+		return p, nil
+	}
+
+	entries := make([]Entry, 0, len(grants))
+	for _, g := range grants {
+		holder, err := resolve(g.UserID)
+		if err != nil {
+			return nil, err
+		}
+		entry := Entry{Grant: g, Exists: holder != nil, User: holder}
+		if g.GrantedBy != nil {
+			granter, err := resolve(*g.GrantedBy)
+			if err != nil {
+				return nil, err
+			}
+			entry.Granter = granter
+		}
+		entries = append(entries, entry)
 	}
 	return entries, nil
 }

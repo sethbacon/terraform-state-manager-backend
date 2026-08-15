@@ -413,9 +413,91 @@ func (h *AuthHandlers) CallbackHandler() gin.HandlerFunc {
 	}
 }
 
+// effectiveScopesOf returns the scope set the auth middleware published for THIS
+// request, or nil when the key was never set.
+//
+// nil and empty are deliberately not distinguished by the callers: both mean "no
+// authority was established here", and reportedScopes fails closed on either.
+func effectiveScopesOf(c *gin.Context) []string {
+	v, ok := c.Get("scopes")
+	if !ok {
+		return nil
+	}
+	scopes, _ := v.([]string)
+	return scopes
+}
+
+// reportedScopes builds the allowed_scopes /auth/me publishes: the caller's live
+// role-template union, with its `admin` bit reconciled against the authority
+// actually in force for this request.
+//
+// GUARD me-allowed-scopes-carrier (#391).
+//
+// approles.Members.GetUserCombinedScopes reads THIS APPLICATION'S ROLE TABLES
+// and nothing else, which is only one of the two carriers of platform-admin
+// authority. The other is the platform_admins table, which
+// middleware.AuthMiddleware resolves per request (elevate ->
+// platformadmin.Service.SessionScopes) and publishes as the request's `scopes`.
+// A principal whose `admin` comes only from the carrier is therefore authorized
+// at every server-side HasScope(ScopeAdmin) site while /auth/me reports them an
+// ordinary user — and the frontend gates all admin navigation on this field, so
+// they are shown no route to the authority they actually hold.
+//
+// TSM IS MORE EXPOSED HERE THAN REGISTRY WAS. Registry's migration 000051
+// backfilled its carrier from admin-bearing role templates, so its two answers
+// agreed by construction until the union stopped carrying `admin` at all. TSM's
+// migration 000030 says "NO BACKFILL" in as many words, so the carrier and the
+// role union are independent from the very first grant.
+//
+// IT SUBTRACTS AS WELL AS ADDS — BUT NOT FOR REGISTRY'S REASON, and the
+// difference is why this is not a transplant. Registry has retired role-template
+// `admin`: it strips a scope that confers nothing at all. TSM's model is
+// ADDITIVE (platformadmin.Service.SessionScopes: effective admin is `carrier OR
+// the presented session's own scope union`), so a role-template `admin` is real
+// authority and must never be stripped merely for being a template's. What is
+// stripped is a role-template `admin` THIS REQUEST DOES NOT ACTUALLY CARRY,
+// which under the additive model is a strictly narrower set — and non-empty:
+//
+//   - API-key authentication. middleware.authenticateAPIKey strips `admin`
+//     unconditionally (idplatformadmin.KeyScopes), on purpose: an unattended CI
+//     credential must not inherit its owner's platform-admin. The live role union
+//     knows nothing of that, so without the subtraction /auth/me tells a pipeline
+//     token it is an administrator while every admin call it makes answers 403.
+//   - An admin-bearing role template granted since the session token was minted.
+//     The middleware elevates from the token's claims, so the server denies until
+//     the next refresh; reporting `admin` renders admin navigation that 403s.
+//
+// So the rule is a single one: `admin` appears in allowed_scopes exactly when it
+// is in force for this request. Read from the request's EFFECTIVE scopes rather
+// than by querying the carrier a second time, so this stays downstream of the
+// middleware's single insertion point instead of becoming a second,
+// independently-driftable answer to the same question — and so it inherits that
+// point's deliberate exclusion of API keys for free.
+//
+// FAIL CLOSED on an absent `scopes` key. Every authenticated path publishes it
+// (middleware.setAuthContext, the API-key branch, and mtls.AuthMiddleware), and
+// /auth/me is mounted behind requireAuth, so an absent one is a mis-wired route
+// rather than a principal and must not be answered with the union's wildcard.
+//
+// ONLY the `admin` bit is reconciled, which is the whole of the divergence: every
+// other scope has exactly one carrier — the role tables this union is read from —
+// so there is no second answer for them to disagree with.
+func reportedScopes(union, effective []string) []string {
+	out := make([]string, 0, len(union)+1)
+	for _, s := range union {
+		if s != string(auth.ScopeAdmin) {
+			out = append(out, s)
+		}
+	}
+	if auth.HasScope(effective, auth.ScopeAdmin) {
+		out = append(out, string(auth.ScopeAdmin))
+	}
+	return out
+}
+
 // MeHandler returns the authenticated user, memberships, and combined scopes.
 // @Summary      Current user
-// @Description  Returns the authenticated user, organization memberships, and combined allowed scopes.
+// @Description  Returns the authenticated user, organization memberships, and the allowed scopes in force for this session. `admin` is reported when this request actually carries it, whether it was conferred by a role template or by the platform-admin carrier, and is absent otherwise — notably on API-key authentication, which never inherits its owner's platform-admin.
 // @Tags         Auth
 // @Produce      json
 // @Success      200  {object}  map[string]interface{}
@@ -468,6 +550,7 @@ func (h *AuthHandlers) MeHandler() gin.HandlerFunc {
 		if err != nil {
 			scopes = []string{}
 		}
+		scopes = reportedScopes(scopes, effectiveScopesOf(c))
 		memberships := make([]gin.H, 0, len(userMemberships))
 		for _, m := range userMemberships {
 			memberships = append(memberships, gin.H{

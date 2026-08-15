@@ -447,6 +447,73 @@ func TestIntegrationGrantWritesItsProvenanceAndItsIntent(t *testing.T) {
 	}
 }
 
+// TestIntegrationListResolvesIdentitiesAcrossTheConnectionSplit (#392).
+//
+// The half of the identity resolution only a real server can establish. sqlmock
+// can show that a SELECT is issued and hand back whatever rows the test wrote;
+// it cannot show that the query is legal against the identity schema, that the
+// APP connection's carrier and the IDENTITY connection's users can be joined by
+// this code at all when they are not joinable by SQL, or that a granted_by
+// written on one connection resolves to a person on the other. Those are
+// properties of the two-connection topology, so they are asserted against it.
+//
+// The orphan is the case that makes the split visible: the carrier keeps a row
+// no foreign key could have kept, and the listing has to name the live rows
+// while leaving that one nameless rather than failing or hiding it.
+func TestIntegrationListResolvesIdentitiesAcrossTheConnectionSplit(t *testing.T) {
+	e := newEnv(t)
+	granter := e.newUser(t, "granter@example.com")
+	holder := e.newUser(t, "holder@example.com")
+	doomed := e.newUser(t, "doomed@example.com")
+
+	for _, target := range []string{holder, doomed} {
+		note := "granted by a person"
+		if _, err := e.svc.Grant(context.Background(), target,
+			Actor{UserID: granter, Email: "granter@example.com"}, &note); err != nil {
+			t.Fatalf("Grant(%s): %v", target, err)
+		}
+	}
+	e.deleteUser(t, doomed)
+
+	entries, err := e.svc.List(context.Background())
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("got %d entries, want 2", len(entries))
+	}
+
+	byUser := map[string]Entry{}
+	for _, entry := range entries {
+		byUser[entry.UserID] = entry
+	}
+
+	live, ok := byUser[holder]
+	if !ok {
+		t.Fatalf("the live grant is missing from the listing")
+	}
+	if live.User == nil || live.User.Email != "holder@example.com" {
+		t.Errorf("grantee = %+v, want holder@example.com resolved off the identity connection", live.User)
+	}
+	// The granter id was written on the APP connection and resolved on the
+	// IDENTITY one. No SQL join spans those, which is the whole reason this is
+	// resolved in Go rather than selected.
+	if live.Granter == nil || live.Granter.Email != "granter@example.com" {
+		t.Errorf("granter = %+v, want granter@example.com", live.Granter)
+	}
+
+	orphan, ok := byUser[doomed]
+	if !ok {
+		t.Fatalf("the orphaned grant was hidden; it is removable only from this listing")
+	}
+	if orphan.Exists || orphan.User != nil {
+		t.Errorf("orphan carries an identity: %+v", orphan)
+	}
+	if orphan.Granter == nil || orphan.Granter.Email != "granter@example.com" {
+		t.Errorf("orphan granter = %+v: a deleted grantee must not cost the row its provenance", orphan.Granter)
+	}
+}
+
 // TestIntegrationFloorRefusesTheLastAdministrator: a deployment that revokes its
 // last administrator has no recovery path short of hand-written SQL against the
 // very table this API exists to replace.
