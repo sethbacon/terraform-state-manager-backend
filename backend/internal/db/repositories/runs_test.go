@@ -13,13 +13,13 @@ import (
 
 var driftCols = []string{"id", "pipeline_connection_id", "source_id", "state_key", "repo_ref", "working_dir",
 	"status", "added", "changed", "destroyed", "drifted", "summary", "detail", "callback_token", "actor",
-	"created_at", "updated_at"}
+	"created_at", "updated_at", "truncated", "omitted_entries", "omitted_attrs", "unparseable", "unmasked"}
 
 func driftRow(token string) *sqlmock.Rows {
 	return sqlmock.NewRows(driftCols).
 		AddRow("d1", "p1", "s1", "app.tfstate", "refs/heads/main", "infra/",
 			"completed", 1, 2, 0, true, []byte(`{"resources":[]}`), "", token, "alice",
-			"2026-06-10", "2026-06-10")
+			"2026-06-10", "2026-06-10", false, 0, 0, false, false)
 }
 
 func TestDriftRepository_CreateAndGet(t *testing.T) {
@@ -114,10 +114,69 @@ func TestDriftRepository_Updates(t *testing.T) {
 	}
 
 	mock.ExpectExec("UPDATE drift_runs").
-		WithArgs("d1", "completed", 1, 2, 0, true, `{"x":1}`, "done").
+		WithArgs("d1", "completed", 1, 2, 0, true, `{"x":1}`, "done", false, 0, 0, false, false).
 		WillReturnResult(sqlmock.NewResult(0, 1))
-	if err := r.UpdateResult(ctx, "d1", "completed", 1, 2, 0, true, []byte(`{"x":1}`), "done"); err != nil {
+	if err := r.UpdateResult(ctx, "d1", "completed", 1, 2, 0, true, []byte(`{"x":1}`), "done", Completeness{}); err != nil {
 		t.Errorf("UpdateResult: %v", err)
+	}
+}
+
+// TestDriftRepository_UpdateResultPersistsCompletenessMarkers is the storage half
+// of the run round trip, and the twin of
+// TestDriftRecordRepository_PersistsCompletenessMarkers one layer down: the five
+// markers must bind into the UPDATE and come back off a scanned row. A run row
+// that stores only counts cannot tell a check that verified clean from one that
+// never finished — both are added=changed=destroyed=0 — and for a clean or
+// unparseable run there is no record to recover the answer from.
+func TestDriftRepository_UpdateResultPersistsCompletenessMarkers(t *testing.T) {
+	db, mock := newMock(t)
+	r := NewDriftRepository(db)
+
+	mock.ExpectExec("UPDATE drift_runs").
+		WithArgs("d1", "completed", 0, 0, 0, false, nil, "", true, 5, 9, true, true).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	err := r.UpdateResult(ctx, "d1", "completed", 0, 0, 0, false, nil, "",
+		Completeness{Truncated: true, OmittedEntries: 5, OmittedAttrs: 9, Unparseable: true, Unmasked: true})
+	if err != nil {
+		t.Fatalf("UpdateResult: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("markers must be bound into the UPDATE: %v", err)
+	}
+
+	// ...and back out again, so per-run history can actually report them.
+	mock.ExpectQuery("SELECT .+ FROM drift_runs WHERE id").WithArgs("d1").
+		WillReturnRows(sqlmock.NewRows(driftCols).
+			AddRow("d1", "p1", "s1", "app.tfstate", "", "", "completed",
+				0, 0, 0, false, nil, "", "", "alice", "2026-06-10", "2026-06-10",
+				true, 5, 9, true, true))
+	got, err := r.GetByID(ctx, "d1")
+	if err != nil || got == nil {
+		t.Fatalf("GetByID: %v %+v", err, got)
+	}
+	if !got.Truncated || got.OmittedEntries != 5 || got.OmittedAttrs != 9 || !got.Unparseable || !got.Unmasked {
+		t.Errorf("markers lost in the round trip: %+v", got.Completeness)
+	}
+}
+
+// TestDriftRepository_UpdateResultWidensTruncated is the run twin of the record
+// path's one-way widening. Both storage paths share MarkTruncation precisely so
+// a single callback cannot leave the run row saying the summary was complete
+// while its record row says it was bounded.
+func TestDriftRepository_UpdateResultWidensTruncated(t *testing.T) {
+	db, mock := newMock(t)
+	r := NewDriftRepository(db)
+
+	// truncated=false is overruled by the omission count beside it.
+	mock.ExpectExec("UPDATE drift_runs").
+		WithArgs("d1", "completed", 0, 0, 0, false, nil, "", true, 4, 0, false, false).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	if err := r.UpdateResult(ctx, "d1", "completed", 0, 0, 0, false, nil, "",
+		Completeness{Truncated: false, OmittedEntries: 4}); err != nil {
+		t.Fatalf("UpdateResult: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("omissions must imply truncated on the run too: %v", err)
 	}
 }
 

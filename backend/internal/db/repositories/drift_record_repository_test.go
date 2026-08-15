@@ -76,7 +76,8 @@ func TestDetection_MarkTruncation(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			d := &Detection{Truncated: c.truncated, OmittedEntries: c.omittedEntries, OmittedAttrs: c.omittedAttrs}
+			d := &Detection{Completeness: Completeness{
+				Truncated: c.truncated, OmittedEntries: c.omittedEntries, OmittedAttrs: c.omittedAttrs}}
 			d.MarkTruncation()
 			if d.Truncated != c.want {
 				t.Errorf("Truncated = %v, want %v", d.Truncated, c.want)
@@ -102,7 +103,8 @@ func TestDriftRecordRepository_PersistsCompletenessMarkers(t *testing.T) {
 
 	rec, err := r.UpsertDetection(ctx, &Detection{
 		SourceID: "s1", StateKey: "app.tfstate", Origin: "ingest", Added: 1,
-		Truncated: true, OmittedEntries: 5, OmittedAttrs: 9, Unparseable: true, Unmasked: true,
+		Completeness: Completeness{
+			Truncated: true, OmittedEntries: 5, OmittedAttrs: 9, Unparseable: true, Unmasked: true},
 	})
 	if err != nil {
 		t.Fatalf("UpsertDetection: %v", err)

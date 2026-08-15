@@ -54,12 +54,12 @@ func newDriftEnv(t *testing.T) *sourcesEnv {
 
 var driftCols = []string{"id", "pipeline_connection_id", "source_id", "state_key", "repo_ref", "working_dir",
 	"status", "added", "changed", "destroyed", "drifted", "summary", "detail", "callback_token", "actor",
-	"created_at", "updated_at"}
+	"created_at", "updated_at", "truncated", "omitted_entries", "omitted_attrs", "unparseable", "unmasked"}
 
 func driftRow(token string) *sqlmock.Rows {
 	return sqlmock.NewRows(driftCols).
 		AddRow("d1", "p1", nil, "app.tfstate", "", "", "dispatched", nil, nil, nil, nil, nil, "", token, "alice",
-			"2026-06-10", "2026-06-10")
+			"2026-06-10", "2026-06-10", false, 0, 0, false, false)
 }
 
 var healthCols = []string{"id", "pipeline_connection_id", "repo_ref", "working_dir", "terraform_version",

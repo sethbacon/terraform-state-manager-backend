@@ -130,7 +130,8 @@ func TestRunResults_DriftCreatesRecord_CleanResolves(t *testing.T) {
 	runRow := func(token string) *sqlmock.Rows {
 		return sqlmock.NewRows(driftCols).
 			AddRow("d1", "p1", "s1", "envs/prod.tfstate", "", "", "dispatched",
-				nil, nil, nil, nil, nil, "", token, "alice", "2026-06-11", "2026-06-11")
+				nil, nil, nil, nil, nil, "", token, "alice", "2026-06-11", "2026-06-11",
+				false, 0, 0, false, false)
 	}
 
 	// Drifted callback: consume token → store result → upsert record.

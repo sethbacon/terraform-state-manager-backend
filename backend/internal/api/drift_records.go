@@ -24,40 +24,28 @@ import (
 // maxIngestPlanBytes caps the terraform show -json payload accepted by ingest.
 const maxIngestPlanBytes = 5 << 20 // 5 MiB
 
-// completeness carries the drift contract's five markers — what a check did NOT
-// do — from a request body to the stored record. Grouped rather than passed as
-// five more positional arguments so a marker cannot be threaded into the wrong
-// slot, and so adding the next one touches the struct instead of every caller.
-//
-// Both receiving DTOs embed it, which is also what keeps the push endpoint and
-// the dispatched-run callback accepting the identical vocabulary.
-type completeness struct {
-	Truncated      bool `json:"truncated"`
-	OmittedEntries int  `json:"omitted_entries"`
-	OmittedAttrs   int  `json:"omitted_attrs"`
-	Unparseable    bool `json:"unparseable"`
-	Unmasked       bool `json:"unmasked"`
-}
+// The drift contract's five markers travel as repositories.Completeness from a
+// request body all the way to the stored row — the same type the run and record
+// rows embed, so a marker cannot be dropped in between. Both receiving DTOs
+// embed it, which is what keeps the push endpoint and the dispatched-run
+// callback accepting the identical vocabulary.
 
-// apply copies the markers onto a Detection bound for storage.
-func (m completeness) apply(d *repositories.Detection) {
-	d.Truncated, d.OmittedEntries, d.OmittedAttrs = m.Truncated, m.OmittedEntries, m.OmittedAttrs
-	d.Unparseable, d.Unmasked = m.Unparseable, m.Unmasked
-}
-
-// fromResult replaces the sender's claims with the markers computed from a plan
-// this server parsed itself. Server-side parsing is ground truth; a sender that
-// also sent markers was describing a document we have now read directly.
-func (m *completeness) fromResult(res *driftingest.Result) {
-	m.Truncated, m.OmittedEntries, m.OmittedAttrs = res.Truncated(), res.OmittedEntries, res.OmittedAttrs
-	m.Unparseable, m.Unmasked = res.Unparseable, res.Unmasked
+// completenessFromResult returns the markers computed from a plan this server
+// parsed itself, replacing whatever the sender claimed. Server-side parsing is
+// ground truth; a sender that also sent markers was describing a document we
+// have now read directly.
+func completenessFromResult(res *driftingest.Result) repositories.Completeness {
+	return repositories.Completeness{
+		Truncated: res.Truncated(), OmittedEntries: res.OmittedEntries, OmittedAttrs: res.OmittedAttrs,
+		Unparseable: res.Unparseable, Unmasked: res.Unmasked,
+	}
 }
 
 // recordDriftOutcome maintains drift_records from a run result: a drifted
 // completion upserts the live record for the state, a clean completion resolves
 // it. Runs without a source_id + state_key cannot be mapped to a record (the
 // pair is the record identity) and are skipped; failures don't touch records.
-func (h *DriftHandlers) recordDriftOutcome(ctx context.Context, run *repositories.DriftRun, status string, added, changed, destroyed int, drifted bool, summary []byte, marks completeness) {
+func (h *DriftHandlers) recordDriftOutcome(ctx context.Context, run *repositories.DriftRun, status string, added, changed, destroyed int, drifted bool, summary []byte, marks repositories.Completeness) {
 	if h.recordRepo == nil || status != "completed" || run.SourceID == nil || run.StateKey == "" {
 		return
 	}
@@ -72,8 +60,8 @@ func (h *DriftHandlers) recordDriftOutcome(ctx context.Context, run *repositorie
 			Changed:              changed,
 			Destroyed:            destroyed,
 			Summary:              summary,
+			Completeness:         marks,
 		}
-		marks.apply(d)
 		if _, err := h.recordRepo.UpsertDetection(ctx, d); err != nil {
 			driftLog.Error("failed to upsert drift record from run", "run", run.ID, "error", err)
 		}
@@ -116,7 +104,7 @@ type driftIngestPayload struct {
 	// Markers describing what the sender's own check did not do. Honoured when
 	// the sender supplies counts/summary; overwritten by the server's own
 	// reading when a raw plan is supplied instead.
-	completeness
+	repositories.Completeness
 }
 
 // IngestDrift accepts a drift result pushed by a pipeline TSM did not dispatch.
@@ -199,7 +187,7 @@ func (h *DriftHandlers) IngestDrift() gin.HandlerFunc {
 			drifted = res.Drifted()
 			// We read the plan ourselves, so our markers replace whatever the
 			// sender claimed about it.
-			req.completeness.fromResult(res)
+			req.Completeness = completenessFromResult(res)
 			// Best-effort: capture registry-module provenance from the plan's
 			// configuration block. Never fails the ingest — the drift record is the
 			// primary product; provenance powers the optional "modules in use" /
@@ -243,16 +231,16 @@ func (h *DriftHandlers) IngestDrift() gin.HandlerFunc {
 		}
 
 		det := &repositories.Detection{
-			SourceID:    req.SourceID,
-			StateKey:    req.StateKey,
-			Origin:      "ingest",
-			Added:       added,
-			Changed:     changed,
-			Destroyed:   destroyed,
-			Summary:     summary,
-			ExternalRef: extRef,
+			SourceID:     req.SourceID,
+			StateKey:     req.StateKey,
+			Origin:       "ingest",
+			Added:        added,
+			Changed:      changed,
+			Destroyed:    destroyed,
+			Summary:      summary,
+			ExternalRef:  extRef,
+			Completeness: req.Completeness,
 		}
-		req.completeness.apply(det)
 		rec, err := h.recordRepo.UpsertDetection(ctx, det)
 		if err != nil {
 			serverError(c, err, "failed to record drift")
