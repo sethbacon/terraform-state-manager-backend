@@ -488,3 +488,112 @@ func TestMirrorSetByID_AdoptsATemplateItHasNotSeen(t *testing.T) {
 		t.Errorf("identity leg: %v", err)
 	}
 }
+
+// THE MIRROR MUST NOT REACH FURTHER THAN THE WRITE IT MIRRORS.
+//
+// A revocation writes the mirror FIRST, before the identity leg's scope
+// predicate has refused anything, so without a tenancy check a caller whose
+// scope does not admit the organization would have the mirrored row deleted and
+// then be told the membership was not found — a cross-tenant write reported as a
+// no-op. Nothing reads the mirror in Phase 3a, which is precisely why it would
+// go unnoticed until the phase that does.
+//
+// Found by the suite's tenant-scope signature (#719) on the first CI run of this
+// change, not by review.
+//
+// ASSERTED ON A TAPE THAT MUST STAY EMPTY, not on ExpectationsWereMet.
+// sqlmock's ExpectationsWereMet reports expectations that were never MET; it
+// says nothing about statements that were issued and not expected. Those fail
+// the individual call, and the mirror logs a failed leg and carries on — so the
+// obvious "stage nothing on the app mock and assert its expectations were met"
+// version of this test PASSES WITH THE FIX REVERTED. It did, on all three
+// mutations, before this rewrite. Here the app mock stages exactly the statement
+// the unguarded code would issue, carrying a tape matcher: if that statement is
+// ever issued the tape records it, and an empty tape is the pass.
+func TestMirrorNeverTouchesAnOrganizationOutsideTheCallersScope(t *testing.T) {
+	cases := []struct {
+		name string
+		// stageIdentity scripts the identity leg, which is not under test.
+		stageIdentity func(sqlmock.Sqlmock)
+		// stageMirror stages the statement the UNGUARDED mirror would issue.
+		stageMirror func(sqlmock.Sqlmock, *tape)
+		run         func(*Members) error
+	}{
+		{
+			name: "remove: scope names another tenant",
+			stageIdentity: func(m sqlmock.Sqlmock) {
+				m.ExpectExec("DELETE FROM organization_members").WillReturnResult(sqlmock.NewResult(0, 0))
+			},
+			stageMirror: func(m sqlmock.Sqlmock, tp *tape) {
+				m.ExpectExec(regexp.QuoteMeta(`DELETE FROM organization_member_roles WHERE organization_id = $1 AND user_id = $2`)).
+					WithArgs(tp.at("mirror"), "user-1").
+					WillReturnResult(sqlmock.NewResult(0, 1))
+			},
+			run: func(m *Members) error {
+				return m.RemoveMember(context.Background(), "org-1", "user-1", idstore.OrgScopeOrganizations("org-2"))
+			},
+		},
+		{
+			name:          "remove: deny-everything scope",
+			stageIdentity: func(m sqlmock.Sqlmock) {},
+			stageMirror: func(m sqlmock.Sqlmock, tp *tape) {
+				m.ExpectExec(regexp.QuoteMeta(`DELETE FROM organization_member_roles WHERE organization_id = $1 AND user_id = $2`)).
+					WithArgs(tp.at("mirror"), "user-1").
+					WillReturnResult(sqlmock.NewResult(0, 1))
+			},
+			run: func(m *Members) error {
+				return m.RemoveMember(context.Background(), "org-1", "user-1", idstore.OrgScope{})
+			},
+		},
+		{
+			name: "organization delete: scope names another tenant",
+			stageIdentity: func(m sqlmock.Sqlmock) {
+				m.ExpectExec("DELETE FROM organizations").WillReturnResult(sqlmock.NewResult(0, 0))
+			},
+			stageMirror: func(m sqlmock.Sqlmock, tp *tape) {
+				m.ExpectExec(regexp.QuoteMeta(`DELETE FROM organization_member_roles WHERE organization_id = $1`)).
+					WithArgs(tp.at("mirror")).
+					WillReturnResult(sqlmock.NewResult(0, 3))
+			},
+			run: func(m *Members) error {
+				return m.Delete(context.Background(), "org-1", idstore.OrgScopeOrganizations("org-2"))
+			},
+		},
+		{
+			name: "grant: scope names another tenant",
+			stageIdentity: func(m sqlmock.Sqlmock) {
+				expectIdentityRoleLookup(m, "editor")
+				// Scripted to SUCCEED even though the scope excludes the
+				// organization: that is the only way to reach the mirror leg at
+				// all, and therefore the only way this assertion can fail.
+				m.ExpectExec("INSERT INTO organization_members").WillReturnResult(sqlmock.NewResult(0, 1))
+			},
+			stageMirror: func(m sqlmock.Sqlmock, tp *tape) {
+				m.ExpectQuery(regexp.QuoteMeta(`SELECT id FROM role_templates WHERE name = $1`)).
+					WithArgs(tp.at("mirror")).
+					WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(templateID))
+			},
+			run: func(m *Members) error {
+				return m.AddMemberWithParams(context.Background(), "org-1", "user-1", "editor", idstore.OrgScopeOrganizations("org-2"))
+			},
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			m, identityMock, appMock, done := twoConnections(t)
+			defer done()
+			var tp tape
+			c.stageIdentity(identityMock)
+			c.stageMirror(appMock, &tp)
+
+			// The identity leg's own answer is not under test — it already
+			// refuses out-of-scope writes — so its error is ignored.
+			_ = c.run(m)
+
+			if len(tp.steps) != 0 {
+				t.Fatalf("the mirror wrote an organization the caller's scope does not permit: %v", tp.steps)
+			}
+		})
+	}
+}

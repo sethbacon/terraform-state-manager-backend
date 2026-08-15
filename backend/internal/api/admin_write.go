@@ -208,19 +208,38 @@ func (h *AdminHandlers) DeleteUser() gin.HandlerFunc {
 		// that case ("nothing to delete"), so it is absorbed rather than turned
 		// into the 500 a bare `err != nil` would now produce on every repeat
 		// call. A real failure still 500s.
-		if err := h.userRepo.DeleteUser(ctx, id, scope); err != nil && !notFound(err) {
-			serverError(c, err, "failed to delete user")
-			return
+		deleted := true
+		if err := h.userRepo.DeleteUser(ctx, id, scope); err != nil {
+			if !notFound(err) {
+				serverError(c, err, "failed to delete user")
+				return
+			}
+			deleted = false
 		}
-		// identity.organization_members.user_id is ON DELETE CASCADE, so the
-		// delete above withdrew every role this principal held — without any
+		// identity.organization_members.user_id is ON DELETE CASCADE, so a
+		// successful delete withdrew every role this principal held — without any
 		// membership statement of its own, and therefore without passing through
 		// the mirror on h.orgRepo. TSM's own organization_member_roles has no
 		// foreign key to cascade with (identity may be another database), so the
-		// cascade is mirrored explicitly here. Unconditional: ErrNotFound above
-		// means the user was already gone, which is precisely the case whose
-		// leftover rows would otherwise never be collected.
-		h.orgRepo.PurgeUserRoles(ctx, id)
+		// cascade is mirrored explicitly.
+		//
+		// ONLY WHEN THE DELETE ACTUALLY APPLIED, and that is a tenancy guard, not
+		// tidiness. DeleteUser is scoped: a caller acting on a user outside their
+		// organizations matches no row and returns ErrNotFound, which this route
+		// absorbs into its idempotent 204. PurgeUserRoles is deliberately
+		// unscoped — it strips a principal whose identity row is gone, so there
+		// is no organization left to test — so calling it on that absorbed
+		// ErrNotFound would let a caller wipe another tenant's mirrored roles
+		// with a request that changed nothing in identity and reported success.
+		// Nothing reads the mirror in Phase 3a, so it would go unnoticed until
+		// the phase that does.
+		//
+		// Rows left behind by a user who was already gone are collected by the
+		// startup reconcile (approles.Reconcile's sweep), which is the mechanism
+		// for exactly that and needs no privilege from this request.
+		if deleted {
+			h.orgRepo.PurgeUserRoles(ctx, id)
+		}
 		h.writeAudit(c, "user.delete", "user", id, map[string]interface{}{
 			"api_keys_revoked": out.KeysRevoked, "sessions_revoked": out.TokensRevoked})
 		c.Status(http.StatusNoContent)

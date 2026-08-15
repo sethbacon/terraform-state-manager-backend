@@ -1,6 +1,7 @@
 package api
 
 import (
+	"database/sql/driver"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -418,3 +419,96 @@ func TestAdminEraseUser_StripsMembershipsInEveryOrganization(t *testing.T) {
 		t.Errorf("erase response should name the subject: %s", w.Body.String())
 	}
 }
+
+// DELETE /admin/users/{id} is SCOPED: a caller acting on a user outside their
+// organizations matches no row, and this route absorbs that ErrNotFound into its
+// idempotent 204 (TestAdminDeleteUser_AlreadyGone_Returns204 pins that). But
+// PurgeUserRoles is deliberately UNSCOPED — it strips a principal whose identity
+// row is gone, so there is no organization left to test — so running it on that
+// absorbed ErrNotFound lets a caller wipe another tenant's mirrored roles with a
+// request that changed nothing in identity and answered 204.
+//
+// Nothing reads the mirror in Phase 3a, so no behavioural assertion can see it.
+// The app connection is a SEPARATE mock staging exactly the statement the
+// unguarded code would issue, carrying a matcher that records when it fires;
+// "never fired" is the pass, and the sibling case below proves the probe fires
+// when the purge legitimately runs.
+//
+// ASSERTED THAT WAY AND NOT ON ExpectationsWereMet, which reports expectations
+// that were never met and says nothing about statements issued and not expected
+// — those fail the individual call, and the mirror logs and carries on, so the
+// obvious spelling of this test passes with the fix reverted.
+//
+// Found by the suite's tenant-scope signature (#719), not by review.
+func TestDeleteUser_PurgesTheMirrorOnlyWhenTheDeleteApplied(t *testing.T) {
+	newEnv := func(t *testing.T) (*sourcesEnv, sqlmock.Sqlmock, *purgeProbe) {
+		t.Helper()
+		identityDB, identityMock, err := sqlmock.New()
+		if err != nil {
+			t.Fatalf("sqlmock.New (identity): %v", err)
+		}
+		t.Cleanup(func() { _ = identityDB.Close() })
+		appDB, appMock, err := sqlmock.New()
+		if err != nil {
+			t.Fatalf("sqlmock.New (app): %v", err)
+		}
+		t.Cleanup(func() { _ = appDB.Close() })
+
+		h := NewAdminHandlers(identityDB, appDB, WithAdminCredentialSweeper(
+			credlifecycle.NewSweeper(
+				repositories.NewUserTokenRevocationRepository(identityDB),
+				idstore.NewAPIKeyRepository(identityDB),
+				approles.NewMembers(identityDB, nil))))
+		r := gin.New()
+		r.DELETE("/api/v1/admin/users/:id", h.DeleteUser())
+
+		probe := &purgeProbe{}
+		appMock.ExpectExec("DELETE FROM organization_member_roles").
+			WithArgs(probe).
+			WillReturnResult(sqlmock.NewResult(0, 2))
+		return &sourcesEnv{mock: identityMock, r: r}, appMock, probe
+	}
+
+	// The credential sweep runs before the delete on this route, so both cases
+	// script it identically; only the DELETE's row count differs.
+	script := func(mock sqlmock.Sqlmock, rows int64) {
+		mock.ExpectExec("INSERT INTO user_token_revocations").WithArgs("u1").
+			WillReturnResult(sqlmock.NewResult(0, 1))
+		mock.ExpectExec("DELETE FROM api_keys").WithArgs("u1").
+			WillReturnResult(sqlmock.NewResult(0, 0))
+		mock.ExpectExec("DELETE FROM users").WithArgs("u1").
+			WillReturnResult(sqlmock.NewResult(0, rows))
+	}
+
+	t.Run("matched no row: the mirror is not touched", func(t *testing.T) {
+		e, _, probe := newEnv(t)
+		script(e.mock, 0)
+		if w := e.do(http.MethodDelete, "/api/v1/admin/users/u1", ""); w.Code != http.StatusNoContent {
+			t.Fatalf("status = %d, want 204", w.Code)
+		}
+		if probe.hit {
+			t.Fatal("the mirror purge ran for a delete that matched no row: a caller outside the target's " +
+				"organizations can strip another tenant's mirrored roles with a request that changed nothing in identity")
+		}
+	})
+
+	// The falsification, kept permanently rather than run once: if the probe
+	// never fired in either case the assertion above would be vacuous.
+	t.Run("deleted the user: the mirror IS purged", func(t *testing.T) {
+		e, _, probe := newEnv(t)
+		script(e.mock, 1)
+		if w := e.do(http.MethodDelete, "/api/v1/admin/users/u1", ""); w.Code != http.StatusNoContent {
+			t.Fatalf("status = %d, want 204", w.Code)
+		}
+		if !probe.hit {
+			t.Fatal("a successful delete did not purge the mirrored roles, so the CASCADE in identity " +
+				"leaves this application's tables describing a principal that no longer exists")
+		}
+	})
+}
+
+// purgeProbe records whether the statement it is attached to was ever matched.
+// It matches anything; recording is the whole job.
+type purgeProbe struct{ hit bool }
+
+func (p *purgeProbe) Match(driver.Value) bool { p.hit = true; return true }

@@ -114,7 +114,9 @@ func (m *Members) AddMemberWithRoleTemplate(ctx context.Context, orgID, userID s
 	if err := m.identityOrgs.AddMemberWithRoleTemplate(ctx, orgID, userID, roleTemplateID, scope); err != nil {
 		return err
 	}
-	m.mirrorSetByID(ctx, orgID, userID, roleTemplateID)
+	if m.permits(scope, orgID) {
+		m.mirrorSetByID(ctx, orgID, userID, roleTemplateID)
+	}
 	return nil
 }
 
@@ -125,7 +127,9 @@ func (m *Members) AddMemberWithParams(ctx context.Context, orgID, userID, roleTe
 	if err := m.identityOrgs.AddMemberWithParams(ctx, orgID, userID, roleTemplateName, scope); err != nil {
 		return err
 	}
-	m.mirrorSetByName(ctx, orgID, userID, roleTemplateName)
+	if m.permits(scope, orgID) {
+		m.mirrorSetByName(ctx, orgID, userID, roleTemplateName)
+	}
 	return nil
 }
 
@@ -138,7 +142,9 @@ func (m *Members) UpdateMemberRoleTemplate(ctx context.Context, orgID, userID st
 	if err := m.identityOrgs.UpdateMemberRoleTemplate(ctx, orgID, userID, roleTemplateID, scope); err != nil {
 		return err
 	}
-	m.mirrorSetByID(ctx, orgID, userID, roleTemplateID)
+	if m.permits(scope, orgID) {
+		m.mirrorSetByID(ctx, orgID, userID, roleTemplateID)
+	}
 	return nil
 }
 
@@ -149,7 +155,9 @@ func (m *Members) UpdateMemberRole(ctx context.Context, orgID, userID, roleTempl
 	if err := m.identityOrgs.UpdateMemberRole(ctx, orgID, userID, roleTemplateName, scope); err != nil {
 		return err
 	}
-	m.mirrorSetByName(ctx, orgID, userID, roleTemplateName)
+	if m.permits(scope, orgID) {
+		m.mirrorSetByName(ctx, orgID, userID, roleTemplateName)
+	}
 	return nil
 }
 
@@ -164,7 +172,9 @@ func (m *Members) UpdateMemberRole(ctx context.Context, orgID, userID, roleTempl
 // preserve exactly the record the caller asked to be rid of. Every caller in TSM
 // already absorbs that sentinel for the same reason.
 func (m *Members) RemoveMember(ctx context.Context, orgID, userID string, scope idstore.OrgScope) error {
-	m.mirrorDelete(ctx, orgID, userID)
+	if m.permits(scope, orgID) {
+		m.mirrorDelete(ctx, orgID, userID)
+	}
 	return m.identityOrgs.RemoveMember(ctx, orgID, userID, scope)
 }
 
@@ -202,7 +212,9 @@ func (m *Members) RemoveAllMembershipsForUser(ctx context.Context, userID string
 // keyed on the CONSTRUCTOR instead — anything that can reach this repository has
 // to come through NewMembers and therefore through this override.
 func (m *Members) Delete(ctx context.Context, orgID string, scope idstore.OrgScope) error {
-	m.mirrorDeleteForOrganization(ctx, orgID)
+	if m.permits(scope, orgID) {
+		m.mirrorDeleteForOrganization(ctx, orgID)
+	}
 	return m.identityOrgs.Delete(ctx, orgID, scope)
 }
 
@@ -360,6 +372,33 @@ func (m *Members) mirrorDeleteForOrganization(ctx context.Context, orgID string)
 		slog.Error("approles: this application's mirror still records roles in an organization being deleted",
 			"organization_id", orgID, "error", err)
 	}
+}
+
+// permits reports whether the caller's tenancy admits writing this
+// organization's mirrored roles.
+//
+// THE MIRROR MUST NOT REACH FURTHER THAN THE WRITE IT MIRRORS. Every identity
+// leg here is scoped — the shared store applies the caller's OrgScope as a SQL
+// predicate and reports ErrNotFound when it matches nothing (identity #138,
+// #162) — but a REVOCATION writes the mirror FIRST, before that predicate has
+// had a chance to refuse anything. Without this check, a caller whose scope does
+// not admit orgID would have the mirrored row deleted anyway and then be told
+// the membership was not found: a cross-tenant write reported as a no-op. In
+// Phase 3a nothing reads the mirror so nobody loses access, which is exactly why
+// it would go unnoticed until the phase that starts reading it.
+//
+// Applied on the grant paths too, where the identity leg's own predicate already
+// establishes the same thing. That is redundant and deliberately so: "the mirror
+// never touches an organization the caller's scope does not permit" is then a
+// property of THIS function, checkable by reading it, rather than an argument
+// about what each identity method does with its scope argument.
+//
+// PurgeUserRoles is not routed through here and cannot be: it strips a principal
+// whose identity row has already been deleted, so there is no organization left
+// to test and no membership left for a scope to admit. Its caller's own
+// DeleteUser carried the tenancy.
+func (m *Members) permits(scope idstore.OrgScope, orgID string) bool {
+	return scope.PermitsOrganization(orgID)
 }
 
 // scopeOrganizations translates an OrgScope into the argument

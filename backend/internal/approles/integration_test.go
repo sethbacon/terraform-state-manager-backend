@@ -674,3 +674,50 @@ func assertNoDrift(t *testing.T, e *env) {
 	sort.Strings(keys)
 	t.Fatalf("the mirror does not agree with identity: %v (kinds %v)", kinds, keys)
 }
+
+// TestIntegrationMirrorIsTenantScoped is the same property as the unit test,
+// asserted on ROWS rather than on mock expectations.
+//
+// It exists because the mock version of this test is delicate: sqlmock reports
+// unmet expectations, not unexpected statements, so the obvious spelling passes
+// with the fix reverted. A row that is still there after an out-of-tenancy call
+// cannot be misread.
+func TestIntegrationMirrorIsTenantScoped(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+
+	e.newIdentityRole(t, "viewer", "state:read")
+	if _, err := Reconcile(ctx, e.appDB, e.identityDB); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	victim := e.newOrg(t, "victim")
+	other := e.newOrg(t, "other")
+	user := e.newUser(t, "ivan@example.com")
+	if err := e.members.AddMemberWithParams(ctx, victim, user, "viewer", idstore.OrgScopeAllOrganizations()); err != nil {
+		t.Fatalf("seed membership: %v", err)
+	}
+	if _, ok := e.mirroredRole(t, victim, user); !ok {
+		t.Fatal("the dual write did not reach TSM's own table")
+	}
+
+	// A caller whose tenancy is `other` acting on `victim`.
+	outside := idstore.OrgScopeOrganizations(other)
+	_ = e.members.RemoveMember(ctx, victim, user, outside)
+	if _, ok := e.mirroredRole(t, victim, user); !ok {
+		t.Fatal("an out-of-tenancy RemoveMember deleted another organization's mirrored role")
+	}
+	_ = e.members.Delete(ctx, victim, outside)
+	if _, ok := e.mirroredRole(t, victim, user); !ok {
+		t.Fatal("an out-of-tenancy organization delete removed another organization's mirrored roles")
+	}
+	// The identity row is likewise untouched, so the two sides still agree.
+	assertNoDrift(t, e)
+
+	// In tenancy, the same calls do apply.
+	if err := e.members.RemoveMember(ctx, victim, user, idstore.OrgScopeOrganizations(victim)); err != nil {
+		t.Fatalf("in-tenancy RemoveMember: %v", err)
+	}
+	if _, ok := e.mirroredRole(t, victim, user); ok {
+		t.Fatal("an in-tenancy RemoveMember left the mirrored role behind")
+	}
+}
