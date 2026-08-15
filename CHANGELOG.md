@@ -1,5 +1,25 @@
 # Changelog
 
+## [3.6.0](https://github.com/sethbacon/terraform-state-manager-backend/compare/v3.5.0...v3.6.0) (2026-08-15)
+
+
+### ⚠ BREAKING CHANGES
+
+* **identity:** authorization now reads this application's own role tables (TSM_AUTHZ_ROLE_SOURCE=app, the default). Deployments with suite.role_seed_owner set to the sibling have been authorizing against the sibling's definition of every role name and will authorize against this build's from the first boot. Run `server authz-drift` before upgrading and require a zero exit; set TSM_AUTHZ_ROLE_SOURCE=identity and restart to roll back.
+
+### Features
+
+* **drift:** store per-run completeness so a run can answer "was this check complete?" ([#388](https://github.com/sethbacon/terraform-state-manager-backend/issues/388)) ([cbbcf28](https://github.com/sethbacon/terraform-state-manager-backend/commit/cbbcf2828efc4c267acce9e325b18cdff24fe324))
+* **identity:** authorize from TSM's own role tables, gated on proven equivalence ([#389](https://github.com/sethbacon/terraform-state-manager-backend/issues/389)) ([3572d76](https://github.com/sethbacon/terraform-state-manager-backend/commit/3572d76e4f867a5a948a602a73deff00e4f21694))
+* **identity:** give TSM a platform-admin carrier and an audit outbox ([#385](https://github.com/sethbacon/terraform-state-manager-backend/issues/385)) ([83bf1aa](https://github.com/sethbacon/terraform-state-manager-backend/commit/83bf1aa8570e8229e887c42ee33947041915bc10))
+* **identity:** give TSM its own role tables, backfilled and dual-written ([#387](https://github.com/sethbacon/terraform-state-manager-backend/issues/387)) ([a1fe840](https://github.com/sethbacon/terraform-state-manager-backend/commit/a1fe8400f9f94fd9ee1b94e8a7e1db2d9dddd97a))
+
+
+### Bug Fixes
+
+* **auth:** report carrier-granted admin on /auth/me and resolve platform-admin identities ([#396](https://github.com/sethbacon/terraform-state-manager-backend/issues/396)) ([47b0447](https://github.com/sethbacon/terraform-state-manager-backend/commit/47b0447c80ee83a8442374c18c415f202b76ce9f))
+* **security:** take go1.26.6 for seven reachable stdlib advisories ([#390](https://github.com/sethbacon/terraform-state-manager-backend/issues/390)) ([4122b42](https://github.com/sethbacon/terraform-state-manager-backend/commit/4122b42f6001f73b16e3ab03578f4fb8328bf147)), closes [#334](https://github.com/sethbacon/terraform-state-manager-backend/issues/334)
+
 ## [3.5.0](https://github.com/sethbacon/terraform-state-manager-backend/compare/v3.4.0...v3.5.0) (2026-08-14)
 
 
