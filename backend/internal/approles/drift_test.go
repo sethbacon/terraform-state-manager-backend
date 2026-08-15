@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
 )
@@ -23,13 +24,13 @@ func newDriftEnv(t *testing.T) *driftEnv { return &driftEnv{env: newReconcileEnv
 type assignment struct{ org, user, role string }
 
 func (d *driftEnv) stage(identityTemplates, appTemplates []Template, identityRows, appRows []assignment) {
-	identityTemplateRows := sqlmock.NewRows([]string{"id", "name", "display_name", "description", "scopes", "is_system"})
+	identityTemplateRows := identityTemplateProbeRows()
 	for _, t := range identityTemplates {
 		identityTemplateRows.AddRow(t.ID, t.Name, t.DisplayName, t.Description, []byte(scopeJSON(t.Scopes)), t.IsSystem)
 	}
-	appTemplateRows := sqlmock.NewRows([]string{"id", "name", "display_name", "description", "scopes", "is_system"})
+	appTemplateRows := appTemplateRows()
 	for _, t := range appTemplates {
-		appTemplateRows.AddRow(t.ID, t.Name, t.DisplayName, t.Description, []byte(scopeJSON(t.Scopes)), t.IsSystem)
+		appTemplateRows.AddRow(t.ID, t.Name, t.DisplayName, t.Description, []byte(scopeJSON(t.Scopes)), t.IsSystem, time.Now(), time.Now())
 	}
 	d.env.identity.ExpectQuery(regexp.QuoteMeta(`SELECT id::text, name`)).WillReturnRows(identityTemplateRows)
 	d.env.app.ExpectQuery(regexp.QuoteMeta(`SELECT id, name, COALESCE(display_name`)).WillReturnRows(appTemplateRows)
@@ -207,10 +208,10 @@ func TestCheckDrift_DoesNotReadAMidStreamFailureAsTheEndOfTheStream(t *testing.T
 	const user = "22222222-0000-0000-0000-000000000001"
 	templates := []Template{tmpl(adminTemplateID, "admin", "admin")}
 
-	identityTemplateRows := sqlmock.NewRows([]string{"id", "name", "display_name", "description", "scopes", "is_system"}).
+	identityTemplateRows := identityTemplateProbeRows().
 		AddRow(adminTemplateID, "admin", "admin", nil, []byte(`["admin"]`), true)
-	appTemplateRows := sqlmock.NewRows([]string{"id", "name", "display_name", "description", "scopes", "is_system"}).
-		AddRow(adminTemplateID, "admin", "admin", nil, []byte(`["admin"]`), true)
+	appTemplateRows := appTemplateRows().
+		AddRow(adminTemplateID, "admin", "admin", nil, []byte(`["admin"]`), true, time.Now(), time.Now())
 	_ = templates
 	d.env.identity.ExpectQuery(regexp.QuoteMeta(`SELECT id::text, name`)).WillReturnRows(identityTemplateRows)
 	d.env.app.ExpectQuery(regexp.QuoteMeta(`SELECT id, name, COALESCE(display_name`)).WillReturnRows(appTemplateRows)

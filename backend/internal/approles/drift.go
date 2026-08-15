@@ -342,6 +342,10 @@ func loadTemplates(ctx context.Context, appDB, identityDB *sql.DB) (identityTemp
 }
 
 // scanTemplate decodes one role definition row, including its JSONB scopes.
+//
+// It does NOT read created_at/updated_at: this shape exists only to be compared,
+// and the comparison is over names and scopes. Store.ListTemplates does read them,
+// because its result is also what GET /admin/roles serves.
 func scanTemplate(rows *sql.Rows) (Template, error) {
 	var t Template
 	var scopes []byte

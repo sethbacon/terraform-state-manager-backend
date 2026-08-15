@@ -255,3 +255,79 @@ func TestBuildAuditLog_OrgTagging(t *testing.T) {
 // replaced by the store.AuditScope SQL predicate in identity v0.21.0; its
 // semantics are asserted end-to-end, per read axis, in
 // admin_audit_scope_test.go.
+
+// TestListRolesWireShapeIsUnchanged pins the JSON GET /admin/roles serves.
+//
+// The role picker moved off identity.role_templates and onto this application's
+// own tables, which changed the Go TYPE the handler serialises — from
+// identity/models.RoleTemplate to approles.Template. Those two are field-for-field
+// equivalent and tag-for-tag equivalent, and nothing in the compiler or in any
+// behavioural test says so: a missing `json:"display_name"` produces a 200 whose
+// body says `DisplayName`, and the admin Roles page renders blank cells against a
+// successful request. That is this phase's own failure mode arriving through the
+// serialiser instead of the query.
+//
+// The frontend's RoleTemplate interface (frontend/src/services/api.ts) is the
+// contract; these are its keys.
+func TestListRolesWireShapeIsUnchanged(t *testing.T) {
+	h, mock := newAdminHandlers(t)
+	// No app connection in this rig, so the handler falls back to the shared
+	// repository — which is the point: BOTH sources must serialise identically,
+	// and this asserts the fallback leg. The app leg is asserted by
+	// TestAppRoleTemplateJSONMatchesTheIdentityShape below, on the type itself.
+	mock.ExpectQuery("SELECT id, name, display_name, description, scopes, is_system").
+		WillReturnRows(sqlmock.NewRows([]string{"id", "name", "display_name", "description", "scopes", "is_system", "created_at", "updated_at"}).
+			AddRow("11111111-0000-0000-0000-000000000001", "editor", "Editor", nil, []byte(`["state:read"]`), true, time.Now(), time.Now()))
+
+	router := gin.New()
+	router.GET("/admin/roles", h.ListRoles())
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/admin/roles", nil))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d (%s)", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Roles []map[string]interface{} `json:"roles"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decoding the response: %v", err)
+	}
+	if len(body.Roles) != 1 {
+		t.Fatalf("roles = %v, want one", body.Roles)
+	}
+	for _, key := range []string{"id", "name", "display_name", "scopes", "is_system", "created_at", "updated_at"} {
+		if _, ok := body.Roles[0][key]; !ok {
+			t.Errorf("the response has no %q key: the admin Roles page reads it, and its absence is a 200 "+
+				"with a blank cell rather than an error. Body: %s", key, rec.Body.String())
+		}
+	}
+}
+
+// TestAppRoleTemplateJSONMatchesTheIdentityShape asserts the TYPE the app leg
+// serialises, so the leg that has no sqlmock rig in this package is covered too.
+func TestAppRoleTemplateJSONMatchesTheIdentityShape(t *testing.T) {
+	desc := "Read and edit state."
+	encoded, err := json.Marshal(approles.Template{
+		ID: "11111111-0000-0000-0000-000000000001", Name: "editor", DisplayName: "Editor",
+		Description: &desc, Scopes: []string{"state:read"}, IsSystem: true,
+		CreatedAt: time.Now(), UpdatedAt: time.Now(),
+	})
+	if err != nil {
+		t.Fatalf("marshalling approles.Template: %v", err)
+	}
+	var got map[string]interface{}
+	if err := json.Unmarshal(encoded, &got); err != nil {
+		t.Fatalf("decoding: %v", err)
+	}
+	for _, key := range []string{"id", "name", "display_name", "description", "scopes", "is_system", "created_at", "updated_at"} {
+		if _, ok := got[key]; !ok {
+			t.Errorf("approles.Template serialises without %q — the admin Roles page reads it. Got: %s", key, encoded)
+		}
+	}
+	for _, absent := range []string{"DisplayName", "IsSystem", "CreatedAt"} {
+		if _, ok := got[absent]; ok {
+			t.Errorf("approles.Template serialises the Go field name %q: the json tag is missing", absent)
+		}
+	}
+}

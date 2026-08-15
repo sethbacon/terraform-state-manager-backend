@@ -58,8 +58,15 @@ func expectVerifyOK(m sqlmock.Sqlmock) {
 		WillReturnRows(sqlmock.NewRows([]string{"to_regclass"}).AddRow("public.organization_member_roles"))
 }
 
-// appTemplateRows is the shape Store.ListTemplates scans.
+// appTemplateRows is the shape Store.ListTemplates scans. It carries the
+// timestamps because that result is also what GET /admin/roles serves.
 func appTemplateRows() *sqlmock.Rows {
+	return sqlmock.NewRows([]string{"id", "name", "display_name", "description", "scopes", "is_system", "created_at", "updated_at"})
+}
+
+// identityTemplateProbeRows is the shape CheckDrift's IDENTITY-side template read
+// scans — six columns, no timestamps: that side exists only to be compared.
+func identityTemplateProbeRows() *sqlmock.Rows {
 	return sqlmock.NewRows([]string{"id", "name", "display_name", "description", "scopes", "is_system"})
 }
 
@@ -72,7 +79,7 @@ func appTemplateRows() *sqlmock.Rows {
 // is how a suite becomes unreadable.
 func expectDriftProbe(env *reconcileEnv) {
 	env.identity.ExpectQuery(regexp.QuoteMeta(`SELECT id::text, name`)).
-		WillReturnRows(appTemplateRows())
+		WillReturnRows(identityTemplateProbeRows())
 	env.app.ExpectQuery(regexp.QuoteMeta(`SELECT id, name, COALESCE(display_name`)).
 		WillReturnRows(appTemplateRows())
 	env.identity.ExpectQuery(`FROM organization_members ORDER BY`).
@@ -157,7 +164,7 @@ func TestReconcile_AdoptsIdentityTemplatesPreservingTheirIDs(t *testing.T) {
 	// boot whose definer wrote nothing.
 	definedRows := appTemplateRows()
 	for i, rt := range auth.AppRoleTemplates() {
-		definedRows.AddRow(fmt.Sprintf("aaaaaaaa-0000-0000-0000-%012d", i), rt.Name, rt.DisplayName, nil, []byte(`[]`), true)
+		definedRows.AddRow(fmt.Sprintf("aaaaaaaa-0000-0000-0000-%012d", i), rt.Name, rt.DisplayName, nil, []byte(`[]`), true, time.Now(), time.Now())
 	}
 	expectForeignTemplateReadback(env, definedRows)
 
@@ -363,7 +370,7 @@ func TestReconcile_ReportsWhatItIsAboutToRepair(t *testing.T) {
 	// Identity has a membership this application records no role for: a principal
 	// who has LOST access they should have.
 	env.identity.ExpectQuery(regexp.QuoteMeta(`SELECT id::text, name`)).
-		WillReturnRows(appTemplateRows())
+		WillReturnRows(identityTemplateProbeRows())
 	env.app.ExpectQuery(regexp.QuoteMeta(`SELECT id, name, COALESCE(display_name`)).
 		WillReturnRows(appTemplateRows())
 	env.identity.ExpectQuery(`FROM organization_members ORDER BY`).
@@ -542,8 +549,8 @@ func TestReconcile_ReportsRolesThisBuildDoesNotDefine(t *testing.T) {
 			AddRow(adminTemplateID, "registry_publisher", "Publisher", nil, []byte(`["modules:write"]`), true, now, now))
 	expectTemplateAdoption(env.app, adminTemplateID, "registry_publisher", "Publisher")
 	expectForeignTemplateReadback(env, appTemplateRows().
-		AddRow(adminTemplateID, "registry_publisher", "Publisher", nil, []byte(`["modules:write"]`), true).
-		AddRow(editorTemplateID, "editor", "Editor", nil, []byte(`["state:read"]`), true))
+		AddRow(adminTemplateID, "registry_publisher", "Publisher", nil, []byte(`["modules:write"]`), true, time.Now(), time.Now()).
+		AddRow(editorTemplateID, "editor", "Editor", nil, []byte(`["state:read"]`), true, time.Now(), time.Now()))
 	env.identity.ExpectQuery("SELECT organization_id, user_id, role_template_id").
 		WillReturnRows(sqlmock.NewRows([]string{"organization_id", "user_id", "role_template_id"}))
 	env.app.ExpectExec("DELETE FROM organization_member_roles WHERE mirrored_at").

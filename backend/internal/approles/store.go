@@ -122,13 +122,24 @@ func NewStore(db *sql.DB) *Store { return &Store{db: db} }
 // Template is one role definition as this package moves it between the two
 // connections. It is deliberately not the shared library's models.RoleTemplate:
 // that type is the identity schema's row, and this table is TSM's.
+//
+// THE JSON TAGS ARE A WIRE CONTRACT, not decoration. GET /admin/roles serves this
+// type since the role picker moved onto these tables, and the frontend's
+// RoleTemplate interface reads snake_case `display_name` / `is_system` /
+// `created_at`. Without the tags Go would emit `DisplayName` and `IsSystem` and
+// drop the timestamps entirely — the admin Roles page would render blank cells
+// against a 200, which is the same class of silent wrongness this whole phase is
+// about, arriving through the serializer instead of the query. Keep them
+// byte-identical to identity/models.RoleTemplate's.
 type Template struct {
-	ID          string
-	Name        string
-	DisplayName string
-	Description *string
-	Scopes      []string
-	IsSystem    bool
+	ID          string    `json:"id"`
+	Name        string    `json:"name"`
+	DisplayName string    `json:"display_name"`
+	Description *string   `json:"description,omitempty"`
+	Scopes      []string  `json:"scopes"`
+	IsSystem    bool      `json:"is_system"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
 }
 
 // Verify asserts at startup that the two tables exist on the connection this
@@ -305,7 +316,7 @@ func (s *Store) DefineTemplate(ctx context.Context, t Template) error {
 // ListTemplates returns every role definition this application holds, keyed by
 // name, for the drift comparison and the reconcile's adopted-template report.
 func (s *Store) ListTemplates(ctx context.Context) (map[string]Template, error) {
-	const q = `SELECT id, name, COALESCE(display_name, ''), description, COALESCE(scopes, '[]'::jsonb), is_system FROM role_templates`
+	const q = `SELECT id, name, COALESCE(display_name, ''), description, COALESCE(scopes, '[]'::jsonb), is_system, created_at, updated_at FROM role_templates`
 	rows, err := s.db.QueryContext(ctx, q)
 	if err != nil {
 		return nil, fmt.Errorf("approles: listing role templates: %w", err)
@@ -316,7 +327,7 @@ func (s *Store) ListTemplates(ctx context.Context) (map[string]Template, error) 
 	for rows.Next() {
 		var t Template
 		var scopes []byte
-		if err := rows.Scan(&t.ID, &t.Name, &t.DisplayName, &t.Description, &scopes, &t.IsSystem); err != nil {
+		if err := rows.Scan(&t.ID, &t.Name, &t.DisplayName, &t.Description, &scopes, &t.IsSystem, &t.CreatedAt, &t.UpdatedAt); err != nil {
 			return nil, fmt.Errorf("approles: reading a role template: %w", err)
 		}
 		if err := json.Unmarshal(scopes, &t.Scopes); err != nil {
