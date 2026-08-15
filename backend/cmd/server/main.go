@@ -594,6 +594,17 @@ func startAuthzDriftWatch(appDB, identityDB *sql.DB, interval time.Duration) fun
 // sibling's — so reporting it at ERROR would train an operator to ignore the
 // series that also carries the real one.
 func reportAuthzDrift(ctx context.Context, appDB, identityDB *sql.DB) {
+	// See runAuthzDrift: an app connection routed into identity compares that
+	// schema against itself and reports agreement forever, so the detector would
+	// go permanently, silently green on the one deployment that needs it.
+	if _, _, err := approles.NewStore(appDB).Verify(ctx); err != nil {
+		if ctx.Err() != nil {
+			return
+		}
+		telemetry.AuthzDriftCheckFailed()
+		slog.Error("role-drift comparison cannot run: this application's authorization tables did not verify", "error", err)
+		return
+	}
 	res, err := approles.CheckDrift(ctx, appDB, identityDB)
 	if err != nil {
 		if ctx.Err() != nil {
@@ -673,6 +684,23 @@ func runAuthzDrift(cfg *config.Config) error {
 		return fmt.Errorf("failed to connect to identity schema: %w", err)
 	}
 	defer func() { _ = identityDB.Close() }()
+
+	// ROUTING FIRST, OR THE GATE CAN REPORT A FALSE CLEAN.
+	//
+	// Both sides of the comparison name their tables UNQUALIFIED, placed by each
+	// connection's search_path. On an app connection that resolves the identity
+	// schema — the exact misconfiguration migration 000032's pre-check and
+	// Store.Verify exist to refuse — this would read identity's tables twice,
+	// find them identical to themselves, and exit zero. A gate that certifies the
+	// one configuration the whole phase is designed to prevent is worse than no
+	// gate: it is the "green class gate certified a live finding" shape, and it
+	// would do it on the deployment least ready for the flip.
+	//
+	// Reconcile does this already, before its own CheckDrift; the two callers that
+	// do not are this command and the periodic watch, so both check here.
+	if _, _, err := approles.NewStore(database).Verify(context.Background()); err != nil {
+		return fmt.Errorf("authz-drift: %w", err)
+	}
 
 	res, err := approles.CheckDrift(context.Background(), database, identityDB)
 	if err != nil {

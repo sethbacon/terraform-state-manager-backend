@@ -1187,3 +1187,59 @@ func TestIntegrationRollbackToIdentityStillSeesPostFlipWrites(t *testing.T) {
 	}
 	assertNoDrift(t, e)
 }
+
+// A MISROUTED APP CONNECTION PRODUCES A FALSE CLEAN, AND Verify IS WHAT STOPS IT.
+//
+// Both sides of CheckDrift name their tables UNQUALIFIED, placed by each
+// connection's search_path. On an "app" connection carrying
+// `search_path=identity,public` — the misconfiguration migration 000032's
+// pre-check and Store.Verify exist to refuse — `role_templates` resolves to
+// IDENTITY's copy while `organization_member_roles` falls through to the
+// application's. The comparison then reads identity's role definitions on both
+// sides and reports `template_drift=0` and `scope_divergent=0` no matter how far
+// apart the two schemas actually are.
+//
+// That is a false clean on exactly the check this phase added, on exactly the
+// deployment least ready for the flip. This test establishes the premise the
+// guards rest on: the same estate reports divergence when routed correctly and
+// reports none when misrouted, and Verify refuses the misrouted connection before
+// either the gate or the periodic detector reaches the comparison.
+func TestIntegrationAMisroutedConnectionHidesTemplateDivergence(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+
+	// The sibling's `editor` in the shared schema; this build's in ours.
+	e.newIdentityRole(t, "editor", "modules:read", "providers:read")
+	if _, err := Reconcile(ctx, e.appDB, e.identityDB, ownTemplates); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+
+	correct, err := CheckDrift(ctx, e.appDB, e.identityDB)
+	if err != nil {
+		t.Fatalf("CheckDrift on the correct topology: %v", err)
+	}
+	if len(correct.TemplateDrift) == 0 {
+		t.Fatalf("the correctly-routed comparison reports no template drift, so this test's premise is gone: %s",
+			correct.String())
+	}
+
+	// The same comparison, over an app connection routed into identity.
+	misrouted := connect(t, os.Getenv("TEST_DATABASE_URL"), "identity,public")
+
+	if _, _, err := NewStore(misrouted).Verify(ctx); !errors.Is(err, ErrMisrouted) {
+		t.Fatalf("Verify on a misrouted connection: got %v, want ErrMisrouted — that refusal is the ONLY thing "+
+			"standing between the gate and the false clean below", err)
+	}
+
+	deceived, err := CheckDrift(ctx, misrouted, e.identityDB)
+	if err != nil {
+		t.Fatalf("CheckDrift on the misrouted topology: %v", err)
+	}
+	if len(deceived.TemplateDrift) != 0 || deceived.ScopeDivergent != 0 {
+		t.Skipf("this topology does not reproduce the false clean (%s); the Verify refusal above is asserted "+
+			"regardless, which is the property the gate depends on", deceived.String())
+	}
+	t.Logf("confirmed: correctly routed reports %d divergent templates, misrouted reports 0 — "+
+		"`server authz-drift` would have exited zero on a deployment whose authorization was never separated",
+		len(correct.TemplateDrift))
+}
