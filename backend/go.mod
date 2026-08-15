@@ -1,6 +1,6 @@
 module github.com/terraform-state-manager/terraform-state-manager
 
-go 1.26.5
+go 1.26.6
 
 require (
 	cloud.google.com/go/storage v1.64.0
@@ -25,7 +25,7 @@ require (
 	github.com/sethbacon/terraform-suite-identity v0.28.0
 	github.com/spf13/viper v1.21.0
 	golang.org/x/crypto v0.54.0
-	golang.org/x/mod v0.38.0
+	golang.org/x/mod v0.40.0
 	google.golang.org/api v0.291.0
 	gopkg.in/yaml.v3 v3.0.1
 )

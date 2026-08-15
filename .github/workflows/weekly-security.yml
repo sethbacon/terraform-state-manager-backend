@@ -45,6 +45,20 @@ jobs:
         with:
           persist-credentials: false
 
+      # Call analysis is deliberately disabled here. The scanner image ships its
+      # own Go toolchain (1.26.2 in v2.3.8) and invokes it with GOTOOLCHAIN=local,
+      # so it cannot build a module whose go directive names a newer release than
+      # the one baked into the image. When that happens its internal govulncheck
+      # pass aborts and osv-scanner exits 127 — an *error* code, distinct from the
+      # exit 1 that means "vulnerabilities found" — while still reporting zero
+      # vulnerabilities. `continue-on-error` collapses both into outcome=failure,
+      # so the tooling error silently filed a "vulnerabilities found" issue that
+      # listed nothing (issue #334, and again on the 2026-08-10 run).
+      #
+      # Nothing is lost by disabling it: reachability is the govulncheck job's job,
+      # and that job resolves the toolchain from backend/go.mod, so it always
+      # matches the module. This job stays responsible for the flat known-vuln
+      # sweep of go.sum, which needs no toolchain at all.
       - name: Run OSV-Scanner
         id: osv
         uses: google/osv-scanner-action/osv-scanner-action@9a498708959aeaef5ef730655706c5a1df1edbc2 # v2.3.8
@@ -54,6 +68,7 @@ jobs:
             --recursive
             ./backend
             --format=table
+            --no-call-analysis=go
 
       - name: Create issue on new vulnerabilities
         if: steps.osv.outcome == 'failure'
