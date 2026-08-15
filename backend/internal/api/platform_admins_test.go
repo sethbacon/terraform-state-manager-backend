@@ -227,6 +227,100 @@ func TestListPlatformAdminsFlagsOrphans(t *testing.T) {
 	}
 }
 
+func (r paRig) expectUserRow(id, email, name string) {
+	now := time.Now()
+	r.identity.ExpectQuery("SELECT id, email, name, oidc_sub, created_at, updated_at").
+		WillReturnRows(sqlmock.NewRows(paUserCols).AddRow(id, email, name, "sub", now, now))
+}
+
+// GUARD platform-admin-list-resolves-identities (#392), at the wire.
+//
+// The service resolving the people is only half of it — the view has to carry
+// them. A management page built on this endpoint could otherwise render nothing
+// but UUIDs, which discards the whole point of recording granted_by.
+//
+// It also pins the two absences apart from a blank: an orphaned grantee has NO
+// email/name key at all (omitempty) while keeping its user_id and its
+// `orphaned` flag, so a client can tell "there is nobody there" from "somebody
+// with no address".
+func TestListPlatformAdminsResolvesGranteeAndGranterIdentities(t *testing.T) {
+	const granterID = "55555555-5555-4555-8555-555555555555"
+	granter := granterID
+	r := newPARig(t, true)
+	r.app.ExpectQuery(`FROM "platform_admins"`).
+		WillReturnRows(sqlmock.NewRows(paGrantCols).
+			AddRow(paUserID, &granter, time.Now(), "on call").
+			AddRow(paOtherID, &granter, time.Now(), "deleted"))
+	r.expectUserRow(paUserID, "holder@example.com", "Holder")
+	r.expectUserRow(granterID, "granter@example.com", "Granter")
+	r.expectUserResolves(false) // the second grant's holder is gone
+
+	w := r.do(http.MethodGet, "/platform-admins", "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (%s)", w.Code, w.Body.String())
+	}
+	var got struct {
+		PlatformAdmins []struct {
+			UserID         string  `json:"user_id"`
+			Email          *string `json:"email"`
+			Name           *string `json:"name"`
+			GrantedBy      *string `json:"granted_by"`
+			GrantedByEmail *string `json:"granted_by_email"`
+			Orphaned       bool    `json:"orphaned"`
+		} `json:"platform_admins"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(got.PlatformAdmins) != 2 {
+		t.Fatalf("got %d rows, want 2", len(got.PlatformAdmins))
+	}
+
+	live := got.PlatformAdmins[0]
+	if live.Email == nil || *live.Email != "holder@example.com" {
+		t.Errorf("email = %v, want holder@example.com: a table of bare UUIDs is not provenance", live.Email)
+	}
+	if live.Name == nil || *live.Name != "Holder" {
+		t.Errorf("name = %v, want Holder", live.Name)
+	}
+	if live.GrantedByEmail == nil || *live.GrantedByEmail != "granter@example.com" {
+		t.Errorf("granted_by_email = %v, want granter@example.com", live.GrantedByEmail)
+	}
+
+	orphan := got.PlatformAdmins[1]
+	if !orphan.Orphaned {
+		t.Errorf("%s not flagged orphaned but its user is gone", orphan.UserID)
+	}
+	if orphan.Email != nil || orphan.Name != nil {
+		t.Errorf("orphan carries an identity (%v / %v): absent, not blank", orphan.Email, orphan.Name)
+	}
+	if orphan.UserID != paOtherID || orphan.GrantedBy == nil {
+		t.Errorf("the orphan lost the identifiers it is removed by: %+v", orphan)
+	}
+	if orphan.GrantedByEmail == nil || *orphan.GrantedByEmail != "granter@example.com" {
+		t.Errorf("orphan granted_by_email = %v, want the memoised granter@example.com", orphan.GrantedByEmail)
+	}
+	if err := r.identity.ExpectationsWereMet(); err != nil {
+		t.Errorf("identity expectations: %v", err)
+	}
+}
+
+// Resolution reaches a store that may be a different database entirely, so it
+// can be down while the carrier is fine. That is 503 and an empty answer, never
+// a list in which every live administrator reads as an orphan.
+func TestListPlatformAdminsReportsAnIdentityOutageAsRetryable(t *testing.T) {
+	r := newPARig(t, true)
+	r.app.ExpectQuery(`FROM "platform_admins"`).
+		WillReturnRows(sqlmock.NewRows(paGrantCols).AddRow(paUserID, nil, time.Now(), nil))
+	r.identity.ExpectQuery("SELECT id, email, name, oidc_sub, created_at, updated_at").
+		WillReturnError(errors.New("dial tcp: connection refused"))
+
+	w := r.do(http.MethodGet, "/platform-admins", "")
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503 (%s)", w.Code, w.Body.String())
+	}
+}
+
 // expectSerializedRevoke scripts everything up to and including the predicate's
 // resolution: the advisory-lock transaction, the revoking transaction, and the
 // FOR UPDATE read that returns rows.

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 
+	idmodels "github.com/sethbacon/terraform-suite-identity/identity/models"
 	idplatformadmin "github.com/sethbacon/terraform-suite-identity/identity/platformadmin"
 	idstore "github.com/sethbacon/terraform-suite-identity/identity/store"
 )
@@ -46,19 +47,39 @@ type identityResolver struct {
 // it to some organization would make a grant look orphaned merely because the
 // user belongs somewhere the scope did not reach.
 func (r identityResolver) UserExists(ctx context.Context, userID string) (bool, error) {
-	if r.users == nil {
-		return false, fmt.Errorf("%w: no identity user repository is wired, so no grant can be shown "+
-			"to name a live principal", idplatformadmin.ErrIdentityUnavailable)
-	}
-	if strings.TrimSpace(userID) == "" {
-		return false, nil
-	}
-	user, err := r.users.GetUserByID(ctx, userID, idstore.OrgScopeAllOrganizations())
-	if errors.Is(err, idstore.ErrNotFound) {
-		return false, nil
-	}
+	user, err := r.lookup(ctx, userID)
 	if err != nil {
 		return false, err
 	}
 	return user != nil, nil
+}
+
+// lookup resolves userID to the identity user behind it, or to (nil, nil) when
+// nobody answers to that id.
+//
+// It is UserExists with the person kept rather than discarded, and it is the
+// only reader of the identity store in this package — the existence question and
+// the "who is this?" question are the same query, and answering them separately
+// would be two round trips per grant that could disagree with each other.
+//
+// The three-outcome contract UserExists documents is this function's: (user,
+// nil) and (nil, nil) are answers, (nil, err) is "I could not find out", and
+// collapsing the third into the second is the defect both signatures exist to
+// make unwriteable.
+func (r identityResolver) lookup(ctx context.Context, userID string) (*idmodels.User, error) {
+	if r.users == nil {
+		return nil, fmt.Errorf("%w: no identity user repository is wired, so no grant can be shown "+
+			"to name a live principal", idplatformadmin.ErrIdentityUnavailable)
+	}
+	if strings.TrimSpace(userID) == "" {
+		return nil, nil
+	}
+	user, err := r.users.GetUserByID(ctx, userID, idstore.OrgScopeAllOrganizations())
+	if errors.Is(err, idstore.ErrNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return user, nil
 }

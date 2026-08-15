@@ -364,6 +364,108 @@ func TestListLabelsOrphansRatherThanHidingThem(t *testing.T) {
 	}
 }
 
+// expectUserRow answers the next identity lookup with a specific person, so a
+// test can tell the grantee's row from the granter's.
+func (r rig) expectUserRow(id, email, name string) {
+	now := time.Now()
+	r.identity.ExpectQuery("SELECT id, email, name, oidc_sub, created_at, updated_at").
+		WillReturnRows(sqlmock.NewRows(userCols).AddRow(id, email, name, "sub", now, now))
+}
+
+// GUARD platform-admin-list-resolves-identities (#392).
+//
+// granted_by is the entire reason the carrier records provenance, and a bare
+// UUID is not provenance: an operator deciding whether a grant is legitimate
+// cannot do it without a name, and this listing is also the only surface an
+// orphaned row can be removed from. List already reached identity for the
+// existence boolean and threw the person away.
+//
+// The memoisation is asserted here rather than assumed. The second grant names
+// the SAME granter, and there is no third identity expectation scripted: an
+// unmemoised lookup would query a handle with nothing left to answer it and fail
+// the listing outright.
+func TestListResolvesTheGranteeAndTheGranter(t *testing.T) {
+	r := newRig(t)
+	const goneUserID = "22222222-2222-4222-8222-222222222222"
+	const granterID = "33333333-3333-4333-8333-333333333333"
+	granter := granterID
+	r.app.ExpectQuery(`FROM "platform_admins"`).
+		WillReturnRows(sqlmock.NewRows(grantCols).
+			AddRow(testUserID, &granter, time.Now(), "on call").
+			AddRow(goneUserID, &granter, time.Now(), "deleted user"))
+	r.expectUserRow(testUserID, "holder@example.com", "Holder")
+	r.expectUserRow(granterID, "granter@example.com", "Granter")
+	r.expectUserResolves(false) // the second grant's holder is gone
+
+	entries, err := r.svc.List(context.Background())
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("got %d entries, want 2", len(entries))
+	}
+
+	if entries[0].User == nil {
+		t.Fatalf("the live grant resolved to nobody: a list of bare UUIDs is not provenance")
+	}
+	if entries[0].User.Email != "holder@example.com" || entries[0].User.Name != "Holder" {
+		t.Errorf("grantee = %+v, want holder@example.com / Holder", *entries[0].User)
+	}
+	if entries[0].Granter == nil || entries[0].Granter.Email != "granter@example.com" {
+		t.Errorf("granter = %+v, want granter@example.com", entries[0].Granter)
+	}
+
+	// The orphan keeps its row and its flag and gains no half-filled person —
+	// but its granter still resolves, so the row remains attributable.
+	if entries[1].Exists || entries[1].User != nil {
+		t.Errorf("the orphaned grant carries an identity: %+v", entries[1])
+	}
+	if entries[1].Granter == nil || entries[1].Granter.Email != "granter@example.com" {
+		t.Errorf("orphan granter = %+v, want the memoised granter@example.com", entries[1].Granter)
+	}
+
+	if err := r.identity.ExpectationsWereMet(); err != nil {
+		t.Errorf("identity expectations: %v", err)
+	}
+}
+
+// A grant with no granting principal is the first-boot bootstrap. It must not
+// reach identity with an empty id, and it must not invent a granter.
+func TestListLeavesABootstrapGrantUnattributed(t *testing.T) {
+	r := newRig(t)
+	r.app.ExpectQuery(`FROM "platform_admins"`).
+		WillReturnRows(sqlmock.NewRows(grantCols).AddRow(testUserID, nil, time.Now(), "first boot"))
+	r.expectUserRow(testUserID, "holder@example.com", "Holder")
+
+	entries, err := r.svc.List(context.Background())
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if entries[0].Granter != nil {
+		t.Errorf("granter = %+v, want nil: nobody conferred a bootstrap grant", entries[0].Granter)
+	}
+	if err := r.identity.ExpectationsWereMet(); err != nil {
+		t.Errorf("a NULL granted_by reached the identity store: %v", err)
+	}
+}
+
+// A GRANTER lookup that fails is an outage too. Serving the listing with that
+// one column blank would invite exactly the misreading the grantee's own
+// fail-closed rule exists to prevent, on rows an operator is deciding whether to
+// delete.
+func TestListRefusesWhenTheGranterCannotBeResolved(t *testing.T) {
+	r := newRig(t)
+	granter := "33333333-3333-4333-8333-333333333333"
+	r.app.ExpectQuery(`FROM "platform_admins"`).
+		WillReturnRows(sqlmock.NewRows(grantCols).AddRow(testUserID, &granter, time.Now(), nil))
+	r.expectUserRow(testUserID, "holder@example.com", "Holder")
+	r.expectUserLookupFails(errors.New("dial tcp: connection refused"))
+
+	if _, err := r.svc.List(context.Background()); !errors.Is(err, idplatformadmin.ErrIdentityUnavailable) {
+		t.Errorf("err = %v, want ErrIdentityUnavailable", err)
+	}
+}
+
 // An identity outage must not render every administrator as an orphan: the
 // obvious response to that listing is to delete them.
 func TestListRefusesToGuessDuringAnIdentityOutage(t *testing.T) {
