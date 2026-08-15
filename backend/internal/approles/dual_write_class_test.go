@@ -526,3 +526,100 @@ func TestTheEmbeddedRepositoryIsUnreachable(t *testing.T) {
 			"members.OrganizationRepository.AddMemberWithParams(...) writes identity and skips the mirror")
 	}
 }
+
+// TestEveryMirroredWriteRunsACallerSuppliedSweep is AXIS 7.
+//
+// Axis 2 proves each override writes both places. This proves each one also
+// invalidates the credentials that FROZE the authority it just changed.
+//
+// It was added because sethbacon/security-orchestration#732 found the two Add
+// methods reaching the mirror's upsert without a sweep, and the argument that
+// they could not need one turned out to be an argument from their NAMES. On the
+// identity leg an add is a plain INSERT under UNIQUE(organization_id, user_id)
+// and genuinely cannot reduce; on the mirror leg it is
+// `ON CONFLICT ... DO UPDATE`, which since Phase 3b writes the table that decides
+// authorization — so adding a principal to an organization identity has no
+// membership for moves whatever STALE record this application held, downward if
+// the new role is narrower.
+//
+// The rule is therefore keyed on the MIRROR WRITE rather than on a list of
+// "reducing" method names: any Members method that sets or removes a role record
+// must take an AuthorityReducer and must actually run it. A list of names is what
+// let the Add methods sit outside the rule for a whole phase.
+func TestEveryMirroredWriteRunsACallerSuppliedSweep(t *testing.T) {
+	root := backendRoot(t)
+	src, err := os.ReadFile(filepath.Join(root, "internal/approles/members.go"))
+	if err != nil {
+		t.Fatalf("reading members.go: %v", err)
+	}
+	fset := token.NewFileSet()
+	parsed, err := parser.ParseFile(fset, "members.go", src, parser.SkipObjectResolution)
+	if err != nil {
+		t.Fatalf("parsing members.go: %v", err)
+	}
+
+	// PurgeUserRoles is the one documented exception: its subject has just been
+	// deleted from identity, so no credential of theirs can authenticate at all.
+	// Spelled here so removing that reasoning from the method also has to be done
+	// here, deliberately.
+	exempt := map[string]bool{"PurgeUserRoles": true}
+
+	var checked, unswept []string
+	for _, decl := range parsed.Decls {
+		fn, isFn := decl.(*ast.FuncDecl)
+		if !isFn || fn.Recv == nil || fn.Body == nil || !receiverIsMembers(fn) || !fn.Name.IsExported() {
+			continue
+		}
+		var writesMirror, takesReducer, runsReducer bool
+		ast.Inspect(fn.Body, func(n ast.Node) bool {
+			call, isCall := n.(*ast.CallExpr)
+			if !isCall {
+				return true
+			}
+			_, sel, ok := selectorName(call)
+			if !ok {
+				if id, isID := call.Fun.(*ast.Ident); isID {
+					sel = id.Name
+				} else {
+					return true
+				}
+			}
+			if mirrorHelpers[sel] {
+				writesMirror = true
+			}
+			if sel == "reduceAuthority" {
+				runsReducer = true
+			}
+			return true
+		})
+		for _, param := range fn.Type.Params.List {
+			if id, ok := param.Type.(*ast.Ident); ok && id.Name == "AuthorityReducer" {
+				takesReducer = true
+			}
+		}
+		if !writesMirror || exempt[fn.Name.Name] {
+			continue
+		}
+		switch {
+		case !takesReducer:
+			unswept = append(unswept, fn.Name.Name+" (writes the mirror, takes no AuthorityReducer)")
+		case !runsReducer:
+			unswept = append(unswept, fn.Name.Name+" (takes an AuthorityReducer but never calls reduceAuthority)")
+		default:
+			checked = append(checked, fn.Name.Name)
+		}
+	}
+
+	if len(checked)+len(unswept) == 0 {
+		t.Fatal("no exported Members method writes the mirror at all: the guard inspected an empty universe " +
+			"(the mirror helpers were renamed, or the writes moved out of members.go)")
+	}
+	if len(unswept) > 0 {
+		sort.Strings(unswept)
+		t.Fatalf("these Members methods change this application's role records without a caller-supplied credential sweep: %v.\n"+
+			"Since Phase 3b these rows decide authorization, and TSM's two credential families freeze a principal's scopes at "+
+			"issue time (#330) — so a role write that does not sweep takes nothing away. Note the mirror leg is an UPSERT even "+
+			"where the identity leg is an insert-only: `Add` is not a proof that nothing is reduced "+
+			"(sethbacon/security-orchestration#732). Take an AuthorityReducer and pass it to reduceAuthority.", unswept)
+	}
+}

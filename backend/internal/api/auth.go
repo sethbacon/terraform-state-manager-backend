@@ -727,7 +727,8 @@ func (h *AuthHandlers) reconcileManagedMemberships(ctx context.Context, userID s
 				if updErr != nil {
 					return fmt.Errorf("update member role org=%s user=%s: %w", org.ID, userID, updErr)
 				}
-			} else if err := h.orgRepo.AddMemberWithParams(ctx, org.ID, userID, role, idstore.OrgScopeOrganizations(org.ID)); err != nil {
+			} else if err := h.orgRepo.AddMemberWithParams(ctx, org.ID, userID, role, idstore.OrgScopeOrganizations(org.ID),
+				h.sweepIdPReduction("idp: group mapping applied")); err != nil {
 				return fmt.Errorf("add member org=%s user=%s: %w", org.ID, userID, err)
 			}
 			slog.Info("group mapping applied", "user_id", userID, "org", orgName, "role", role)
@@ -762,7 +763,8 @@ func (h *AuthHandlers) reconcileManagedMemberships(ctx context.Context, userID s
 			return fmt.Errorf("check membership default org user=%s: %w", userID, err)
 		}
 		if !isMember {
-			if err := h.orgRepo.AddMemberWithParams(ctx, org.ID, userID, defaultRole, idstore.OrgScopeOrganizations(org.ID)); err != nil {
+			if err := h.orgRepo.AddMemberWithParams(ctx, org.ID, userID, defaultRole, idstore.OrgScopeOrganizations(org.ID),
+				h.sweepIdPReduction("idp: default-role membership applied")); err != nil {
 				return fmt.Errorf("add default member user=%s: %w", userID, err)
 			}
 		}
@@ -820,7 +822,16 @@ func (h *AuthHandlers) assignRole(ctx context.Context, userID, role string) {
 		// First-login-only: never re-assign or escalate an existing member.
 		return
 	}
-	if err := h.orgRepo.AddMemberWithParams(ctx, org.ID, userID, role, idstore.OrgScopeOrganizations(org.ID)); err != nil {
+	// KEYS ONLY, like every other authority write on a login path — see
+	// sweepIdPReduction: moving the JWT watermark microseconds before
+	// GenerateJWT would revoke the very token this request is about to mint.
+	//
+	// It is not a no-op even though the CheckMembership above establishes the
+	// principal is not a member: that boolean is identity's fact, and this
+	// application can still hold a stale role record for the pair (CheckDrift's
+	// `stale` kind), which the mirror's upsert then moves down to `role`.
+	if err := h.orgRepo.AddMemberWithParams(ctx, org.ID, userID, role, idstore.OrgScopeOrganizations(org.ID),
+		h.sweepIdPReduction("login: first-login role assignment")); err != nil {
 		slog.Warn("failed to add membership", "user_id", userID, "role", role, "error", err)
 	}
 }

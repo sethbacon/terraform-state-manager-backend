@@ -349,7 +349,7 @@ func TestIntegrationReconcileSweepsWhatIdentityNoLongerHas(t *testing.T) {
 	e.newIdentityRole(t, "viewer", "state:read")
 	org := e.newOrg(t, "acme")
 	user := e.newUser(t, "carol@example.com")
-	if err := e.members.AddMemberWithParams(ctx, org, user, "viewer", idstore.OrgScopeAllOrganizations()); err != nil {
+	if err := e.members.AddMemberWithParams(ctx, org, user, "viewer", idstore.OrgScopeAllOrganizations(), noSweepNeeded); err != nil {
 		t.Fatalf("AddMemberWithParams: %v", err)
 	}
 	if _, ok := e.mirroredRole(t, org, user); !ok {
@@ -384,7 +384,7 @@ func TestIntegrationReconcileSparesAConcurrentWrite(t *testing.T) {
 	e.newIdentityRole(t, "viewer", "state:read")
 	org := e.newOrg(t, "acme")
 	user := e.newUser(t, "dave@example.com")
-	if err := e.members.AddMemberWithParams(ctx, org, user, "viewer", idstore.OrgScopeAllOrganizations()); err != nil {
+	if err := e.members.AddMemberWithParams(ctx, org, user, "viewer", idstore.OrgScopeAllOrganizations(), noSweepNeeded); err != nil {
 		t.Fatalf("AddMemberWithParams: %v", err)
 	}
 	if _, err := Reconcile(ctx, e.appDB, e.identityDB, ownTemplates); err != nil {
@@ -411,7 +411,7 @@ func TestIntegrationDualWriteEndToEnd(t *testing.T) {
 	user := e.newUser(t, "erin@example.com")
 	all := idstore.OrgScopeAllOrganizations()
 
-	if err := e.members.AddMemberWithParams(ctx, org, user, "editor", all); err != nil {
+	if err := e.members.AddMemberWithParams(ctx, org, user, "editor", all, noSweepNeeded); err != nil {
 		t.Fatalf("AddMemberWithParams: %v", err)
 	}
 	if got, _ := e.mirroredRole(t, org, user); got != editorID {
@@ -435,7 +435,7 @@ func TestIntegrationDualWriteEndToEnd(t *testing.T) {
 
 	// The organization delete, whose identity effect is a CASCADE this table has
 	// no foreign key to participate in.
-	if err := e.members.AddMemberWithParams(ctx, org, user, "editor", all); err != nil {
+	if err := e.members.AddMemberWithParams(ctx, org, user, "editor", all, noSweepNeeded); err != nil {
 		t.Fatalf("re-add: %v", err)
 	}
 	if err := e.members.Delete(ctx, org, all, noSweepNeeded); err != nil {
@@ -447,7 +447,7 @@ func TestIntegrationDualWriteEndToEnd(t *testing.T) {
 
 	// The user hard-delete, likewise a CASCADE, mirrored by PurgeUserRoles.
 	org2 := e.newOrg(t, "globex")
-	if err := e.members.AddMemberWithParams(ctx, org2, user, "viewer", all); err != nil {
+	if err := e.members.AddMemberWithParams(ctx, org2, user, "viewer", all, noSweepNeeded); err != nil {
 		t.Fatalf("add to second org: %v", err)
 	}
 	if _, err := e.identityDB.Exec(`DELETE FROM identity.users WHERE id = $1`, user); err != nil {
@@ -475,7 +475,7 @@ func TestIntegrationDroppingATemplateNullsTheAssignment(t *testing.T) {
 	}
 	org := e.newOrg(t, "acme")
 	user := e.newUser(t, "frank@example.com")
-	if err := e.members.AddMemberWithParams(ctx, org, user, "viewer", idstore.OrgScopeAllOrganizations()); err != nil {
+	if err := e.members.AddMemberWithParams(ctx, org, user, "viewer", idstore.OrgScopeAllOrganizations(), noSweepNeeded); err != nil {
 		t.Fatalf("AddMemberWithParams: %v", err)
 	}
 
@@ -507,7 +507,7 @@ func TestIntegrationMirrorAdoptsATemplateItHasNeverSeen(t *testing.T) {
 	org := e.newOrg(t, "acme")
 	user := e.newUser(t, "grace@example.com")
 
-	if err := e.members.AddMemberWithParams(ctx, org, user, "late_arrival", idstore.OrgScopeAllOrganizations()); err != nil {
+	if err := e.members.AddMemberWithParams(ctx, org, user, "late_arrival", idstore.OrgScopeAllOrganizations(), noSweepNeeded); err != nil {
 		t.Fatalf("AddMemberWithParams: %v", err)
 	}
 	if got, ok := e.mirroredRole(t, org, user); !ok || got != lateID {
@@ -517,7 +517,7 @@ func TestIntegrationMirrorAdoptsATemplateItHasNeverSeen(t *testing.T) {
 	// By id, too: the same hazard reached through the admin route's uuid form.
 	user2 := e.newUser(t, "heidi@example.com")
 	byIDRole := e.newIdentityRole(t, "late_arrival_two", "state:read")
-	if err := e.members.AddMemberWithRoleTemplate(ctx, org, user2, &byIDRole, idstore.OrgScopeAllOrganizations()); err != nil {
+	if err := e.members.AddMemberWithRoleTemplate(ctx, org, user2, &byIDRole, idstore.OrgScopeAllOrganizations(), noSweepNeeded); err != nil {
 		t.Fatalf("AddMemberWithRoleTemplate: %v", err)
 	}
 	if got, ok := e.mirroredRole(t, org, user2); !ok || got != byIDRole {
@@ -553,7 +553,7 @@ func TestIntegrationDriftQueryReportsAllThreeKinds(t *testing.T) {
 		t.Fatalf("seed stale: %v", err)
 	}
 	// mismatched: both, different roles.
-	if err := e.members.AddMemberWithParams(ctx, org, mismatched, "editor", all); err != nil {
+	if err := e.members.AddMemberWithParams(ctx, org, mismatched, "editor", all, noSweepNeeded); err != nil {
 		t.Fatalf("seed mismatched: %v", err)
 	}
 	if err := e.store.SetRole(ctx, org, mismatched, &roleB, idstore.OrgScopeAllOrganizations()); err != nil {
@@ -748,7 +748,7 @@ func TestIntegrationMirrorIsTenantScoped(t *testing.T) {
 	victim := e.newOrg(t, "victim")
 	other := e.newOrg(t, "other")
 	user := e.newUser(t, "ivan@example.com")
-	if err := e.members.AddMemberWithParams(ctx, victim, user, "viewer", idstore.OrgScopeAllOrganizations()); err != nil {
+	if err := e.members.AddMemberWithParams(ctx, victim, user, "viewer", idstore.OrgScopeAllOrganizations(), noSweepNeeded); err != nil {
 		t.Fatalf("seed membership: %v", err)
 	}
 	if _, ok := e.mirroredRole(t, victim, user); !ok {
@@ -1166,7 +1166,7 @@ func TestIntegrationRollbackToIdentityStillSeesPostFlipWrites(t *testing.T) {
 
 	// A grant made by a deployment running the FLIPPED build.
 	flipped := NewMembers(e.identityDB, e.appDB, RoleSourceApp)
-	if err := flipped.AddMemberWithParams(ctx, org, user, "editor", idstore.OrgScopeAllOrganizations()); err != nil {
+	if err := flipped.AddMemberWithParams(ctx, org, user, "editor", idstore.OrgScopeAllOrganizations(), noSweepNeeded); err != nil {
 		t.Fatalf("AddMemberWithParams: %v", err)
 	}
 	// ...then narrowed, which is the direction that matters: a rollback must not
