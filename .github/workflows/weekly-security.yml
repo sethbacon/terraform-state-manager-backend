@@ -8,6 +8,21 @@ on:
   schedule:
     - cron: "0 8 * * 1" # Every Monday 08:00 UTC
   workflow_dispatch: {}
+  # govulncheck also runs per-PR/push so a newly introduced reachable
+  # vulnerability fails the PR instead of surfacing up to a week later. Every
+  # other job below stays schedule/dispatch-only via an explicit `if:` — ci.yml
+  # already runs per-push on its own, and osv-scan has no triage step here, so
+  # gating merges on it would pin the check red on advisories with no fix.
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Now that this runs per-PR, rapid pushes would otherwise stack full scans.
+# Keyed on event_name so a PR run never cancels the weekly one.
+concurrency:
+  group: weekly-security-${{ github.event_name }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
@@ -21,6 +36,7 @@ jobs:
   # union (contents:read + issues:write) and avoid a startup_failure.
   ci:
     name: CI
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     permissions:
       contents: read
       issues: write
@@ -35,6 +51,7 @@ jobs:
   # ── OSV Vulnerability Scan ────────────────────────────
   osv-scan:
     name: OSV Vulnerability Scan
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -128,14 +145,30 @@ jobs:
         id: govulncheck
         working-directory: backend
         continue-on-error: true
-        run: govulncheck ./...
+        run: govulncheck -format json ./... > govulncheck-results.json
+
+      # Triaged rather than gated on directly: govulncheck exits non-zero for
+      # ANY reachable vulnerability, including one with no released fix, and
+      # gating on those pins the check red until upstream ships no matter what
+      # the PR changed. continue-on-error so the weekly run stays green; the
+      # exit status is read below.
+      - name: Triage findings (weekly)
+        id: govulncheck_triage_weekly
+        if: github.event_name == 'schedule'
+        working-directory: backend
+        continue-on-error: true
+        run: python3 scripts/govulncheck_triage.py govulncheck-results.json --issue-body ../govulncheck-report.md
 
       - name: Create issue on new vulnerabilities
-        if: steps.govulncheck.outcome == 'failure'
+        # Only when something is actually actionable — govulncheck_triage.py
+        # exits non-zero exclusively for reachable advisories with a published
+        # fixed version. Unfixable ones still reach the job summary as warnings.
+        if: steps.govulncheck_triage_weekly.outcome == 'failure'
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         with:
           script: |
-            const marker = 'govulncheck: reachable vulnerabilities found';
+            const fs = require('fs');
+            const marker = 'govulncheck: fixable reachable vulnerabilities found';
             const { data: open } = await github.rest.issues.listForRepo({
               owner: context.repo.owner, repo: context.repo.repo,
               state: 'open', labels: 'security,dependencies',
@@ -145,12 +178,14 @@ jobs:
               return;
             }
             const title = `${marker} — ${new Date().toISOString().slice(0,10)}`;
+            // The report names each advisory, the module and version we
+            // actually depend on, and the version it is fixed in — so the
+            // issue stays actionable after the workflow logs expire.
+            const report = fs.readFileSync('govulncheck-report.md', 'utf8');
             const body = [
-              '## govulncheck Vulnerability Report',
+              report,
               '',
               `**Workflow run:** ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
-              '',
-              'govulncheck found known vulnerabilities that are reachable from this codebase (call-graph analysis). Please review the workflow logs and update affected dependencies.',
             ].join('\n');
 
             await github.rest.issues.create({
@@ -161,9 +196,19 @@ jobs:
               labels: ['security', 'dependencies'],
             });
 
+      - name: Triage findings — fail only when a fix is published
+        # Per-PR/push runs gate the merge, but only on advisories that can
+        # actually be acted on. A permanently-red required check is one
+        # everybody learns to ignore; findings with no fix are surfaced as
+        # warnings + job summary instead.
+        if: github.event_name != 'schedule'
+        working-directory: backend
+        run: python3 scripts/govulncheck_triage.py govulncheck-results.json
+
   # ── CodeQL Analysis ───────────────────────────────────
   codeql:
     name: CodeQL Analysis (Go)
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     permissions:
       actions: read # CodeQL reads workflow-run metadata (required on private repos)
