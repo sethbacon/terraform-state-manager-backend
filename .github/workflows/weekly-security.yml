@@ -49,9 +49,11 @@ jobs:
     uses: ./.github/workflows/ci.yml
 
   # ── OSV Vulnerability Scan ────────────────────────────
+  # Runs per-PR/push as well as weekly, now that findings are triaged: gating on
+  # the raw exit code would pin the check red on advisories with no published
+  # fix, which is why it was schedule-only before.
   osv-scan:
     name: OSV Vulnerability Scan
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -81,18 +83,40 @@ jobs:
         uses: google/osv-scanner-action/osv-scanner-action@8deb546fdb875b9996d27d4950be7312dac076a1 # v2.5.0
         continue-on-error: true
         with:
+          # JSON (not table) so the triage step below can tell an advisory with a
+          # published fix from one without; the triage step prints a
+          # human-readable summary in its place.
           scan-args: |-
             --recursive
             ./backend
-            --format=table
+            --format=json
+            --output=osv-results.json
             --no-call-analysis=go
 
+      # Triaged so the issue below is filed on the same basis the PR gate uses.
+      # Previously this filed an issue for ANY finding, with a body that named
+      # none of them and pointed at logs that expire — so an advisory with no
+      # published fix reopened a contentless issue every week.
+      #
+      # continue-on-error so an unfixable finding still records the report and
+      # leaves the weekly run green; the exit status is read below.
+      - name: Triage findings (weekly)
+        id: osv_triage_weekly
+        if: steps.osv.outcome == 'failure' && github.event_name == 'schedule'
+        continue-on-error: true
+        run: python3 backend/scripts/osv_triage.py osv-results.json --issue-body osv-report.md
+
       - name: Create issue on new vulnerabilities
-        if: steps.osv.outcome == 'failure'
+        # Only when something is actually actionable — osv_triage.py exits
+        # non-zero exclusively for advisories with a published fixed version.
+        # Unfixable findings still reach the job summary as warnings, and the
+        # govulncheck job covers whether they are reachable.
+        if: steps.osv_triage_weekly.outcome == 'failure'
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         with:
           script: |
-            const marker = 'OSV-Scanner: vulnerabilities found';
+            const fs = require('fs');
+            const marker = 'OSV-Scanner: fixable vulnerabilities found';
             const { data: open } = await github.rest.issues.listForRepo({
               owner: context.repo.owner, repo: context.repo.repo,
               state: 'open', labels: 'security,dependencies',
@@ -102,12 +126,14 @@ jobs:
               return;
             }
             const title = `${marker} — ${new Date().toISOString().slice(0,10)}`;
+            // The report names each advisory, the package and version we
+            // actually depend on, and the version it is fixed in — so the issue
+            // stays actionable after the workflow logs expire.
+            const report = fs.readFileSync('osv-report.md', 'utf8');
             const body = [
-              '## OSV-Scanner Vulnerability Report',
+              report,
               '',
               `**Workflow run:** ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
-              '',
-              'OSV-Scanner found known vulnerabilities in `go.sum`. Please review the workflow logs and update affected dependencies.',
             ].join('\n');
 
             await github.rest.issues.create({
@@ -117,6 +143,16 @@ jobs:
               body,
               labels: ['security', 'dependencies'],
             });
+
+      - name: Triage findings — fail only when a fix is published
+        # Per-PR/push runs gate the merge, but only on advisories that can
+        # actually be acted on. OSV-Scanner exits non-zero for ANY known
+        # vulnerability, including ones with no released fix — gating on those
+        # would pin the check red until upstream ships, regardless of what the
+        # PR changed, and a permanently-red required check is one everybody
+        # learns to ignore.
+        if: steps.osv.outcome == 'failure' && github.event_name != 'schedule'
+        run: python3 backend/scripts/osv_triage.py osv-results.json
 
   # ── govulncheck (reachability-aware scan) ─────────────
   # OSV-Scanner flags every known-vulnerable version in go.sum regardless of whether
