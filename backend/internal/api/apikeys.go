@@ -434,6 +434,29 @@ func (h *APIKeysHandlers) RotateAPIKey() gin.HandlerFunc {
 			return
 		}
 
+		// The replacement carries the OLD KEY's scopes, so the old key's scope set
+		// is this request's mint ceiling — and it must be re-validated against the
+		// credential presenting the rotation, exactly as create and update do
+		// (#339). ownsOrAdmin admits any key with the same UserID, so without
+		// this a key deliberately narrowed to state:read could rotate a broader
+		// SIBLING key of the same owner and be handed that key's new secret in
+		// the response: a narrow machine credential minting its owner's maximum
+		// key-assignable authority, with no interactive session anywhere.
+		//
+		// Self-rotation is unaffected (a key trivially holds its own scopes), and
+		// so is an admin rotating anyone's key (admin satisfies HasScope for
+		// every scope). What is refused is rotating a key broader than the
+		// credential asking for it — including an owner whose own authority has
+		// been reduced since the key was minted, whose key middleware.grantedSubset
+		// already caps at the reduced set, and which must not be re-minted at its
+		// stale breadth.
+		if ok, bad := validateGrantedScopes(c, key.Scopes); !ok {
+			c.JSON(http.StatusForbidden, gin.H{
+				"error": "cannot rotate a key carrying scope " + bad + " (a key may only be rotated by a credential that holds its scopes)",
+			})
+			return
+		}
+
 		owner := userIDOf(c)
 		if key.UserID != nil {
 			owner = *key.UserID // rotation preserves the original owner
