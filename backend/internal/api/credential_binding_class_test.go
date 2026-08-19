@@ -788,3 +788,69 @@ func TestRoutesBehindRequireAuthBindAuthority(t *testing.T) {
 		}
 	}
 }
+
+// TestRouterIsTheOnlyRouteTable keeps the route-shape guards COMPLETE.
+//
+// parseRouterRoutes reads internal/api/router.go and nothing else, so a second
+// route table anywhere in the tree would be invisible to it — and every route on
+// it would sit outside TestRoutesBehindRequireAuthBindAuthority without anything
+// reporting a gap. A guard that silently stops covering part of its subject is
+// worse than no guard, because it still reports green.
+//
+// Today router.go is the whole route surface. If that has to change, this test
+// is the place to widen parseRouterRoutes to the new file rather than to exempt
+// it.
+func TestRouterIsTheOnlyRouteTable(t *testing.T) {
+	verbs := map[string]bool{
+		"GET": true, "POST": true, "PUT": true, "PATCH": true,
+		"DELETE": true, "HEAD": true, "OPTIONS": true,
+	}
+	fset := token.NewFileSet()
+	root := filepath.Join("..", "..")
+	var stray []string
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+		rel := filepath.ToSlash(strings.TrimPrefix(filepath.Clean(path), "../../"))
+		if rel == "internal/api/router.go" {
+			return nil
+		}
+		file, perr := parser.ParseFile(fset, path, nil, parser.SkipObjectResolution)
+		if perr != nil {
+			return fmt.Errorf("parse %s: %w", path, perr)
+		}
+		ast.Inspect(file, func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
+			if !ok || len(call.Args) < 2 {
+				return true
+			}
+			sel, ok := call.Fun.(*ast.SelectorExpr)
+			if !ok || !verbs[sel.Sel.Name] {
+				return true
+			}
+			// A route path is a literal beginning with "/". An HTTP client call
+			// takes a URL ("https://...") or a variable, so neither matches.
+			lit, ok := call.Args[0].(*ast.BasicLit)
+			if !ok || lit.Kind != token.STRING || !strings.HasPrefix(strings.Trim(lit.Value, `"`), "/") {
+				return true
+			}
+			stray = append(stray, fmt.Sprintf("%s registers %s %s", rel, sel.Sel.Name, lit.Value))
+			return true
+		})
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("scan backend tree: %v", err)
+	}
+	for _, s := range stray {
+		t.Errorf("%s.\n"+
+			"parseRouterRoutes only reads internal/api/router.go, so this route is invisible to "+
+			"TestRoutesBehindRequireAuthBindAuthority — it could sit behind requireAuth with no "+
+			"authority decision and nothing would report it (#339). Widen parseRouterRoutes to "+
+			"this file, or move the route into router.go.", s)
+	}
+}
