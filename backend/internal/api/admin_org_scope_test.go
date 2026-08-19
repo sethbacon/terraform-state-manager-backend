@@ -17,7 +17,21 @@ import (
 // router.go does: a stand-in for requireAuth sets user_id in the gin context
 // (the real middleware chain populates this from the validated JWT), then
 // requireOrgScope gates the :id-scoped routes ahead of the handler.
+//
+// The stand-in publishes `scopes` as well, because the real middleware always
+// does and requireOrgScope now checks the presenting credential against them
+// (#339). organizations:write is the default rather than admin: it is the
+// minimum that clears the new credential check, so these tests keep exercising
+// the PER-ORGANIZATION derivation below it rather than riding an admin wildcard
+// past both halves. Use newAdminOrgScopeEnvAs to present something else.
 func newAdminOrgScopeEnv(t *testing.T, callerUserID string) *sourcesEnv {
+	t.Helper()
+	return newAdminOrgScopeEnvAs(t, callerUserID, []string{"organizations:write"})
+}
+
+// newAdminOrgScopeEnvAs is newAdminOrgScopeEnv with the presenting credential's
+// effective scopes spelled out, so a test can present a narrowed API key.
+func newAdminOrgScopeEnvAs(t *testing.T, callerUserID string, presented []string) *sourcesEnv {
 	t.Helper()
 	db, mock, err := newSQLMock()
 	if err != nil {
@@ -30,6 +44,7 @@ func newAdminOrgScopeEnv(t *testing.T, callerUserID string) *sourcesEnv {
 	r.Use(func(c *gin.Context) {
 		if callerUserID != "" {
 			c.Set("user_id", callerUserID)
+			c.Set("scopes", presented)
 		}
 		c.Next()
 	})

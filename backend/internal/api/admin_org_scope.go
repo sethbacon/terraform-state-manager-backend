@@ -34,6 +34,31 @@ import (
 // caller's per-organization scopes via OrganizationRepository.GetUserScopesForOrg
 // against the existing flat/global JWT's user id — rather than trusting any
 // flat scope set, which cannot distinguish which organization granted it.
+//
+// IT NARROWS, IT DOES NOT REPLACE (#339). The /admin/organizations/:id subtree
+// carries requireAuth and this middleware and NOTHING ELSE — the
+// organizations:read/:create gates in router.go sit on the collection routes
+// (GET "" and POST ""), not on the group — so before the first check below the
+// per-organization re-derivation was the SOLE authority decision on
+// PUT/DELETE /:id and the four member routes. That made it an authority ceiling
+// read off the OWNING USER's role rows rather than off the credential
+// presenting the request: requireAuth also authenticates API keys, so a key
+// deliberately narrowed to state:read, owned by an org_owner (org_owner carries
+// organizations:write — see auth/scopes.go), could rename or delete that
+// organization and add, re-role or remove its members. The user record said
+// org_owner; the credential said state:read; only the user record was consulted.
+//
+// So the presented credential is checked FIRST, against the same predicate, and
+// the per-organization re-derivation then narrows that result to this specific
+// organization. Both must hold. No key can satisfy the first check —
+// organizations:write and admin are both outside assignableKeyScopes (admin
+// additionally stripped by idplatformadmin.KeyScopes), which is the intended
+// outcome: organization management is an interactive-session action.
+//
+// The check lives HERE rather than as another middleware.RequireScope in the
+// router so that the two halves cannot be separated. A route added to the
+// orgScoped group inherits both or neither; a router-level gate is one line a
+// future group can be written without.
 func (h *AdminHandlers) requireOrgScope() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		orgID := c.Param("id")
@@ -44,12 +69,26 @@ func (h *AdminHandlers) requireOrgScope() gin.HandlerFunc {
 			return
 		}
 
+		// The presenting credential's own ceiling. scopesOf reads the effective
+		// scopes the auth middleware published for THIS request — the JWT's
+		// claims plus any platform-admin elevation, or an API key's capped and
+		// admin-stripped set — so a credential that does not itself carry
+		// organization-management authority is refused here, whatever its owner
+		// holds.
+		if !orgManagementScope(scopesOf(c)) {
+			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{
+				"error":   "Not authorized to manage organizations",
+				"details": "The presenting credential must itself carry organizations:write (or admin); an API key never does",
+			})
+			return
+		}
+
 		scopes, err := h.orgRepo.GetUserScopesForOrg(c.Request.Context(), uid, orgID)
 		if err != nil {
 			c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "failed to verify organization membership"})
 			return
 		}
-		if !(auth.HasScope(scopes, auth.ScopeOrganizationsWrite) || auth.HasScope(scopes, auth.ScopeAdmin)) {
+		if !orgManagementScope(scopes) {
 			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{
 				"error":   "Not authorized for this organization",
 				"details": "Caller must hold organizations:write (or admin) scope within the target organization",
@@ -58,6 +97,14 @@ func (h *AdminHandlers) requireOrgScope() gin.HandlerFunc {
 		}
 		c.Next()
 	}
+}
+
+// orgManagementScope is the single predicate both halves of requireOrgScope
+// apply — once to the presenting credential, once to the caller's scopes within
+// the target organization. One function, so the two halves cannot drift into
+// asking different questions and re-open the gap between them.
+func orgManagementScope(scopes []string) bool {
+	return auth.HasScope(scopes, auth.ScopeOrganizationsWrite) || auth.HasScope(scopes, auth.ScopeAdmin)
 }
 
 // requireSharedOrgAdminWithTargetUser returns a middleware that verifies the

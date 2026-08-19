@@ -579,7 +579,66 @@ func (h *AuthHandlers) MeHandler() gin.HandlerFunc {
 	}
 }
 
+// sessionAuthMethods are the authentication methods that constitute an
+// INTERACTIVE SESSION: a JWT this server minted through a login flow, presented
+// either in the auth cookie (jwt_cookie) or in an Authorization header (jwt).
+// Everything else behind requireAuth is a machine credential with its own,
+// independent lifecycle — an API key (rotated at /apikeys/:id/rotate, expiring
+// on its own expires_at, swept by credlifecycle) or an mTLS client certificate
+// (whose scopes come from a cert mapping and which has no user at all).
+//
+// ALLOWLIST, NOT DENYLIST (#339). A future authentication method has to opt in
+// here deliberately; one added to middleware.AuthMiddleware without a thought
+// for session minting is refused rather than admitted by default.
+var sessionAuthMethods = map[string]bool{"jwt": true, "jwt_cookie": true}
+
+// isInteractiveSession reports whether this request was authenticated by a
+// session JWT rather than by a machine credential.
+//
+// FAILS CLOSED on an absent auth_method. Every authenticated path publishes one
+// — middleware.setAuthContext for both JWT forms, the API-key branch of
+// middleware.authenticateAPIKey, and mtls.AuthMiddleware — so an absent one is
+// a mis-wired route rather than a principal, and must not be read as "session".
+func isInteractiveSession(c *gin.Context) bool {
+	v, ok := c.Get("auth_method")
+	if !ok {
+		return false
+	}
+	m, _ := v.(string)
+	return sessionAuthMethods[m]
+}
+
 // RefreshHandler issues a new JWT with fresh scopes and revokes the old one.
+//
+// INTERACTIVE SESSIONS ONLY (#339). requireAuth is middleware.AuthMiddleware,
+// which also authenticates API keys, so before this check a key could present
+// itself here and be handed a session cookie. That was an authority ceiling
+// derived from the OWNING USER instead of from the PRESENTING CREDENTIAL, and
+// it defeated both narrowings the API-key path applies:
+//
+//   - middleware.grantedSubset caps a key's stored scopes by its owner's live
+//     set, so a key deliberately minted with only state:read stays state:read.
+//     Refresh read the owner's whole cross-organization union instead.
+//   - idplatformadmin.KeyScopes strips `admin` from an API-key request
+//     UNCONDITIONALLY, precisely because an unattended CI credential must not
+//     inherit its owner's platform-admin. A refresh routed AROUND that strip
+//     handed an admin owner's narrowed CI key a session cookie carrying `admin`.
+//
+// REFUSED OUTRIGHT rather than re-derived from the key's own scopes, because a
+// scope-correct answer would still be the wrong shape. Refresh does not merely
+// restate authority, it CHANGES THE CREDENTIAL KIND: the session it mints is
+// not bound to the key's expires_at, is not revoked when the key is deleted, is
+// invisible to credlifecycle.Sweeper (which sweeps the key family and leaves
+// sessions to their TTL), and is a cookie credential rather than a bearer one.
+// Even at identical scopes that is an escalation in DURABILITY and in
+// revocability, so bounding the scope set would close only half the hole while
+// adding a third place that has to remember the `admin` strip. There is also
+// nothing to refresh: keys do not expire the way sessions do, and a key that
+// needs new material rotates at POST /apikeys/:id/rotate.
+//
+// Logged, not audited. A refused refresh writes no database row, so a rejected
+// path cannot be used to pump the audit table; the key's presentation is
+// already recorded by the middleware's UpdateLastUsed.
 func (h *AuthHandlers) RefreshHandler() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		userID, ok := c.Get("user_id")
@@ -588,6 +647,19 @@ func (h *AuthHandlers) RefreshHandler() gin.HandlerFunc {
 			return
 		}
 		uid, _ := userID.(string)
+
+		// Before any lookup: authority here must come from the credential that
+		// presented the request, and only a session has a session to refresh.
+		if !isInteractiveSession(c) {
+			method, _ := c.Get("auth_method")
+			slog.Warn("refresh refused: not an interactive session",
+				"user_id", uid, "auth_method", method)
+			c.JSON(http.StatusForbidden, gin.H{
+				"error":   "Session refresh requires an interactive session",
+				"details": "API keys and mTLS client certificates are not sessions and cannot be exchanged for one; rotate an API key at POST /api/v1/apikeys/{id}/rotate instead",
+			})
+			return
+		}
 
 		user, err := h.userRepo.GetUserByID(c.Request.Context(), uid, loginScope())
 		if err != nil || user == nil {
