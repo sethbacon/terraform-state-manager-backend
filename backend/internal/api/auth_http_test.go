@@ -21,8 +21,22 @@ func init() {
 }
 
 // newAuthEnv builds AuthHandlers (all SSO providers disabled) with an optional
-// fake auth context, mirroring what AuthMiddleware would have established.
+// fake auth context, mirroring what AuthMiddleware would have established for
+// an ordinary cookie session.
+//
+// It publishes auth_method alongside user_id because the real middleware always
+// does (middleware.setAuthContext, the API-key branch, mtls.AuthMiddleware), and
+// /auth/refresh now fails closed without it (#339). A harness that installed
+// only user_id would be testing a context shape production never produces.
 func newAuthEnv(t *testing.T, userID string, mutate func(*config.Config)) *sourcesEnv {
+	t.Helper()
+	return newAuthEnvAs(t, userID, "jwt_cookie", mutate)
+}
+
+// newAuthEnvAs is newAuthEnv with the authentication method spelled out, so a
+// test can present the same user id as a machine credential. An empty
+// authMethod installs no auth_method key at all — the mis-wired-route shape.
+func newAuthEnvAs(t *testing.T, userID, authMethod string, mutate func(*config.Config)) *sourcesEnv {
 	t.Helper()
 	db, mock, err := sqlmock.New()
 	if err != nil {
@@ -41,7 +55,13 @@ func newAuthEnv(t *testing.T, userID string, mutate func(*config.Config)) *sourc
 
 	r := gin.New()
 	if userID != "" {
-		r.Use(func(c *gin.Context) { c.Set("user_id", userID); c.Next() })
+		r.Use(func(c *gin.Context) {
+			c.Set("user_id", userID)
+			if authMethod != "" {
+				c.Set("auth_method", authMethod)
+			}
+			c.Next()
+		})
 	}
 	v1 := r.Group("/api/v1/auth")
 	v1.GET("/providers", h.ProvidersHandler())
