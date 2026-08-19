@@ -1,5 +1,21 @@
 # Changelog
 
+## [3.7.0](https://github.com/sethbacon/terraform-state-manager-backend/compare/v3.6.0...v3.7.0) (2026-08-19)
+
+
+### ⚠ BREAKING CHANGES
+
+* **auth:** authority behind requireAuth is now bounded by the credential presenting the request rather than by its owner's role rows. Three requests that previously succeeded are refused: POST /auth/refresh from an API key or mTLS client certificate now answers 403 (rotate the key at POST /apikeys/{id}/rotate instead of exchanging it for a session); the /admin/organizations/{id} routes now require the presenting credential to itself carry organizations:write or admin, which no API key can (both are outside assignableKeyScopes), so organization management is an interactive-session action; and POST /apikeys/{id}/rotate now refuses to rotate a key whose scopes the caller does not hold, which also refuses an owner whose own authority was reduced since the key was minted. See docs/upgrade-guide.md.
+
+### Bug Fixes
+
+* **auth:** bind authority ceilings to the presenting credential, not the owner ([#406](https://github.com/sethbacon/terraform-state-manager-backend/issues/406)) ([0ccf318](https://github.com/sethbacon/terraform-state-manager-backend/commit/0ccf31880aecb571938854946c97226d270d5917))
+
+
+### Dependencies
+
+* finish the move off lib/pq to jackc/pgx and note why it remains indirect ([#411](https://github.com/sethbacon/terraform-state-manager-backend/issues/411)) ([7ac47e7](https://github.com/sethbacon/terraform-state-manager-backend/commit/7ac47e79b5aa6613a5261f4cf386ecbf99d53dc2))
+
 ## [3.6.0](https://github.com/sethbacon/terraform-state-manager-backend/compare/v3.5.0...v3.6.0) (2026-08-15)
 
 
