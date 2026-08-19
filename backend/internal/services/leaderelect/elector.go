@@ -6,7 +6,7 @@
 // holder's database session, so a crashed or partitioned leader releases it
 // implicitly (connection teardown) and a standby promotes on its next retry.
 //
-// Requires session-mode database connections (the default lib/pq pool). A
+// Requires session-mode database connections (the default pgx pool). A
 // transaction-pooling proxy (e.g. pgbouncer in transaction mode) would break
 // session advisory locks and must not front this connection.
 //
