@@ -88,6 +88,15 @@ We will credit reporters in the release notes unless anonymity is requested.
   [docs/capacity-planning.md](docs/capacity-planning.md#database-sizing)).
 - Encryption at rest and a retention policy for state backups are planned and
   tracked in #257.
+- **`github.com/lib/pq` still appears in the module graph, and its advisories
+  will still be reported by a scanner that reads `go.mod` alone.** Nothing in
+  this module imports it: the Postgres driver is `jackc/pgx`. It survives as an
+  indirect requirement of `golang-migrate/migrate/v4`, whose `database/postgres`
+  driver this module deliberately keeps, because the `pgx/v5` equivalent offers
+  only `WithInstance` and closes the pool it is handed. Reachability-aware tools
+  agree there is no exposure — `govulncheck` reports zero findings, where the
+  seven `lib/pq` advisories were previously reported here — but a naive
+  composition scan cannot see that and will keep flagging them.
 
 ## Encryption Key Custody
 
