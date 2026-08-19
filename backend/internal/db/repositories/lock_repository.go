@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/lib/pq"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 // ErrLocked is returned by StateLockRepository.Acquire when the (source, key) is
@@ -87,7 +87,7 @@ func (r *StateLockRepository) Acquire(ctx context.Context, sourceID, key, actor 
 		`INSERT INTO state_locks (source_id, state_key, actor) VALUES ($1, $2, $3) RETURNING id`,
 		sourceID, key, actor).Scan(&id)
 	if err != nil {
-		var pqErr *pq.Error
+		var pqErr *pgconn.PgError
 		if errors.As(err, &pqErr) && pqErr.Code == "23505" { // unique_violation
 			// Name the holder so operators can decide whether to force-unlock.
 			var holder, since string

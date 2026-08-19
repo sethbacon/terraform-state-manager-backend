@@ -9,7 +9,7 @@ import (
 	"time"
 
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
-	"github.com/lib/pq"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 // errDB is a shared sentinel used to drive error paths (registry pattern).
@@ -17,7 +17,7 @@ var errDB = errors.New("db error")
 
 func newMock(t *testing.T) (*sql.DB, sqlmock.Sqlmock) {
 	t.Helper()
-	db, mock, err := sqlmock.New()
+	db, mock, err := newSQLMock()
 	if err != nil {
 		t.Fatalf("sqlmock.New: %v", err)
 	}
@@ -155,7 +155,7 @@ func TestStateLockRepository_AcquireRelease(t *testing.T) {
 	mock.ExpectExec("DELETE FROM state_locks").
 		WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectQuery("INSERT INTO state_locks").
-		WillReturnError(&pq.Error{Code: "23505"})
+		WillReturnError(&pgconn.PgError{Code: "23505"})
 	mock.ExpectQuery("SELECT COALESCE").WithArgs("s1", "k").
 		WillReturnRows(sqlmock.NewRows([]string{"actor", "acquired_at"}).AddRow("alice", "2026-06-11 10:00:00"))
 	_, err = r.Acquire(ctx, "s1", "k", "bob")

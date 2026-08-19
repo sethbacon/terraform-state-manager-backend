@@ -29,7 +29,6 @@ import (
 	"time"
 
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
-	"github.com/lib/pq"
 	idstore "github.com/sethbacon/terraform-suite-identity/identity/store"
 )
 
@@ -240,9 +239,9 @@ func TestAdminDeleteUser_AlreadyGone_Returns204(t *testing.T) {
 
 func TestAdminDeleteOrganization_AlreadyGone_Returns204(t *testing.T) {
 	e := newAdminWriteEnv(t)
-	e.mock.ExpectQuery("FROM organization_members").WithArgs("o1", pq.Array([]string{"o1"})).
+	e.mock.ExpectQuery("FROM organization_members").WithArgs("o1", []string{"o1"}).
 		WillReturnRows(sqlmock.NewRows(memberRowCols))
-	e.mock.ExpectExec("DELETE FROM organizations").WithArgs("o1", pq.Array([]string{"o1"})).
+	e.mock.ExpectExec("DELETE FROM organizations").WithArgs("o1", []string{"o1"}).
 		WillReturnResult(sqlmock.NewResult(0, 0))
 	if w := e.do(http.MethodDelete, "/api/v1/admin/organizations/o1", ""); w.Code != http.StatusNoContent {
 		t.Errorf("repeat DELETE organization: status = %d, want 204", w.Code)
@@ -251,7 +250,7 @@ func TestAdminDeleteOrganization_AlreadyGone_Returns204(t *testing.T) {
 
 func TestAdminRemoveOrganizationMember_NotAMember_Returns204(t *testing.T) {
 	e := newAdminWriteEnv(t)
-	e.mock.ExpectExec("DELETE FROM organization_members").WithArgs("o1", "u1", pq.Array([]string{"o1"})).
+	e.mock.ExpectExec("DELETE FROM organization_members").WithArgs("o1", "u1", []string{"o1"}).
 		WillReturnResult(sqlmock.NewResult(0, 0))
 	// AuthorityReduced still runs — it re-derives what the user retains rather
 	// than assuming a row moved, so it is safe on a no-op removal.
@@ -325,14 +324,14 @@ func TestReconcile_AlreadyRemovedMembership_CompletesLoop(t *testing.T) {
 		expectOrgByName(mock, "o-"+org, org)
 	}
 	// Both look like members...
-	mock.ExpectQuery("FROM organization_members").WithArgs("o-alpha", "u1", pq.Array([]string{"o-alpha"})).
+	mock.ExpectQuery("FROM organization_members").WithArgs("o-alpha", "u1", []string{"o-alpha"}).
 		WillReturnRows(sqlmock.NewRows(memberRowCols).AddRow("o-alpha", "u1", nil, time.Now()))
-	mock.ExpectQuery("FROM organization_members").WithArgs("o-beta", "u1", pq.Array([]string{"o-beta"})).
+	mock.ExpectQuery("FROM organization_members").WithArgs("o-beta", "u1", []string{"o-beta"}).
 		WillReturnRows(sqlmock.NewRows(memberRowCols).AddRow("o-beta", "u1", nil, time.Now()))
 	// ...but alpha's row is already gone by the time the DELETE lands.
-	mock.ExpectExec("DELETE FROM organization_members").WithArgs("o-alpha", "u1", pq.Array([]string{"o-alpha"})).
+	mock.ExpectExec("DELETE FROM organization_members").WithArgs("o-alpha", "u1", []string{"o-alpha"}).
 		WillReturnResult(sqlmock.NewResult(0, 0))
-	mock.ExpectExec("DELETE FROM organization_members").WithArgs("o-beta", "u1", pq.Array([]string{"o-beta"})).
+	mock.ExpectExec("DELETE FROM organization_members").WithArgs("o-beta", "u1", []string{"o-beta"}).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 
 	err := h.reconcileManagedMemberships(context.Background(), "u1",
@@ -352,7 +351,7 @@ func TestReconcile_MembershipVanishedBeforeRoleUpdate_Continues(t *testing.T) {
 	h, mock := newReconcileEnv(t, nil)
 
 	expectOrgByName(mock, "o1", "platform")
-	mock.ExpectQuery("FROM organization_members").WithArgs("o1", "u1", pq.Array([]string{"o1"})).
+	mock.ExpectQuery("FROM organization_members").WithArgs("o1", "u1", []string{"o1"}).
 		WillReturnRows(sqlmock.NewRows(memberRowCols).AddRow("o1", "u1", nil, time.Now()))
 	expectRoleScopesLookup(mock, "editor", []string{"state:read", "state:write"})
 	mock.ExpectQuery("SELECT id FROM role_templates WHERE name").WithArgs("editor").

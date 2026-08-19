@@ -46,7 +46,9 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/lib/pq"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
+	_ "github.com/jackc/pgx/v5/stdlib"
 	identity "github.com/sethbacon/terraform-suite-identity/identity"
 	idauditoutbox "github.com/sethbacon/terraform-suite-identity/identity/auditoutbox"
 	idmodels "github.com/sethbacon/terraform-suite-identity/identity/models"
@@ -81,7 +83,7 @@ func newEnv(t *testing.T) *env {
 		t.Skip("TEST_DATABASE_URL not set; skipping PostgreSQL integration test")
 	}
 
-	admin, err := sql.Open("postgres", dsn)
+	admin, err := sql.Open("pgx", dsn)
 	if err != nil {
 		t.Fatalf("open %s: %v", dsn, err)
 	}
@@ -92,8 +94,8 @@ func newEnv(t *testing.T) *env {
 	// A fresh database per run, so a previous failure cannot make the next run
 	// pass (or fail) for reasons that are not in this file.
 	for _, stmt := range []string{
-		`DROP DATABASE IF EXISTS ` + pq.QuoteIdentifier(testDatabaseName) + ` WITH (FORCE)`,
-		`CREATE DATABASE ` + pq.QuoteIdentifier(testDatabaseName),
+		`DROP DATABASE IF EXISTS ` + pgx.Identifier{testDatabaseName}.Sanitize() + ` WITH (FORCE)`,
+		`CREATE DATABASE ` + pgx.Identifier{testDatabaseName}.Sanitize(),
 	} {
 		if _, err := admin.Exec(stmt); err != nil {
 			t.Fatalf("%s: %v", stmt, err)
@@ -132,7 +134,7 @@ func connect(t *testing.T, dsn, searchPath string) *sql.DB {
 		q.Set("search_path", searchPath)
 		parsed.RawQuery = q.Encode()
 	}
-	db, err := sql.Open("postgres", parsed.String())
+	db, err := sql.Open("pgx", parsed.String())
 	if err != nil {
 		t.Fatalf("open %s: %v", parsed.Redacted(), err)
 	}
@@ -269,7 +271,7 @@ func TestIntegrationMigrationRollsBackAndReapplies(t *testing.T) {
 // with ERRCODE 23514, so this asserts on the code rather than on message text,
 // which is what makes the assertion survive a reworded RAISE.
 func isCheckViolation(err error) bool {
-	var pgErr *pq.Error
+	var pgErr *pgconn.PgError
 	return errors.As(err, &pgErr) && pgErr.Code == "23514"
 }
 

@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	_ "github.com/lib/pq" // PostgreSQL driver, already a project dependency
+	_ "github.com/jackc/pgx/v5/stdlib" // PostgreSQL driver, already a project dependency
 )
 
 // pgSchemaName restricts schema_name to a plain SQL identifier. The schema name
@@ -72,7 +72,7 @@ func newPG(config, credentials map[string]any) (*pgSource, error) {
 // open returns a short-lived connection; this connector is a scanner, not a pool.
 // coverage:skip:requires-database
 func (p *pgSource) open() (*sql.DB, error) {
-	db, err := sql.Open("postgres", p.connStr)
+	db, err := sql.Open("pgx", p.connStr)
 	if err != nil {
 		return nil, fmt.Errorf("pg open failed: %w", err)
 	}

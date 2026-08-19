@@ -11,7 +11,6 @@ import (
 
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
 	"github.com/gin-gonic/gin"
-	"github.com/lib/pq"
 	idauth "github.com/sethbacon/terraform-suite-identity/identity/auth"
 	idstore "github.com/sethbacon/terraform-suite-identity/identity/store"
 
@@ -188,7 +187,7 @@ func expectSCIMDeprovision(mock sqlmock.Sqlmock, userID string) {
 // watermark lives on the app database while the reduction runs against identity.
 func assertPreExistingSessionRejected(t *testing.T, site, userID string) {
 	t.Helper()
-	db, mock, err := sqlmock.New()
+	db, mock, err := newSQLMock()
 	if err != nil {
 		t.Fatalf("sqlmock.New: %v", err)
 	}
@@ -227,7 +226,7 @@ func assertPreExistingSessionRejected(t *testing.T, site, userID string) {
 // so revoking the row really does retire the credential.
 func assertRevokedKeyRejected(t *testing.T, site string) {
 	t.Helper()
-	db, mock, err := sqlmock.New()
+	db, mock, err := newSQLMock()
 	if err != nil {
 		t.Fatalf("sqlmock.New: %v", err)
 	}
@@ -283,7 +282,7 @@ func TestCredentialLifecycleClass_AuthorityReductionInvalidatesEveryCredentialFa
 				r := gin.New()
 				r.DELETE("/organizations/:id/members/:user_id", h.RemoveOrganizationMember())
 
-				mock.ExpectExec("DELETE FROM organization_members").WithArgs("o1", "u1", pq.Array([]string{"o1"})).
+				mock.ExpectExec("DELETE FROM organization_members").WithArgs("o1", "u1", []string{"o1"}).
 					WillReturnResult(sqlmock.NewResult(0, 1))
 				expectWatermarkWrite(mock, "u1")
 				expectRetainedScopes(mock, "u1", `["state:read"]`)
@@ -339,9 +338,9 @@ func TestCredentialLifecycleClass_AuthorityReductionInvalidatesEveryCredentialFa
 
 				// Members are snapshotted BEFORE the delete; the cascade removes
 				// them, so afterwards there is nobody left to sweep.
-				mock.ExpectQuery("FROM organization_members").WithArgs("o1", pq.Array([]string{"o1"})).
+				mock.ExpectQuery("FROM organization_members").WithArgs("o1", []string{"o1"}).
 					WillReturnRows(sqlmock.NewRows(memberRowCols).AddRow("o1", "u1", nil, time.Now()))
-				mock.ExpectExec("DELETE FROM organizations").WithArgs("o1", pq.Array([]string{"o1"})).
+				mock.ExpectExec("DELETE FROM organizations").WithArgs("o1", []string{"o1"}).
 					WillReturnResult(sqlmock.NewResult(0, 1))
 				expectWatermarkWrite(mock, "u1")
 				expectRetainedScopes(mock, "u1", `["state:read"]`)
@@ -502,9 +501,9 @@ func TestCredentialLifecycleClass_AuthorityReductionInvalidatesEveryCredentialFa
 				desired, managed := resolveGroupMappings([]string{"other-team"}, mappings)
 
 				expectOrgByName(mock, "o1", "acme")
-				mock.ExpectQuery("FROM organization_members").WithArgs("o1", "u1", pq.Array([]string{"o1"})).
+				mock.ExpectQuery("FROM organization_members").WithArgs("o1", "u1", []string{"o1"}).
 					WillReturnRows(sqlmock.NewRows(memberRowCols).AddRow("o1", "u1", "rt-editor", time.Now()))
-				mock.ExpectExec("DELETE FROM organization_members").WithArgs("o1", "u1", pq.Array([]string{"o1"})).
+				mock.ExpectExec("DELETE FROM organization_members").WithArgs("o1", "u1", []string{"o1"}).
 					WillReturnResult(sqlmock.NewResult(0, 1))
 				expectRetainedScopes(mock, "u1", `["state:read"]`)
 				expectKeyRevoked(mock, "u1", "k-idp-deprovisioned")
@@ -532,7 +531,7 @@ func TestCredentialLifecycleClass_AuthorityReductionInvalidatesEveryCredentialFa
 					[]config.LDAPGroupMapping{{GroupDN: "cn=platform,ou=groups", Organization: "acme", Role: "viewer"}})
 
 				expectOrgByName(mock, "o1", "acme")
-				mock.ExpectQuery("FROM organization_members").WithArgs("o1", "u1", pq.Array([]string{"o1"})).
+				mock.ExpectQuery("FROM organization_members").WithArgs("o1", "u1", []string{"o1"}).
 					WillReturnRows(sqlmock.NewRows(memberRowCols).AddRow("o1", "u1", "rt-owner", time.Now()))
 				expectRoleScopesLookup(mock, "viewer", []string{"state:read"})
 				mock.ExpectQuery("SELECT id FROM role_templates WHERE name").WithArgs("viewer").
@@ -559,9 +558,9 @@ func TestCredentialLifecycleClass_AuthorityReductionInvalidatesEveryCredentialFa
 					[]config.SAMLGroupMapping{{Group: "platform-team", Organization: "acme", Role: "editor"}})
 
 				expectOrgByName(mock, "o1", "acme")
-				mock.ExpectQuery("FROM organization_members").WithArgs("o1", "u1", pq.Array([]string{"o1"})).
+				mock.ExpectQuery("FROM organization_members").WithArgs("o1", "u1", []string{"o1"}).
 					WillReturnRows(sqlmock.NewRows(memberRowCols).AddRow("o1", "u1", "rt-editor", time.Now()))
-				mock.ExpectExec("DELETE FROM organization_members").WithArgs("o1", "u1", pq.Array([]string{"o1"})).
+				mock.ExpectExec("DELETE FROM organization_members").WithArgs("o1", "u1", []string{"o1"}).
 					WillReturnResult(sqlmock.NewResult(0, 1))
 				expectRetainedScopes(mock, "u1", `["state:read"]`)
 				expectKeyRevoked(mock, "u1", "k-saml-deprovisioned")
@@ -575,7 +574,7 @@ func TestCredentialLifecycleClass_AuthorityReductionInvalidatesEveryCredentialFa
 
 	for _, tc := range cases {
 		t.Run(tc.site, func(t *testing.T) {
-			db, mock, err := sqlmock.New()
+			db, mock, err := newSQLMock()
 			if err != nil {
 				t.Fatalf("sqlmock.New: %v", err)
 			}
@@ -612,7 +611,7 @@ func TestCredentialLifecycleClass_AuthorityReductionInvalidatesEveryCredentialFa
 // green. The decisive assertion is the key list WITHOUT a following delete.
 func TestCredentialLifecycleClass_PromotionRetainsKeys(t *testing.T) {
 	gin.SetMode(gin.TestMode)
-	db, mock, err := sqlmock.New()
+	db, mock, err := newSQLMock()
 	if err != nil {
 		t.Fatalf("sqlmock.New: %v", err)
 	}
@@ -621,7 +620,7 @@ func TestCredentialLifecycleClass_PromotionRetainsKeys(t *testing.T) {
 	h := newClassAuthHandlers(t, db, nil)
 
 	expectOrgByName(mock, "o1", "acme")
-	mock.ExpectQuery("FROM organization_members").WithArgs("o1", "u1", pq.Array([]string{"o1"})).
+	mock.ExpectQuery("FROM organization_members").WithArgs("o1", "u1", []string{"o1"}).
 		WillReturnRows(sqlmock.NewRows(memberRowCols).AddRow("o1", "u1", "rt-viewer", time.Now()))
 	expectRoleScopesLookup(mock, "editor", []string{"state:read", "state:write"})
 	mock.ExpectQuery("SELECT id FROM role_templates WHERE name").WithArgs("editor").
@@ -648,7 +647,7 @@ func TestCredentialLifecycleClass_PromotionRetainsKeys(t *testing.T) {
 // membership delete, a watermark write, or any key statement.
 func TestCredentialLifecycleClass_SCIMPutWithoutActiveDoesNotDeprovision(t *testing.T) {
 	gin.SetMode(gin.TestMode)
-	db, mock, err := sqlmock.New()
+	db, mock, err := newSQLMock()
 	if err != nil {
 		t.Fatalf("sqlmock.New: %v", err)
 	}

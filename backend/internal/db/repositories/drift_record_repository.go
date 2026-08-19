@@ -8,7 +8,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/lib/pq"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 // DriftRecord is a durable, acknowledgeable drift condition on one state file.
@@ -162,7 +162,7 @@ func (r *DriftRecordRepository) UpsertDetection(ctx context.Context, d *Detectio
 	if err != nil {
 		// A resolved record can still hold this external_ref (pipeline retry
 		// after auto-resolve): treat the replay as idempotent, not an error.
-		var pqErr *pq.Error
+		var pqErr *pgconn.PgError
 		if errors.As(err, &pqErr) && pqErr.Code == "23505" && d.ExternalRef != nil {
 			if existing, gErr := r.GetByExternalRef(ctx, d.SourceID, *d.ExternalRef); gErr == nil && existing != nil {
 				return existing, nil
@@ -210,7 +210,7 @@ func driftRecordFilter(statuses []string, sourceID, severity string, start, end 
 	clause := ""
 	args := []any{}
 	if len(statuses) > 0 {
-		args = append(args, pq.Array(statuses))
+		args = append(args, statuses)
 		clause += fmt.Sprintf(" AND status = ANY($%d)", len(args)) // #nosec G202 -- placeholder only; value bound via args
 	}
 	if sourceID != "" {

@@ -16,7 +16,6 @@ import (
 
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
 	"github.com/gin-gonic/gin"
-	"github.com/lib/pq"
 	idstore "github.com/sethbacon/terraform-suite-identity/identity/store"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/approles"
 )
@@ -103,12 +102,12 @@ type auditScopeEnv struct {
 func newAuditScopeEnv(t *testing.T) *auditScopeEnv {
 	t.Helper()
 	rec := &auditSQLRecorder{}
-	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(
+	db, mock, err := newSQLMockMatching(
 		sqlmock.QueryMatcherFunc(func(expectedSQL, actualSQL string) error {
 			rec.record(actualSQL)
 			return sqlmock.QueryMatcherRegexp.Match(expectedSQL, actualSQL)
 		}),
-	))
+	)
 	if err != nil {
 		t.Fatalf("sqlmock.New: %v", err)
 	}
@@ -170,10 +169,10 @@ var auditReadAxes = []auditReadAxis{
 		name: "list",
 		exercise: func(e *auditScopeEnv, callerID string, wantOrgs []string, page *sqlmock.Rows) *httptest.ResponseRecorder {
 			expectAdminMemberships(e.mock, callerID, wantOrgs...)
-			e.mock.ExpectQuery(`SELECT COUNT\(\*\) FROM audit_logs`).WithArgs(pq.Array(wantOrgs)).
+			e.mock.ExpectQuery(`SELECT COUNT\(\*\) FROM audit_logs`).WithArgs(wantOrgs).
 				WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(3))
 			e.mock.ExpectQuery("SELECT al.id, .+ FROM audit_logs").
-				WithArgs(pq.Array(wantOrgs), sqlmock.AnyArg(), sqlmock.AnyArg()).
+				WithArgs(wantOrgs, sqlmock.AnyArg(), sqlmock.AnyArg()).
 				WillReturnRows(page)
 			return e.serveAs("/x", "/x", callerID, e.h.ListAuditLogs())
 		},
@@ -184,10 +183,10 @@ var auditReadAxes = []auditReadAxis{
 		name: "export",
 		exercise: func(e *auditScopeEnv, callerID string, wantOrgs []string, page *sqlmock.Rows) *httptest.ResponseRecorder {
 			expectAdminMemberships(e.mock, callerID, wantOrgs...)
-			e.mock.ExpectQuery(`SELECT COUNT\(\*\) FROM audit_logs`).WithArgs(pq.Array(wantOrgs)).
+			e.mock.ExpectQuery(`SELECT COUNT\(\*\) FROM audit_logs`).WithArgs(wantOrgs).
 				WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(3))
 			e.mock.ExpectQuery("SELECT al.id, .+ FROM audit_logs").
-				WithArgs(pq.Array(wantOrgs), sqlmock.AnyArg(), sqlmock.AnyArg()).
+				WithArgs(wantOrgs, sqlmock.AnyArg(), sqlmock.AnyArg()).
 				WillReturnRows(page)
 			e.mock.ExpectQuery("INSERT INTO audit_logs").WillReturnRows(auditInsertReturn())
 			return e.serveAs("/x", "/x?format=json", callerID, e.h.ExportAuditLogs())
@@ -205,15 +204,15 @@ var auditReadAxes = []auditReadAxis{
 			// disclose through one axis what it refuses on the other.
 			expectAdminMemberships(e.mock, callerID, wantOrgs...)
 			e.mock.ExpectQuery("SELECT id, email, name, oidc_sub").
-				WithArgs(auditScopeTarget, pq.Array(wantOrgs)).
+				WithArgs(auditScopeTarget, wantOrgs).
 				WillReturnRows(idUserRow(auditScopeTarget))
 			e.mock.ExpectQuery("FROM organization_members om").WithArgs(auditScopeTarget).
 				WillReturnRows(sqlmock.NewRows(userMembershipCols))
 			e.mock.ExpectQuery(`SELECT COUNT\(\*\) FROM audit_logs`).
-				WithArgs(pq.Array(wantOrgs), auditScopeTarget).
+				WithArgs(wantOrgs, auditScopeTarget).
 				WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(3))
 			e.mock.ExpectQuery("SELECT al.id, .+ FROM audit_logs").
-				WithArgs(pq.Array(wantOrgs), auditScopeTarget, sqlmock.AnyArg(), sqlmock.AnyArg()).
+				WithArgs(wantOrgs, auditScopeTarget, sqlmock.AnyArg(), sqlmock.AnyArg()).
 				WillReturnRows(page)
 			e.mock.ExpectQuery("INSERT INTO audit_logs").WillReturnRows(auditInsertReturn())
 			return e.serveAs("/x/:id", "/x/"+auditScopeTarget, callerID, e.h.ExportUserData())

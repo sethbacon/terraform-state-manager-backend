@@ -32,7 +32,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/lib/pq"
+	"github.com/jackc/pgx/v5"
+	_ "github.com/jackc/pgx/v5/stdlib"
 	identity "github.com/sethbacon/terraform-suite-identity/identity"
 	idmodels "github.com/sethbacon/terraform-suite-identity/identity/models"
 	idstore "github.com/sethbacon/terraform-suite-identity/identity/store"
@@ -66,7 +67,7 @@ func newEnv(t *testing.T) *env {
 	if dsn == "" {
 		t.Skip("TEST_DATABASE_URL not set; skipping PostgreSQL integration test")
 	}
-	admin, err := sql.Open("postgres", dsn)
+	admin, err := sql.Open("pgx", dsn)
 	if err != nil {
 		t.Fatalf("open %s: %v", dsn, err)
 	}
@@ -75,8 +76,8 @@ func newEnv(t *testing.T) *env {
 		t.Skipf("TEST_DATABASE_URL is not reachable (%v); skipping", err)
 	}
 	for _, stmt := range []string{
-		`DROP DATABASE IF EXISTS ` + pq.QuoteIdentifier(testDatabaseName) + ` WITH (FORCE)`,
-		`CREATE DATABASE ` + pq.QuoteIdentifier(testDatabaseName),
+		`DROP DATABASE IF EXISTS ` + pgx.Identifier{testDatabaseName}.Sanitize() + ` WITH (FORCE)`,
+		`CREATE DATABASE ` + pgx.Identifier{testDatabaseName}.Sanitize(),
 	} {
 		if _, err := admin.Exec(stmt); err != nil {
 			t.Fatalf("%s: %v", stmt, err)
@@ -125,7 +126,7 @@ func connect(t *testing.T, dsn, searchPath string) *sql.DB {
 		q.Set("search_path", searchPath)
 		parsed.RawQuery = q.Encode()
 	}
-	db, err := sql.Open("postgres", parsed.String())
+	db, err := sql.Open("pgx", parsed.String())
 	if err != nil {
 		t.Fatalf("open %s: %v", parsed.Redacted(), err)
 	}

@@ -34,7 +34,7 @@ var setupUserCols = []string{"id", "email", "name", "oidc_sub", "created_at", "u
 // identity) over one sqlmock database.
 func newConfigureAdminEnv(t *testing.T) (*Handlers, sqlmock.Sqlmock) {
 	t.Helper()
-	db, mock, err := sqlmock.New()
+	db, mock, err := newSQLMock()
 	if err != nil {
 		t.Fatalf("sqlmock.New: %v", err)
 	}

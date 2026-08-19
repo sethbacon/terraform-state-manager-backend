@@ -7,7 +7,6 @@ import (
 
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
 	"github.com/gin-gonic/gin"
-	"github.com/lib/pq"
 
 	"github.com/terraform-state-manager/terraform-state-manager/internal/approles"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/auth"
@@ -25,7 +24,7 @@ import (
 // own per-org logic in isolation).
 func newAdminOrgRoutingEnv(t *testing.T, callerUserID string, scopes []string) *sourcesEnv {
 	t.Helper()
-	db, mock, err := sqlmock.New()
+	db, mock, err := newSQLMock()
 	if err != nil {
 		t.Fatalf("sqlmock.New: %v", err)
 	}
@@ -80,7 +79,7 @@ func TestAdminOrgRouting_ListAllowsOrganizationsReadScope(t *testing.T) {
 		WillReturnRows(sqlmock.NewRows(userMembershipCols).
 			AddRow("org-a", "Org A", "rt-owner", time.Now(), "org_owner", "Owner", []byte(`["organizations:read"]`)))
 	e.mock.ExpectQuery("FROM organizations").
-		WithArgs(pq.Array([]string{"org-a"}), sqlmock.AnyArg(), sqlmock.AnyArg()).
+		WithArgs([]string{"org-a"}, sqlmock.AnyArg(), sqlmock.AnyArg()).
 		WillReturnRows(sqlmock.NewRows(
 			[]string{"id", "name", "display_name", "idp_type", "idp_name", "created_at", "updated_at"}))
 
@@ -117,7 +116,7 @@ func TestAdminOrgRouting_CreateAllowsOrganizationsCreateScope(t *testing.T) {
 		WithArgs("org_owner").
 		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("rt-org-owner"))
 	e.mock.ExpectExec("INSERT INTO organization_members").
-		WithArgs("org-1", "caller-1", "rt-org-owner", pq.Array([]string{"org-1"})).
+		WithArgs("org-1", "caller-1", "rt-org-owner", []string{"org-1"}).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	e.mock.ExpectQuery("INSERT INTO audit_logs").WillReturnRows(auditInsertReturn())
 
@@ -144,7 +143,7 @@ func TestAdminOrgRouting_AdminWildcardBypassesOrganizationsReadAndCreate(t *test
 		WillReturnRows(sqlmock.NewRows(userMembershipCols).
 			AddRow("org-a", "Org A", "rt-owner", time.Now(), "org_owner", "Owner", []byte(`["organizations:read"]`)))
 	e.mock.ExpectQuery("FROM organizations").
-		WithArgs(pq.Array([]string{"org-a"}), sqlmock.AnyArg(), sqlmock.AnyArg()).
+		WithArgs([]string{"org-a"}, sqlmock.AnyArg(), sqlmock.AnyArg()).
 		WillReturnRows(sqlmock.NewRows(
 			[]string{"id", "name", "display_name", "idp_type", "idp_name", "created_at", "updated_at"}))
 

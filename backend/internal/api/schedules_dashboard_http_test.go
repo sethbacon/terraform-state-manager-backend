@@ -36,7 +36,7 @@ type schedulesEnv struct {
 
 func newSchedulesEnv(t *testing.T) *schedulesEnv {
 	t.Helper()
-	db, mock, err := sqlmock.New()
+	db, mock, err := newSQLMock()
 	if err != nil {
 		t.Fatalf("sqlmock.New: %v", err)
 	}
@@ -168,7 +168,7 @@ func TestSchedules_RunNow(t *testing.T) {
 // status.
 func TestDashboardOverview_StoreAggregation(t *testing.T) {
 	t.Setenv("TSM_ENCRYPTION_KEY", "0123456789abcdef0123456789abcdef")
-	db, mock, err := sqlmock.New()
+	db, mock, err := newSQLMock()
 	if err != nil {
 		t.Fatalf("sqlmock.New: %v", err)
 	}
@@ -248,7 +248,7 @@ func TestDashboardOverview_StoreAggregation(t *testing.T) {
 // TestDashboardOverview_SyncStatusDegraded: a source whose last cycle had read
 // errors counts toward source_errors and never-synced sources report synced=false.
 func TestDashboardOverview_SyncStatusDegraded(t *testing.T) {
-	db, mock, err := sqlmock.New()
+	db, mock, err := newSQLMock()
 	if err != nil {
 		t.Fatalf("sqlmock.New: %v", err)
 	}
@@ -288,7 +288,7 @@ func TestDashboardOverview_SyncStatusDegraded(t *testing.T) {
 // newest last_sync_at, a second overview request reuses the cached aggregates
 // (no aggregate queries); a newer last_sync_at invalidates and recomputes.
 func TestDashboardOverview_AggregateCache(t *testing.T) {
-	db, mock, err := sqlmock.New()
+	db, mock, err := newSQLMock()
 	if err != nil {
 		t.Fatalf("sqlmock.New: %v", err)
 	}
@@ -342,7 +342,7 @@ func TestDashboardOverview_AggregateCache(t *testing.T) {
 }
 
 func TestDashboardOverview_SourceListError(t *testing.T) {
-	db, _, err := sqlmock.New()
+	db, _, err := newSQLMock()
 	if err != nil {
 		t.Fatalf("sqlmock.New: %v", err)
 	}
@@ -359,7 +359,7 @@ func TestDashboardOverview_SourceListError(t *testing.T) {
 
 func TestStatesByVersion_HTTP(t *testing.T) {
 	newEnv := func(t *testing.T) (*gin.Engine, sqlmock.Sqlmock) {
-		db, mock, err := sqlmock.New()
+		db, mock, err := newSQLMock()
 		if err != nil {
 			t.Fatalf("sqlmock: %v", err)
 		}

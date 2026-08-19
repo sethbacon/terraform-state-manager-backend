@@ -10,7 +10,6 @@ import (
 
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
 	"github.com/gin-gonic/gin"
-	"github.com/lib/pq"
 	idstore "github.com/sethbacon/terraform-suite-identity/identity/store"
 
 	"github.com/terraform-state-manager/terraform-state-manager/internal/approles"
@@ -23,7 +22,7 @@ import (
 // queue audit-INSERT expectations where they assert auditing happened.
 func newAdminWriteEnv(t *testing.T) *sourcesEnv {
 	t.Helper()
-	db, mock, err := sqlmock.New()
+	db, mock, err := newSQLMock()
 	if err != nil {
 		t.Fatalf("sqlmock.New: %v", err)
 	}
@@ -252,9 +251,9 @@ func TestAdminOrganizationCRUD(t *testing.T) {
 
 	orgCols := []string{"id", "name", "display_name", "idp_type", "idp_name", "created_at", "updated_at"}
 	// Update: rename + bind IdP.
-	e.mock.ExpectQuery("FROM organizations").WithArgs("o1", pq.Array([]string{"o1"})).
+	e.mock.ExpectQuery("FROM organizations").WithArgs("o1", []string{"o1"}).
 		WillReturnRows(sqlmock.NewRows(orgCols).AddRow("o1", "eng", "Engineering", nil, nil, now, now))
-	e.mock.ExpectExec("UPDATE organizations SET name").WithArgs("platform", "o1", pq.Array([]string{"o1"})).
+	e.mock.ExpectExec("UPDATE organizations SET name").WithArgs("platform", "o1", []string{"o1"}).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	e.mock.ExpectExec("UPDATE organizations").WillReturnResult(sqlmock.NewResult(0, 1))
 	w = e.do(http.MethodPut, "/api/v1/admin/organizations/o1",
@@ -264,7 +263,7 @@ func TestAdminOrganizationCRUD(t *testing.T) {
 	}
 
 	// Clearing the IdP binding with empty strings.
-	e.mock.ExpectQuery("FROM organizations").WithArgs("o1", pq.Array([]string{"o1"})).
+	e.mock.ExpectQuery("FROM organizations").WithArgs("o1", []string{"o1"}).
 		WillReturnRows(sqlmock.NewRows(orgCols).AddRow("o1", "platform", "Platform", "oidc", "keycloak", now, now))
 	e.mock.ExpectExec("UPDATE organizations").WillReturnResult(sqlmock.NewResult(0, 1))
 	w = e.do(http.MethodPut, "/api/v1/admin/organizations/o1", `{"idp_type":"","idp_name":""}`)
@@ -275,16 +274,16 @@ func TestAdminOrganizationCRUD(t *testing.T) {
 		t.Error("empty idp fields must clear the binding")
 	}
 
-	e.mock.ExpectQuery("FROM organizations").WithArgs("ghost", pq.Array([]string{"ghost"})).WillReturnRows(sqlmock.NewRows(orgCols))
+	e.mock.ExpectQuery("FROM organizations").WithArgs("ghost", []string{"ghost"}).WillReturnRows(sqlmock.NewRows(orgCols))
 	if w := e.do(http.MethodPut, "/api/v1/admin/organizations/ghost", `{"name":"x"}`); w.Code != http.StatusNotFound {
 		t.Errorf("missing org: status = %d, want 404", w.Code)
 	}
 
 	// Members are snapshotted BEFORE the delete: organization_members cascades,
 	// so afterwards there is nobody left to sweep (none here).
-	e.mock.ExpectQuery("FROM organization_members").WithArgs("o1", pq.Array([]string{"o1"})).
+	e.mock.ExpectQuery("FROM organization_members").WithArgs("o1", []string{"o1"}).
 		WillReturnRows(sqlmock.NewRows([]string{"organization_id", "user_id", "role_template_id", "created_at"}))
-	e.mock.ExpectExec("DELETE FROM organizations").WithArgs("o1", pq.Array([]string{"o1"})).WillReturnResult(sqlmock.NewResult(0, 1))
+	e.mock.ExpectExec("DELETE FROM organizations").WithArgs("o1", []string{"o1"}).WillReturnResult(sqlmock.NewResult(0, 1))
 	if w := e.do(http.MethodDelete, "/api/v1/admin/organizations/o1", ""); w.Code != http.StatusNoContent {
 		t.Errorf("delete org: status = %d, want 204", w.Code)
 	}
@@ -295,7 +294,7 @@ func TestAdminOrganizationMembers(t *testing.T) {
 
 	memberWithUserCols := []string{"organization_id", "user_id", "role_template_id", "created_at",
 		"user_name", "user_email", "role_template_name", "role_template_display_name", "role_template_scopes"}
-	e.mock.ExpectQuery("FROM organization_members om").WithArgs("o1", pq.Array([]string{"o1"})).
+	e.mock.ExpectQuery("FROM organization_members om").WithArgs("o1", []string{"o1"}).
 		WillReturnRows(sqlmock.NewRows(memberWithUserCols).
 			AddRow("o1", "u1", nil, time.Now(), "Alice", "a@b.c", nil, nil, []byte(`[]`)))
 	w := e.do(http.MethodGet, "/api/v1/admin/organizations/o1/members", "")
@@ -335,7 +334,7 @@ func TestAdminOrganizationMembers(t *testing.T) {
 		t.Fatalf("update member: status = %d (%s)", w.Code, w.Body.String())
 	}
 
-	e.mock.ExpectExec("DELETE FROM organization_members").WithArgs("o1", "u1", pq.Array([]string{"o1"})).
+	e.mock.ExpectExec("DELETE FROM organization_members").WithArgs("o1", "u1", []string{"o1"}).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	if w := e.do(http.MethodDelete, "/api/v1/admin/organizations/o1/members/u1", ""); w.Code != http.StatusNoContent {
 		t.Errorf("remove member: status = %d, want 204", w.Code)
@@ -359,12 +358,12 @@ func TestAdminOrganizationMembers(t *testing.T) {
 // A caller-less test rig would match both on WithArgs alone.
 func TestAdminEraseUser_StripsMembershipsInEveryOrganization(t *testing.T) {
 	rec := &auditSQLRecorder{}
-	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(
+	db, mock, err := newSQLMockMatching(
 		sqlmock.QueryMatcherFunc(func(expectedSQL, actualSQL string) error {
 			rec.record(actualSQL)
 			return sqlmock.QueryMatcherRegexp.Match(expectedSQL, actualSQL)
 		}),
-	))
+	)
 	if err != nil {
 		t.Fatalf("sqlmock.New: %v", err)
 	}
@@ -385,7 +384,7 @@ func TestAdminEraseUser_StripsMembershipsInEveryOrganization(t *testing.T) {
 		WillReturnRows(sqlmock.NewRows(userMembershipCols).
 			AddRow("org-a", "Org A", "rt-admin", time.Now(), "admin", "Admin", []byte(`["admin"]`)))
 	mock.ExpectQuery("SELECT id, email, name, oidc_sub").
-		WithArgs("u1", pq.Array([]string{"org-a"})).WillReturnRows(idUserRow("u1"))
+		WithArgs("u1", []string{"org-a"}).WillReturnRows(idUserRow("u1"))
 	mock.ExpectExec("UPDATE users").WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectQuery("DELETE FROM organization_members").WithArgs("u1").
 		WillReturnRows(sqlmock.NewRows([]string{"organization_id"}).AddRow("org-a").AddRow("org-b"))
@@ -443,12 +442,12 @@ func TestAdminEraseUser_StripsMembershipsInEveryOrganization(t *testing.T) {
 func TestDeleteUser_PurgesTheMirrorOnlyWhenTheDeleteApplied(t *testing.T) {
 	newEnv := func(t *testing.T) (*sourcesEnv, sqlmock.Sqlmock, *purgeProbe) {
 		t.Helper()
-		identityDB, identityMock, err := sqlmock.New()
+		identityDB, identityMock, err := newSQLMock()
 		if err != nil {
 			t.Fatalf("sqlmock.New (identity): %v", err)
 		}
 		t.Cleanup(func() { _ = identityDB.Close() })
-		appDB, appMock, err := sqlmock.New()
+		appDB, appMock, err := newSQLMock()
 		if err != nil {
 			t.Fatalf("sqlmock.New (app): %v", err)
 		}

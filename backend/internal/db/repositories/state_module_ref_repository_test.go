@@ -4,7 +4,6 @@ import (
 	"testing"
 
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
-	"github.com/lib/pq"
 )
 
 func TestStateModuleRefRepository_ReplaceForState(t *testing.T) {
@@ -80,7 +79,7 @@ func TestStateModuleRefRepository_FindConsumers_HostFilter(t *testing.T) {
 	cols := []string{"source_id", "source_name", "state_key", "module_version", "observed_at"}
 	// Matches the canonical column against the alias set passed as a text[].
 	mock.ExpectQuery("WHERE r.registry_host_canon = ANY.+ AND r.module_source").
-		WithArgs(pq.Array([]string{"registry.terraform.io", "tf.example.com"}), "terraform-aws-modules/vpc/aws").
+		WithArgs([]string{"registry.terraform.io", "tf.example.com"}, "terraform-aws-modules/vpc/aws").
 		WillReturnRows(sqlmock.NewRows(cols).
 			AddRow("s1", "prod", "app.tfstate", nil, "2026-06-14"))
 

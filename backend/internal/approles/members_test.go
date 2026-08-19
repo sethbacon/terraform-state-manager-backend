@@ -106,11 +106,11 @@ func (tp *tape) wants(t *testing.T, want ...string) {
 // mocks, so an assertion on one cannot be satisfied by the other.
 func twoConnections(t *testing.T) (*Members, sqlmock.Sqlmock, sqlmock.Sqlmock, func()) {
 	t.Helper()
-	identityDB, identityMock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherRegexp))
+	identityDB, identityMock, err := newSQLMockRegexp()
 	if err != nil {
 		t.Fatalf("sqlmock.New (identity): %v", err)
 	}
-	appDB, appMock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherRegexp))
+	appDB, appMock, err := newSQLMockRegexp()
 	if err != nil {
 		t.Fatalf("sqlmock.New (app): %v", err)
 	}
@@ -392,7 +392,7 @@ func TestPurgeUserRoles_StripsEveryOrganization(t *testing.T) {
 // degrades to the identity leg alone rather than panicking. That is the unit-test
 // rig's shape, and it must not be the server's.
 func TestNoAppConnection_DegradesToTheIdentityLegAlone(t *testing.T) {
-	identityDB, identityMock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherRegexp))
+	identityDB, identityMock, err := newSQLMockRegexp()
 	if err != nil {
 		t.Fatalf("sqlmock.New: %v", err)
 	}
@@ -535,7 +535,7 @@ func TestAFailedRevocationMirrorDoesNotReachIdentity(t *testing.T) {
 // callable on *Members, or the wrapper would have been a rewrite rather than a
 // wrap.
 func TestReadsArePromotedUnchanged(t *testing.T) {
-	identityDB, identityMock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherRegexp))
+	identityDB, identityMock, err := newSQLMockRegexp()
 	if err != nil {
 		t.Fatalf("sqlmock.New: %v", err)
 	}

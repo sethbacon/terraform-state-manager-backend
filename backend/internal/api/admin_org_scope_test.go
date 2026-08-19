@@ -10,7 +10,6 @@ import (
 
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
 	"github.com/gin-gonic/gin"
-	"github.com/lib/pq"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/approles"
 )
 
@@ -20,7 +19,7 @@ import (
 // requireOrgScope gates the :id-scoped routes ahead of the handler.
 func newAdminOrgScopeEnv(t *testing.T, callerUserID string) *sourcesEnv {
 	t.Helper()
-	db, mock, err := sqlmock.New()
+	db, mock, err := newSQLMock()
 	if err != nil {
 		t.Fatalf("sqlmock.New: %v", err)
 	}
@@ -115,7 +114,7 @@ func TestRequireOrgScope_AllowsAdminActingOnOwnOrg(t *testing.T) {
 	expectGetUserScopesForOrg(e.mock, "org-a", "caller-1", `["admin"]`)
 	// The members list now also binds the route's own OrgScope (routeOrgScope),
 	// which requireOrgScope has already proved the caller holds.
-	e.mock.ExpectQuery("FROM organization_members om").WithArgs("org-a", pq.Array([]string{"org-a"})).
+	e.mock.ExpectQuery("FROM organization_members om").WithArgs("org-a", []string{"org-a"}).
 		WillReturnRows(sqlmock.NewRows(scopeMemberCols))
 
 	w := e.do(http.MethodGet, "/api/v1/admin/organizations/org-a/members", "")
@@ -165,7 +164,7 @@ func TestRequireOrgScope_AllowsAdminForMemberMutations(t *testing.T) {
 	e := newAdminOrgScopeEnv(t, "caller-1")
 
 	expectGetUserScopesForOrg(e.mock, "org-a", "caller-1", `["admin"]`)
-	e.mock.ExpectExec("DELETE FROM organization_members").WithArgs("org-a", "u2", pq.Array([]string{"org-a"})).
+	e.mock.ExpectExec("DELETE FROM organization_members").WithArgs("org-a", "u2", []string{"org-a"}).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 
 	w := e.do(http.MethodDelete, "/api/v1/admin/organizations/org-a/members/u2", "")
@@ -228,7 +227,7 @@ func TestRequireOrgScope_DoesNotGateOrganizationListOrCreate(t *testing.T) {
 	e.mock.ExpectQuery("FROM organization_members om").WithArgs("caller-1").
 		WillReturnRows(sqlmock.NewRows(userMembershipCols).
 			AddRow("org-a", "Org A", "rt-owner", time.Now(), "org_owner", "Owner", []byte(`["organizations:write"]`)))
-	e.mock.ExpectQuery("FROM organizations").WithArgs(pq.Array([]string{"org-a"}), sqlmock.AnyArg(), sqlmock.AnyArg()).
+	e.mock.ExpectQuery("FROM organizations").WithArgs([]string{"org-a"}, sqlmock.AnyArg(), sqlmock.AnyArg()).
 		WillReturnRows(sqlmock.NewRows(
 			[]string{"id", "name", "display_name", "idp_type", "idp_name", "created_at", "updated_at"}))
 	w := e.do(http.MethodGet, "/api/v1/admin/organizations", "")
@@ -254,7 +253,7 @@ func TestCreateOrganization_AddsCallerAsOrgOwner(t *testing.T) {
 		WithArgs("org_owner").
 		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("rt-org-owner"))
 	e.mock.ExpectExec("INSERT INTO organization_members").
-		WithArgs("org-1", "caller-1", "rt-org-owner", pq.Array([]string{"org-1"})).
+		WithArgs("org-1", "caller-1", "rt-org-owner", []string{"org-1"}).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	e.mock.ExpectQuery("INSERT INTO audit_logs").WillReturnRows(auditInsertReturn())
 
@@ -295,7 +294,7 @@ func TestRequireOrgScope_AllowsOrganizationsWriteWithoutAdmin(t *testing.T) {
 	e := newAdminOrgScopeEnv(t, "caller-1")
 
 	expectGetUserScopesForOrg(e.mock, "org-a", "caller-1", `["organizations:write"]`)
-	e.mock.ExpectExec("DELETE FROM organization_members").WithArgs("org-a", "u2", pq.Array([]string{"org-a"})).
+	e.mock.ExpectExec("DELETE FROM organization_members").WithArgs("org-a", "u2", []string{"org-a"}).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 
 	w := e.do(http.MethodDelete, "/api/v1/admin/organizations/org-a/members/u2", "")
@@ -496,12 +495,12 @@ const (
 // protect), who stay visible.
 func TestListUsers_NarrowsToCallerAdminOrgs(t *testing.T) {
 	rec := &auditSQLRecorder{}
-	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(
+	db, mock, err := newSQLMockMatching(
 		sqlmock.QueryMatcherFunc(func(expectedSQL, actualSQL string) error {
 			rec.record(actualSQL)
 			return sqlmock.QueryMatcherRegexp.Match(expectedSQL, actualSQL)
 		}),
-	))
+	)
 	if err != nil {
 		t.Fatalf("sqlmock.New: %v", err)
 	}
@@ -519,15 +518,15 @@ func TestListUsers_NarrowsToCallerAdminOrgs(t *testing.T) {
 		WillReturnRows(sqlmock.NewRows(userMembershipCols).
 			AddRow(auditScopeOrgA, "Org A", "rt-admin", time.Now(), "admin", "Admin", []byte(`["admin"]`)).
 			AddRow("org-c", "Org C", "rt-viewer", time.Now(), "viewer", "Viewer", []byte(`["state:read"]`)))
-	mock.ExpectQuery(`SELECT COUNT\(\*\) FROM users`).WithArgs(pq.Array([]string{auditScopeOrgA})).
+	mock.ExpectQuery(`SELECT COUNT\(\*\) FROM users`).WithArgs([]string{auditScopeOrgA}).
 		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(2))
 	mock.ExpectQuery("FROM users").
-		WithArgs(pq.Array([]string{auditScopeOrgA}), sqlmock.AnyArg(), sqlmock.AnyArg()).
+		WithArgs([]string{auditScopeOrgA}, sqlmock.AnyArg(), sqlmock.AnyArg()).
 		WillReturnRows(sqlmock.NewRows([]string{"id", "email", "name", "oidc_sub", "created_at", "updated_at"}).
 			AddRow("u-a", "a@x.io", "A", nil, time.Now(), time.Now()).
 			AddRow("u-none", "n@x.io", "N", nil, time.Now(), time.Now()))
 	mock.ExpectQuery("FROM organization_members om").
-		WithArgs(pq.Array([]string{"u-a", "u-none"}), pq.Array([]string{auditScopeOrgA})).
+		WithArgs([]string{"u-a", "u-none"}, []string{auditScopeOrgA}).
 		WillReturnRows(sqlmock.NewRows(append([]string{"user_id"}, userMembershipCols...)).
 			AddRow("u-a", auditScopeOrgA, "Org A", "rt-admin", time.Now(), "admin", "Admin", []byte(`["admin"]`)))
 

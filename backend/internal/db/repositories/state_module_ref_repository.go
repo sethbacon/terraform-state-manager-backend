@@ -3,8 +3,6 @@ package repositories
 import (
 	"context"
 	"database/sql"
-
-	"github.com/lib/pq"
 )
 
 // StateModuleRef is one captured module dependency of a state (migration 000015).
@@ -106,7 +104,7 @@ func (r *StateModuleRefRepository) FindConsumers(ctx context.Context, hosts []st
 	           LEFT JOIN state_sources s ON s.id = r.source_id
 	           WHERE r.registry_host_canon = ANY($1) AND r.module_source = $2
 	           ORDER BY r.observed_at DESC`
-	rows, err := r.db.QueryContext(ctx, q, pq.Array(hosts), moduleSource)
+	rows, err := r.db.QueryContext(ctx, q, hosts, moduleSource)
 	if err != nil {
 		return nil, err
 	}
