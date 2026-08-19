@@ -161,6 +161,45 @@ relay. Two consequences:
   is refused rather than attempted. If you rely on that, either enable TLS on the
   relay or drop the credentials.
 
+## One-time notice: authority is bound to the presenting credential
+
+**Breaking.** Three endpoints now derive what a caller may do from the
+**credential presenting the request** rather than from the **owning user's role
+rows**. Before this release an API key could reach authority its owner held but
+the key itself never did, defeating the two narrowings the API-key path applies
+deliberately (a key's stored scopes are capped by its owner's live set, and
+`admin` is stripped from every API-key request unconditionally so an unattended
+CI credential cannot inherit its owner's platform-admin).
+
+| Endpoint | Now refused | Do this instead |
+| --- | --- | --- |
+| `POST /api/v1/auth/refresh` | API-key and mTLS callers get **403** | Nothing to change for browsers. A key has no session to refresh — rotate it at `POST /api/v1/apikeys/{id}/rotate`. |
+| `PUT`/`DELETE /api/v1/admin/organizations/{id}` and its `/members` routes | Callers whose credential does not itself carry `organizations:write` or `admin` get **403**; **no API key can**, as neither scope is key-assignable | Manage organizations from an interactive session. |
+| `POST /api/v1/apikeys/{id}/rotate` | Rotating a key whose scopes the caller does not hold gets **403** | Rotate from a session, or from the key itself. |
+
+Who is affected, in practice:
+
+- **Browser/SPA users: nobody.** The frontend never calls `/auth/refresh`, and
+  organization management already runs from a session.
+- **Automation holding a `tsm_` API key** that called `/auth/refresh` to obtain a
+  session cookie. This was the escalation: the resulting cookie carried the
+  owner's whole cross-organization scope union, `admin` included. Point that
+  automation at the API directly with its key — the key already carries the
+  scopes it was granted — or give it a key with the scopes it actually needs.
+- **Automation that rotated a *different* key than the one it authenticates
+  with.** A key may still rotate itself, and an `admin` session may still rotate
+  anyone's key; what is refused is a narrow key rotating a broader sibling of the
+  same owner and receiving its secret.
+- **An owner whose own authority was reduced** since a key was minted can no
+  longer re-mint that key at its original breadth. The key was already capped at
+  the reduced set on every request, so this only stops the stale breadth being
+  written back into a fresh row. Recreate the key with the scopes you now hold.
+
+Check before rolling: `GET /api/v1/apikeys` lists every key with its scopes and
+`last_used_at`. A key whose scopes exceed its owner's current authority, or whose
+automation refreshes a session, is one to re-issue first. Nothing is revoked and
+no schema changes.
+
 ## Version pinning
 
 Always pin image tags in production (`v1.0.0`, never `latest`); the chart's
