@@ -6,7 +6,7 @@ import (
 	"time"
 
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
-	"github.com/lib/pq"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 var driftRecordCols = []string{"id", "source_id", "state_key", "pipeline_connection_id", "last_run_id",
@@ -43,7 +43,7 @@ func TestDriftRecordRepository_UpsertDetection(t *testing.T) {
 	// as-is, not surfaced as an error.
 	ref := "run-42"
 	mock.ExpectQuery("INSERT INTO drift_records").
-		WillReturnError(&pq.Error{Code: "23505"})
+		WillReturnError(&pgconn.PgError{Code: "23505"})
 	mock.ExpectQuery("FROM drift_records WHERE source_id .+ external_ref").WithArgs("s1", ref).
 		WillReturnRows(driftRecordRow("r-old", "resolved"))
 	rec, err = r.UpsertDetection(ctx, &Detection{SourceID: "s1", StateKey: "app.tfstate", Origin: "ingest", ExternalRef: &ref})
@@ -141,7 +141,7 @@ func TestDriftRecordRepository_ListAndCounts(t *testing.T) {
 	r := NewDriftRecordRepository(db)
 
 	mock.ExpectQuery("FROM drift_records WHERE 1=1 AND status = ANY").
-		WithArgs(pq.Array([]string{"open", "acknowledged"}), "s1", 100, 0).
+		WithArgs([]string{"open", "acknowledged"}, "s1", 100, 0).
 		WillReturnRows(driftRecordRow("r1", "open"))
 	recs, err := r.List(ctx, []string{"open", "acknowledged"}, "s1", "", 0, 0, nil, nil)
 	if err != nil || len(recs) != 1 || recs[0].Status != "open" {

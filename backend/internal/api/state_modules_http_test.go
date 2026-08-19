@@ -8,14 +8,13 @@ import (
 
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
 	"github.com/gin-gonic/gin"
-	"github.com/lib/pq"
 )
 
 // newModulesRouter mounts the module-provenance read handlers bare (no auth
 // middleware, mirroring newDriftEnv) over a sqlmock DB.
 func newModulesRouter(t *testing.T) (*gin.Engine, sqlmock.Sqlmock) {
 	t.Helper()
-	db, mock, err := sqlmock.New()
+	db, mock, err := newSQLMock()
 	if err != nil {
 		t.Fatalf("sqlmock.New: %v", err)
 	}
@@ -65,7 +64,7 @@ func TestConsumers_HostMatchedJoin(t *testing.T) {
 	r, mock := newModulesRouter(t)
 	cols := []string{"source_id", "source_name", "state_key", "module_version", "observed_at"}
 	mock.ExpectQuery("WHERE r.registry_host_canon = ANY.+ AND r.module_source").
-		WithArgs(pq.Array([]string{"registry.terraform.io"}), "terraform-aws-modules/vpc/aws").
+		WithArgs([]string{"registry.terraform.io"}, "terraform-aws-modules/vpc/aws").
 		WillReturnRows(sqlmock.NewRows(cols).AddRow("s1", "prod", "app.tfstate", nil, "2026-06-14"))
 
 	w := httptest.NewRecorder()

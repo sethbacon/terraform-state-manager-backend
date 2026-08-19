@@ -33,7 +33,7 @@ func TestMain(m *testing.M) {
 
 func newMock(t *testing.T) (*sql.DB, sqlmock.Sqlmock) {
 	t.Helper()
-	db, mock, err := sqlmock.New()
+	db, mock, err := newSQLMock()
 	if err != nil {
 		t.Fatalf("sqlmock.New: %v", err)
 	}
@@ -553,7 +553,7 @@ func TestAnalysisMarker(t *testing.T) {
 // non-worker ones, so pruning there would take a destructive sweep outside the
 // leader gate.
 func TestBackupRetentionPrunesOnPeriodicCycleOnly(t *testing.T) {
-	db, mock, err := sqlmock.New()
+	db, mock, err := newSQLMock()
 	if err != nil {
 		t.Fatalf("sqlmock.New: %v", err)
 	}
@@ -593,7 +593,7 @@ func TestBackupRetentionPrunesOnPeriodicCycleOnly(t *testing.T) {
 // With retention unconfigured (operator set backup_retention.enabled=false) the
 // periodic cycle must issue no backup DELETE at all.
 func TestBackupRetentionDisabledIssuesNoDelete(t *testing.T) {
-	db, mock, err := sqlmock.New()
+	db, mock, err := newSQLMock()
 	if err != nil {
 		t.Fatalf("sqlmock.New: %v", err)
 	}
@@ -616,7 +616,7 @@ func TestBackupRetentionDisabledIssuesNoDelete(t *testing.T) {
 // A failing prune must not abort the cycle — it is a bounded cleanup, not part
 // of the reconcile contract.
 func TestBackupRetentionErrorDoesNotFailCycle(t *testing.T) {
-	db, mock, err := sqlmock.New()
+	db, mock, err := newSQLMock()
 	if err != nil {
 		t.Fatalf("sqlmock.New: %v", err)
 	}

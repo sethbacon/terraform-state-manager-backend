@@ -15,7 +15,7 @@ import (
 
 func newStore(t *testing.T) (*Store, sqlmock.Sqlmock) {
 	t.Helper()
-	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherRegexp))
+	db, mock, err := newSQLMockRegexp()
 	if err != nil {
 		t.Fatalf("sqlmock.New: %v", err)
 	}

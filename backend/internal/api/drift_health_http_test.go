@@ -18,7 +18,7 @@ import (
 func newDriftEnv(t *testing.T) *sourcesEnv {
 	t.Helper()
 	t.Setenv("TSM_ENCRYPTION_KEY", "0123456789abcdef0123456789abcdef")
-	db, mock, err := sqlmock.New()
+	db, mock, err := newSQLMock()
 	if err != nil {
 		t.Fatalf("sqlmock.New: %v", err)
 	}

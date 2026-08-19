@@ -37,11 +37,11 @@ type readsEnv struct {
 
 func newReadsEnv(t *testing.T, source RoleSource) *readsEnv {
 	t.Helper()
-	identityDB, identityMock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherRegexp))
+	identityDB, identityMock, err := newSQLMockRegexp()
 	if err != nil {
 		t.Fatalf("sqlmock.New (identity): %v", err)
 	}
-	appDB, appMock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherRegexp))
+	appDB, appMock, err := newSQLMockRegexp()
 	if err != nil {
 		t.Fatalf("sqlmock.New (app): %v", err)
 	}
@@ -319,7 +319,7 @@ func TestAnUndecidedRoleSourceIsRefused(t *testing.T) {
 // and the constructions that predate an app connection working; in a server it
 // would mean this phase is not in effect on that path.
 func TestNoApplicationConnectionDegradesToIdentity(t *testing.T) {
-	identityDB, identityMock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherRegexp))
+	identityDB, identityMock, err := newSQLMockRegexp()
 	if err != nil {
 		t.Fatalf("sqlmock.New: %v", err)
 	}
@@ -377,7 +377,7 @@ func TestParseRoleSource(t *testing.T) {
 // rendered SQL, because the zero OrgScope and the platform-wide one differ by one
 // literal and produce identical-looking Go.
 func TestAppRoleReadsBindTheCallersTenancy(t *testing.T) {
-	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherRegexp))
+	db, mock, err := newSQLMockRegexp()
 	if err != nil {
 		t.Fatalf("sqlmock.New: %v", err)
 	}
@@ -415,7 +415,7 @@ func TestAppRoleReadsBindTheCallersTenancy(t *testing.T) {
 // identically in the read path, and collapsing them here would leave the drift
 // comparison and the read path disagreeing about what they are looking at.
 func TestRoleForPair_DistinguishesNoRowFromANullRole(t *testing.T) {
-	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherRegexp))
+	db, mock, err := newSQLMockRegexp()
 	if err != nil {
 		t.Fatalf("sqlmock.New: %v", err)
 	}

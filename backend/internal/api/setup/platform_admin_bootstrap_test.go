@@ -32,12 +32,12 @@ var carrierGrantCols = []string{"user_id", "granted_by", "granted_at", "note"}
 // those two cannot share a transaction.
 func newConfigureAdminEnvWithCarrier(t *testing.T) (*Handlers, sqlmock.Sqlmock, sqlmock.Sqlmock) {
 	t.Helper()
-	identityDB, identityMock, err := sqlmock.New()
+	identityDB, identityMock, err := newSQLMock()
 	if err != nil {
 		t.Fatalf("sqlmock.New (identity): %v", err)
 	}
 	t.Cleanup(func() { _ = identityDB.Close() })
-	appDB, appMock, err := sqlmock.New()
+	appDB, appMock, err := newSQLMock()
 	if err != nil {
 		t.Fatalf("sqlmock.New (app): %v", err)
 	}

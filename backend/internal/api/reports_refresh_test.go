@@ -31,7 +31,7 @@ type refreshEnv struct {
 func newRefreshEnv(t *testing.T) *refreshEnv {
 	t.Helper()
 	t.Setenv("TSM_ENCRYPTION_KEY", "0123456789abcdef0123456789abcdef")
-	db, mock, err := sqlmock.New()
+	db, mock, err := newSQLMock()
 	if err != nil {
 		t.Fatalf("sqlmock.New: %v", err)
 	}

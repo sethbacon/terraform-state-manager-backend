@@ -6,8 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
-
-	"github.com/lib/pq"
 )
 
 // StateAnalysis is one analyzed state file in the persistent analysis store.
@@ -337,7 +335,7 @@ func (r *StateAnalysisRepository) Sizes(ctx context.Context, sourceID string) (m
 func (r *StateAnalysisRepository) DeleteMissing(ctx context.Context, sourceID string, keep []string) error {
 	_, err := r.db.ExecContext(ctx,
 		`DELETE FROM state_analyses WHERE source_id = $1 AND NOT (state_key = ANY($2))`,
-		sourceID, pq.Array(keep))
+		sourceID, keep)
 	return err
 }
 

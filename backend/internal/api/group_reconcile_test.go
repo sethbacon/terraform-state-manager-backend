@@ -8,7 +8,6 @@ import (
 
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
 	"github.com/google/uuid"
-	"github.com/lib/pq"
 
 	"github.com/terraform-state-manager/terraform-state-manager/internal/config"
 )
@@ -16,7 +15,7 @@ import (
 // newReconcileEnv returns AuthHandlers over sqlmock for direct method tests.
 func newReconcileEnv(t *testing.T, mutate func(*config.Config)) (*AuthHandlers, sqlmock.Sqlmock) {
 	t.Helper()
-	db, mock, err := sqlmock.New()
+	db, mock, err := newSQLMock()
 	if err != nil {
 		t.Fatalf("sqlmock.New: %v", err)
 	}
@@ -59,7 +58,7 @@ func TestReconcile_UpsertExistingMember(t *testing.T) {
 
 	expectOrgByName(mock, "o1", "platform")
 	// Already a member → role update (guard scopes lookup + template id lookup + UPDATE).
-	mock.ExpectQuery("FROM organization_members").WithArgs("o1", "u1", pq.Array([]string{"o1"})).
+	mock.ExpectQuery("FROM organization_members").WithArgs("o1", "u1", []string{"o1"}).
 		WillReturnRows(sqlmock.NewRows(memberRowCols).AddRow("o1", "u1", nil, time.Now()))
 	expectRoleScopesLookup(mock, "editor", []string{"state:read", "state:write"})
 	mock.ExpectQuery("SELECT id FROM role_templates WHERE name").WithArgs("editor").
@@ -81,7 +80,7 @@ func TestReconcile_AddsNewMember(t *testing.T) {
 	h, mock := newReconcileEnv(t, nil)
 
 	expectOrgByName(mock, "o1", "platform")
-	mock.ExpectQuery("FROM organization_members").WithArgs("o1", "u1", pq.Array([]string{"o1"})).
+	mock.ExpectQuery("FROM organization_members").WithArgs("o1", "u1", []string{"o1"}).
 		WillReturnRows(sqlmock.NewRows(memberRowCols)) // not a member
 	expectRoleScopesLookup(mock, "viewer", []string{"state:read"})
 	mock.ExpectQuery("SELECT id FROM role_templates WHERE name").WithArgs("viewer").
@@ -104,9 +103,9 @@ func TestReconcile_DeprovisionsOnGroupLoss(t *testing.T) {
 
 	// Managed org, no desired entry, currently a member → membership revoked.
 	expectOrgByName(mock, "o1", "platform")
-	mock.ExpectQuery("FROM organization_members").WithArgs("o1", "u1", pq.Array([]string{"o1"})).
+	mock.ExpectQuery("FROM organization_members").WithArgs("o1", "u1", []string{"o1"}).
 		WillReturnRows(sqlmock.NewRows(memberRowCols).AddRow("o1", "u1", "rt-editor", time.Now()))
-	mock.ExpectExec("DELETE FROM organization_members").WithArgs("o1", "u1", pq.Array([]string{"o1"})).
+	mock.ExpectExec("DELETE FROM organization_members").WithArgs("o1", "u1", []string{"o1"}).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 
 	err := h.reconcileManagedMemberships(context.Background(), "u1",
@@ -139,7 +138,7 @@ func TestReconcile_DefaultRoleFirstLoginOnly(t *testing.T) {
 	// unlike the "wanted" branch tests above.
 	h, mock := newReconcileEnv(t, nil)
 	expectOrgByName(mock, "o-def", "default") // GetDefaultOrganization → GetByName("default")
-	mock.ExpectQuery("FROM organization_members").WithArgs("o-def", "u1", pq.Array([]string{"o-def"})).
+	mock.ExpectQuery("FROM organization_members").WithArgs("o-def", "u1", []string{"o-def"}).
 		WillReturnRows(sqlmock.NewRows(memberRowCols))
 	mock.ExpectQuery("SELECT id FROM role_templates WHERE name").WithArgs("viewer").
 		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("rt-viewer"))
@@ -156,7 +155,7 @@ func TestReconcile_DefaultRoleFirstLoginOnly(t *testing.T) {
 	// Existing member: the default role must NOT overwrite their role.
 	h2, mock2 := newReconcileEnv(t, nil)
 	expectOrgByName(mock2, "o-def", "default")
-	mock2.ExpectQuery("FROM organization_members").WithArgs("o-def", "u1", pq.Array([]string{"o-def"})).
+	mock2.ExpectQuery("FROM organization_members").WithArgs("o-def", "u1", []string{"o-def"}).
 		WillReturnRows(sqlmock.NewRows(memberRowCols).AddRow("o-def", "u1", "rt-admin", time.Now()))
 
 	if err := h2.reconcileManagedMemberships(context.Background(), "u1", nil, nil, "viewer"); err != nil {
@@ -172,7 +171,7 @@ func TestReconcile_SkipsManagedDefaultOrgFallback(t *testing.T) {
 	// reconciliation above is authoritative for it.
 	h, mock := newReconcileEnv(t, nil)
 	expectOrgByName(mock, "o-def", "default") // managed loop reconciles it (not a member, nothing desired)
-	mock.ExpectQuery("FROM organization_members").WithArgs("o-def", "u1", pq.Array([]string{"o-def"})).
+	mock.ExpectQuery("FROM organization_members").WithArgs("o-def", "u1", []string{"o-def"}).
 		WillReturnRows(sqlmock.NewRows(memberRowCols))
 	expectOrgByName(mock, "o-def", "default") // GetDefaultOrganization lookup
 
@@ -201,7 +200,7 @@ func TestReconcile_ResolvedRoleCarriesScopeAdmin_AddPath_Rejected(t *testing.T) 
 	h, mock := newReconcileEnv(t, nil)
 
 	expectOrgByName(mock, "o1", "platform")
-	mock.ExpectQuery("FROM organization_members").WithArgs("o1", "u1", pq.Array([]string{"o1"})).
+	mock.ExpectQuery("FROM organization_members").WithArgs("o1", "u1", []string{"o1"}).
 		WillReturnRows(sqlmock.NewRows(memberRowCols)) // not a member
 	// guardProvisionableRole's scopes lookup returns the grant-all wildcard —
 	// AddMemberWithParams's own role-template-id lookup and INSERT must NEVER
@@ -224,7 +223,7 @@ func TestReconcile_ResolvedRoleCarriesScopeAdmin_UpdatePath_Rejected(t *testing.
 	h, mock := newReconcileEnv(t, nil)
 
 	expectOrgByName(mock, "o1", "platform")
-	mock.ExpectQuery("FROM organization_members").WithArgs("o1", "u1", pq.Array([]string{"o1"})).
+	mock.ExpectQuery("FROM organization_members").WithArgs("o1", "u1", []string{"o1"}).
 		WillReturnRows(sqlmock.NewRows(memberRowCols).AddRow("o1", "u1", "rt-editor", time.Now()))
 	expectRoleScopesLookup(mock, "admin", []string{"admin"})
 	// No UPDATE (or the revoke DELETE) must follow.
@@ -248,7 +247,7 @@ func TestReconcile_GuardProvisionableRole_UnknownRoleTemplate_DefersToRealLookup
 	h, mock := newReconcileEnv(t, nil)
 
 	expectOrgByName(mock, "o1", "platform")
-	mock.ExpectQuery("FROM organization_members").WithArgs("o1", "u1", pq.Array([]string{"o1"})).
+	mock.ExpectQuery("FROM organization_members").WithArgs("o1", "u1", []string{"o1"}).
 		WillReturnRows(sqlmock.NewRows(memberRowCols)) // not a member
 	// guardProvisionableRole's own scopes lookup finds no such role template.
 	mock.ExpectQuery("SELECT id, name, display_name, description, scopes").WithArgs("ghost-role").
@@ -278,7 +277,7 @@ func TestApplyGroupMappings_EndToEnd(t *testing.T) {
 	mock.ExpectQuery("SELECT oidc_group_claim_name").
 		WillReturnRows(sqlmock.NewRows([]string{"oidc_group_claim_name", "oidc_default_role", "oidc_group_mappings", "updated_at"}))
 	expectOrgByName(mock, "o-def", "default")
-	mock.ExpectQuery("FROM organization_members").WithArgs("o-def", "u1", pq.Array([]string{"o-def"})).
+	mock.ExpectQuery("FROM organization_members").WithArgs("o-def", "u1", []string{"o-def"}).
 		WillReturnRows(sqlmock.NewRows(memberRowCols))
 	expectRoleScopesLookup(mock, "editor", []string{"state:read", "state:write"})
 	mock.ExpectQuery("SELECT id FROM role_templates WHERE name").WithArgs("editor").
