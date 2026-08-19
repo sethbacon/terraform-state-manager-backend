@@ -35,7 +35,13 @@
 package api
 
 import (
+	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"io/fs"
 	"net/http"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -257,5 +263,528 @@ func TestRotate_AdminStillRotatesAnyKey(t *testing.T) {
 	w := e.do(http.MethodPost, "/api/v1/apikeys/k9/rotate", `{"grace_period_hours":0}`)
 	if w.Code != http.StatusCreated {
 		t.Fatalf("status = %d, want 201: `admin` must still rotate any key (%s)", w.Code, w.Body.String())
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Structural guards. The three fixes above are instances; these are the class.
+//
+// Every guard here ENUMERATES from the source tree rather than checking a list
+// somebody typed. A guard that asserts "these three handlers are fine" is worth
+// nothing the moment a fourth is written, which is exactly how #339 arrived —
+// the sibling in requireOrgScope had been sitting behind the same middleware as
+// the reported instance the whole time.
+// ---------------------------------------------------------------------------
+
+// callersOfFunc returns "<path>:<enclosing top-level func>" for every CALL of
+// name in the non-test tree, matching both a qualified call (x.Name(...)) and a
+// package-local one (Name(...)).
+//
+// It matches only the CALLEE position of a call expression, so a doc comment
+// (this file is full of them), a variable that happens to share the name, or the
+// function's own declaration is never mistaken for a call site. Calls inside a
+// closure are attributed to the top-level function that returns it, which is what
+// every gin handler in this package is.
+func callersOfFunc(t *testing.T, name string) []string {
+	t.Helper()
+	var found []string
+	fset := token.NewFileSet()
+	root := filepath.Join("..", "..")
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+		file, perr := parser.ParseFile(fset, path, nil, parser.SkipObjectResolution)
+		if perr != nil {
+			return fmt.Errorf("parse %s: %w", path, perr)
+		}
+		rel := filepath.ToSlash(strings.TrimPrefix(filepath.Clean(path), "../../"))
+		for _, decl := range file.Decls {
+			fd, ok := decl.(*ast.FuncDecl)
+			if !ok {
+				continue
+			}
+			hit := false
+			ast.Inspect(fd, func(n ast.Node) bool {
+				call, ok := n.(*ast.CallExpr)
+				if !ok {
+					return true
+				}
+				switch fun := call.Fun.(type) {
+				case *ast.Ident:
+					hit = hit || fun.Name == name
+				case *ast.SelectorExpr:
+					hit = hit || fun.Sel.Name == name
+				}
+				return true
+			})
+			if hit {
+				found = append(found, rel+":"+fd.Name.Name)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("scan backend tree: %v", err)
+	}
+	return found
+}
+
+// sessionMintingCall is the one function that turns a scope set into a session
+// JWT. Everything downstream of it — the cookie, the TTL, the JTI — inherits
+// whatever authority was handed to it, so it is the choke point the class is
+// defined at.
+const sessionMintingCall = "GenerateJWT"
+
+// credentialGateCall is the predicate a session minter behind requireAuth must
+// apply: it reads auth_method, which only the middleware writes, so it cannot be
+// satisfied by anything the request controls.
+const credentialGateCall = "isInteractiveSession"
+
+// unauthenticatedSessionMinters are the session-minting functions that legitimately
+// derive authority from the user record, because they run BEFORE any credential
+// exists — they are the login flows that create the first one. The value is the
+// route each is mounted on, and TestUnauthenticatedSessionMintersAreReallyUnauthenticated
+// proves against router.go that the route really is outside requireAuth.
+//
+// This is the recorded adjudication of #339's four flagged login handlers. The
+// signature that raised #339 flagged all four alongside RefreshHandler; they are
+// FALSE POSITIVES, because a handler that has no presenting credential cannot
+// bind to one. That is a claim about ROUTING, not about the handler bodies — so
+// it is checked against the router rather than asserted in prose, and the day one
+// of these is moved behind requireAuth the exemption's premise dies and this
+// file says so.
+var unauthenticatedSessionMinters = map[string]string{
+	"internal/api/auth.go:CallbackHandler":        "/api/v1/auth/callback",
+	"internal/api/ldap_login.go:LDAPLoginHandler": "/api/v1/auth/ldap/login",
+	"internal/api/saml_login.go:SAMLACSHandler":   "/api/v1/auth/saml/acs",
+	"internal/api/dev.go:DevLoginHandler":         "/api/v1/dev/login",
+}
+
+// TestSessionMintersAreCredentialBound is the class guard for #339.
+//
+// A session JWT carries authority. Minting one from the OWNER's role rows on a
+// path an API key can reach is the defect; the only two safe shapes are "there
+// is no credential yet" (a login flow, listed above and proved unauthenticated
+// by routing) and "the credential was checked first" (isInteractiveSession).
+// Any third shape fails here, with no way to make it pass except deleting the
+// derivation, adding the gate, or writing the handler down as a login flow — and
+// that last one is checked against the router, not taken on trust.
+func TestSessionMintersAreCredentialBound(t *testing.T) {
+	minters := callersOfFunc(t, sessionMintingCall)
+	if len(minters) == 0 {
+		t.Fatalf("no function calls %s. Either sessions are no longer minted, or the "+
+			"scanner is not reading the source tree — in which case this guard and every "+
+			"other one in this file are silently passing.", sessionMintingCall)
+	}
+
+	gated := map[string]bool{}
+	for _, site := range callersOfFunc(t, credentialGateCall) {
+		gated[site] = true
+	}
+
+	for _, site := range minters {
+		if _, ok := unauthenticatedSessionMinters[site]; ok {
+			continue
+		}
+		if !gated[site] {
+			t.Errorf("%s mints a session JWT but never calls %s.\n"+
+				"Behind requireAuth the caller may be an API key, and a session minted from the "+
+				"OWNER's scopes carries authority that key never held — grantedSubset's cap and "+
+				"KeyScopes' unconditional `admin` strip are both bypassed (#339).\n"+
+				"Either gate it on the presenting credential, or — if it is a login flow with no "+
+				"credential to bind to — add it to unauthenticatedSessionMinters with its route, "+
+				"which is then verified against router.go.",
+				site, credentialGateCall)
+		}
+	}
+
+	for site := range unauthenticatedSessionMinters {
+		found := false
+		for _, m := range minters {
+			found = found || m == site
+		}
+		if !found {
+			t.Errorf("unauthenticatedSessionMinters lists %s, which no longer mints a session. "+
+				"Remove the entry so the list keeps meaning what it says.", site)
+		}
+	}
+}
+
+// keyMintingCall persists a new API key and returns its plaintext secret.
+const keyMintingCall = "mintKey"
+
+// keyCeilingCall bounds a requested scope set by the CALLER's own scopes.
+const keyCeilingCall = "validateGrantedScopes"
+
+// TestKeyMintersValidateTheCeiling is the same class one credential kind over.
+// An API key is authority too, and rotation is a minting path that takes its
+// scopes from a stored row rather than from the request body — which is exactly
+// how it came to skip the check its create and update siblings both had.
+func TestKeyMintersValidateTheCeiling(t *testing.T) {
+	minters := callersOfFunc(t, keyMintingCall)
+	if len(minters) == 0 {
+		t.Fatalf("no function calls %s — the scanner is not seeing the key-minting path "+
+			"it is meant to guard.", keyMintingCall)
+	}
+	bounded := map[string]bool{}
+	for _, site := range callersOfFunc(t, keyCeilingCall) {
+		bounded[site] = true
+	}
+	for _, site := range minters {
+		if !bounded[site] {
+			t.Errorf("%s mints an API key but never calls %s.\n"+
+				"The scopes it stamps on the new key must be bounded by the scopes of the "+
+				"credential asking for it, or a narrow key mints a broad one (#339).",
+				site, keyCeilingCall)
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// The route-shape enumerator.
+//
+// #339's sibling was not a handler that did something exotic; it was a ROUTE
+// GROUP whose only gates were requireAuth and a user-derived check. Nothing at
+// the handler level distinguishes that from a correctly gated group — the
+// difference is in the middleware chain — so the guard has to read the chain.
+// ---------------------------------------------------------------------------
+
+// routeSpec is one registered route with its FULL middleware chain, group
+// nesting flattened.
+type routeSpec struct {
+	method  string
+	path    string
+	handler string
+	chain   []string
+}
+
+func (r routeSpec) key() string { return r.method + " " + r.path }
+
+func (r routeSpec) has(mw string) bool {
+	for _, m := range r.chain {
+		if m == mw {
+			return true
+		}
+	}
+	return false
+}
+
+// scopeGateCalls are the middlewares that decide on the scopes the auth
+// middleware published for THIS request. requireOrgScope is deliberately NOT
+// here: it re-derives from the user id, and treating it as a gate is precisely
+// the reading that let #339's sibling sit behind requireAuth alone.
+var scopeGateCalls = []string{"RequireScope", "RequireAnyScope", "RequireAllScopes"}
+
+func (r routeSpec) hasScopeGate() bool {
+	for _, g := range scopeGateCalls {
+		if r.has(g) {
+			return true
+		}
+	}
+	return false
+}
+
+// parseRouterRoutes reads internal/api/router.go and reconstructs every route
+// with the middleware chain it actually inherits.
+//
+// It follows `x := y.Group(path, mw...)` assignments, `x.Use(mw...)` calls and
+// `x.VERB(path, mw..., handler)` registrations, so a route's chain is its own
+// middlewares plus every enclosing group's, in nesting order. Middlewares are
+// named by their callee (middleware.RequireScope(...) -> "RequireScope",
+// admin.requireOrgScope() -> "requireOrgScope", the bare ident requireAuth ->
+// "requireAuth"), which is enough to ask the only question that matters here:
+// what decided this request was allowed.
+func parseRouterRoutes(t *testing.T) []routeSpec {
+	t.Helper()
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, filepath.Join("router.go"), nil, parser.SkipObjectResolution)
+	if err != nil {
+		t.Fatalf("parse router.go: %v", err)
+	}
+
+	type group struct {
+		path   string
+		chain  []string
+		parent string
+	}
+	groups := map[string]*group{}
+	// A receiver never assigned from .Group (the engine itself) is a root.
+	groupOf := func(name string) *group {
+		if g, ok := groups[name]; ok {
+			return g
+		}
+		g := &group{}
+		groups[name] = g
+		return g
+	}
+	// resolve walks a group's ancestry, returning the full path and chain.
+	var resolve func(name string) (string, []string)
+	resolve = func(name string) (string, []string) {
+		g := groupOf(name)
+		if g.parent == "" {
+			return g.path, append([]string{}, g.chain...)
+		}
+		ppath, pchain := resolve(g.parent)
+		return ppath + g.path, append(pchain, g.chain...)
+	}
+
+	// exprName renders a middleware or handler expression to its callee name.
+	var exprName func(ast.Expr) string
+	exprName = func(e ast.Expr) string {
+		switch v := e.(type) {
+		case *ast.Ident:
+			return v.Name
+		case *ast.SelectorExpr:
+			return v.Sel.Name
+		case *ast.CallExpr:
+			return exprName(v.Fun)
+		}
+		return ""
+	}
+	strLit := func(e ast.Expr) (string, bool) {
+		lit, ok := e.(*ast.BasicLit)
+		if !ok || lit.Kind != token.STRING {
+			return "", false
+		}
+		return strings.Trim(lit.Value, `"`), true
+	}
+	verbs := map[string]bool{
+		"GET": true, "POST": true, "PUT": true, "PATCH": true,
+		"DELETE": true, "HEAD": true, "OPTIONS": true,
+	}
+
+	var routes []routeSpec
+	// Source order matters: a group is always defined before it is used.
+	ast.Inspect(file, func(n ast.Node) bool {
+		switch node := n.(type) {
+		case *ast.AssignStmt:
+			if len(node.Lhs) != 1 || len(node.Rhs) != 1 {
+				return true
+			}
+			lhs, ok := node.Lhs[0].(*ast.Ident)
+			if !ok {
+				return true
+			}
+			call, ok := node.Rhs[0].(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			sel, ok := call.Fun.(*ast.SelectorExpr)
+			if !ok || sel.Sel.Name != "Group" || len(call.Args) == 0 {
+				return true
+			}
+			recv, ok := sel.X.(*ast.Ident)
+			if !ok {
+				return true
+			}
+			path, _ := strLit(call.Args[0])
+			g := &group{path: path, parent: recv.Name}
+			for _, a := range call.Args[1:] {
+				g.chain = append(g.chain, exprName(a))
+			}
+			groups[lhs.Name] = g
+		case *ast.ExprStmt:
+			call, ok := node.X.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			sel, ok := call.Fun.(*ast.SelectorExpr)
+			if !ok {
+				return true
+			}
+			recv, ok := sel.X.(*ast.Ident)
+			if !ok {
+				return true
+			}
+			if sel.Sel.Name == "Use" {
+				g := groupOf(recv.Name)
+				for _, a := range call.Args {
+					g.chain = append(g.chain, exprName(a))
+				}
+				return true
+			}
+			if !verbs[sel.Sel.Name] || len(call.Args) < 2 {
+				return true
+			}
+			rpath, ok := strLit(call.Args[0])
+			if !ok {
+				return true
+			}
+			gpath, gchain := resolve(recv.Name)
+			r := routeSpec{method: sel.Sel.Name, path: gpath + rpath, chain: gchain}
+			// Everything between the path and the final handler is middleware.
+			for _, a := range call.Args[1 : len(call.Args)-1] {
+				r.chain = append(r.chain, exprName(a))
+			}
+			r.handler = exprName(call.Args[len(call.Args)-1])
+			routes = append(routes, r)
+		}
+		return true
+	})
+	return routes
+}
+
+// TestRouteParserSeesTheRouter is the non-vacuity check for the parser. Every
+// guard below reports "clean" by finding nothing wrong, so a parser that walked
+// the wrong file, stopped following .Group, or lost the verbs would make all of
+// them pass while checking nothing at all.
+func TestRouteParserSeesTheRouter(t *testing.T) {
+	routes := parseRouterRoutes(t)
+	if len(routes) < 50 {
+		t.Fatalf("parsed only %d routes from router.go; the real router has ~100. "+
+			"The parser has lost the tree, and every guard built on it is now vacuous.", len(routes))
+	}
+	var authed, gated int
+	for _, r := range routes {
+		if r.has("requireAuth") {
+			authed++
+			if r.hasScopeGate() {
+				gated++
+			}
+		}
+	}
+	if authed == 0 {
+		t.Fatal("no route parsed as being behind requireAuth: the middleware chain is not " +
+			"being resolved, so the credential-binding guards see an empty universe")
+	}
+	if gated == 0 {
+		t.Fatal("no route parsed as carrying a scope gate: middleware.RequireScope is no " +
+			"longer being recognised, so every route looks ungated and the reviewed list " +
+			"below would be accepted as complete when it is not")
+	}
+	// Anchors: the two shapes #339 turns on must both be visible.
+	var sawRefresh, sawCallback bool
+	for _, r := range routes {
+		if r.key() == "POST /api/v1/auth/refresh" {
+			sawRefresh = true
+			if !r.has("requireAuth") {
+				t.Error("POST /auth/refresh is no longer behind requireAuth")
+			}
+		}
+		if r.key() == "GET /api/v1/auth/callback" {
+			sawCallback = true
+		}
+	}
+	if !sawRefresh || !sawCallback {
+		t.Fatalf("anchor routes missing (refresh=%v callback=%v): the parser is not "+
+			"resolving the /auth group", sawRefresh, sawCallback)
+	}
+}
+
+// TestUnauthenticatedSessionMintersAreReallyUnauthenticated verifies #339's
+// recorded false positives against the router instead of against prose.
+//
+// The four login handlers are exempt from TestSessionMintersAreCredentialBound
+// on one claim only: they are mounted outside requireAuth, so no credential has
+// been presented and there is nothing to bind to. That claim is checked here.
+// Move any of them behind requireAuth and the exemption becomes an unguarded
+// session minter, which is #339 again.
+func TestUnauthenticatedSessionMintersAreReallyUnauthenticated(t *testing.T) {
+	routes := parseRouterRoutes(t)
+	byHandler := map[string][]routeSpec{}
+	for _, r := range routes {
+		byHandler[r.handler] = append(byHandler[r.handler], r)
+	}
+	for site, wantPath := range unauthenticatedSessionMinters {
+		fn := site[strings.LastIndex(site, ":")+1:]
+		mounted := byHandler[fn]
+		if len(mounted) == 0 {
+			t.Errorf("%s is exempted as an unauthenticated login flow, but router.go mounts "+
+				"no route on it. An exemption for a handler that is not routed proves nothing; "+
+				"remove it, or point it at the route that exists.", site)
+			continue
+		}
+		for _, r := range mounted {
+			if r.path != wantPath {
+				t.Errorf("%s is recorded at %s but is mounted at %s. Update the entry so the "+
+					"claim being checked is the one being made.", site, wantPath, r.path)
+			}
+			if r.has("requireAuth") {
+				t.Errorf("%s is exempted from the credential-binding guard because it is an "+
+					"UNAUTHENTICATED login flow, but %s is now behind requireAuth.\n"+
+					"An API key can reach it, so it mints a session from the owner's scopes on a "+
+					"path that has a presenting credential — #339 exactly. Either gate it on %s, "+
+					"or take it back out of requireAuth.", site, r.key(), credentialGateCall)
+			}
+		}
+	}
+}
+
+// reviewedUngatedRoutes are the routes that sit behind requireAuth with NO
+// middleware.RequireScope gate, each mapped to how its handler nonetheless binds
+// authority to the credential presenting the request.
+//
+// The bar for an entry: name the mechanism, and make it one that reads the
+// REQUEST's established scopes (scopesOf / c.Get("scopes")) or its auth_method.
+// "The handler checks ownership" is not sufficient on its own for anything that
+// MINTS or WIDENS — ownership is a fact about the user record, and #339 is the
+// class of ceilings read off the user record. Ownership is sufficient for reads
+// and for revocation, which cannot hand out authority.
+//
+// A route added behind requireAuth without a scope gate and without an entry
+// here fails the build. That is the point: #339's sibling was a whole group
+// (/admin/organizations/:id) whose only gates were requireAuth and a user-derived
+// check, and nothing in the tree objected for as long as it stood.
+var reviewedUngatedRoutes = map[string]string{
+	"GET /api/v1/auth/me": "reports, never mints: reportedScopes reconciles the `admin` bit against " +
+		"this request's EFFECTIVE scopes, so an API key is never told it holds authority the " +
+		"middleware stripped from it",
+	"POST /api/v1/auth/refresh": "gated on isInteractiveSession (#339): only a session JWT may be " +
+		"exchanged for a session JWT, so the owner's scope union is never read for a machine credential",
+
+	"GET /api/v1/apikeys": "read-only listing; the non-admin branch is ListAPIKeysByUser (own keys), " +
+		"and the admin branch is narrowed by OrgScopeForUser to keys whose owner shares an " +
+		"organization the caller administers (#182). No authority is conferred",
+	"POST /api/v1/apikeys": "validateGrantedScopes bounds the requested scopes by scopesOf(c) — the " +
+		"REQUEST's effective scopes — so a key can only ever mint a narrower key",
+	"GET /api/v1/apikeys/:id":    "read-only, ownsOrAdmin; never returns the secret",
+	"PUT /api/v1/apikeys/:id":    "ownsOrAdmin plus validateGrantedScopes against scopesOf(c), so an update cannot widen a key past the caller",
+	"DELETE /api/v1/apikeys/:id": "revocation only, ownsOrAdmin; removing authority cannot confer any",
+	"POST /api/v1/apikeys/:id/rotate": "ownsOrAdmin plus validateGrantedScopes against the TARGET KEY's " +
+		"scopes (#339), so a narrow key cannot rotate a broader sibling of the same owner and be handed its secret",
+
+	"PUT /api/v1/admin/organizations/:id": "requireOrgScope checks the PRESENTING credential for " +
+		"organizations:write/admin before re-deriving per-organization scopes (#339); no API key can carry either",
+	"DELETE /api/v1/admin/organizations/:id":                  "as PUT /admin/organizations/:id",
+	"GET /api/v1/admin/organizations/:id/members":             "as PUT /admin/organizations/:id",
+	"POST /api/v1/admin/organizations/:id/members":            "as PUT /admin/organizations/:id",
+	"PUT /api/v1/admin/organizations/:id/members/:user_id":    "as PUT /admin/organizations/:id",
+	"DELETE /api/v1/admin/organizations/:id/members/:user_id": "as PUT /admin/organizations/:id",
+}
+
+// TestRoutesBehindRequireAuthBindAuthority enumerates the routes an API key can
+// reach and forces every one of them to have decided, in writing, how it bounds
+// authority.
+//
+// requireAuth is NOT an authorization decision — it establishes who is calling
+// and with what. A route that stops there is relying entirely on its handler, and
+// the handler is where #339 lived three times over.
+func TestRoutesBehindRequireAuthBindAuthority(t *testing.T) {
+	routes := parseRouterRoutes(t)
+	seen := map[string]bool{}
+	for _, r := range routes {
+		if !r.has("requireAuth") || r.hasScopeGate() {
+			continue
+		}
+		seen[r.key()] = true
+		if _, ok := reviewedUngatedRoutes[r.key()]; !ok {
+			t.Errorf("%s is behind requireAuth with no scope gate (chain: %s).\n"+
+				"An API key reaches it, and requireAuth only says WHO is calling — nothing has "+
+				"yet decided what this credential may do. Add a middleware.RequireScope, or add "+
+				"an entry to reviewedUngatedRoutes naming the mechanism in the handler that "+
+				"bounds authority by the REQUEST's scopes rather than by the owner's role rows (#339).",
+				r.key(), strings.Join(r.chain, " "))
+		}
+	}
+	for key := range reviewedUngatedRoutes {
+		if !seen[key] {
+			t.Errorf("reviewedUngatedRoutes lists %s, which is no longer an ungated route behind "+
+				"requireAuth. Remove the entry so the list keeps meaning what it says — a stale "+
+				"exemption is how a real one stops being read.", key)
+		}
 	}
 }
