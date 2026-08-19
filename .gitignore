@@ -20,3 +20,6 @@ backend/coverage.html
 backend/gosec-results.json
 backend/dist/
 backend/bin/
+
+# Node (CI tooling only, under .github/; the lockfile itself is tracked)
+node_modules/
