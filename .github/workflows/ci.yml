@@ -146,6 +146,89 @@ jobs:
           message: ${{ steps.badge.outputs.percent }}%
           color: ${{ steps.badge.outputs.color }}
 
+  # ── Postgres-backed tests (issue #394) ────────────────
+  # These never ran anywhere. No workflow declares a postgres service, passes
+  # -tags integration, or sets either DSN variable, so the equivalence proof
+  # that gated a BREAKING authorization change (#389), the bootstrap ordering,
+  # the platform-admin floor's concurrency behaviour and the migration
+  # connection-leak regression test were all verified on developer machines only.
+  #
+  # TWO VARIABLE NAMES, and this is the trap: the three build-tagged files read
+  # TEST_DATABASE_URL, while internal/db/migration_conn_leak_test.go carries NO
+  # build tag and reads TSM_TEST_DATABASE_URL. A job scoped to "add -tags
+  # integration" runs the first three and leaves the fourth still skipping --
+  # and that fourth file is the only live proof of #342's fix, which was closed
+  # on the strength of a test that had never executed. Both are set below.
+  postgres-tests:
+    name: Postgres-backed tests
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        # Without a health check the job races the container and every test
+        # skips on an unreachable DSN -- green, and meaningless.
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Go toolchain
+        uses: ./.github/actions/setup-backend
+
+      - name: Run the Postgres-backed tests
+        working-directory: backend
+        env:
+          TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres?sslmode=disable
+          TSM_TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres?sslmode=disable
+        # -tags integration for the three tagged files; the untagged fourth
+        # compiles either way and gates only on its own DSN variable.
+        run: go test ./internal/... -tags integration -v 2>&1 | tee /tmp/pg-tests.log
+
+      - name: Fail if the Postgres tests skipped
+        run: |
+          # The guard on the guard: a suite that skipped everything and a suite
+          # that passed share an exit code, so assert on the transcript.
+          if grep -qE '(TSM_)?TEST_DATABASE_URL not set' /tmp/pg-tests.log; then
+            echo "::error::Postgres tests SKIPPED on an unset DSN -- this job proved nothing."
+            grep -nE '(TSM_)?TEST_DATABASE_URL not set' /tmp/pg-tests.log | head -5
+            exit 1
+          fi
+          if grep -q 'is not reachable' /tmp/pg-tests.log; then
+            echo "::error::Postgres tests SKIPPED on an unreachable DSN -- this job proved nothing."
+            exit 1
+          fi
+          # Named explicitly, and named PRECISELY: a count alone would stay
+          # green if the tagged set stopped building. The last entry is the
+          # DATABASE half of migration_conn_leak_test.go, not
+          # TestMigrationHelpers_DoNotUseWithInstance -- that one is a
+          # source-scanning guard needing no database, so it passes even when
+          # the DSN is unset and would have made this check pass vacuously for
+          # the one file that gates on TSM_TEST_DATABASE_URL. It is the only
+          # live proof of #342, whose fix was closed on a test that had never
+          # executed.
+          for want in TestIntegration Bootstrap GetMigrationVersion_ReturnsItsConnectionToThePool; do
+            if ! grep -q -- "--- PASS: .*$want" /tmp/pg-tests.log; then
+              echo "::error::no passing test matching '$want' -- the tagged set may not have built."
+              exit 1
+            fi
+          done
+          echo "Postgres-backed tests passed: $(grep -c '^--- PASS' /tmp/pg-tests.log)"
+
   gosec:
     name: Security Scan (gosec)
     runs-on: ubuntu-latest
