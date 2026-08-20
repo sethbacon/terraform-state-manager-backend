@@ -21,6 +21,7 @@ import (
 
 	"github.com/terraform-state-manager/terraform-state-manager/internal/approles"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/auth"
+	"github.com/terraform-state-manager/terraform-state-manager/internal/tenancy"
 )
 
 // Run ensures the default organization exists, seeds the shared identity schema's
@@ -58,7 +59,50 @@ func Run(ctx context.Context, identityDB, appDB *sql.DB, seedRoles bool) error {
 		return fmt.Errorf("reconcile per-app authorization tables: %w", err)
 	}
 	approles.LogReport(rep)
+
+	// Phase 1 of #393: give the app connection the default organization's id, and
+	// stamp the rows that predate migration 000033's organization_id column.
+	//
+	// THIS CANNOT BE A MIGRATION, and 000033's header gives the three independent
+	// reasons. The one this call site embodies is ORDERING: cmd/server/main.go
+	// runs the app migrations at line 220 and reaches this function at line 275,
+	// so at migration time the organizations table may not exist yet and the
+	// default row certainly does not. Here it does, because ensureDefaultOrg has
+	// just run above.
+	//
+	// LAST, AFTER THE RECONCILE, not because it depends on it but because it is
+	// the step whose failure is least damaging to defer. The reconcile decides
+	// authorization; this writes a column nothing reads until Phase 2.
+	orgID, err := defaultOrgID(ctx, identityDB)
+	if err != nil {
+		return fmt.Errorf("resolve the default organization id: %w", err)
+	}
+	if err := tenancy.Backfill(ctx, appDB, orgID); err != nil {
+		return fmt.Errorf("backfill the organization partition: %w", err)
+	}
 	return nil
+}
+
+// defaultOrgID reads back the organization ensureDefaultOrg has just guaranteed.
+//
+// A separate query rather than a RETURNING clause on ensureDefaultOrg's INSERT,
+// because that INSERT is conditional (`WHERE NOT EXISTS`) and returns NO ROW on
+// the overwhelmingly common path where the organization already exists. A
+// RETURNING there would hand back an id on first boot and nothing on every boot
+// after, which is the shape of bug that works in every test that starts from an
+// empty database.
+//
+// On the IDENTITY connection, whose search_path resolves `organizations`
+// (cmd/server/main.go opens it with `identity,public`). The app connection
+// cannot run this — 000032's routing pre-check exists to guarantee it cannot —
+// which is exactly why the id is fetched here and passed across.
+func defaultOrgID(ctx context.Context, db *sql.DB) (string, error) {
+	var id string
+	if err := db.QueryRowContext(ctx,
+		`SELECT id::text FROM organizations WHERE name = 'default'`).Scan(&id); err != nil {
+		return "", err
+	}
+	return id, nil
 }
 
 // seedRoleTemplates writes this build's role -> scope mapping into THIS
