@@ -55,10 +55,18 @@ jobs:
   osv-scan:
     name: OSV Vulnerability Scan
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     permissions:
       contents: read
       issues: write
     steps:
+      # hardening-exception: egress-audit — queries the OSV vulnerability database,
+      #   whose endpoints are not enumerated until an audit run records them
+      - name: Harden the runner
+        uses: step-security/harden-runner@05e31511f85b41b11d1cf0ef85d0992719546e2c # v2.21.0
+        with:
+          egress-policy: audit
+
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -162,10 +170,18 @@ jobs:
   govulncheck:
     name: govulncheck (reachability scan)
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     permissions:
       contents: read
       issues: write
     steps:
+      # hardening-exception: egress-audit — downloads the Go vulnerability database
+      #   and the govulncheck tool from the module proxy
+      - name: Harden the runner
+        uses: step-security/harden-runner@05e31511f85b41b11d1cf0ef85d0992719546e2c # v2.21.0
+        with:
+          egress-policy: audit
+
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -175,7 +191,9 @@ jobs:
         uses: ./.github/actions/setup-backend
 
       - name: Install govulncheck
-        run: go install golang.org/x/vuln/cmd/govulncheck@v1.1.4
+        uses: 4cloudguru/shared-workflows/.github/actions/go-install@bc0eaaec5d6f5cf632ef862ff7475da928e32466 # v1.2.0
+        with:
+          package: golang.org/x/vuln/cmd/govulncheck@v1.1.4
 
       - name: Run govulncheck
         id: govulncheck
@@ -246,11 +264,20 @@ jobs:
     name: CodeQL Analysis (Go)
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     permissions:
       actions: read # CodeQL reads workflow-run metadata (required on private repos)
       contents: read
       security-events: write
     steps:
+      # hardening-exception: egress-audit — downloads the CodeQL bundle and its
+      #   query packs, which resolve to a set of endpoints this repository has never
+      #   enumerated
+      - name: Harden the runner
+        uses: step-security/harden-runner@05e31511f85b41b11d1cf0ef85d0992719546e2c # v2.21.0
+        with:
+          egress-policy: audit
+
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -276,11 +303,19 @@ jobs:
   notify-on-failure:
     name: Create issue on failure
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     needs: [ci, osv-scan, govulncheck, codeql]
     if: failure() && github.event_name == 'schedule'
     permissions:
       issues: write
     steps:
+      # hardening-exception: egress-audit — files an issue through the GitHub API
+      #   and has no other recorded destination yet
+      - name: Harden the runner
+        uses: step-security/harden-runner@05e31511f85b41b11d1cf0ef85d0992719546e2c # v2.21.0
+        with:
+          egress-policy: audit
+
       - name: Create failure issue
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         with:
