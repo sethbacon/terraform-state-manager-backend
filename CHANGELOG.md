@@ -1,5 +1,12 @@
 # Changelog
 
+## [3.8.0](https://github.com/sethbacon/terraform-state-manager-backend/compare/v3.7.0...v3.8.0) (2026-08-20)
+
+
+### Features
+
+* **db:** give the domain roots an organization, nullable and unread ([#393](https://github.com/sethbacon/terraform-state-manager-backend/issues/393) phase 1) ([#414](https://github.com/sethbacon/terraform-state-manager-backend/issues/414)) ([bd24d55](https://github.com/sethbacon/terraform-state-manager-backend/commit/bd24d558f61a5a35d42e6086c99df326a52b2b70))
+
 ## [3.7.0](https://github.com/sethbacon/terraform-state-manager-backend/compare/v3.6.0...v3.7.0) (2026-08-19)
 
 
