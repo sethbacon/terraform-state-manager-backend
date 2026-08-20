@@ -57,7 +57,15 @@ concurrency:
 jobs:
   replay:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
+      # hardening-exception: egress-audit — checks out sibling repositories across
+      #   the suite, so its destination set spans every repo in scope and has never
+      #   been enumerated here
+      - name: Harden the runner
+        uses: step-security/harden-runner@05e31511f85b41b11d1cf0ef85d0992719546e2c # v2.21.0
+        with:
+          egress-policy: audit
       # ── THE FIRST STEP, AND IT HAS TO STAY THE FIRST STEP ────────────────
       #
       # WHAT THIS CLOSES. SUITE_READ_APP_KEY is in this repository's DEPENDABOT

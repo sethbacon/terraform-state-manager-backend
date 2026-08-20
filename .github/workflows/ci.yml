@@ -22,9 +22,19 @@ jobs:
   backend-test:
     name: Backend Tests & Quality
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     permissions:
       contents: read
     steps:
+      # hardening-exception: egress-audit — Go module and tool downloads plus the
+      #   coverage-badge gist call have no enumerated endpoint list yet.
+      #   harden-runner has never run in this repository, so audit is what PRODUCES
+      #   the list a block policy would need
+      - name: Harden the runner
+        uses: step-security/harden-runner@05e31511f85b41b11d1cf0ef85d0992719546e2c # v2.21.0
+        with:
+          egress-policy: audit
+
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -50,12 +60,20 @@ jobs:
         working-directory: backend
         run: go vet ./...
 
+      # Split out of the verify step below so the install can be retried. A
+      # transient module-proxy read -- "golang.org/x/tools@v0.7.0: stream error"
+      # -- failed this exact step on a pull request containing zero Go changes,
+      # and it was reported twice as swagger drift before the log was read.
+      - name: Install swag
+        uses: 4cloudguru/shared-workflows/.github/actions/go-install@bc0eaaec5d6f5cf632ef862ff7475da928e32466 # v1.2.0
+        with:
+          package: github.com/swaggo/swag/cmd/swag@v1.16.4
+
       - name: Verify swagger.json is in sync with annotations
         working-directory: backend
         # swagger.json is generated from handler swag annotations (source of truth).
         # Regenerate and fail if the committed file is stale.
         run: |
-          go install github.com/swaggo/swag/cmd/swag@v1.16.4
           export PATH="$PATH:$(go env GOPATH)/bin"
           swag init -g cmd/server/main.go --outputTypes json
           if ! git diff --exit-code docs/swagger.json; then
@@ -162,6 +180,7 @@ jobs:
   postgres-tests:
     name: Postgres-backed tests
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       contents: read
     services:
@@ -182,6 +201,14 @@ jobs:
           --health-retries 10
 
     steps:
+      # hardening-exception: egress-audit — pulls the postgres:16-alpine service
+      #   image in addition to Go modules, and no endpoint baseline exists yet for
+      #   this repository
+      - name: Harden the runner
+        uses: step-security/harden-runner@05e31511f85b41b11d1cf0ef85d0992719546e2c # v2.21.0
+        with:
+          egress-policy: audit
+
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -232,10 +259,18 @@ jobs:
   gosec:
     name: Security Scan (gosec)
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       contents: read
       issues: write
     steps:
+      # hardening-exception: egress-audit — installs gosec from the Go module proxy,
+      #   whose transitive fetch set is not enumerated until an audit run records it
+      - name: Harden the runner
+        uses: step-security/harden-runner@05e31511f85b41b11d1cf0ef85d0992719546e2c # v2.21.0
+        with:
+          egress-policy: audit
+
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -295,9 +330,17 @@ jobs:
   docker-build:
     name: Docker Build Smoke Test
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       contents: read
     steps:
+      # hardening-exception: egress-audit — docker build pulls base images and
+      #   layers from registries this repository has never enumerated
+      - name: Harden the runner
+        uses: step-security/harden-runner@05e31511f85b41b11d1cf0ef85d0992719546e2c # v2.21.0
+        with:
+          egress-policy: audit
+
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -338,9 +381,17 @@ jobs:
   deployment-validate:
     name: Deployment artifacts (helm / kustomize / compose)
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       contents: read
     steps:
+      # hardening-exception: egress-audit — helm, kustomize and kubeconform fetch
+      #   schemas and charts from remote sources that are not yet listed
+      - name: Harden the runner
+        uses: step-security/harden-runner@05e31511f85b41b11d1cf0ef85d0992719546e2c # v2.21.0
+        with:
+          egress-policy: audit
+
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

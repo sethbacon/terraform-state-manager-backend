@@ -38,9 +38,18 @@ jobs:
   guard:
     name: Verify tag is on main
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       contents: read
     steps:
+      # hardening-exception: egress-audit — verifies the tag is reachable from main
+      #   using git and the API only, but no endpoint baseline exists for this
+      #   repository yet
+      - name: Harden the runner
+        uses: step-security/harden-runner@05e31511f85b41b11d1cf0ef85d0992719546e2c # v2.21.0
+        with:
+          egress-policy: audit
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0 # need full history to walk ancestry
@@ -80,6 +89,7 @@ jobs:
   goreleaser:
     name: GoReleaser — binaries
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     needs: ci
     permissions:
       contents: write # required to create releases and upload assets
@@ -87,6 +97,14 @@ jobs:
       attestations: write # required for GitHub build provenance attestation
 
     steps:
+      # hardening-exception: egress-audit — GoReleaser resolves build dependencies
+      #   and uploads release artifacts, and the destination set is not enumerated
+      #   until an audit run records it
+      - name: Harden the runner
+        uses: step-security/harden-runner@05e31511f85b41b11d1cf0ef85d0992719546e2c # v2.21.0
+        with:
+          egress-policy: audit
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 # zizmor: ignore[artipacked] -- goreleaser reads tags and publishes release artifacts
         with:
           fetch-depth: 0 # GoReleaser needs full history to resolve previous tag
@@ -156,6 +174,7 @@ jobs:
   docker:
     name: Publish Docker image
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     environment: release
     needs: ci
     permissions:
@@ -165,6 +184,13 @@ jobs:
       attestations: write # required for GitHub build provenance attestation
 
     steps:
+      # hardening-exception: egress-audit — pushes image layers to the container
+      #   registry, whose endpoints are not yet enumerated for this repository
+      - name: Harden the runner
+        uses: step-security/harden-runner@05e31511f85b41b11d1cf0ef85d0992719546e2c # v2.21.0
+        with:
+          egress-policy: audit
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -304,10 +330,18 @@ jobs:
   publish-release:
     name: Publish GitHub Release
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     needs: [goreleaser, docker]
     permissions:
       contents: write
     steps:
+      # hardening-exception: egress-audit — publishes the GitHub Release through the
+      #   API and has no other network destination recorded yet
+      - name: Harden the runner
+        uses: step-security/harden-runner@05e31511f85b41b11d1cf0ef85d0992719546e2c # v2.21.0
+        with:
+          egress-policy: audit
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 # zizmor: ignore[artipacked] -- publishes the GitHub Release
         with:
           sparse-checkout: CHANGELOG.md
