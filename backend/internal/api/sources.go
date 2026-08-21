@@ -42,6 +42,11 @@ type SourcesHandlers struct {
 	// changing what is served (#393 Phase 2b, TSM_TENANCY_DUAL_READ). Off unless
 	// the router turns it on; deleted in Phase 3 along with tenant_dualread.go.
 	tenantDualRead bool
+	// orgs verifies that an acting organization exists before a row is stamped
+	// with it. Nil in rigs with no identity connection; actingOrganization
+	// REFUSES rather than proceeding, because stamping an unverified id is the
+	// orphaned-row case (#436).
+	orgs organizationExistence
 }
 
 // NewSourcesHandlers constructs the handlers over the app (public) connection,
@@ -58,6 +63,19 @@ func NewSourcesHandlers(database, identityDB *sql.DB) *SourcesHandlers {
 		audit:         newAuditor(identityDB),
 	}
 }
+
+// AttachOrganizations wires the existence check used before a row is stamped
+// with an acting organization (#436).
+//
+// A setter, and the router supplies its EXISTING approles.Members rather than
+// this package constructing an identity repository of its own. That is not
+// style: internal/approles' own guard test refuses a second construction of
+// idstore.NewOrganizationRepository anywhere else, because a repository obtained
+// that way writes identity WITHOUT mirroring to this application's
+// organization_member_roles — and nothing observable would report it. The read
+// here needs no mirroring, but honouring one construction point is what keeps
+// that guard meaningful rather than something with an exception in it.
+func (h *SourcesHandlers) AttachOrganizations(orgs organizationExistence) { h.orgs = orgs }
 
 // AttachSyncer wires the statesync service in after construction (the router
 // builds both and connects them).
@@ -189,7 +207,15 @@ func (h *SourcesHandlers) CreateSource() gin.HandlerFunc {
 			src.EncryptedCredentials = enc
 		}
 
-		created, err := h.repo.Create(c.Request.Context(), src)
+		// The organization this source belongs to, named by the request and
+		// verified against a scope this server resolved (#436). Writes the
+		// response itself on every failure path.
+		orgID := actingOrganization(c, h.orgs)
+		if orgID == "" {
+			return
+		}
+
+		created, err := h.repo.Create(c.Request.Context(), src, orgID)
 		if err != nil {
 			serverError(c, err, "failed to create source")
 			return

@@ -13,8 +13,14 @@ import (
 	"testing"
 
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
+
 	"github.com/gin-gonic/gin"
+	"github.com/terraform-state-manager/terraform-state-manager/internal/tenantscope"
 )
+
+// testActingOrg is the organization the rig acts in. A caller with exactly one
+// never has to send the header, so the create paths resolve it implicitly.
+const testActingOrg = "11111111-1111-4111-8111-111111111111"
 
 func init() { gin.SetMode(gin.TestMode) }
 
@@ -61,6 +67,14 @@ func newSourcesEnv(t *testing.T) *sourcesEnv {
 		if env.scopes != nil {
 			c.Set("scopes", env.scopes)
 		}
+		// What middleware.TenantScope publishes in production. Stored directly
+		// rather than resolved, so this rig needs no membership store — but it
+		// must be stored, because a route that CREATES treats an unresolved
+		// scope as a 500 rather than as "no memberships" (#436). Omitting it
+		// here would make every create test fail with the message that says the
+		// route was never wired, which is precisely the distinction worth
+		// keeping.
+		tenantscope.Store(c, tenantscope.Scope{OrgIDs: []string{testActingOrg}})
 		c.Next()
 	})
 	v1 := r.Group("/api/v1")

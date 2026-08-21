@@ -80,7 +80,32 @@ func (h *Handlers) SaveSource(c *gin.Context) {
 		}
 		src.EncryptedCredentials = enc
 	}
-	if _, err := h.sources.Create(c.Request.Context(), src); err != nil {
+	// THE SETUP WIZARD HAS NO PRINCIPAL, so it has no acting organization to
+	// read (#436). SetupTokenMiddleware is the only gate on this route: there is
+	// no session, no API key, no user_id and no membership, so
+	// tenantscope.ActingOrganization is inapplicable here rather than merely
+	// awkward — it would return ErrNoActingOrganization every time.
+	//
+	// The source the wizard creates belongs to the deployment's DEFAULT
+	// organization, read from the app-side carrier. That is the same
+	// organization the wizard's owner step writes the first membership into, so
+	// the first source and the first administrator land together by
+	// construction rather than by coincidence.
+	orgID, err := h.settings.DefaultOrganizationID(c.Request.Context())
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to resolve the default organization"})
+		return
+	}
+	if orgID == "" {
+		// Refuse rather than fall through to the column DEFAULT. bootstrap.Run
+		// writes this carrier before the listener starts and main is fatal if it
+		// errors, so an empty value here means the deployment did not boot the
+		// way it must have — creating an unowned source on top of that would
+		// hide it.
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "no default organization is configured"})
+		return
+	}
+	if _, err := h.sources.Create(c.Request.Context(), src, orgID); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create state source"})
 		return
 	}
