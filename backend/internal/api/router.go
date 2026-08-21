@@ -83,10 +83,16 @@ func NewRouter(cfg *config.Config, database *sql.DB, identityDB *sql.DB) (*gin.E
 	// lives in its own (TSM_IDENTITY_DATABASE_*); the API-key and organization
 	// repositories live on the identity connection that owns those tables.
 	userRevocationRepo := repositories.NewUserTokenRevocationRepository(database)
+	// One Members, shared by the credential sweeper and by the per-request tenant
+	// scope resolution below. Two instances would be two answers to "which
+	// organizations grant this principal this scope", derived from the same
+	// tables through the same role source — and the copy that is wrong is the one
+	// nobody is looking at.
+	orgMembers := approles.NewMembers(identityDB, database, approles.RoleSource(cfg.Authz.RoleSource))
 	credSweeper := credlifecycle.NewSweeper(
 		userRevocationRepo,
 		idstore.NewAPIKeyRepository(identityDB),
-		approles.NewMembers(identityDB, database, approles.RoleSource(cfg.Authz.RoleSource)),
+		orgMembers,
 	)
 
 	authHandlers, err := NewAuthHandlers(cfg, identityDB, database, WithAuthCredentialSweeper(credSweeper))
@@ -225,16 +231,37 @@ func NewRouter(cfg *config.Config, database *sql.DB, identityDB *sql.DB) (*gin.E
 
 		// Phase 1 read plane: state sources + analysis.
 		sources := NewSourcesHandlers(database, identityDB)
+		// #393 Phase 2b: measure the organization-scoped reads against the
+		// unscoped ones this route family still serves. Off by default; changes
+		// nothing that is returned. See internal/api/tenant_dualread.go.
+		sources.EnableTenantDualRead(cfg.Tenancy.DualRead)
+		// The tenant scope for the /sources READ routes.
+		//
+		// platformAdmins is a *platformadmin.Service and may be NIL here (the
+		// unit-test rig has no connections). That is deliberately safe rather
+		// than merely tolerated: a nil *Service still satisfies the interface,
+		// its IsPlatformAdmin returns platformadmin.ErrNotConfigured, and
+		// tenantscope.Resolve treats an absent carrier the way middleware.elevate
+		// does — as authority WITHHELD, not granted. A `platformAdmins != nil`
+		// guard here would type-assert its way to the same place and hide that.
+		//
+		// Registered PER ROUTE and carrying the same auth.Scope as the route's
+		// own RequireScope, not once on the group: a scope resolved for
+		// state:read says nothing about who may WRITE in those organizations,
+		// and handing it to the sources:manage routes would, in Phase 3,
+		// authorize an edit in an organization the caller may only read. See
+		// middleware.TenantScope.
+		tenantScopeStateRead := middleware.TenantScope(orgMembers, platformAdmins, auth.ScopeStateRead)
 		// Bound state-operation requests so a hung or slow backend cannot block the
 		// handler goroutine (and any per-key lock it holds) indefinitely (#263).
 		s := v1.Group("/sources", requireAuth, middleware.RequestTimeout(5*time.Minute))
 		{
-			s.GET("", middleware.RequireScope(auth.ScopeStateRead), sources.ListSources())
+			s.GET("", middleware.RequireScope(auth.ScopeStateRead), tenantScopeStateRead, sources.ListSources())
 			s.POST("", middleware.RequireScope(auth.ScopeSourcesManage), sources.CreateSource())
 			// Static /test must not collide with /:id below: gin resolves static
 			// segments before params, so POST /sources/test is unambiguous.
 			s.POST("/test", middleware.RequireScope(auth.ScopeSourcesManage), sources.TestSourceConfig())
-			s.GET("/:id", middleware.RequireScope(auth.ScopeStateRead), sources.GetSource())
+			s.GET("/:id", middleware.RequireScope(auth.ScopeStateRead), tenantScopeStateRead, sources.GetSource())
 			s.PUT("/:id", middleware.RequireScope(auth.ScopeSourcesManage), sources.UpdateSource())
 			s.DELETE("/:id", middleware.RequireScope(auth.ScopeSourcesManage), sources.DeleteSource())
 			s.POST("/:id/test", middleware.RequireScope(auth.ScopeStateRead), sources.TestSource())

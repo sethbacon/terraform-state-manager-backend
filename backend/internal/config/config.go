@@ -41,6 +41,48 @@ type Config struct {
 	StateSource StateSourceConfig `mapstructure:"statesource"`
 	// BackupRetention bounds the state_backups table (#257).
 	BackupRetention BackupRetentionConfig `mapstructure:"backup_retention"`
+	// Tenancy carries the organization-partition rollout controls (#393).
+	Tenancy TenancyConfig `mapstructure:"tenancy"`
+}
+
+// TenancyConfig controls the organization-partition rollout of
+// sethbacon/terraform-state-manager-backend#393.
+//
+// # DualRead is the evidence, and it is the only thing this phase adds
+//
+// Migration 000033 sequences that issue in four phases and says why Phase 2 is
+// "dual-reads behind a flag and proves equivalence" rather than a flip: a change
+// that starts filtering before equivalence is demonstrated is a partial cutover,
+// "which is how a deployment ends up half-isolated and nobody can say which
+// half". Turning this on makes the /sources read routes ALSO run the
+// organization-scoped query beside the unscoped one they serve, and report where
+// the two disagree — to the log, and to the tsm_tenant_scope_* series
+// (internal/telemetry). The scoped answer is computed and discarded. Nothing an
+// operator or a client sees changes.
+//
+// # It reports; it never errors and never withholds
+//
+// A divergence found here is not necessarily a fault. On a deployment with two
+// organizations the scoped read returning FEWER rows is the whole point of #393
+// — it is the leak being closed, observed. Failing the request on it would turn
+// "the fix works" into a 500, and would make the flag itself the partial cutover
+// the migration refuses: some sources requests served, some 5xx, and the
+// deployment half-available in a way no client can characterise. So divergence
+// is recorded and the request is served exactly as it was before. What the
+// evidence is FOR is the Phase 3 go/no-go: on a single-organization deployment
+// the counters must stay at zero, and on a partitioned one the withheld rows
+// must be the rows that tenant should never have been able to read.
+//
+// # Off by default, because it costs a second query
+//
+// Each observed read runs twice. state_sources is operator-provisioned and small
+// (internal/api caps a page at 500 and calls that "far above any realistic
+// install"), so the cost is a duplicate index scan on a short table — but it is
+// not nothing, and a flag whose default changed behaviour would not be a flag.
+//
+// Env: TSM_TENANCY_DUAL_READ.
+type TenancyConfig struct {
+	DualRead bool `mapstructure:"dual_read"`
 }
 
 // AuthzConfig controls where authorization decisions read a principal's role
@@ -694,6 +736,11 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("telemetry.metrics.prometheus_port", 9090)
 
 	v.SetDefault("workers.enabled", true)
+
+	// Organization-partition rollout (#393). Off: Phase 2b observes nothing
+	// unless an operator asks it to, and observing costs a second query per
+	// read. See TenancyConfig.
+	v.SetDefault("tenancy.dual_read", false)
 
 	// Drift-run reconciler: fail a dispatched run whose CI job never called back
 	// after run_ttl, sweeping every reconcile_interval.
