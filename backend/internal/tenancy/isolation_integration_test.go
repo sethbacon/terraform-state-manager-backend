@@ -191,3 +191,164 @@ func TestIntegration_SourceNameUniquenessIsGlobal_AndDiscloses(t *testing.T) {
 		"organization %s already has one, and the rejection tells it so. Error: %v",
 		orgBeta, orgAlpha, err)
 }
+
+// tsmPartitionRoots is the nine tables migration 000033 gave their OWN
+// organization_id, as opposed to the tables that inherit one by joining up to a
+// root. Phase 4 makes every one of these columns NOT NULL, which is also the
+// moment their uniqueness constraints stop being defensible, so this list is the
+// starting point for the re-keying inventory below.
+var tsmPartitionRoots = []string{
+	"ci_sources", "drift_records", "drift_runs", "health_runs",
+	"notification_channels", "pipeline_connections", "schedules",
+	"state_sources", "state_transfers",
+}
+
+// globallyUniqueNameIndexes returns every UNIQUE index in the public schema
+// whose key is exactly one column called `name`, as table -> index name.
+//
+// Read out of the catalog rather than transcribed from the migrations on
+// purpose. A hand-maintained list is a claim about the schema that stops being
+// checked the moment someone adds a table, and that is precisely how the gap
+// this test exists to close was created.
+func globallyUniqueNameIndexes(t *testing.T, db *sql.DB) map[string]string {
+	t.Helper()
+	rows, err := db.Query(`
+		SELECT t.relname, i.relname
+		FROM pg_index x
+		JOIN pg_class     i ON i.oid = x.indexrelid
+		JOIN pg_class     t ON t.oid = x.indrelid
+		JOIN pg_namespace n ON n.oid = t.relnamespace
+		JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = x.indkey[0]
+		WHERE n.nspname = 'public'
+		  AND x.indisunique
+		  AND x.indnkeyatts = 1
+		  AND a.attname = 'name'`)
+	if err != nil {
+		t.Fatalf("query unique name indexes: %v", err)
+	}
+	defer rows.Close()
+
+	found := map[string]string{}
+	for rows.Next() {
+		var table, index string
+		if err := rows.Scan(&table, &index); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		found[table] = index
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("rows: %v", err)
+	}
+	// An empty result would mean the query stopped matching anything -- a
+	// catalog shape change, a schema rename -- and would make every assertion
+	// below pass by describing nothing. A signature that cannot see its subject
+	// looks exactly like a subject that is clean.
+	if len(found) == 0 {
+		t.Fatalf("no globally-unique name index found anywhere in the schema; " +
+			"the catalog query has stopped matching and this test is now vacuous")
+	}
+	return found
+}
+
+// TestIntegration_Phase4NameRekeyInventory_IsCompleteAndDerived is the
+// generalisation of the test above it, and it exists because that test was one
+// instance of a five-instance class.
+//
+// TestIntegration_SourceNameUniquenessIsGlobal_AndDiscloses proves that two
+// organizations cannot both own a source named "production", and that the
+// rejection tells the loser so. Nothing about that argument is specific to
+// state_sources. FIVE partition roots carry a UNIQUE index on `name` alone:
+//
+//	state_sources         000001:17   idx_state_sources_name
+//	pipeline_connections  000004:14   idx_pipeline_connections_name
+//	schedules             000008:18   idx_schedules_name
+//	notification_channels 000009:16   idx_notification_channels_name
+//	ci_sources            000011:15   idx_ci_sources_name
+//
+// 000033 walks the roots one by one and calls out the globally-unique name on
+// FOUR of them, each with a note that Phase 4 re-keys it. ci_sources is the one
+// it does not. That paragraph is spent instead on a genuinely important warning
+// -- ci_sources already has a column called `organization`, which is the Azure
+// DevOps organization or GitHub owner, a remote coordinate one letter away from
+// the tenancy column -- and the uniqueness fact drops out.
+//
+// The consequence is narrow and entirely mechanical: whoever writes Phase 4 from
+// 000033's inventory re-keys four tables, leaves idx_ci_sources_name alone, and
+// ships a deployment where two organizations still cannot both name a CI source
+// "github-prod" and the error still discloses that the other one has. The leak
+// this whole issue is about, surviving in a sibling of the table it was fixed
+// in, because the fix was written from a list rather than from the schema.
+//
+// So this asserts the inventory ITSELF, derived from the catalog:
+//
+//   - every partition root that has a global unique name is named here. When
+//     Phase 4 re-keys one to UNIQUE (organization_id, name) the index stops
+//     having a single `name` key, this set shrinks, and the test fails until
+//     someone records that it was deliberate.
+//   - a table OUTSIDE the roots that acquires one fails too. role_templates is
+//     the only one today and 000033 argues it: deployment-wide on purpose, its
+//     uniqueness already per-app. A new tenant-owned table arriving with a
+//     global unique name is exactly the case a transcribed list would miss.
+func TestIntegration_Phase4NameRekeyInventory_IsCompleteAndDerived(t *testing.T) {
+	db := newTestDB(t)
+	found := globallyUniqueNameIndexes(t, db)
+
+	roots := map[string]bool{}
+	for _, r := range tsmPartitionRoots {
+		roots[r] = true
+	}
+
+	// The five that Phase 4 must re-key to UNIQUE (organization_id, name).
+	wantRoots := map[string]bool{
+		"state_sources":         true,
+		"pipeline_connections":  true,
+		"schedules":             true,
+		"notification_channels": true,
+		"ci_sources":            true,
+	}
+	// Tables outside the partition that may hold a global unique name, each
+	// because 000033 argues they are not tenant data.
+	allowedNonRoots := map[string]string{
+		"role_templates": "000033: TSM's own role -> scope definitions, " +
+			"deployment-wide on purpose; 000032:92 notes its uniqueness is already per-app",
+	}
+
+	gotRoots := map[string]bool{}
+	for table := range found {
+		switch {
+		case roots[table]:
+			gotRoots[table] = true
+		case allowedNonRoots[table] != "":
+			// Justified in 000033. Left alone.
+		default:
+			t.Errorf("%s has a globally-unique `name` index (%s) and is neither a "+
+				"partition root nor one of the tables 000033 argues out of the "+
+				"partition. Either it is tenant data, in which case it needs an "+
+				"organization_id and a per-organization key, or it is not, in which "+
+				"case say so where 000033 says so about the others.",
+				table, found[table])
+		}
+	}
+
+	for table := range wantRoots {
+		if !gotRoots[table] {
+			t.Errorf("%s no longer has a globally-unique `name` index. If Phase 4 "+
+				"re-keyed it to UNIQUE (organization_id, name), that is the intended "+
+				"outcome and this inventory should record it as done -- remove it from "+
+				"wantRoots and invert the disclosure test for it. If nobody re-keyed "+
+				"it, an index that guarded uniqueness has been dropped.", table)
+		}
+	}
+	for table := range gotRoots {
+		if !wantRoots[table] {
+			t.Errorf("partition root %s has a globally-unique `name` index (%s) that "+
+				"this inventory does not name, so Phase 4 would not re-key it and two "+
+				"organizations could not both use a name in it.", table, found[table])
+		}
+	}
+
+	t.Logf("Phase 4 name re-keying inventory, derived from the catalog: %d partition "+
+		"roots carry UNIQUE(name) and must become UNIQUE(organization_id, name); "+
+		"%d non-root tables carry one and are argued out of the partition by 000033.",
+		len(gotRoots), len(found)-len(gotRoots))
+}
