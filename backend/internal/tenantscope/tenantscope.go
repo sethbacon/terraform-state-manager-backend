@@ -1,278 +1,163 @@
-// Package tenantscope resolves, once per request, the set of organizations a
-// caller is allowed to reach — the dimension TSM's authorization has never had.
+// Package tenantscope adapts this application's HTTP requests to the suite's
+// shared tenancy resolver.
 //
-// PHASE 2a OF FOUR of #393. Phase 1 (internal/tenancy) gave nine root tables a
-// nullable organization_id and stamped every row. It filtered nothing, on
-// purpose, and said why: "nothing in a TSM request knows which organization the
-// caller is acting as". This package is that missing thing. It still filters
-// nothing — no repository signature changes here — but from this point a handler
-// CAN ask "which organizations is this request for?", which Phase 3 needs before
-// it can flip a single read.
+// THE LOGIC USED TO LIVE HERE AND NO LONGER DOES. terraform-registry-backend
+// carried the same package solving the same class, neither imported the other,
+// and by the time both were written they had drifted into two different
+// authority models under one type name. It is now
+// identity/tenantscope in terraform-suite-identity (its #247), which
+// sethbacon/terraform-suite-identity#206 makes the rule for: the library owns
+// mechanism, the app owns policy.
 //
-// # What is actually broken, and it is not a missing WHERE clause
+// What remains here is the two things that genuinely belong to this repository:
+// pulling a Principal out of a *gin.Context, and stating THIS application's
+// policy. Both are small and both are the parts a shared package must not
+// assume.
 //
-// internal/approles/reads.go:GetUserCombinedScopes flattens every membership's
-// role-template scopes into one set and discards the organization each came
-// from; middleware.RequireScope then tests that flat set with no organization
-// dimension at all. So `state:read` held in ONE organization authorizes reads of
-// EVERY organization's data. internal/tenancy/isolation_integration_test.go
-// demonstrates the consequence against a real database rather than arguing it
-// from the call graph.
+// # This application's policy, and why each answer is what it is
 //
-// The flattening is not a bug in GetUserCombinedScopes — a session JWT is one
-// flat scope list by construction, and that is fine for "may this credential
-// read state at all". It is only wrong as an answer to "whose state", and
-// nothing in the codebase asked the second question because there was no type in
-// which to phrase it. There is now, and it is the zero value of that type that
-// matters most: it permits nothing.
+// AdminsApplyToAPIKeys is OFF. A key minted for automation must not inherit its
+// owner's platform authority; internal/middleware/auth.go already caps a key's
+// scopes by its owner's CURRENT ones for the same reason (#223).
 //
-// # Mirrored from terraform-registry, deliberately, and where it diverges
+// KeyBindsOrganization is OFF, and this one is temporary. terraform-registry
+// turns it ON, deliberately, after its #719 found that a userless organization
+// service key had no memberships to resolve and so received empty lists and
+// refusals on its OWN organization. That fix is right there and wrong here,
+// because internal/api/apikeys.go:mintKey stamps EVERY key with the deployment's
+// default organization whoever owns it — so the column is a constant, and
+// binding to it would place every key in one organization. It becomes correct
+// once #436 makes that stamp mean something. #438 tracks the gap in the
+// meantime.
 //
-// terraform-registry's internal/tenantscope is the same package solving the same
-// class, and this is its shape — Scope{PlatformAdmin, OrgIDs}, Permits/
-// PermitsPtr/Empty, a Resolve that fails closed. Two divergences are forced by
-// facts about TSM, and both are documented at the code that makes them:
-//
-//  1. PLATFORM ADMIN COMES FROM THE CARRIER, NOT FROM THE FLAT SCOPE. In
-//     registry, `admin` in a session IS the platform-wide wildcard, so reading
-//     it off the context is reading platform-adminness. In TSM it is not: `admin`
-//     is granted per organization through an admin-bearing role template and
-//     merely SURFACES flat, which is why internal/api/admin_org_scope.go states
-//     that "every /admin caller is somebody's tenant admin" and has no
-//     platform-wide branch. Deriving PlatformAdmin from the flat scope here would
-//     hand every single-organization admin the whole estate — #393's leak, rebuilt
-//     inside the type meant to close it. See Resolve.
-//
-//  2. NO API-KEY ORGANIZATION BRANCH. registry's Resolve trusts an API key's
-//     organization_id as an authority binding. TSM's is not one: mintKey stamps
-//     every key with the global default organization whoever owns it, which
-//     internal/api/apikeys.go:keyScope documents at length. The tenant boundary
-//     for a TSM key is its OWNER's membership, so keys take the same membership
-//     path as sessions here. Copying registry's branch would have bound every key
-//     in the deployment to the default organization.
-//
-// # The zero value permits nothing
-//
-// Every failure path in this package returns it. A caller with no principal, a
-// resolver that was not wired, a principal with no qualifying membership: all
-// select nothing rather than everything. The one thing that is NOT reported as
-// an empty scope is a lookup that FAILED — that comes back as an error, so the
-// handler answers 500 instead of quietly serving a caller their own empty world
-// (or, if a future caller inverts the test, everyone else's).
+// PlatformAdmins is the live carrier, not a flat scope. In registry `admin` IS
+// the platform-wide wildcard; here it is granted per organization through an
+// admin-bearing role template and merely SURFACES flat, so reading it off the
+// request would hand every single-organization admin the whole deployment.
 package tenantscope
 
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 
 	"github.com/gin-gonic/gin"
-	idauth "github.com/sethbacon/terraform-suite-identity/identity/auth"
-	idstore "github.com/sethbacon/terraform-suite-identity/identity/store"
+	idtenantscope "github.com/sethbacon/terraform-suite-identity/identity/tenantscope"
 
 	"github.com/terraform-state-manager/terraform-state-manager/internal/auth"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/platformadmin"
 )
 
-// Memberships resolves the organizations in which a principal holds a scope.
-//
-// *approles.Members satisfies it, and is the only production implementation:
-// OrgScopeForUser there keeps exactly the memberships whose ROLE TEMPLATE grants
-// `required`, under this application's role source, with this application's
-// write-implies-read pairs. That is already the resolver every scoped /admin
-// route is built on (internal/api/admin_org_scope.go:callerScopeFor), so
-// tenancy resolved here and tenancy resolved there cannot disagree.
-//
-// It is an interface and not the concrete type for one reason, and it is a test
-// reason rather than an abstraction reason: the failure mode this package must
-// get right is a membership lookup that ERRORS, and *approles.Members can only
-// be made to error by taking a database away from it. A one-method seam lets
-// that case be a table row instead of an integration fixture.
-type Memberships interface {
-	OrgScopeForUser(ctx context.Context, userID, required string, rwPairs idauth.ReadWritePairs) (idstore.OrgScope, error)
-}
+// Scope, Memberships and PlatformAdmins are ALIASES rather than definitions, so
+// every existing caller — the repositories' scoped readers, the dual-read
+// comparator, the middleware — compiles unchanged and interoperates with the
+// shared package without a conversion at the seam. A conversion is where a
+// PlatformAdmin flag gets dropped.
+type (
+	Scope          = idtenantscope.Scope
+	Memberships    = idtenantscope.Memberships
+	PlatformAdmins = idtenantscope.PlatformAdmins
+)
 
-// PlatformAdmins answers whether a principal holds platform-wide authority right
-// now. *platformadmin.Service satisfies it.
+// Resolve returns the organizations this request may reach.
 //
-// LIVE, NOT CACHED, and that is the carrier's whole point — see
-// platformadmin.elevate's caller in internal/middleware/auth.go: a row removed
-// from platform_admins stops elevating on the NEXT request rather than whenever
-// the holder's longest session expires. A scope resolved from a cached answer
-// would reintroduce exactly that window on the read path.
-type PlatformAdmins interface {
-	IsPlatformAdmin(ctx context.Context, userID string) (bool, error)
-}
-
-// Scope is the set of organizations a request may reach.
-//
-// The zero value denies everything, so a handler that fails to resolve a scope —
-// or resolves one for a principal with no qualifying membership — selects
-// nothing rather than the whole deployment.
-type Scope struct {
-	// PlatformAdmin marks a caller holding a platform_admins carrier row. That
-	// authority is genuinely platform-wide: it is TSM's only principal that is
-	// not somebody's tenant admin, which is why it is the only thing here that
-	// crosses an organization boundary.
-	//
-	// It is NOT "the caller's scopes contain admin". See Resolve.
-	PlatformAdmin bool
-	// OrgIDs are the organizations in which the caller was verified to hold the
-	// scope the route required — not merely the organizations they belong to.
-	// That distinction is the point of the type: membership answers "do you know
-	// these people", and the question a read has to ask is "may you do THIS
-	// here".
-	OrgIDs []string
-}
-
-// Permits reports whether a row owned by orgID is inside the scope.
-//
-// UNOWNED ROWS. An empty orgID means a row whose organization_id is NULL, and it
-// is permitted only for a platform admin. NULL on these nine tables means "no
-// tenant has been asserted", not "belongs to everyone": internal/tenancy's
-// backfill exists precisely because a NULL there is a row that predates the
-// column, and it stamps them with the DEFAULT organization — so a NULL seen
-// after Phase 1 is a row written by a replica still on the previous build, whose
-// true owner is the default organization and whose contents are therefore
-// somebody's. Admitting it to everyone would leak exactly the tenant that owns
-// the most rows.
-//
-// This deliberately differs from the answer internal/api/admin_org_scope.go
-// gives on audit_logs and users, where WithUnowned() admits unowned rows to
-// every admin. That is not an inconsistency, it is the same rule applied to
-// different data: TSM WRITES platform-level audit entries with a NULL
-// organization_id on purpose, and a user with no membership belongs to no
-// tenant. Neither is true of a state source or a drift run — there is no such
-// thing as a platform-level state file.
-func (s Scope) Permits(orgID string) bool {
-	if s.PlatformAdmin {
-		return true
-	}
-	if orgID == "" {
-		return false
-	}
-	for _, id := range s.OrgIDs {
-		if id == orgID {
-			return true
-		}
-	}
-	return false
-}
-
-// PermitsPtr is Permits for the nullable organization_id the nine partitioned
-// tables actually carry, and will carry until Phase 4 makes the column NOT NULL.
-// A nil pointer is the NULL owner Permits declines to anybody but a platform
-// admin.
-func (s Scope) PermitsPtr(orgID *string) bool {
-	if orgID == nil {
-		return s.Permits("")
-	}
-	return s.Permits(*orgID)
-}
-
-// Empty reports whether the scope can select nothing at all.
-func (s Scope) Empty() bool { return !s.PlatformAdmin && len(s.OrgIDs) == 0 }
-
-// Resolve resolves the caller's tenant scope for the scope a route requires.
-//
-// It fails closed: a missing or malformed principal yields an empty scope, an
-// unwired resolver yields an empty scope, and a lookup FAILURE is returned as an
-// error so the handler can 500 rather than silently widening to every
-// organization — or, just as bad, narrowing a platform administrator to nothing
-// during the incident in which they need the read.
-//
-// GUARD tenant-scope-resolver (#393).
-//
-// # Why the carrier and not the flat `admin` scope
-//
-// GUARD tenant-scope-platform-admin (#393). terraform-registry resolves this
-// from the context's scope list, because there `admin` is the platform-wide
-// wildcard. Transplanting that line into TSM would be the leak this package
-// closes, written into the package that closes it: TSM grants `admin` through a
-// role template held IN AN ORGANIZATION (auth.AppRoleTemplates), the session JWT
-// flattens every membership's scopes into one list (approles.GetUserCombinedScopes),
-// and so an admin of one tenant arrives carrying a flat `admin` that says
-// nothing about the other tenants. internal/api/admin_org_scope.go already
-// refuses to read it that way — "every /admin caller is somebody's tenant admin"
-// — and requireOrgScope re-derives per-organization authority for that reason.
-//
-// The carrier (platform_admins, migration 000030) is the one principal that IS
-// platform-wide, and it is a live read of a table an operator can empty.
-//
-// # Why the carrier is not consulted for an API key
-//
-// GUARD tenant-scope-key-no-elevation (#393, and #223 before it).
-// middleware.authenticateAPIKey takes no platformadmin.Service — its doc calls
-// that structural rather than remembered: "a key must not inherit its owner's
-// platform-admin" is enforced by there being nothing there to call, because a
-// key is a long-lived, frequently unattended CI credential and an elevation
-// riding along on it would be revocable only by deleting the key. A carrier read
-// keyed on the OWNER's user id here would reinstate precisely that inheritance
-// one layer further in, on the read path, where it would be much harder to see.
-// So on an API-key request the carrier is not asked, and the key's tenancy is
-// its owner's memberships — the boundary internal/api/apikeys.go:keyScope
-// already names as the right one for a TSM key.
+// It is the same call it always was; the decision now lives in the shared
+// package and this states the policy it is made under.
 func Resolve(c *gin.Context, memberships Memberships, admins PlatformAdmins, required auth.Scope) (Scope, error) {
 	if c == nil {
 		return Scope{}, nil
 	}
-
-	userID := principal(c)
-	if userID == "" {
-		// No principal at all: an unauthenticated request, or an mTLS client
-		// (internal/auth/mtls sets scopes and auth_method but never a user_id,
-		// because a certificate subject is not an identity user and has no
-		// memberships to resolve). Either way there is nobody whose tenancy could
-		// be looked up, and the empty scope is the honest answer.
-		return Scope{}, nil
+	resolver := idtenantscope.Resolver{
+		Memberships:    memberships,
+		ReadWritePairs: auth.ReadWritePairs(),
+		// Both deliberately left at their zero value; see the package comment.
+		AdminsApplyToAPIKeys: false,
+		KeyBindsOrganization: false,
 	}
-
-	if !isAPIKeyRequest(c) && admins != nil {
-		isAdmin, err := admins.IsPlatformAdmin(requestContext(c), userID)
-		switch {
-		case errors.Is(err, platformadmin.ErrNotConfigured):
-			// No carrier is wired — a deployment without a database connection, or
-			// a test rig. Not an error, and not an elevation: middleware.elevate
-			// treats an absent carrier the same way, because a carrier that is not
-			// there withholds authority rather than granting it. Fall through to
-			// memberships.
-		case err != nil:
-			// An authority question that did not resolve is not a completed "no".
-			// Returning the zero scope WITH the error keeps a caller that ignores
-			// the error selecting nothing.
-			return Scope{}, err
-		case isAdmin:
-			return Scope{PlatformAdmin: true}, nil
-		}
+	if admins != nil {
+		resolver.Admins = notConfiguredShim{inner: admins}
 	}
-
-	if memberships == nil {
-		// A handler wired without a membership resolver cannot verify anything.
-		// Denying is the only safe answer; returning an unfiltered result would be
-		// the defect this package exists to close.
-		return Scope{}, nil
-	}
-
-	// GUARD tenant-scope-role-template (#393): membership alone is not authority.
-	// OrgScopeForUser keeps only the organizations whose ROLE TEMPLATE grants
-	// `required`, under this application's write-implies-read pairs — so a viewer
-	// in an organization does not acquire the tenancy of an editor in it. This is
-	// the same call internal/api/admin_org_scope.go:callerScopeFor makes for the
-	// /admin reads, deliberately: a second implementation of one tenancy decision
-	// is the thing that drifts.
-	orgScope, err := memberships.OrgScopeForUser(requestContext(c), userID, string(required), auth.ReadWritePairs())
-	if err != nil {
-		return Scope{}, err
-	}
-	return Scope{OrgIDs: orgScope.OrganizationIDs()}, nil
+	return resolver.Resolve(requestContext(c), principalOf(c), string(required))
 }
 
-// principal returns the authenticated user id the auth middleware published, or
-// "" when there is none or it is not a string.
+// ActingOrganization is the organization a WRITE belongs to: the one named by
+// the request, verified against a scope this server resolved.
 //
-// A principal that cannot be interpreted is a principal that cannot be
-// authorized, so a non-string value under the key is "" rather than a panic or a
-// pass.
+// Separate from Resolve because they answer different questions. Resolve returns
+// a SET, which is the right answer for a read and no answer at all for a write.
+func ActingOrganization(c *gin.Context, scope Scope) (string, error) {
+	selected := ""
+	if c != nil && c.Request != nil {
+		selected = c.GetHeader(idtenantscope.ActingOrganizationHeader)
+	}
+	return idtenantscope.Resolver{}.ActingOrganization(scope, selected)
+}
+
+// notConfiguredShim translates this repository's "carrier was never constructed"
+// sentinel into the one the shared resolver recognises.
+//
+// WITHOUT THIS THE FALL-THROUGH SILENTLY BECOMES A HARD ERROR. The shared
+// resolver treats an absent carrier as WITHHOLDING authority — it defers to
+// memberships rather than denying — and it recognises that by matching its own
+// ErrAdminsNotConfigured or identity's platformadmin.ErrNotConfigured. This
+// repository's internal/platformadmin declares a THIRD, textually different
+// sentinel of its own, which neither matches. A deployment with no carrier wired
+// would have started answering 500 on every scoped read instead of resolving
+// memberships, and nothing about the call site would have looked wrong.
+//
+// Both errors are wrapped, so errors.Is still finds the original.
+type notConfiguredShim struct{ inner PlatformAdmins }
+
+func (s notConfiguredShim) IsPlatformAdmin(ctx context.Context, userID string) (bool, error) {
+	isAdmin, err := s.inner.IsPlatformAdmin(ctx, userID)
+	if err != nil && errors.Is(err, platformadmin.ErrNotConfigured) {
+		return false, fmt.Errorf("%w: %w", idtenantscope.ErrAdminsNotConfigured, err)
+	}
+	return isAdmin, err
+}
+
+// principalOf reads what the auth middleware published.
+func principalOf(c *gin.Context) idtenantscope.Principal {
+	return idtenantscope.Principal{
+		UserID:     principal(c),
+		Credential: credentialOf(c),
+		// KeyOrgID is deliberately not populated: KeyBindsOrganization is off,
+		// so the shared resolver would ignore it, and supplying a value the
+		// policy says is meaningless is how it gets trusted later by accident.
+	}
+}
+
+// credentialOf maps this application's auth_method vocabulary onto the shared
+// one.
+//
+// The default is CredentialUnspecified — the NARROW reading, never elevated —
+// rather than "session". internal/middleware/auth.go sets auth_method on every
+// path that also sets user_id, so an unrecognised value is not a live case; it
+// is what a future auth path would hit before anybody remembered this function,
+// and the safe answer there is the restrictive one.
+func credentialOf(c *gin.Context) idtenantscope.Credential {
+	v, ok := c.Get("auth_method")
+	if !ok {
+		return idtenantscope.CredentialUnspecified
+	}
+	method, ok := v.(string)
+	if !ok {
+		return idtenantscope.CredentialUnspecified
+	}
+	switch method {
+	case "apikey":
+		return idtenantscope.CredentialAPIKey
+	case "jwt", "jwt_cookie":
+		return idtenantscope.CredentialSession
+	default:
+		// "mtls" lands here, and correctly: internal/auth/mtls never publishes
+		// a user_id, so there is no principal to elevate in the first place.
+		return idtenantscope.CredentialUnspecified
+	}
+}
+
+// principal returns the authenticated user id the auth middleware published.
 func principal(c *gin.Context) string {
 	v, ok := c.Get("user_id")
 	if !ok {
@@ -283,21 +168,6 @@ func principal(c *gin.Context) string {
 		return ""
 	}
 	return strings.TrimSpace(id)
-}
-
-// isAPIKeyRequest reports whether this request authenticated with an API key.
-//
-// It reads auth_method, the value middleware.authenticateAPIKey publishes,
-// rather than probing for api_key_id: auth_method is the key every other
-// consumer already reads (AuthMiddleware's own mTLS short-circuit,
-// internal/api's audit vocabulary), and one fact should have one name.
-func isAPIKeyRequest(c *gin.Context) bool {
-	v, ok := c.Get("auth_method")
-	if !ok {
-		return false
-	}
-	method, ok := v.(string)
-	return ok && method == "apikey"
 }
 
 // requestContext returns the request's context, or a background context for the
