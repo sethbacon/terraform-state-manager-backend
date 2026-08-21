@@ -73,12 +73,19 @@ type Config struct {
 // the counters must stay at zero, and on a partitioned one the withheld rows
 // must be the rows that tenant should never have been able to read.
 //
-// # Off by default, because it costs a second query
+// # Off by default, because it costs extra queries
 //
-// Each observed read runs twice. state_sources is operator-provisioned and small
-// (internal/api caps a page at 500 and calls that "far above any realistic
-// install"), so the cost is a duplicate index scan on a short table — but it is
-// not nothing, and a flag whose default changed behaviour would not be a flag.
+// /sources/:id runs its read twice: GetByID, then GetByIDInScope. /sources costs
+// more than that, and the difference is worth stating rather than rounding to
+// "twice". It SERVES ListPage + Count, but the comparison is made on the full
+// sets (see tenant_dualread.go on why a page-for-page comparison would hide
+// divergence on page seven), so observing it adds List + ListInScope — two
+// unpaged reads, one of which duplicates nothing the served path did.
+//
+// state_sources is operator-provisioned and small (internal/api caps a page at
+// 500 and calls that "far above any realistic install"), so those are short-table
+// scans — but they are not nothing, and a flag whose default changed behaviour
+// would not be a flag.
 //
 // Env: TSM_TENANCY_DUAL_READ.
 type TenancyConfig struct {
