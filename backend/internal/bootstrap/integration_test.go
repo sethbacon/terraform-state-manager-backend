@@ -276,3 +276,49 @@ func TestIntegrationRunKeepsIdentitysIDsOnAFreshInstall(t *testing.T) {
 			mirrored, e.appTemplateID(t, "editor"))
 	}
 }
+
+// TestIntegrationRunRefusesADriftedChannelTable proves the assertion added for
+// #440 actually fires.
+//
+// notification_channels is THIS repository's table (000009); identity/notify
+// supplies the canonical DDL and the check, and nothing else stands between a
+// drifted local schema and a failure a customer finds. Before this call existed,
+// a missing column surfaced as a runtime SQL error on the first notification —
+// or, once a scoped read lands, as a silently empty channel list, which reads as
+// "nobody configured any" rather than "this deployment is broken".
+//
+// The damage is done AFTER the migrations, so this asserts the check and not the
+// migration: the schema is correct, then one column the DAO's statements require
+// is removed, and Run must refuse to start.
+func TestIntegrationRunRefusesADriftedChannelTable(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+
+	// Control. The same call on the schema the migrations produced must SUCCEED,
+	// or the negative case below proves only that Run fails for some reason.
+	if err := bootstrapRun(ctx, e, true); err != nil {
+		t.Fatalf("Run against the migrated schema: %v", err)
+	}
+
+	if _, err := e.appDB.ExecContext(ctx,
+		`ALTER TABLE notification_channels DROP COLUMN encrypted_target`); err != nil {
+		t.Fatalf("drift the channel table: %v", err)
+	}
+
+	err := bootstrapRun(ctx, e, true)
+	if err == nil {
+		t.Fatal("Run succeeded against a notification_channels table missing a column its own " +
+			"statements select. The startup assertion is not being called, and the failure has " +
+			"been deferred to whenever someone next tries to notify.")
+	}
+	if !strings.Contains(err.Error(), "notification_channels") {
+		t.Errorf("Run failed, but not in a way that names the table: %v\n"+
+			"An operator reading this has to know which migration to look at.", err)
+	}
+}
+
+// bootstrapRun is Run with this suite's arguments, so the control and the
+// negative case cannot drift apart.
+func bootstrapRun(ctx context.Context, e *env, seedRoles bool) error {
+	return Run(ctx, e.identityDB, e.appDB, seedRoles)
+}
