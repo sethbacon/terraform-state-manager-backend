@@ -37,6 +37,11 @@ type SourcesHandlers struct {
 	// overviewCache memoizes the dashboard's store-wide aggregations (see
 	// dashboard.go). Zero value ready; guarded by its own mutex.
 	overviewCache overviewAggCache
+	// tenantDualRead runs the organization-scoped read beside the unscoped read
+	// on the two /sources read routes and reports where they disagree, without
+	// changing what is served (#393 Phase 2b, TSM_TENANCY_DUAL_READ). Off unless
+	// the router turns it on; deleted in Phase 3 along with tenant_dualread.go.
+	tenantDualRead bool
 }
 
 // NewSourcesHandlers constructs the handlers over the app (public) connection,
@@ -57,6 +62,13 @@ func NewSourcesHandlers(database, identityDB *sql.DB) *SourcesHandlers {
 // AttachSyncer wires the statesync service in after construction (the router
 // builds both and connects them).
 func (h *SourcesHandlers) AttachSyncer(s *statesync.Syncer) { h.syncer = s }
+
+// EnableTenantDualRead turns on the #393 Phase 2b equivalence measurement (see
+// tenant_dualread.go). A setter rather than a constructor parameter for the
+// reason AttachSyncer is one: the router holds the config and the handlers do
+// not, and this is one line for Phase 3 to delete rather than a signature every
+// caller and test would have to be walked through twice.
+func (h *SourcesHandlers) EnableTenantDualRead(on bool) { h.tenantDualRead = on }
 
 // ConnectSource builds a live connector for a source, decrypting its
 // credentials. Exported shape for the statesync service's Connect dependency.
@@ -113,6 +125,12 @@ func (h *SourcesHandlers) ListSources() gin.HandlerFunc {
 			return
 		}
 		c.JSON(http.StatusOK, gin.H{"sources": sources, "total": total, "page": page, "per_page": perPage})
+
+		// After the response, never before it: the measurement must not be able
+		// to delay or replace a read that has already succeeded (#393 Phase 2b).
+		if h.tenantDualRead {
+			h.observeSourceListScope(c)
+		}
 	}
 }
 
@@ -209,6 +227,14 @@ func (h *SourcesHandlers) GetSource() gin.HandlerFunc {
 			return
 		}
 		c.JSON(http.StatusOK, s)
+
+		// This is the read #393 names as the highest blast radius: /sources/:id
+		// hands the row to the credential decryption in ConnectSource, so a row
+		// the scoped read would have withheld is a credential one tenant can
+		// decrypt of another's (#393 Phase 2b).
+		if h.tenantDualRead {
+			h.observeSourceGetScope(c, s)
+		}
 	}
 }
 

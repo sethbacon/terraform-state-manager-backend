@@ -9,6 +9,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+
+	"github.com/terraform-state-manager/terraform-state-manager/internal/tenantscope"
 )
 
 // Source is a configured connection to a backend where Terraform state lives.
@@ -204,3 +206,109 @@ func orEmptyMap(m map[string]any) map[string]any {
 	}
 	return m
 }
+
+// ===========================================================================
+// SCOPED READS — PHASE 2b OF FOUR of
+// sethbacon/terraform-state-manager-backend#393.
+//
+// These sit BESIDE List and GetByID rather than replacing them, and that is the
+// phase boundary, not a transitional untidiness. Migration 000033 states the
+// rule the whole issue is sequenced around: a change that starts filtering
+// before equivalence has been demonstrated is a partial cutover, "which is how a
+// deployment ends up half-isolated and nobody can say which half". So Phase 2b
+// adds a second reader, proves it returns what the first one returns on a
+// deployment with one organization, and serves the first one's answer unchanged.
+// PHASE 3 is what moves the callers over and deletes the unscoped variants.
+//
+// internal/tenancy/isolation_integration_test.go calls List(ctx) and
+// GetByID(ctx, id) at those exact signatures ON PURPOSE, so that Phase 3 breaks
+// the build and forces its assertions to be inverted. Changing either signature
+// here would spring that tripwire in the phase that has not earned it — the
+// build would break, someone would invert the assertions, and the executable
+// record of the leak would be retired while the leak was still open.
+// ===========================================================================
+
+// ListInScope returns the sources the scope permits, newest first.
+//
+// It is the scoped twin of List and shares its unbounded shape for the same
+// reason (#282): its Phase 3 callers are the statesync reconcile loop and
+// dashboard aggregation, which must see every source they are entitled to.
+//
+// An empty scope reads NOTHING, and does so without a query. That is the
+// fail-closed direction: a caller whose tenancy could not be established, or who
+// holds the required scope in no organization, selects no rows rather than every
+// row. The early return is not an optimisation — `= ANY('{}')` would return the
+// same empty set — it is here so that the "reads nothing" answer does not depend
+// on a Postgres subtlety that a later edit could change by accident.
+func (r *SourceRepository) ListInScope(ctx context.Context, scope tenantscope.Scope) ([]Source, error) {
+	if scope.Empty() {
+		return []Source{}, nil
+	}
+	if scope.PlatformAdmin {
+		// The one principal that is genuinely platform-wide (see
+		// tenantscope.Scope.PlatformAdmin). It also sees rows whose
+		// organization_id is still NULL — a row written by a replica on the
+		// previous build, before the startup backfill stamped it — which the
+		// organization predicate below cannot match and no tenant should see.
+		return r.List(ctx)
+	}
+	rows, err := r.db.QueryContext(ctx, `SELECT `+sourceColumns+`
+		FROM state_sources WHERE `+sourceOrgPredicate+`
+		ORDER BY created_at DESC`, scope.OrgIDs)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	return scanSources(rows)
+}
+
+// GetByIDInScope returns the source with the given id when the scope permits it,
+// and (nil, nil) otherwise.
+//
+// A row that exists but belongs to another organization is reported EXACTLY as a
+// row that does not exist. The caller cannot tell the two apart, and must not be
+// able to: internal/tenancy/isolation_integration_test.go already proves that
+// state_sources' globally-unique name discloses the existence of another
+// organization's source through a constraint error, and answering "403, that one
+// is not yours" here would rebuild the same disclosure on the read path — a
+// caller could enumerate ids and learn which of them name real sources somewhere
+// in the deployment. 404 is the whole answer.
+func (r *SourceRepository) GetByIDInScope(ctx context.Context, id string, scope tenantscope.Scope) (*Source, error) {
+	if scope.Empty() {
+		return nil, nil
+	}
+	if scope.PlatformAdmin {
+		return r.GetByID(ctx, id)
+	}
+	// The organization array is $1 and the id is $2, so that both readers can
+	// share one predicate string rather than keeping two copies that agree only
+	// as long as somebody remembers they must.
+	row := r.db.QueryRowContext(ctx, `SELECT `+sourceColumns+`
+		FROM state_sources WHERE `+sourceOrgPredicate+` AND id = $2`, scope.OrgIDs, id)
+	s, err := scanSource(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return s, nil
+}
+
+// sourceOrgPredicate is the organization filter, written once so the two readers
+// above cannot come to mean different things — which is the failure mode that
+// matters here, because a predicate that has drifted on ONE of them still passes
+// every test written against the other.
+//
+// `= ANY($n::uuid[])` rather than a generated IN list: one parameter, so the
+// plan is stable whatever the caller's organization count, and no string
+// concatenation reaches the query at all.
+//
+// IT EXCLUDES NULL, and deliberately. `NULL = ANY(...)` is NULL, never true, so a
+// row whose organization_id has not been stamped is invisible to every tenant.
+// That is the same rule tenantscope.Scope.Permits applies to the empty owner and
+// for the same reason: on these tables NULL means "no tenant has been asserted",
+// not "belongs to everyone", and admitting such rows to everybody would leak
+// whichever tenant owns the most unstamped rows.
+const sourceOrgPredicate = `organization_id = ANY($1::uuid[])`
