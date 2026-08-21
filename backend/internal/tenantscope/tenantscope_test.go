@@ -3,6 +3,7 @@ package tenantscope
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http/httptest"
 	"testing"
 
@@ -288,6 +289,7 @@ func TestResolve(t *testing.T) {
 		{
 			name:        "an empty user id is not a principal",
 			userIDValue: "   ",
+			authMethod:  "jwt",
 			memberships: &fakeMemberships{scope: idstore.OrgScopeOrganizations(orgA)},
 			admins:      &fakeAdmins{admin: true},
 			required:    auth.ScopeStateRead,
@@ -300,6 +302,7 @@ func TestResolve(t *testing.T) {
 			// A principal we cannot interpret is a principal we cannot authorize.
 			name:        "a non-string user id is not a principal",
 			userIDValue: 42,
+			authMethod:  "jwt",
 			memberships: &fakeMemberships{scope: idstore.OrgScopeOrganizations(orgA)},
 			admins:      &fakeAdmins{admin: true},
 			required:    auth.ScopeStateRead,
@@ -311,6 +314,7 @@ func TestResolve(t *testing.T) {
 		{
 			name:        "a member gets the organizations the role template qualified",
 			userIDValue: userID,
+			authMethod:  "jwt",
 			memberships: &fakeMemberships{scope: idstore.OrgScopeOrganizations(orgA)},
 			admins:      &fakeAdmins{},
 			required:    auth.ScopeStateRead,
@@ -324,6 +328,7 @@ func TestResolve(t *testing.T) {
 			// not an empty scope and emphatically not a wide one.
 			name:        "a membership lookup failure is an error, not a scope",
 			userIDValue: userID,
+			authMethod:  "jwt",
 			memberships: &fakeMemberships{scope: idstore.OrgScopeAllOrganizations(), err: errLookup},
 			admins:      &fakeAdmins{},
 			required:    auth.ScopeStateRead,
@@ -337,6 +342,7 @@ func TestResolve(t *testing.T) {
 			// The carrier is the ONLY source of platform-wide authority.
 			name:        "a carrier row is platform-wide",
 			userIDValue: userID,
+			authMethod:  "jwt",
 			memberships: &fakeMemberships{scope: idstore.OrgScopeOrganizations(orgA)},
 			admins:      &fakeAdmins{admin: true},
 			required:    auth.ScopeStateRead,
@@ -353,6 +359,7 @@ func TestResolve(t *testing.T) {
 			// that closes it.
 			name:        "a flat admin scope is not platform-wide",
 			userIDValue: userID,
+			authMethod:  "jwt",
 			scopes:      []string{string(auth.ScopeAdmin)},
 			memberships: &fakeMemberships{scope: idstore.OrgScopeOrganizations(orgA)},
 			admins:      &fakeAdmins{admin: false},
@@ -393,6 +400,7 @@ func TestResolve(t *testing.T) {
 			// An unwired carrier withholds authority; it does not fail the request.
 			name:        "an unconfigured carrier falls through to memberships",
 			userIDValue: userID,
+			authMethod:  "jwt",
 			memberships: &fakeMemberships{scope: idstore.OrgScopeOrganizations(orgA)},
 			admins:      &fakeAdmins{err: platformadmin.ErrNotConfigured},
 			required:    auth.ScopeStateRead,
@@ -406,6 +414,7 @@ func TestResolve(t *testing.T) {
 			// question, which is not a completed "no".
 			name:        "a carrier lookup failure is an error",
 			userIDValue: userID,
+			authMethod:  "jwt",
 			memberships: &fakeMemberships{scope: idstore.OrgScopeAllOrganizations()},
 			admins:      &fakeAdmins{err: errLookup},
 			required:    auth.ScopeStateRead,
@@ -418,6 +427,7 @@ func TestResolve(t *testing.T) {
 		{
 			name:        "a principal with no qualifying membership selects nothing",
 			userIDValue: userID,
+			authMethod:  "jwt",
 			memberships: &fakeMemberships{scope: idstore.OrgScopeOrganizations()},
 			admins:      &fakeAdmins{},
 			required:    auth.ScopeStateRead,
@@ -591,4 +601,186 @@ func sameIDs(got, want []string) bool {
 		}
 	}
 	return true
+}
+
+// --- what the adapter itself is responsible for --------------------------------
+
+// TestResolveStillFallsThroughOnThisRepositorysNotConfiguredSentinel is the
+// regression guard for the one thing adopting the shared resolver could have
+// broken silently.
+//
+// The shared resolver treats an absent carrier as WITHHOLDING authority: it
+// defers to memberships rather than denying. It recognises that by matching its
+// own ErrAdminsNotConfigured or identity's platformadmin.ErrNotConfigured. This
+// repository's internal/platformadmin declares a THIRD, textually different
+// sentinel, which matches neither. Without the shim, a deployment with no
+// carrier wired would have started answering 500 on every scoped read instead of
+// resolving memberships — and nothing at the call site would have looked wrong.
+func TestResolveStillFallsThroughOnThisRepositorysNotConfiguredSentinel(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+	}{
+		{"bare", platformadmin.ErrNotConfigured},
+		{"wrapped", fmt.Errorf("carrier: %w", platformadmin.ErrNotConfigured)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			members := &fakeMemberships{scope: idstore.OrgScopeOrganizations(orgA)}
+			c := newContext(t, "u1", "jwt", nil)
+
+			got, err := Resolve(c, members, &fakeAdmins{err: tc.err}, auth.ScopeStateRead)
+			if err != nil {
+				t.Fatalf("an unconfigured carrier produced an error: %v.\n"+
+					"The shared resolver does not recognise this repository's sentinel; the "+
+					"adapter must translate it, or a deployment with no carrier 500s on every "+
+					"scoped read.", err)
+			}
+			if members.calls != 1 {
+				t.Fatalf("memberships consulted %d times, want 1", members.calls)
+			}
+			if !sameIDs(got.OrgIDs, []string{orgA}) {
+				t.Errorf("OrgIDs = %v, want the membership answer", got.OrgIDs)
+			}
+		})
+	}
+}
+
+// A genuine carrier failure must still be an error. The shim translates ONE
+// sentinel and must not swallow anything else.
+func TestResolveStillReportsARealCarrierFailure(t *testing.T) {
+	members := &fakeMemberships{scope: idstore.OrgScopeOrganizations(orgA)}
+	c := newContext(t, "u1", "jwt", nil)
+
+	_, err := Resolve(c, members, &fakeAdmins{err: errLookup}, auth.ScopeStateRead)
+	if !errors.Is(err, errLookup) {
+		t.Fatalf("err = %v, want the lookup failure", err)
+	}
+	if members.calls != 0 {
+		t.Errorf("memberships consulted after the carrier failed")
+	}
+}
+
+// TestCredentialMappingDefaultsToTheNarrowReading covers the one behaviour this
+// adoption deliberately tightened.
+//
+// The old code asked "is this an API key?" and treated everything else —
+// including an auth_method nobody set — as a session, so an unrecognised value
+// was eligible for platform elevation. The mapping is now explicit and its
+// default is the narrow one. No production path is affected:
+// internal/middleware/auth.go sets auth_method on every path that also sets
+// user_id ("jwt", "jwt_cookie", "apikey"), and mTLS sets one but never a user_id.
+func TestCredentialMappingDefaultsToTheNarrowReading(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		authMethod any
+		wantAdmin  bool
+	}{
+		{"a cookie session elevates", "jwt_cookie", true},
+		{"a bearer session elevates", "jwt", true},
+		{"an api key does not", "apikey", false},
+		{"mtls does not", "mtls", false},
+		{"an unset auth_method does not", nil, false},
+		{"an unrecognised auth_method does not", "carrier-pigeon", false},
+		{"a non-string auth_method does not", 42, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			members := &fakeMemberships{scope: idstore.OrgScopeOrganizations(orgA)}
+			admins := &fakeAdmins{admin: true}
+			c := newContext(t, "u1", tc.authMethod, nil)
+
+			got, err := Resolve(c, members, admins, auth.ScopeStateRead)
+			if err != nil {
+				t.Fatalf("Resolve: %v", err)
+			}
+			if got.PlatformAdmin != tc.wantAdmin {
+				t.Errorf("PlatformAdmin = %v, want %v (auth_method %v)", got.PlatformAdmin, tc.wantAdmin, tc.authMethod)
+			}
+			if tc.wantAdmin && admins.calls != 1 {
+				t.Errorf("carrier consulted %d times, want 1", admins.calls)
+			}
+			if !tc.wantAdmin && admins.calls != 0 {
+				t.Errorf("carrier consulted %d times for a credential that must never elevate", admins.calls)
+			}
+		})
+	}
+}
+
+// TestActingOrganizationReadsTheHeaderAndVerifiesIt covers the seam: the header
+// arrives from the client and is worth nothing until it is checked against a
+// scope this server resolved.
+func TestActingOrganizationReadsTheHeaderAndVerifiesIt(t *testing.T) {
+	scope := Scope{OrgIDs: []string{orgA, orgB}}
+
+	t.Run("a permitted selection is used", func(t *testing.T) {
+		c := newContext(t, "u1", "jwt", nil)
+		c.Request.Header.Set("X-Organization-Id", orgB)
+		got, err := ActingOrganization(c, scope)
+		if err != nil || got != orgB {
+			t.Fatalf("got (%q, %v), want (%s, nil)", got, err, orgB)
+		}
+	})
+
+	t.Run("an unpermitted selection is refused", func(t *testing.T) {
+		c := newContext(t, "u1", "jwt", nil)
+		c.Request.Header.Set("X-Organization-Id", "99999999-9999-4999-8999-999999999999")
+		got, err := ActingOrganization(c, scope)
+		if err == nil {
+			t.Fatalf("a client-supplied organization outside the caller's scope was accepted as %q. "+
+				"The header is a claim, not an authority.", got)
+		}
+	})
+
+	t.Run("no header, one organization, no ambiguity", func(t *testing.T) {
+		c := newContext(t, "u1", "jwt", nil)
+		got, err := ActingOrganization(c, Scope{OrgIDs: []string{orgA}})
+		if err != nil || got != orgA {
+			t.Fatalf("got (%q, %v); a caller in exactly one organization must never have to send "+
+				"the header", got, err)
+		}
+	})
+
+	t.Run("no header, several organizations, refused", func(t *testing.T) {
+		c := newContext(t, "u1", "jwt", nil)
+		if _, err := ActingOrganization(c, scope); err == nil {
+			t.Fatal("the server chose an organization on the caller's behalf")
+		}
+	})
+}
+
+// TestKeyOrganizationBindingIsLockedTwice documents a deliberate belt-and-braces
+// that a single mutation cannot expose, and therefore has to be asserted.
+//
+// terraform-registry binds an API key to the organization named on it, after its
+// #719 found a userless service key had no memberships and so was refused its
+// OWN organization. That fix is wrong HERE while mintKey stamps every key with
+// the deployment default (#438), so the adapter turns it off in two independent
+// places:
+//
+//	Resolver.KeyBindsOrganization = false   the policy says do not read it
+//	principalOf leaves KeyOrgID empty       there is nothing to read
+//
+// Flipping either alone changes nothing, which is the point: whoever enables
+// this for #436 has to touch both, and cannot do it by editing one line while
+// reviewing another.
+func TestKeyOrganizationBindingIsLockedTwice(t *testing.T) {
+	c := newContext(t, "u1", "apikey", nil)
+	// Even with a key organization sitting on the context, the adapter must not
+	// carry it into the Principal.
+	c.Set("api_key_organization_id", orgB)
+
+	if got := principalOf(c).KeyOrgID; got != "" {
+		t.Errorf("principalOf carried KeyOrgID = %q. The policy ignores it today, so supplying "+
+			"it means the day somebody flips KeyBindsOrganization the binding silently goes "+
+			"live against a column that is a deployment default for every key.", got)
+	}
+
+	// And the resolved answer is the OWNER's memberships, not the key's org.
+	members := &fakeMemberships{scope: idstore.OrgScopeOrganizations(orgA)}
+	got, err := Resolve(c, members, &fakeAdmins{}, auth.ScopeStateRead)
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if !sameIDs(got.OrgIDs, []string{orgA}) {
+		t.Errorf("OrgIDs = %v, want the owner's memberships %v", got.OrgIDs, []string{orgA})
+	}
 }

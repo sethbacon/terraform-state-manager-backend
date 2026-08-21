@@ -75,6 +75,12 @@ func runTenantScope(t *testing.T, userID string, m tenantscope.Memberships, a te
 	r.Use(func(c *gin.Context) {
 		if userID != "" {
 			c.Set("user_id", userID)
+			// What AuthMiddleware publishes alongside user_id on the session
+			// path. tenantscope maps auth_method explicitly and defaults to the
+			// NARROW reading, so a synthetic context that omits it is not a
+			// session and is never elevated — correct, and not what these cases
+			// are about.
+			c.Set("auth_method", "jwt")
 		}
 		c.Next()
 	})
