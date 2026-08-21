@@ -18,6 +18,9 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log/slog"
+
+	identitynotify "github.com/sethbacon/terraform-suite-identity/identity/notify"
 
 	"github.com/terraform-state-manager/terraform-state-manager/internal/approles"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/auth"
@@ -54,6 +57,34 @@ func Run(ctx context.Context, identityDB, appDB *sql.DB, seedRoles bool) error {
 	if appDB == nil {
 		return nil
 	}
+
+	// The shape assertion identity/notify ships so that a schema mismatch is a
+	// STARTUP failure naming the migration, rather than a runtime SQL error on
+	// the first notification — or, worse, a silently empty channel list, which
+	// reads as "nobody configured any" instead of "this deployment is broken".
+	//
+	// notification_channels is OUR table (000009); the module only supplies the
+	// canonical DDL and this check. So nothing but this call stands between a
+	// drifted local schema and a failure discovered by a customer.
+	//
+	// FIRST among the app-connection steps, deliberately: it is the cheapest and
+	// the only one whose failure means "do not start at all". Reconciling
+	// authorization or backfilling a partition against a schema that is already
+	// wrong buys nothing.
+	//
+	// VerifyChannelOrganizationColumn is NOT called here, and that is a decision
+	// rather than an omission. It asserts the organization_id column that #393's
+	// migration 000033 added, and nothing in this repository passes
+	// notify.WithOrgScope yet. Failing a boot over a column no statement reads
+	// would refuse to start a deployment for a capability it is not using. Add
+	// the call in the change that first scopes a channel read — #393 Phase 3 —
+	// where a missing column becomes a real fault.
+	channelTable, err := identitynotify.VerifyChannelTable(ctx, appDB)
+	if err != nil {
+		return fmt.Errorf("verify the notification_channels table: %w", err)
+	}
+	slog.Info("notification channel table verified", "table", channelTable)
+
 	rep, err := approles.Reconcile(ctx, appDB, identityDB, seedRoleTemplates)
 	if err != nil {
 		return fmt.Errorf("reconcile per-app authorization tables: %w", err)
