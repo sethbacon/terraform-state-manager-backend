@@ -59,7 +59,32 @@ var externallyOwnedInserts = map[string]string{
 		"a mock cannot see.",
 }
 
-var insertPattern = regexp.MustCompile(`(?is)INSERT\s+INTO\s+([a-z_]+)\s*\(([^)]*)\)`)
+// insertPattern matches an INSERT and captures its target and its column list.
+//
+// THE TARGET IS OPTIONALLY SCHEMA-QUALIFIED and the column list is OPTIONAL,
+// because both of those were once ways to walk straight past this guard. It read
+// `INSERT\s+INTO\s+([a-z_]+)\s*\(` at first, which meant:
+//
+//	INSERT INTO public.state_sources (...)   -- invisible: "public" is the table
+//	INSERT INTO state_sources VALUES (...)   -- invisible: no column list to match
+//	INSERT INTO %s (...)                     -- invisible: target is not [a-z_]
+//
+// The middle one is the dangerous member of that set. A positional INSERT that
+// omits organization_id takes the column DEFAULT, which is the exact bug #436
+// exists to close, and the guard said nothing about it. None of the three shapes
+// is present in the tree today -- which is precisely the point, since a guard
+// that only sees the shapes already written is not a guard.
+var insertPattern = regexp.MustCompile(`(?is)INSERT\s+INTO\s+([a-z_]+(?:\.[a-z_]+)?|%s)\s*(\(([^)]*)\))?`)
+
+// interpolatedInsertTargets are INSERT sites whose target table is built at
+// runtime, so no static scan can know which table they write. Each must be
+// justified: an unlisted one fails, because "the guard cannot tell" and "the
+// guard is satisfied" must not look the same.
+var interpolatedInsertTargets = map[string]string{
+	"internal/statesource/pg.go": "the pg state-source CONNECTOR, writing to the customer's own " +
+		"Terraform state table in their database -- not to TSM's schema, so it can reach no " +
+		"partition root. The identifier is validated in newPG.",
+}
 
 func TestEveryInsertIntoAPartitionRootNamesTheOrganization(t *testing.T) {
 	roots := map[string]bool{}
@@ -109,11 +134,42 @@ func TestEveryInsertIntoAPartitionRootNamesTheOrganization(t *testing.T) {
 		}
 		scanned++
 		for _, m := range insertPattern.FindAllStringSubmatch(string(src), -1) {
-			table, columns := m[1], m[2]
+			target, hadColumnList, columns := m[1], m[2] != "", m[3]
+
+			// A runtime-built target: the scan cannot know the table, so it must be
+			// justified rather than skipped.
+			if target == "%s" {
+				if reason := justifiedInterpolation(f); reason != "" {
+					t.Logf("%s: INSERT INTO <interpolated> is justified -- %s", f, reason)
+					continue
+				}
+				t.Errorf("%s: INSERT INTO an interpolated table name. A static scan cannot tell "+
+					"which table this writes, so it cannot tell whether a partition root is being "+
+					"written unstamped. Add the file to interpolatedInsertTargets with the reason "+
+					"it can reach no root.", f)
+				continue
+			}
+
+			// public.state_sources and state_sources are the same table.
+			table := target
+			if i := strings.LastIndex(table, "."); i >= 0 {
+				table = table[i+1:]
+			}
 			if !roots[table] {
 				continue
 			}
 			seen[table] = true
+
+			// A positional INSERT names no columns, so every column it does not
+			// supply takes its DEFAULT -- which for these nine tables is
+			// tsm_default_organization_id(). It cannot be audited by reading it,
+			// and it is the shape most likely to be wrong.
+			if !hadColumnList {
+				t.Errorf("%s: INSERT INTO %s with no column list. Every column it omits takes the "+
+					"schema DEFAULT, and for a partition root that DEFAULT files the row in ONE "+
+					"organization regardless of who is writing. Name the columns.", f, table)
+				continue
+			}
 			if strings.Contains(columns, "organization_id") {
 				continue
 			}
@@ -183,4 +239,17 @@ func TestThePartitionRootListMatchesTheTenancySuite(t *testing.T) {
 		t.Errorf("partition-root lists disagree.\n  tenancy: %s\n  here:    %s",
 			strings.Join(names, ", "), strings.Join(mine, ", "))
 	}
+}
+
+// justifiedInterpolation returns the recorded reason an interpolated INSERT
+// target is safe, matching on path suffix so the module-root walk's "../../../"
+// prefix does not defeat the lookup.
+func justifiedInterpolation(path string) string {
+	clean := filepath.ToSlash(path)
+	for suffix, reason := range interpolatedInsertTargets {
+		if strings.HasSuffix(clean, suffix) {
+			return reason
+		}
+	}
+	return ""
 }
