@@ -8,6 +8,8 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
+	"strings"
 	"time"
 )
 
@@ -166,4 +168,40 @@ func (r *SystemSettingsRepository) SetUIThemeConfig(ctx context.Context, configJ
 		`UPDATE system_settings SET ui_theme_config = $1, updated_at = $2 WHERE id = 1`,
 		configJSON, time.Now())
 	return err
+}
+
+// DefaultOrganizationID returns the organization migration 000033 records as this
+// deployment's default, or "" when it has not been set.
+//
+// READ FROM THE APP CONNECTION, not by looking up an organization named
+// "default" in identity, and the difference is not stylistic:
+//
+//   - It survives a RENAME. identity's OrganizationRepository has a Rename, and
+//     after one a lookup by the name "default" returns not-found while this
+//     column still holds the correct uuid.
+//   - It keeps a cross-database read off a write path. The carrier lives on the
+//     same connection the INSERT uses; the identity database may be a different
+//     database entirely.
+//   - It is guaranteed populated before any request is served. bootstrap.Run
+//     writes it, main fails fatally if that errors, and the listener starts
+//     afterwards.
+//
+// The one caller is the setup wizard, which creates a source with no principal
+// at all and therefore has no acting organization to read (#436).
+func (r *SystemSettingsRepository) DefaultOrganizationID(ctx context.Context) (string, error) {
+	var orgID sql.NullString
+	err := r.db.QueryRowContext(ctx,
+		`SELECT default_organization_id FROM system_settings WHERE id = 1`).Scan(&orgID)
+	if errors.Is(err, sql.ErrNoRows) {
+		// The singleton row is seeded by migration 000017 and never deleted, so
+		// its absence is a broken schema rather than an unset default. Say so.
+		return "", fmt.Errorf("system_settings row is missing; the app schema is not initialised")
+	}
+	if err != nil {
+		return "", fmt.Errorf("read default organization: %w", err)
+	}
+	if !orgID.Valid {
+		return "", nil
+	}
+	return strings.TrimSpace(orgID.String), nil
 }

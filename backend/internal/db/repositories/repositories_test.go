@@ -12,6 +12,10 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
+// testOrgID is an arbitrary organization for the Create paths, which now refuse
+// an empty one (#436).
+const testOrgID = "11111111-1111-4111-8111-111111111111"
+
 // errDB is a shared sentinel used to drive error paths (registry pattern).
 var errDB = errors.New("db error")
 
@@ -80,15 +84,15 @@ func TestSourceRepository_CreateAndDelete(t *testing.T) {
 	r := NewSourceRepository(db)
 
 	mock.ExpectQuery("INSERT INTO state_sources").
-		WithArgs("demo", "local", nil, `{"base_path":"/data"}`, "{}", nil).
+		WithArgs("demo", "local", nil, `{"base_path":"/data"}`, "{}", nil, testOrgID).
 		WillReturnRows(sourceRow())
-	created, err := r.Create(ctx, &Source{Name: "demo", Type: "local", Config: map[string]any{"base_path": "/data"}})
+	created, err := r.Create(ctx, &Source{Name: "demo", Type: "local", Config: map[string]any{"base_path": "/data"}}, testOrgID)
 	if err != nil || created.ID != "s1" {
 		t.Fatalf("Create: %v %+v", err, created)
 	}
 
 	mock.ExpectQuery("INSERT INTO state_sources").WillReturnError(errDB)
-	if _, err := r.Create(ctx, &Source{Name: "x", Type: "local"}); err == nil {
+	if _, err := r.Create(ctx, &Source{Name: "x", Type: "local"}, testOrgID); err == nil {
 		t.Error("Create swallowed the insert error")
 	}
 
@@ -470,5 +474,39 @@ func TestSourceCount(t *testing.T) {
 	}
 	if n != 42 {
 		t.Errorf("count = %d, want 42", n)
+	}
+}
+
+// TestSourceCreateRefusesAnUnownedRow is the whole of #436 in one assertion.
+//
+// A Postgres column DEFAULT applies only when the column is OMITTED, so leaving
+// organization_id out of the INSERT falls through to
+// tsm_default_organization_id() — indistinguishable from a successful stamp, and
+// exactly how every row in the deployment came to belong to the default
+// organization. Naming it with an empty value would be worse: that writes NULL,
+// and a NULL organization is invisible to every tenant.
+//
+// So the only safe behaviour is to refuse, and to refuse BEFORE touching the
+// database — asserted here by giving sqlmock no expectation at all, so any
+// statement reaching it fails the test.
+func TestSourceCreateRefusesAnUnownedRow(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+	r := NewSourceRepository(db)
+
+	for _, orgID := range []string{"", "   ", "\t"} {
+		created, err := r.Create(context.Background(), &Source{Name: "x", Type: "local"}, orgID)
+		if !errors.Is(err, ErrNoOrganization) {
+			t.Errorf("organizationID=%q: err = %v, want ErrNoOrganization", orgID, err)
+		}
+		if created != nil {
+			t.Errorf("organizationID=%q: returned a source despite refusing", orgID)
+		}
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("unmet expectations: %v", err)
 	}
 }

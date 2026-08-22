@@ -235,6 +235,11 @@ func NewRouter(cfg *config.Config, database *sql.DB, identityDB *sql.DB) (*gin.E
 		// unscoped ones this route family still serves. Off by default; changes
 		// nothing that is returned. See internal/api/tenant_dualread.go.
 		sources.EnableTenantDualRead(cfg.Tenancy.DualRead)
+		// The existence check for an acting organization (#436). orgMembers is
+		// this deployment's ONE construction of the shared organization
+		// repository — internal/approles' guard test refuses a second one — and
+		// its reads are the library's, promoted unchanged.
+		sources.AttachOrganizations(orgMembers)
 		// The tenant scope for the /sources READ routes.
 		//
 		// platformAdmins is a *platformadmin.Service and may be NIL here (the
@@ -252,12 +257,24 @@ func NewRouter(cfg *config.Config, database *sql.DB, identityDB *sql.DB) (*gin.E
 		// authorize an edit in an organization the caller may only read. See
 		// middleware.TenantScope.
 		tenantScopeStateRead := middleware.TenantScope(orgMembers, platformAdmins, auth.ScopeStateRead)
+		// A SECOND instance, for sources:manage, and it must not be the one above.
+		//
+		// A scope resolved for state:read answers "which organizations may this
+		// caller READ in". Handing that to a route that CREATES would let a
+		// caller stamp a new source into an organization they may only read —
+		// the precise widening middleware.TenantScope's own doc warns about.
+		//
+		// auth.ReadWritePairs() pairs only state:read->state:write and
+		// organizations:read->organizations:write, so sources:manage is a literal
+		// membership match with no write-implies-read widening: this resolves
+		// exactly the organizations whose role template grants sources:manage.
+		tenantScopeSourcesManage := middleware.TenantScope(orgMembers, platformAdmins, auth.ScopeSourcesManage)
 		// Bound state-operation requests so a hung or slow backend cannot block the
 		// handler goroutine (and any per-key lock it holds) indefinitely (#263).
 		s := v1.Group("/sources", requireAuth, middleware.RequestTimeout(5*time.Minute))
 		{
 			s.GET("", middleware.RequireScope(auth.ScopeStateRead), tenantScopeStateRead, sources.ListSources())
-			s.POST("", middleware.RequireScope(auth.ScopeSourcesManage), sources.CreateSource())
+			s.POST("", middleware.RequireScope(auth.ScopeSourcesManage), tenantScopeSourcesManage, sources.CreateSource())
 			// Static /test must not collide with /:id below: gin resolves static
 			// segments before params, so POST /sources/test is unambiguous.
 			s.POST("/test", middleware.RequireScope(auth.ScopeSourcesManage), sources.TestSourceConfig())

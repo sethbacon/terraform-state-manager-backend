@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/terraform-state-manager/terraform-state-manager/internal/tenantscope"
 )
@@ -121,7 +122,30 @@ func (r *SourceRepository) GetByID(ctx context.Context, id string) (*Source, err
 }
 
 // Create inserts a source and returns it with its generated id/timestamps.
-func (r *SourceRepository) Create(ctx context.Context, s *Source) (*Source, error) {
+// Create writes a source owned by organizationID.
+//
+// THE ORGANIZATION IS A PARAMETER, NOT A FIELD ON Source, and the distinction is
+// load-bearing. Source is JSON-serialized straight to API responses, and it is
+// also the argument to Update — whose UPDATE deliberately does not touch
+// organization_id, because a source does not change hands. A field would make
+// the column look settable on that path too, and the mistake it invites is a
+// silent re-parent of a row that already has an owner.
+//
+// AN EMPTY organizationID IS REFUSED rather than omitted from the INSERT, and
+// this is the whole point of #436. A Postgres column DEFAULT applies only when
+// the column is OMITTED, so leaving it out falls through to
+// tsm_default_organization_id() — which is indistinguishable from a successful
+// stamp, and is exactly how every row in the deployment came to belong to the
+// default organization. Naming the column with an empty value would be worse
+// still: it writes NULL, and a NULL organization is invisible to every tenant.
+//
+// So there is no way to reach this function without saying who owns the row,
+// and getting it wrong is a refusal rather than a quiet default.
+func (r *SourceRepository) Create(ctx context.Context, s *Source, organizationID string) (*Source, error) {
+	organizationID = strings.TrimSpace(organizationID)
+	if organizationID == "" {
+		return nil, ErrNoOrganization
+	}
 	configJSON, err := json.Marshal(orEmptyMap(s.Config))
 	if err != nil {
 		return nil, err
@@ -139,10 +163,10 @@ func (r *SourceRepository) Create(ctx context.Context, s *Source) (*Source, erro
 		creds = s.EncryptedCredentials
 	}
 	row := r.db.QueryRowContext(ctx, `
-		INSERT INTO state_sources (name, type, endpoint, config, scope, encrypted_credentials)
-		VALUES ($1, $2, $3, $4::jsonb, $5::jsonb, $6)
+		INSERT INTO state_sources (name, type, endpoint, config, scope, encrypted_credentials, organization_id)
+		VALUES ($1, $2, $3, $4::jsonb, $5::jsonb, $6, $7::uuid)
 		RETURNING `+sourceColumns,
-		s.Name, s.Type, endpoint, string(configJSON), string(scopeJSON), creds)
+		s.Name, s.Type, endpoint, string(configJSON), string(scopeJSON), creds, organizationID)
 	created, err := scanSource(row)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create source: %w", err)
