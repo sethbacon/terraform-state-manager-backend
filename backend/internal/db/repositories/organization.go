@@ -17,3 +17,13 @@ import "errors"
 // writes NULL, which is invisible to every tenant. Neither failure is visible at
 // the call site; this one is.
 var ErrNoOrganization = errors.New("repositories: no owning organization was supplied")
+
+// ErrSourceNotOwned is returned when a row that INHERITS its organization cannot
+// find one on its parent — the source does not exist, or it predates migration
+// 000033's stamp.
+//
+// Distinct from ErrNoOrganization, which is a caller that did not SAY who owns a
+// row. This one is a caller that named a parent which cannot say. Both refuse,
+// and the distinction is for whoever reads the log: one is a bug in the request,
+// the other is a gap in the data.
+var ErrSourceNotOwned = errors.New("repositories: the named source has no owning organization")

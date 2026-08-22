@@ -123,6 +123,39 @@ type Detection struct {
 // detections — or inserts a fresh open one. Acknowledged records stay
 // acknowledged on re-detection. A replayed ingest (same source + external_ref,
 // already resolved) is returned as-is instead of erroring.
+// UpsertDetection records a drift detection, inheriting the organization from
+// the SOURCE the detection is about.
+//
+// # Why the organization is derived here rather than passed in
+//
+// This statement has TWO producers — the drift callback (recordDriftOutcome) and
+// the external /drift/ingest endpoint — and its ON CONFLICT collapses them onto
+// ONE row. So whichever inserts first fixes that record's organization
+// permanently; organization_id is deliberately absent from the DO UPDATE SET
+// below, because a later detection must never re-parent an existing record.
+//
+// If the two producers computed the organization independently and ever
+// disagreed, a live record's tenant would be decided by a race. Deriving it from
+// the source INSIDE the statement removes that possibility rather than
+// documenting it: both producers reach the same parent by construction, and
+// there is no window between reading the source and writing the record.
+//
+// # Why the SOURCE, not the run
+//
+// A drift record's identity is (source_id, state_key), and BOTH its unique
+// indexes are keyed on source_id — 000033 says they follow the source and need
+// no re-keying in Phase 4. A record whose organization disagreed with its
+// source's would be a finding invisible to the organization that owns the state
+// file it is about. The run is the right CROSS-CHECK and the caller has it in
+// hand, but it is not the parent: /drift/ingest can arrive without one.
+//
+// # An unstamped or missing source yields NO ROW
+//
+// The INSERT selects from state_sources with `organization_id IS NOT NULL`, so a
+// source that does not exist, or one that predates its stamp, produces zero rows
+// and this returns ErrSourceNotOwned. That is deliberate: the alternative is a
+// drift record with a NULL organization, which is invisible to every tenant —
+// a finding nobody can see is worse than a refused write.
 func (r *DriftRecordRepository) UpsertDetection(ctx context.Context, d *Detection) (*DriftRecord, error) {
 	var summaryArg any
 	if len(d.Summary) > 0 {
@@ -133,9 +166,11 @@ func (r *DriftRecordRepository) UpsertDetection(ctx context.Context, d *Detectio
 		INSERT INTO drift_records
 			(source_id, state_key, pipeline_connection_id, last_run_id, origin, severity,
 			 added, changed, destroyed, summary, external_ref,
-			 truncated, omitted_entries, omitted_attrs, unparseable, unmasked)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, COALESCE($10::jsonb,'[]'::jsonb), $11,
-			 $12, $13, $14, $15, $16)
+			 truncated, omitted_entries, omitted_attrs, unparseable, unmasked, organization_id)
+		SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, COALESCE($10::jsonb,'[]'::jsonb), $11,
+			 $12, $13, $14, $15, $16, s.organization_id
+		FROM state_sources s
+		WHERE s.id = $1 AND s.organization_id IS NOT NULL
 		ON CONFLICT (source_id, state_key) WHERE status <> 'resolved'
 		DO UPDATE SET
 			pipeline_connection_id = COALESCE(EXCLUDED.pipeline_connection_id, drift_records.pipeline_connection_id),
@@ -167,6 +202,13 @@ func (r *DriftRecordRepository) UpsertDetection(ctx context.Context, d *Detectio
 			if existing, gErr := r.GetByExternalRef(ctx, d.SourceID, *d.ExternalRef); gErr == nil && existing != nil {
 				return existing, nil
 			}
+		}
+		// ZERO ROWS means the SELECT found no source with an organization: the
+		// source id does not exist, or it predates its stamp. Named, because the
+		// alternative reading — "the upsert failed" — sends an operator looking
+		// at drift when the fault is an unowned source (#436).
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, fmt.Errorf("%w: source %s", ErrSourceNotOwned, d.SourceID)
 		}
 		return nil, fmt.Errorf("failed to upsert drift record: %w", err)
 	}
