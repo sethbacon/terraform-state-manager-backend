@@ -147,18 +147,25 @@ func (f *fakeConn) Read(_ context.Context, key string) (*statesource.RawState, e
 func (f *fakeConn) Write(context.Context, string, []byte) error { return nil }
 func (f *fakeConn) Delete(context.Context, string) error        { return nil }
 
+// syncSourceCols mirrors the state_sources projection, organization_id included:
+// statesync reads the whole fleet across every tenant, so its fixtures have to
+// carry the column the DAO now selects (#436).
+var syncSourceCols = []string{"id", "name", "type", "endpoint", "config", "scope", "encrypted_credentials", "created_at", "updated_at", "organization_id"}
+
+const syncTestOrg = "11111111-1111-4111-8111-111111111111"
+
 func sourceRows(dir string) *sqlmock.Rows {
 	cfg, _ := json.Marshal(map[string]any{"base_path": dir})
-	return sqlmock.NewRows([]string{"id", "name", "type", "endpoint", "config", "scope", "encrypted_credentials", "created_at", "updated_at"}).
-		AddRow("s1", "demo", "local", "", cfg, []byte(`{}`), nil, "2026-06-10", "2026-06-10")
+	return sqlmock.NewRows(syncSourceCols).
+		AddRow("s1", "demo", "local", "", cfg, []byte(`{}`), nil, "2026-06-10", "2026-06-10", syncTestOrg)
 }
 
 func twoSourceRows(dir1, dir2 string) *sqlmock.Rows {
 	cfg1, _ := json.Marshal(map[string]any{"base_path": dir1})
 	cfg2, _ := json.Marshal(map[string]any{"base_path": dir2})
-	return sqlmock.NewRows([]string{"id", "name", "type", "endpoint", "config", "scope", "encrypted_credentials", "created_at", "updated_at"}).
-		AddRow("s1", "demo", "local", "", cfg1, []byte(`{}`), nil, "2026-06-10", "2026-06-10").
-		AddRow("s2", "other", "local", "", cfg2, []byte(`{}`), nil, "2026-06-10", "2026-06-10")
+	return sqlmock.NewRows(syncSourceCols).
+		AddRow("s1", "demo", "local", "", cfg1, []byte(`{}`), nil, "2026-06-10", "2026-06-10", syncTestOrg).
+		AddRow("s2", "other", "local", "", cfg2, []byte(`{}`), nil, "2026-06-10", "2026-06-10", syncTestOrg)
 }
 
 func TestSyncAll_FirstBackfillReadsEverything(t *testing.T) {
@@ -286,9 +293,9 @@ func TestSyncAll_SourceFailuresAreRecordedNotFatal(t *testing.T) {
 func TestSyncAll_SourcesRunConcurrently(t *testing.T) {
 	db, mock := newMock(t)
 	cfg, _ := json.Marshal(map[string]any{"base_path": "/x"})
-	rows := sqlmock.NewRows([]string{"id", "name", "type", "endpoint", "config", "scope", "encrypted_credentials", "created_at", "updated_at"})
+	rows := sqlmock.NewRows(syncSourceCols)
 	for i := 1; i <= 3; i++ {
-		rows.AddRow(fmt.Sprintf("s%d", i), fmt.Sprintf("src-%d", i), "local", "", cfg, []byte(`{}`), nil, "2026-06-10", "2026-06-10")
+		rows.AddRow(fmt.Sprintf("s%d", i), fmt.Sprintf("src-%d", i), "local", "", cfg, []byte(`{}`), nil, "2026-06-10", "2026-06-10", syncTestOrg)
 	}
 	mock.ExpectQuery("SELECT .+ FROM state_sources ORDER BY").WillReturnRows(rows)
 	for range [3]struct{}{} {
@@ -499,7 +506,7 @@ func TestStartStopLoop(t *testing.T) {
 	db, mock := newMock(t)
 	// The immediate boot cycle lists sources; give it an empty result.
 	mock.ExpectQuery("SELECT .+ FROM state_sources ORDER BY").
-		WillReturnRows(sqlmock.NewRows([]string{"id", "name", "type", "endpoint", "config", "scope", "encrypted_credentials", "created_at", "updated_at"}))
+		WillReturnRows(sqlmock.NewRows(syncSourceCols))
 	s := newSyncer(db, connectLocal)
 	s.interval = time.Hour
 	s.Start()

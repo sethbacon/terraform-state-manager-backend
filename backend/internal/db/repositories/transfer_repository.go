@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"strings"
 )
 
 // Transfer records a cross-source backup (copy) or migrate (move + verify).
@@ -48,14 +49,31 @@ func scanTransfer(scanner interface{ Scan(dest ...any) error }) (*Transfer, erro
 }
 
 // Create inserts a transfer record and returns it.
-func (r *TransferRepository) Create(ctx context.Context, t *Transfer) (*Transfer, error) {
+// Create records a state transfer owned by organizationID.
+//
+// A TRANSFER NAMES TWO ENDPOINTS AND THE ORGANIZATION IS NEITHER OF THEM. 000033
+// says a transfer whose ends sit in different organizations is a SUPPORTED way to
+// move a state file across the boundary this phase draws -- so deriving the
+// organization from the source, or refusing when the two disagree, would delete a
+// capability the design record calls intentional.
+//
+// It is the CALLER's acting organization instead: the transfer is an act, this
+// records who performed it, and a cross-boundary move is therefore an explicitly
+// authorized and separately auditable act rather than a by-product of an unscoped
+// read. Verifying that the caller may reach BOTH endpoints belongs at the handler,
+// where both are loaded; this column records whose act it was.
+func (r *TransferRepository) Create(ctx context.Context, t *Transfer, organizationID string) (*Transfer, error) {
+	organizationID = strings.TrimSpace(organizationID)
+	if organizationID == "" {
+		return nil, ErrNoOrganization
+	}
 	row := r.db.QueryRowContext(ctx, `
 		INSERT INTO state_transfers
-			(mode, source_id, source_key, target_source_id, target_key, status, verified, decommissioned, detail, actor)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+			(mode, source_id, source_key, target_source_id, target_key, status, verified, decommissioned, detail, actor, organization_id)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::uuid)
 		RETURNING `+transferColumns,
 		t.Mode, t.SourceID, t.SourceKey, t.TargetSourceID, t.TargetKey, t.Status, t.Verified, t.Decommissioned,
-		nullStr(t.Detail), nullStr(t.Actor))
+		nullStr(t.Detail), nullStr(t.Actor), organizationID)
 	return scanTransfer(row)
 }
 

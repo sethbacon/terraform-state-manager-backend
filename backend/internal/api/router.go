@@ -269,6 +269,18 @@ func NewRouter(cfg *config.Config, database *sql.DB, identityDB *sql.DB) (*gin.E
 		// membership match with no write-implies-read widening: this resolves
 		// exactly the organizations whose role template grants sources:manage.
 		tenantScopeSourcesManage := middleware.TenantScope(orgMembers, platformAdmins, auth.ScopeSourcesManage)
+		// A THIRD and FOURTH instance, for the two routes that write a partition
+		// root of their own rather than inheriting one (#436).
+		//
+		// state:execute dispatches a health run, and state:transfer moves a state
+		// file between two sources. Each stamps the row with the caller's ACTING
+		// organization, so each needs the scope resolved for the verb it is about
+		// to perform -- reusing tenantScopeStateRead here would let a caller who
+		// may only READ in an organization dispatch work into it, and reusing
+		// tenantScopeSourcesManage would answer a question about managing sources
+		// that neither route is asking.
+		tenantScopeStateExecute := middleware.TenantScope(orgMembers, platformAdmins, auth.ScopeStateExecute)
+		tenantScopeStateTransfer := middleware.TenantScope(orgMembers, platformAdmins, auth.ScopeStateTransfer)
 		// Bound state-operation requests so a hung or slow backend cannot block the
 		// handler goroutine (and any per-key lock it holds) indefinitely (#263).
 		s := v1.Group("/sources", requireAuth, middleware.RequestTimeout(5*time.Minute))
@@ -306,8 +318,8 @@ func NewRouter(cfg *config.Config, database *sql.DB, identityDB *sql.DB) (*gin.E
 			s.DELETE("/:id/state/lock", middleware.RequireScope(auth.ScopeAdmin), sources.ForceUnlock())
 
 			// Phase 2 transfer plane: cross-source backup (copy) and migrate (move).
-			s.POST("/:id/state/backup", middleware.RequireScope(auth.ScopeStateTransfer), sources.BackupToSource())
-			s.POST("/:id/state/migrate", middleware.RequireScope(auth.ScopeStateTransfer), sources.MigrateToSource())
+			s.POST("/:id/state/backup", middleware.RequireScope(auth.ScopeStateTransfer), tenantScopeStateTransfer, sources.BackupToSource())
+			s.POST("/:id/state/migrate", middleware.RequireScope(auth.ScopeStateTransfer), tenantScopeStateTransfer, sources.MigrateToSource())
 		}
 
 		v1.GET("/transfers/:id", requireAuth, middleware.RequireScope(auth.ScopeStateRead), sources.GetTransfer())
@@ -524,10 +536,11 @@ func NewRouter(cfg *config.Config, database *sql.DB, identityDB *sql.DB) (*gin.E
 
 		// Phase 4 version lab: dispatch plan against pinned versions + health.
 		health := NewHealthHandlers(cfg, database, identityDB, notifier)
+		health.AttachOrganizations(orgMembers)
 		hg := v1.Group("/health-lab", requireAuth)
 		{
 			hg.GET("/workflow", middleware.RequireScope(auth.ScopeStateRead), health.WorkflowTemplate(templateRepo))
-			hg.POST("/runs", middleware.RequireScope(auth.ScopeStateExecute), health.CreateRun())
+			hg.POST("/runs", middleware.RequireScope(auth.ScopeStateExecute), tenantScopeStateExecute, health.CreateRun())
 			hg.GET("/runs", middleware.RequireScope(auth.ScopeStateRead), health.ListRuns())
 			hg.GET("/runs/:id", middleware.RequireScope(auth.ScopeStateRead), health.GetRun())
 		}

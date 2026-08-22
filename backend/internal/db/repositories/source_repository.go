@@ -29,6 +29,11 @@ type Source struct {
 	EncryptedCredentials []byte `json:"-"`
 	CreatedAt            string `json:"created_at"`
 	UpdatedAt            string `json:"updated_at"`
+
+	// OrganizationID is the owning tenant, carried in memory so a handler that
+	// holds TWO sources -- a transfer names two endpoints -- can check the
+	// caller against both. Never serialized (#436).
+	OrganizationID string `json:"-"`
 }
 
 // SourceRepository is the DAO for the state_sources table.
@@ -41,15 +46,21 @@ func NewSourceRepository(db *sql.DB) *SourceRepository {
 	return &SourceRepository{db: db}
 }
 
-const sourceColumns = `id, name, type, COALESCE(endpoint, ''), config, scope, encrypted_credentials, created_at::text, updated_at::text`
+const sourceColumns = `id, name, type, COALESCE(endpoint, ''), config, scope, encrypted_credentials, created_at::text, updated_at::text,
+	organization_id::text`
 
 func scanSource(scanner interface {
 	Scan(dest ...any) error
 }) (*Source, error) {
 	var s Source
 	var configJSON, scopeJSON []byte
-	if err := scanner.Scan(&s.ID, &s.Name, &s.Type, &s.Endpoint, &configJSON, &scopeJSON, &s.EncryptedCredentials, &s.CreatedAt, &s.UpdatedAt); err != nil {
+	var organizationID sql.NullString
+	if err := scanner.Scan(&s.ID, &s.Name, &s.Type, &s.Endpoint, &configJSON, &scopeJSON, &s.EncryptedCredentials, &s.CreatedAt, &s.UpdatedAt,
+		&organizationID); err != nil {
 		return nil, err
+	}
+	if organizationID.Valid {
+		s.OrganizationID = organizationID.String
 	}
 	if len(configJSON) > 0 {
 		_ = json.Unmarshal(configJSON, &s.Config)

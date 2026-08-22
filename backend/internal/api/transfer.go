@@ -14,6 +14,7 @@ import (
 	"github.com/terraform-state-manager/terraform-state-manager/internal/analyzer"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/db/repositories"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/statesource"
+	"github.com/terraform-state-manager/terraform-state-manager/internal/tenantscope"
 )
 
 type transferRequest struct {
@@ -98,6 +99,28 @@ func (h *SourcesHandlers) doTransfer(c *gin.Context, mode string) {
 		return
 	}
 
+	// A TRANSFER NAMES TWO ENDPOINTS AND THE ORGANIZATION IS NEITHER OF THEM.
+	//
+	// 000033 keeps a cross-organization transfer as a SUPPORTED way to move a
+	// state file across the boundary #436 draws, so this does NOT refuse when the
+	// ends disagree. What it refuses is a caller reaching an end they hold no
+	// authority over: hold BOTH sides and the move is yours to make; hold one and
+	// it is someone else's state file. That is what turns a cross-boundary move
+	// into an explicitly authorized act rather than a by-product of an unscoped
+	// read -- and the record below names the caller's acting organization, so the
+	// act has an owner in the audit trail.
+	//
+	// Ends that carry NO organization are not judged: the backfill has not
+	// necessarily reached them, and refusing an unstamped row would break
+	// transfers on exactly the rows #436 is still repairing.
+	organizationID := actingOrganization(c, h.orgs)
+	if organizationID == "" {
+		return // actingOrganization has already written the response
+	}
+	if !transferEndpointsReachable(c, srcA, srcB) {
+		return
+	}
+
 	// Lock both the source and target keys for the whole transfer, the same way
 	// EditState/StateOperation/RestoreBackup do — previously connA/connB were
 	// read and written here with no lock at all, so a concurrent editor could
@@ -124,7 +147,7 @@ func (h *SourcesHandlers) doTransfer(c *gin.Context, mode string) {
 		_ = c.Error(err) // log the raw connector error; keep it out of the client body/record (#286)
 		rec.Status = "failed"
 		rec.Detail = "write to target failed"
-		saved, _ := h.transferRepo.Create(ctx, rec)
+		saved, _ := h.transferRepo.Create(ctx, rec, organizationID)
 		if saved == nil {
 			saved = rec
 		}
@@ -188,7 +211,7 @@ func (h *SourcesHandlers) doTransfer(c *gin.Context, mode string) {
 		}
 	}
 
-	saved, err := h.transferRepo.Create(ctx, rec)
+	saved, err := h.transferRepo.Create(ctx, rec, organizationID)
 	if err != nil {
 		serverError(c, err, "transfer completed but failed to record it")
 		return
@@ -292,4 +315,31 @@ func (h *SourcesHandlers) GetTransfer() gin.HandlerFunc {
 		}
 		c.JSON(http.StatusOK, t)
 	}
+}
+
+// transferEndpointsReachable reports whether the caller may act on BOTH ends of
+// a transfer, writing the refusal itself when they may not.
+//
+// The refusal is a 404, matching the shape a missing source returns, so a caller
+// outside an owning organization cannot use a transfer to probe which source ids
+// exist elsewhere in the fleet.
+func transferEndpointsReachable(c *gin.Context, ends ...*repositories.Source) bool {
+	scope, resolved := tenantscope.FromContext(c)
+	if !resolved {
+		// Same posture as actingOrganization: an unresolved scope is a wiring
+		// fault, not an empty one. Failing open here would make the whole check
+		// disappear the moment the middleware came unwired.
+		serverError(c, errNoTenantScope, "the tenant scope was not resolved for this route")
+		return false
+	}
+	for _, end := range ends {
+		if end == nil || end.OrganizationID == "" {
+			continue // unstamped: not judged, see doTransfer
+		}
+		if !scope.Permits(end.OrganizationID) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "source not found"})
+			return false
+		}
+	}
+	return true
 }

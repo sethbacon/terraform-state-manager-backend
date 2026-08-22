@@ -49,6 +49,13 @@ type sourcesEnv struct {
 }
 
 func newSourcesEnv(t *testing.T) *sourcesEnv {
+	return newSourcesEnvWithScope(t, tenantscope.Scope{OrgIDs: []string{testActingOrg}})
+}
+
+// newSourcesEnvWithScope builds the rig with an explicit scope, so a test can put
+// the caller in two organizations at once -- which is what makes a transfer
+// ACROSS the partition boundary an authorized act rather than a refused one.
+func newSourcesEnvWithScope(t *testing.T, scope tenantscope.Scope) *sourcesEnv {
 	t.Helper()
 	t.Setenv("TSM_ENCRYPTION_KEY", "0123456789abcdef0123456789abcdef")
 	db, mock, err := sqlmock.New()
@@ -74,7 +81,7 @@ func newSourcesEnv(t *testing.T) *sourcesEnv {
 		// here would make every create test fail with the message that says the
 		// route was never wired, which is precisely the distinction worth
 		// keeping.
-		tenantscope.Store(c, tenantscope.Scope{OrgIDs: []string{testActingOrg}})
+		tenantscope.Store(c, scope)
 		c.Next()
 	})
 	v1 := r.Group("/api/v1")
@@ -128,9 +135,8 @@ func (e *sourcesEnv) read(t *testing.T, name string) string {
 func (e *sourcesEnv) expectSource(id, dir string) {
 	cfg, _ := json.Marshal(map[string]any{"base_path": dir})
 	e.mock.ExpectQuery("SELECT .+ FROM state_sources WHERE id").WithArgs(id).
-		WillReturnRows(sqlmock.NewRows(
-			[]string{"id", "name", "type", "endpoint", "config", "scope", "encrypted_credentials", "created_at", "updated_at"}).
-			AddRow(id, "local-"+id, "local", "", cfg, []byte(`{}`), nil, "2026-06-10", "2026-06-10"))
+		WillReturnRows(sqlmock.NewRows(apiSourceCols).
+			AddRow(id, "local-"+id, "local", "", cfg, []byte(`{}`), nil, "2026-06-10", "2026-06-10", testActingOrg))
 }
 
 func (e *sourcesEnv) do(method, path, body string) *httptest.ResponseRecorder {
@@ -154,9 +160,8 @@ func TestListSources(t *testing.T) {
 	e := newSourcesEnv(t)
 	cfg, _ := json.Marshal(map[string]any{"base_path": e.dir})
 	e.mock.ExpectQuery("SELECT .+ FROM state_sources ORDER BY").
-		WillReturnRows(sqlmock.NewRows(
-			[]string{"id", "name", "type", "endpoint", "config", "scope", "encrypted_credentials", "created_at", "updated_at"}).
-			AddRow("s1", "demo", "local", "", cfg, []byte(`{}`), nil, "2026-06-10", "2026-06-10"))
+		WillReturnRows(sqlmock.NewRows(apiSourceCols).
+			AddRow("s1", "demo", "local", "", cfg, []byte(`{}`), nil, "2026-06-10", "2026-06-10", testActingOrg))
 	// The listing is paginated, so the handler also asks for the total (#282).
 	e.mock.ExpectQuery("SELECT count").
 		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
@@ -185,9 +190,8 @@ func TestCreateSource(t *testing.T) {
 
 	cfg, _ := json.Marshal(map[string]any{"base_path": e.dir})
 	e.mock.ExpectQuery("INSERT INTO state_sources").
-		WillReturnRows(sqlmock.NewRows(
-			[]string{"id", "name", "type", "endpoint", "config", "scope", "encrypted_credentials", "created_at", "updated_at"}).
-			AddRow("s1", "demo", "local", "", cfg, []byte(`{}`), nil, "2026-06-10", "2026-06-10"))
+		WillReturnRows(sqlmock.NewRows(apiSourceCols).
+			AddRow("s1", "demo", "local", "", cfg, []byte(`{}`), nil, "2026-06-10", "2026-06-10", testActingOrg))
 	body := fmt.Sprintf(`{"name":"demo","type":"local","config":{"base_path":%q}}`, e.dir)
 	if w := e.do(http.MethodPost, "/api/v1/sources", body); w.Code != http.StatusCreated {
 		t.Fatalf("create: status = %d (%s)", w.Code, w.Body.String())
@@ -203,7 +207,7 @@ func TestGetAndDeleteSource(t *testing.T) {
 	}
 
 	e.mock.ExpectQuery("SELECT .+ FROM state_sources WHERE id").WithArgs("ghost").
-		WillReturnRows(sqlmock.NewRows([]string{"id", "name", "type", "endpoint", "config", "scope", "encrypted_credentials", "created_at", "updated_at"}))
+		WillReturnRows(sqlmock.NewRows(apiSourceCols))
 	if w := e.do(http.MethodGet, "/api/v1/sources/ghost", ""); w.Code != http.StatusNotFound {
 		t.Errorf("missing: status = %d, want 404", w.Code)
 	}
@@ -263,9 +267,8 @@ func TestUpdateSource(t *testing.T) {
 	cfg, _ := json.Marshal(map[string]any{"base_path": e.dir})
 	e.mock.ExpectQuery("UPDATE state_sources SET").
 		WithArgs("s1", "renamed", nil, sqlmock.AnyArg(), sqlmock.AnyArg(), nil).
-		WillReturnRows(sqlmock.NewRows(
-			[]string{"id", "name", "type", "endpoint", "config", "scope", "encrypted_credentials", "created_at", "updated_at"}).
-			AddRow("s1", "renamed", "local", "", cfg, []byte(`{}`), nil, "2026-06-10", "2026-06-11"))
+		WillReturnRows(sqlmock.NewRows(apiSourceCols).
+			AddRow("s1", "renamed", "local", "", cfg, []byte(`{}`), nil, "2026-06-10", "2026-06-11", testActingOrg))
 	body := fmt.Sprintf(`{"name":"renamed","config":{"base_path":%q}}`, e.dir)
 	w := e.do(http.MethodPut, "/api/v1/sources/s1", body)
 	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"renamed"`) {
@@ -284,7 +287,7 @@ func TestUpdateSource(t *testing.T) {
 		t.Errorf("missing name: status = %d, want 400", w.Code)
 	}
 	e.mock.ExpectQuery("SELECT .+ FROM state_sources WHERE id").WithArgs("ghost").
-		WillReturnRows(sqlmock.NewRows([]string{"id", "name", "type", "endpoint", "config", "scope", "encrypted_credentials", "created_at", "updated_at"}))
+		WillReturnRows(sqlmock.NewRows(apiSourceCols))
 	if w := e.do(http.MethodPut, "/api/v1/sources/ghost", `{"name":"x"}`); w.Code != http.StatusNotFound {
 		t.Errorf("ghost: status = %d, want 404", w.Code)
 	}
@@ -307,9 +310,8 @@ func TestTestSource(t *testing.T) {
 	// A broken backend surfaces as 502 with the connector error.
 	cfg, _ := json.Marshal(map[string]any{"base_path": filepath.Join(e.dir, "gone")})
 	e.mock.ExpectQuery("SELECT .+ FROM state_sources WHERE id").WithArgs("s2").
-		WillReturnRows(sqlmock.NewRows(
-			[]string{"id", "name", "type", "endpoint", "config", "scope", "encrypted_credentials", "created_at", "updated_at"}).
-			AddRow("s2", "broken", "local", "", cfg, []byte(`{}`), nil, "2026-06-10", "2026-06-10"))
+		WillReturnRows(sqlmock.NewRows(apiSourceCols).
+			AddRow("s2", "broken", "local", "", cfg, []byte(`{}`), nil, "2026-06-10", "2026-06-10", testActingOrg))
 	if w := e.do(http.MethodPost, "/api/v1/sources/s2/test", ""); w.Code != http.StatusBadRequest && w.Code != http.StatusBadGateway {
 		t.Errorf("broken: status = %d, want 400/502", w.Code)
 	}
@@ -357,8 +359,7 @@ func TestTestSourceConfigMergesStoredCredentials(t *testing.T) {
 
 	// An unknown source_id is a 404, mirroring the by-id routes.
 	e.mock.ExpectQuery("SELECT .+ FROM state_sources WHERE id").WithArgs("ghost").
-		WillReturnRows(sqlmock.NewRows(
-			[]string{"id", "name", "type", "endpoint", "config", "scope", "encrypted_credentials", "created_at", "updated_at"}))
+		WillReturnRows(sqlmock.NewRows(apiSourceCols))
 	ghost := fmt.Sprintf(`{"type":"local","config":{"base_path":%q},"source_id":"ghost"}`, filepath.ToSlash(e.dir))
 	if w := e.do(http.MethodPost, "/api/v1/sources/test", ghost); w.Code != http.StatusNotFound {
 		t.Errorf("ghost source_id: status = %d, want 404", w.Code)
@@ -583,9 +584,8 @@ func TestEditState_AbortsWhenReadFails(t *testing.T) {
 
 	cfg, _ := json.Marshal(map[string]any{"address": srv.URL})
 	e.mock.ExpectQuery("SELECT .+ FROM state_sources WHERE id").WithArgs("s1").
-		WillReturnRows(sqlmock.NewRows(
-			[]string{"id", "name", "type", "endpoint", "config", "scope", "encrypted_credentials", "created_at", "updated_at"}).
-			AddRow("s1", "flaky-http", "http", "", cfg, []byte(`{}`), nil, "2026-06-11", "2026-06-11"))
+		WillReturnRows(sqlmock.NewRows(apiSourceCols).
+			AddRow("s1", "flaky-http", "http", "", cfg, []byte(`{}`), nil, "2026-06-11", "2026-06-11", testActingOrg))
 	// No lock_address => app-level DB lock: TTL reap, acquire, then release.
 	e.mock.ExpectExec("DELETE FROM state_locks").WillReturnResult(sqlmock.NewResult(0, 0))
 	e.mock.ExpectQuery("INSERT INTO state_locks").
@@ -1216,7 +1216,7 @@ func TestTransfer_BackupAndMigrate(t *testing.T) {
 	// Missing target source → 404.
 	e.expectSource("s1", e.dir)
 	e.mock.ExpectQuery("SELECT .+ FROM state_sources WHERE id").WithArgs("ghost").
-		WillReturnRows(sqlmock.NewRows([]string{"id", "name", "type", "endpoint", "config", "scope", "encrypted_credentials", "created_at", "updated_at"}))
+		WillReturnRows(sqlmock.NewRows(apiSourceCols))
 	if w := e.do(http.MethodPost, "/api/v1/sources/s1/state/backup?key=app.tfstate",
 		`{"target_source_id":"ghost","target_key":"k"}`); w.Code != http.StatusNotFound {
 		t.Errorf("missing target source: status = %d, want 404", w.Code)
@@ -1230,9 +1230,8 @@ func TestListSourcesIsBounded(t *testing.T) {
 	e := newSourcesEnv(t)
 	cfg, _ := json.Marshal(map[string]any{"base_path": e.dir})
 	row := func() *sqlmock.Rows {
-		return sqlmock.NewRows(
-			[]string{"id", "name", "type", "endpoint", "config", "scope", "encrypted_credentials", "created_at", "updated_at"}).
-			AddRow("s1", "demo", "local", "", cfg, []byte(`{}`), nil, "2026-06-10", "2026-06-10")
+		return sqlmock.NewRows(apiSourceCols).
+			AddRow("s1", "demo", "local", "", cfg, []byte(`{}`), nil, "2026-06-10", "2026-06-10", testActingOrg)
 	}
 
 	// No params: capped at the 500 default, offset 0.

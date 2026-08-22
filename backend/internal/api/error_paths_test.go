@@ -9,8 +9,8 @@ import (
 )
 
 func sqlmockRowsForSource(cfgJSON string) *sqlmock.Rows {
-	return sqlmock.NewRows([]string{"id", "name", "type", "endpoint", "config", "scope", "encrypted_credentials", "created_at", "updated_at"}).
-		AddRow("s1", "hcp", "hcp", "", []byte(cfgJSON), []byte(`{}`), []byte("sealed"), "2026-06-11", "2026-06-11")
+	return sqlmock.NewRows(apiSourceCols).
+		AddRow("s1", "hcp", "hcp", "", []byte(cfgJSON), []byte(`{}`), []byte("sealed"), "2026-06-11", "2026-06-11", testActingOrg)
 }
 
 func stringsContains(s, sub string) bool { return strings.Contains(s, sub) }
