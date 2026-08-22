@@ -1,6 +1,7 @@
 package repositories
 
 import (
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -66,16 +67,42 @@ func TestEveryInsertIntoAPartitionRootNamesTheOrganization(t *testing.T) {
 		roots[r] = true
 	}
 
-	files, err := filepath.Glob("*.go")
-	if err != nil {
-		t.Fatalf("glob: %v", err)
+	// WALKS THE WHOLE MODULE, not this package.
+	//
+	// It globbed "*.go" here at first, which covered every root INSERT that exists
+	// today -- all eight local ones live in this package. That is exactly the
+	// shape of a guard that is BLIND rather than clean: an INSERT written from
+	// internal/services or internal/api tomorrow would not be missed by the check,
+	// it would be invisible to it, and the check would keep reporting success.
+	// The two states are indistinguishable from the outside, so the scan is
+	// widened to where the risk actually is.
+	//
+	// _test.go is still skipped, deliberately: the tenancy integration fixtures
+	// INSERT unstamped rows on purpose, because unstamped rows are the condition
+	// they exist to reproduce.
+	root := filepath.Join("..", "..", "..")
+	var files []string
+	if err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			if name := d.Name(); name == "vendor" || name == ".git" || name == "node_modules" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if strings.HasSuffix(path, ".go") && !strings.HasSuffix(path, "_test.go") {
+			files = append(files, path)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("walk %s: %v", root, err)
 	}
+
 	seen := map[string]bool{}
 	scanned := 0
 	for _, f := range files {
-		if strings.HasSuffix(f, "_test.go") {
-			continue
-		}
 		src, err := os.ReadFile(f)
 		if err != nil {
 			t.Fatalf("read %s: %v", f, err)
@@ -103,9 +130,14 @@ func TestEveryInsertIntoAPartitionRootNamesTheOrganization(t *testing.T) {
 		}
 	}
 
-	if scanned == 0 {
-		t.Fatal("no source files scanned: this guard is looking at the wrong directory, and " +
-			"an empty enumeration passes for free -- a blind scan looks exactly like a clean one")
+	// A floor, not just non-zero. "Did it read ANY file" would still pass if the
+	// walk collapsed to this one package, which is the narrowing this widening
+	// exists to prevent.
+	const minFilesForAModuleWideWalk = 100
+	if scanned < minFilesForAModuleWideWalk {
+		t.Fatalf("scanned only %d source files from %s: a module-wide walk reaches well over that (the module has ~156 today), so "+
+			"than that, so this has narrowed back to a single package -- and a blind scan "+
+			"looks exactly like a clean one", scanned, root)
 	}
 
 	// Every root must be ACCOUNTED FOR: found here, or recorded as living
