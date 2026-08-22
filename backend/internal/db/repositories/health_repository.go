@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"strings"
 	"time"
 )
 
@@ -82,7 +83,23 @@ func scanHealth(scanner interface{ Scan(dest ...any) error }) (*HealthRun, error
 	return &h, nil
 }
 
-func (r *HealthRepository) Create(ctx context.Context, h *HealthRun) (*HealthRun, error) {
+// Create records a health run owned by organizationID.
+//
+// LIKE drift_runs, THIS CANNOT INHERIT -- and 000033 is very slightly overstated
+// about why. It says health_runs has "no ownership edge to inherit along even in
+// principle"; in fact pipeline_connection_id IS an edge to a partition root, and
+// it is non-NULL at INSERT time. What 000033 is right about is that the edge is
+// ON DELETE SET NULL, so an inherited answer would become NULL -- unpartitioned,
+// readable by everyone -- as soon as the connection was deleted. Its own column
+// is the only durable answer.
+//
+// So the caller supplies it, and the pipeline connection remains available as a
+// CROSS-CHECK rather than as the source of the value.
+func (r *HealthRepository) Create(ctx context.Context, h *HealthRun, organizationID string) (*HealthRun, error) {
+	organizationID = strings.TrimSpace(organizationID)
+	if organizationID == "" {
+		return nil, ErrNoOrganization
+	}
 	pv, err := json.Marshal(orEmptyStrMap(h.ProviderVersions))
 	if err != nil {
 		return nil, err
@@ -93,11 +110,11 @@ func (r *HealthRepository) Create(ctx context.Context, h *HealthRun) (*HealthRun
 	}
 	row := r.db.QueryRowContext(ctx, `
 		INSERT INTO health_runs
-			(pipeline_connection_id, repo_ref, working_dir, terraform_version, provider_versions, module_versions, registry_host, status, callback_token, actor)
-		VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7, $8, $9, $10)
+			(pipeline_connection_id, repo_ref, working_dir, terraform_version, provider_versions, module_versions, registry_host, status, callback_token, actor, organization_id)
+		VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7, $8, $9, $10, $11::uuid)
 		RETURNING `+healthColumns,
 		h.PipelineConnectionID, nullStr(h.RepoRef), nullStr(h.WorkingDir), nullStr(h.TerraformVersion),
-		string(pv), string(mv), nullStr(h.RegistryHost), h.Status, h.CallbackToken, nullStr(h.Actor))
+		string(pv), string(mv), nullStr(h.RegistryHost), h.Status, h.CallbackToken, nullStr(h.Actor), organizationID)
 	return scanHealth(row)
 }
 

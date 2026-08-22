@@ -17,6 +17,12 @@ type PipelineConnection struct {
 	EncryptedToken []byte         `json:"-"`
 	CreatedAt      string         `json:"created_at"`
 	UpdatedAt      string         `json:"updated_at"`
+
+	// OrganizationID is the owning tenant, carried in memory so a handler can
+	// cross-check a connection against the caller's acting organization before
+	// dispatching work at it. Never serialized: the tenant boundary is enforced
+	// server-side and echoing it back invites a client to try setting it (#436).
+	OrganizationID string `json:"-"`
 }
 
 // PipelineRepository is the DAO for pipeline_connections.
@@ -28,13 +34,19 @@ func NewPipelineRepository(db *sql.DB) *PipelineRepository {
 	return &PipelineRepository{db: db}
 }
 
-const pipelineColumns = `id, name, provider, config, encrypted_token, created_at::text, updated_at::text`
+const pipelineColumns = `id, name, provider, config, encrypted_token, created_at::text, updated_at::text,
+	organization_id::text`
 
 func scanPipeline(scanner interface{ Scan(dest ...any) error }) (*PipelineConnection, error) {
 	var p PipelineConnection
 	var configJSON []byte
-	if err := scanner.Scan(&p.ID, &p.Name, &p.Provider, &configJSON, &p.EncryptedToken, &p.CreatedAt, &p.UpdatedAt); err != nil {
+	var organizationID sql.NullString
+	if err := scanner.Scan(&p.ID, &p.Name, &p.Provider, &configJSON, &p.EncryptedToken, &p.CreatedAt, &p.UpdatedAt,
+		&organizationID); err != nil {
 		return nil, err
+	}
+	if organizationID.Valid {
+		p.OrganizationID = organizationID.String
 	}
 	if len(configJSON) > 0 {
 		_ = json.Unmarshal(configJSON, &p.Config)

@@ -269,7 +269,7 @@ func errDBForTest() error { return os.ErrPermission }
 // httpSourceCols is the state_sources row shape for a manually-registered http
 // source (mirrors TestEditState_AbortsWhenReadFails's precedent) — needed
 // because expectSource always hardcodes type "local".
-var httpSourceCols = []string{"id", "name", "type", "endpoint", "config", "scope", "encrypted_credentials", "created_at", "updated_at"}
+var httpSourceCols = apiSourceCols
 
 // TestMigrate_DecommissionSkippedOnSourceDrift covers the pre-decommission
 // conflict check itself: reviewer feedback found it had never been driven to
@@ -304,7 +304,7 @@ func TestMigrate_DecommissionSkippedOnSourceDrift(t *testing.T) {
 	cfg, _ := json.Marshal(map[string]any{"address": srv.URL})
 	e.mock.ExpectQuery("SELECT .+ FROM state_sources WHERE id").WithArgs("s1").
 		WillReturnRows(sqlmock.NewRows(httpSourceCols).
-			AddRow("s1", "drifting-http", "http", "", cfg, []byte(`{}`), nil, "2026-06-11", "2026-06-11"))
+			AddRow("s1", "drifting-http", "http", "", cfg, []byte(`{}`), nil, "2026-06-11", "2026-06-11", testActingOrg))
 	e.expectSource("s2", dirB)
 	// s1 has no lock_address, so acquireLock falls back to the app-level DB lock:
 	// reap, then acquire (see TestEditState_AbortsWhenReadFails for precedent).
@@ -360,7 +360,7 @@ func TestMigrate_ForceOverridesDecommissionConflict(t *testing.T) {
 	cfg, _ := json.Marshal(map[string]any{"address": srv.URL})
 	e.mock.ExpectQuery("SELECT .+ FROM state_sources WHERE id").WithArgs("s1").
 		WillReturnRows(sqlmock.NewRows(httpSourceCols).
-			AddRow("s1", "drifting-http", "http", "", cfg, []byte(`{}`), nil, "2026-06-11", "2026-06-11"))
+			AddRow("s1", "drifting-http", "http", "", cfg, []byte(`{}`), nil, "2026-06-11", "2026-06-11", testActingOrg))
 	e.expectSource("s2", dirB)
 	e.mock.ExpectExec("DELETE FROM state_locks").WillReturnResult(sqlmock.NewResult(0, 0))
 	e.mock.ExpectQuery("INSERT INTO state_locks").

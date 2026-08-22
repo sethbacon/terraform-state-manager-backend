@@ -215,8 +215,8 @@ func TestDashboardOverview_StoreAggregation(t *testing.T) {
 
 	cfg, _ := json.Marshal(map[string]any{"base_path": dir})
 	sourceListRows := func() *sqlmock.Rows {
-		return sqlmock.NewRows([]string{"id", "name", "type", "endpoint", "config", "scope", "encrypted_credentials", "created_at", "updated_at"}).
-			AddRow("s1", "demo", "local", "", cfg, []byte(`{}`), nil, "2026-06-10", "2026-06-10")
+		return sqlmock.NewRows(apiSourceCols).
+			AddRow("s1", "demo", "local", "", cfg, []byte(`{}`), nil, "2026-06-10", "2026-06-10", testActingOrg)
 	}
 
 	// Sync cycle: list sources, diff markers (none yet), upsert the analysis,
@@ -289,9 +289,9 @@ func TestDashboardOverview_SyncStatusDegraded(t *testing.T) {
 
 	cfg, _ := json.Marshal(map[string]any{"base_path": "/tmp"})
 	mock.ExpectQuery("SELECT .+ FROM state_sources ORDER BY").WillReturnRows(
-		sqlmock.NewRows([]string{"id", "name", "type", "endpoint", "config", "scope", "encrypted_credentials", "created_at", "updated_at"}).
-			AddRow("s1", "demo", "local", "", cfg, []byte(`{}`), nil, "2026-06-10", "2026-06-10").
-			AddRow("s2", "fresh", "local", "", cfg, []byte(`{}`), nil, "2026-06-10", "2026-06-10"))
+		sqlmock.NewRows(apiSourceCols).
+			AddRow("s1", "demo", "local", "", cfg, []byte(`{}`), nil, "2026-06-10", "2026-06-10", testActingOrg).
+			AddRow("s2", "fresh", "local", "", cfg, []byte(`{}`), nil, "2026-06-10", "2026-06-10", testActingOrg))
 	mock.ExpectQuery("FROM source_sync_status").WillReturnRows(
 		sqlmock.NewRows([]string{"source_id", "last_sync_at", "states_listed", "read_errors", "last_error", "stored"}).
 			AddRow("s1", "2026-06-11T09:00:00Z", 165, 3, "read ws-1: 429", 162))
@@ -337,8 +337,8 @@ func TestDashboardOverview_AggregateCache(t *testing.T) {
 
 	cfg, _ := json.Marshal(map[string]any{"base_path": "/tmp"})
 	sourceRows := func() *sqlmock.Rows {
-		return sqlmock.NewRows([]string{"id", "name", "type", "endpoint", "config", "scope", "encrypted_credentials", "created_at", "updated_at"}).
-			AddRow("s1", "demo", "local", "", cfg, []byte(`{}`), nil, "2026-06-10", "2026-06-10")
+		return sqlmock.NewRows(apiSourceCols).
+			AddRow("s1", "demo", "local", "", cfg, []byte(`{}`), nil, "2026-06-10", "2026-06-10", testActingOrg)
 	}
 	statusRows := func(syncedAt string) *sqlmock.Rows {
 		return sqlmock.NewRows([]string{"source_id", "last_sync_at", "states_listed", "read_errors", "last_error", "stored"}).

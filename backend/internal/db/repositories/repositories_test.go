@@ -35,11 +35,15 @@ var ctx = context.Background()
 // SourceRepository
 // ---------------------------------------------------------------------------
 
-var sourceCols = []string{"id", "name", "type", "endpoint", "config", "scope", "encrypted_credentials", "created_at", "updated_at"}
+// organization_id is LAST and is part of the fixture, not an afterthought: the
+// projection selects it, so a fixture that omits it makes every scan fail. That
+// is the desirable direction of failure -- a fixture cannot silently keep
+// passing while the statement stops selecting a column (#436).
+var sourceCols = []string{"id", "name", "type", "endpoint", "config", "scope", "encrypted_credentials", "created_at", "updated_at", "organization_id"}
 
 func sourceRow() *sqlmock.Rows {
 	return sqlmock.NewRows(sourceCols).
-		AddRow("s1", "demo", "local", "", []byte(`{"base_path":"/data"}`), []byte(`{}`), nil, "2026-06-10", "2026-06-10")
+		AddRow("s1", "demo", "local", "", []byte(`{"base_path":"/data"}`), []byte(`{}`), nil, "2026-06-10", "2026-06-10", testOrgID)
 }
 
 func TestSourceRepository_List(t *testing.T) {
@@ -302,11 +306,11 @@ func TestCISourceRepository_CRUD(t *testing.T) {
 // PipelineRepository
 // ---------------------------------------------------------------------------
 
-var pipelineCols = []string{"id", "name", "provider", "config", "encrypted_token", "created_at", "updated_at"}
+var pipelineCols = []string{"id", "name", "provider", "config", "encrypted_token", "created_at", "updated_at", "organization_id"}
 
 func pipelineRow() *sqlmock.Rows {
 	return sqlmock.NewRows(pipelineCols).
-		AddRow("p1", "drift-ci", "github", []byte(`{"repo":"org/repo"}`), nil, "2026-06-10", "2026-06-10")
+		AddRow("p1", "drift-ci", "github", []byte(`{"repo":"org/repo"}`), nil, "2026-06-10", "2026-06-10", testOrgID)
 }
 
 func TestPipelineRepository_CRUD(t *testing.T) {
@@ -376,7 +380,7 @@ func TestTransferRepository(t *testing.T) {
 	row := sqlmock.NewRows(transferCols).
 		AddRow("t1", "migrate", "s1", "k", "s2", "k2", "success", true, true, "", "alice", "2026-06-10")
 	mock.ExpectQuery("INSERT INTO state_transfers").WillReturnRows(row)
-	created, err := r.Create(ctx, &Transfer{Mode: "migrate", SourceID: "s1", SourceKey: "k", TargetSourceID: "s2", TargetKey: "k2", Status: "success"})
+	created, err := r.Create(ctx, &Transfer{Mode: "migrate", SourceID: "s1", SourceKey: "k", TargetSourceID: "s2", TargetKey: "k2", Status: "success"}, testOrgID)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -445,9 +449,8 @@ func TestSourceListPage(t *testing.T) {
 
 	mock.ExpectQuery(`SELECT .+ FROM state_sources ORDER BY created_at DESC\s+LIMIT`).
 		WithArgs(500, 0).
-		WillReturnRows(sqlmock.NewRows(
-			[]string{"id", "name", "type", "endpoint", "config", "scope", "encrypted_credentials", "created_at", "updated_at"}).
-			AddRow("s1", "demo", "local", "", []byte(`{}`), []byte(`{}`), nil, "2026-06-10", "2026-06-10"))
+		WillReturnRows(sqlmock.NewRows(sourceCols).
+			AddRow("s1", "demo", "local", "", []byte(`{}`), []byte(`{}`), nil, "2026-06-10", "2026-06-10", testOrgID))
 
 	got, err := r.ListPage(ctx, 500, 0)
 	if err != nil {

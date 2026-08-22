@@ -29,7 +29,12 @@ type HealthHandlers struct {
 	healthRepo   *repositories.HealthRepository
 	audit        auditor
 	notifier     *notify.Notifier // may be nil (notifications disabled / no DB)
+	orgs         organizationExistence
 }
+
+// AttachOrganizations supplies the existence check the acting-organization
+// resolver uses on the platform-admin branch. See acting_organization.go.
+func (h *HealthHandlers) AttachOrganizations(orgs organizationExistence) { h.orgs = orgs }
 
 // NewHealthHandlers constructs the handlers over the app (public) connection.
 // identityDB (may be nil) carries the shared audit log; the notifier (may be nil)
@@ -75,6 +80,22 @@ func (h *HealthHandlers) CreateRun() gin.HandlerFunc {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
+		// The health run is stamped with the ACTING organization, not with the
+		// pipeline connection's -- health_runs.pipeline_connection_id is
+		// ON DELETE SET NULL, so an inherited answer evaporates into an
+		// unpartitioned row the moment the connection is deleted (#436). The
+		// connection is a CROSS-CHECK below, not the source of the value.
+		//
+		// Resolved BEFORE the first statement runs, so a caller with no resolvable
+		// acting organization is refused without a database round trip -- and so
+		// the unresolved-scope path is reachable in a test without being confused
+		// for a failed query, which is how this refusal previously passed its own
+		// test for the wrong reason.
+		organizationID := actingOrganization(c, h.orgs)
+		if organizationID == "" {
+			return // actingOrganization has already written the response
+		}
+
 		ctx := c.Request.Context()
 		conn, err := h.pipelineRepo.GetByID(ctx, req.PipelineConnectionID)
 		if err != nil {
@@ -104,7 +125,14 @@ func (h *HealthHandlers) CreateRun() gin.HandlerFunc {
 			CallbackToken:        randomToken(),
 			Actor:                userIDOf(c),
 		}
-		saved, err := h.healthRepo.Create(ctx, run)
+		if conn.OrganizationID != "" && conn.OrganizationID != organizationID {
+			// Same shape as a missing connection: a caller outside the owning
+			// organization learns nothing about whether the id exists.
+			c.JSON(http.StatusNotFound, gin.H{"error": "pipeline connection not found"})
+			return
+		}
+
+		saved, err := h.healthRepo.Create(ctx, run, organizationID)
 		if err != nil {
 			serverError(c, err, "failed to create health run")
 			return

@@ -93,11 +93,10 @@ func TestReportStates_RefreshQueryIsInert(t *testing.T) {
 }
 
 func localSourceRows(rows ...[2]string) *sqlmock.Rows {
-	cols := []string{"id", "name", "type", "endpoint", "config", "scope", "encrypted_credentials", "created_at", "updated_at"}
-	out := sqlmock.NewRows(cols)
+	out := sqlmock.NewRows(apiSourceCols)
 	for _, r := range rows {
 		cfg, _ := json.Marshal(map[string]any{"base_path": r[1]})
-		out.AddRow(r[0], r[0], "local", "", cfg, []byte(`{}`), nil, "2026-06-10", "2026-06-10")
+		out.AddRow(r[0], r[0], "local", "", cfg, []byte(`{}`), nil, "2026-06-10", "2026-06-10", testActingOrg)
 	}
 	return out
 }

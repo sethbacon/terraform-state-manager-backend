@@ -207,7 +207,7 @@ func TestHealthRepository_CreateListGet(t *testing.T) {
 
 	mock.ExpectQuery("INSERT INTO health_runs").WillReturnRows(healthRow("tok-1"))
 	conn := "p1"
-	created, err := r.Create(ctx, &HealthRun{PipelineConnectionID: &conn, Status: "pending", CallbackToken: "tok-1"})
+	created, err := r.Create(ctx, &HealthRun{PipelineConnectionID: &conn, Status: "pending", CallbackToken: "tok-1"}, testOrgID)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}

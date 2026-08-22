@@ -18,6 +18,17 @@ import (
 )
 
 func newDriftEnv(t *testing.T) *sourcesEnv {
+	return newDriftEnvWithScope(t, &tenantscope.Scope{OrgIDs: []string{testActingOrg}})
+}
+
+// newDriftEnvWithoutScope builds the rig with NO tenant scope stored, standing in
+// for a route whose middleware.TenantScope was never wired. That is a distinct
+// state from "resolved to nothing", and #436 turns on the two being told apart.
+func newDriftEnvWithoutScope(t *testing.T) *sourcesEnv {
+	return newDriftEnvWithScope(t, nil)
+}
+
+func newDriftEnvWithScope(t *testing.T, scope *tenantscope.Scope) *sourcesEnv {
 	t.Helper()
 	t.Setenv("TSM_ENCRYPTION_KEY", "0123456789abcdef0123456789abcdef")
 	db, mock, err := newSQLMock()
@@ -36,7 +47,9 @@ func newDriftEnv(t *testing.T) *sourcesEnv {
 	// stored, because a route that CREATES treats an unresolved scope as a 500
 	// rather than as "no memberships" (#436).
 	r.Use(func(c *gin.Context) {
-		tenantscope.Store(c, tenantscope.Scope{OrgIDs: []string{testActingOrg}})
+		if scope != nil {
+			tenantscope.Store(c, *scope)
+		}
 		c.Next()
 	})
 	v1 := r.Group("/api/v1")
@@ -92,8 +105,8 @@ func pipelineHTTPRow(t *testing.T, provider, token string, cfgMap map[string]any
 			t.Fatalf("Encrypt: %v", err)
 		}
 	}
-	return sqlmock.NewRows([]string{"id", "name", "provider", "config", "encrypted_token", "created_at", "updated_at"}).
-		AddRow("p1", "ci", provider, cfgJSON, enc, "2026-06-10", "2026-06-10")
+	return sqlmock.NewRows(apiPipelineCols).
+		AddRow("p1", "ci", provider, cfgJSON, enc, "2026-06-10", "2026-06-10", testActingOrg)
 }
 
 func TestPipelines_CRUD(t *testing.T) {
@@ -176,7 +189,7 @@ func TestDriftCreateRun(t *testing.T) {
 
 	// Unknown pipeline → 404.
 	e.mock.ExpectQuery("SELECT .+ FROM pipeline_connections WHERE id").WithArgs("ghost").
-		WillReturnRows(sqlmock.NewRows([]string{"id", "name", "provider", "config", "encrypted_token", "created_at", "updated_at"}))
+		WillReturnRows(sqlmock.NewRows(apiPipelineCols))
 	if w := e.do(http.MethodPost, "/api/v1/drift/runs", `{"pipeline_connection_id":"ghost"}`); w.Code != http.StatusNotFound {
 		t.Errorf("missing pipeline: status = %d, want 404", w.Code)
 	}
