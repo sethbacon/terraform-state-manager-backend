@@ -48,7 +48,17 @@ type ScheduleHandlers struct {
 	repo       *repositories.ScheduleRepository
 	dispatcher scheduler.Dispatcher
 	audit      auditor
+	// orgs verifies that an acting organization exists before a row is stamped
+	// with it. Wired by the router from its single approles.Members; nil is
+	// refused rather than skipped (see actingOrganization).
+	orgs organizationExistence
 }
+
+// AttachOrganizations wires the existence check used before a row is stamped
+// with an acting organization (#436). A setter, and the router supplies its
+// EXISTING approles.Members: internal/approles' guard test refuses a second
+// construction of the shared organization repository.
+func (h *ScheduleHandlers) AttachOrganizations(orgs organizationExistence) { h.orgs = orgs }
 
 // NewScheduleHandlers builds the handlers over the app connection. dispatcher is
 // used by the "run now" endpoint and is the same adapter the background runner
@@ -141,7 +151,15 @@ func (h *ScheduleHandlers) CreateSchedule() gin.HandlerFunc {
 			Name: req.Name, CronExpr: req.CronExpr, TargetType: req.TargetType,
 			TargetConfig: req.TargetConfig, Enabled: enabled,
 		}
-		saved, err := h.repo.Create(c.Request.Context(), s, h.nextRun(req.CronExpr, enabled))
+		// The organization this row belongs to, named by the request and verified
+		// against a scope this server resolved (#436). Writes the response
+		// itself on every failure path.
+		orgID := actingOrganization(c, h.orgs)
+		if orgID == "" {
+			return
+		}
+
+		saved, err := h.repo.Create(c.Request.Context(), s, h.nextRun(req.CronExpr, enabled), orgID)
 		if err != nil {
 			serverError(c, err, "failed to create schedule")
 			return

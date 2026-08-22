@@ -28,7 +28,17 @@ import (
 type CISourceHandlers struct {
 	repo  *repositories.CISourceRepository
 	audit *idstore.AuditRepository
+	// orgs verifies that an acting organization exists before a row is stamped
+	// with it. Wired by the router from its single approles.Members; nil is
+	// refused rather than skipped (see actingOrganization).
+	orgs organizationExistence
 }
+
+// AttachOrganizations wires the existence check used before a row is stamped
+// with an acting organization (#436). A setter, and the router supplies its
+// EXISTING approles.Members: internal/approles' guard test refuses a second
+// construction of the shared organization repository.
+func (h *CISourceHandlers) AttachOrganizations(orgs organizationExistence) { h.orgs = orgs }
 
 // NewCISourceHandlers builds the handlers. identityDB (search_path
 // identity,public) carries the shared audit log.
@@ -212,7 +222,15 @@ func (h *CISourceHandlers) CreateCISource() gin.HandlerFunc {
 			return
 		}
 
-		saved, err := h.repo.Create(c.Request.Context(), src)
+		// The organization this row belongs to, named by the request and verified
+		// against a scope this server resolved (#436). Writes the response
+		// itself on every failure path.
+		orgID := actingOrganization(c, h.orgs)
+		if orgID == "" {
+			return
+		}
+
+		saved, err := h.repo.Create(c.Request.Context(), src, orgID)
 		if err != nil {
 			serverError(c, err, "failed to create CI source")
 			return

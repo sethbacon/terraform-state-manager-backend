@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"strings"
 )
 
 // PipelineConnection is a CI integration used to dispatch drift/version runs.
@@ -70,7 +71,22 @@ func (r *PipelineRepository) GetByID(ctx context.Context, id string) (*PipelineC
 	return p, nil
 }
 
-func (r *PipelineRepository) Create(ctx context.Context, p *PipelineConnection) (*PipelineConnection, error) {
+// Create writes a pipeline connection owned by organizationID.
+//
+// An empty organization is REFUSED, not omitted: omitting the column falls
+// through to migration 000033's DEFAULT, which is indistinguishable from a
+// successful stamp and is how every row in the deployment came to belong to the
+// default organization (#436). Naming it with an empty value writes NULL, which
+// is invisible to every tenant.
+//
+// A parameter rather than a field on PipelineConnection, matching Source: the
+// struct is serialized to API responses and is the argument to Update, whose
+// UPDATE deliberately does not touch organization_id.
+func (r *PipelineRepository) Create(ctx context.Context, p *PipelineConnection, organizationID string) (*PipelineConnection, error) {
+	organizationID = strings.TrimSpace(organizationID)
+	if organizationID == "" {
+		return nil, ErrNoOrganization
+	}
 	configJSON, err := json.Marshal(orEmptyMap(p.Config))
 	if err != nil {
 		return nil, err
@@ -80,10 +96,10 @@ func (r *PipelineRepository) Create(ctx context.Context, p *PipelineConnection) 
 		token = p.EncryptedToken
 	}
 	row := r.db.QueryRowContext(ctx, `
-		INSERT INTO pipeline_connections (name, provider, config, encrypted_token)
-		VALUES ($1, $2, $3::jsonb, $4)
+		INSERT INTO pipeline_connections (name, provider, config, encrypted_token, organization_id)
+		VALUES ($1, $2, $3::jsonb, $4, $5::uuid)
 		RETURNING `+pipelineColumns,
-		p.Name, p.Provider, string(configJSON), token)
+		p.Name, p.Provider, string(configJSON), token, organizationID)
 	return scanPipeline(row)
 }
 

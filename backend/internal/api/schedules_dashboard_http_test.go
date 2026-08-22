@@ -12,6 +12,8 @@ import (
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
 	"github.com/gin-gonic/gin"
 
+	"github.com/terraform-state-manager/terraform-state-manager/internal/tenantscope"
+
 	"github.com/terraform-state-manager/terraform-state-manager/internal/db/repositories"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/services/statesync"
 )
@@ -46,6 +48,14 @@ func newSchedulesEnv(t *testing.T) *schedulesEnv {
 	h := NewScheduleHandlers(db, nil, d)
 
 	r := gin.New()
+	// What middleware.TenantScope publishes in production. Stored directly rather
+	// than resolved, so this rig needs no membership store — but it must be
+	// stored, because a route that CREATES treats an unresolved scope as a 500
+	// rather than as "no memberships" (#436).
+	r.Use(func(c *gin.Context) {
+		tenantscope.Store(c, tenantscope.Scope{OrgIDs: []string{testActingOrg}})
+		c.Next()
+	})
 	v1 := r.Group("/api/v1")
 	v1.GET("/schedules", h.ListSchedules())
 	v1.POST("/schedules", h.CreateSchedule())
@@ -186,6 +196,14 @@ func TestDashboardOverview_StoreAggregation(t *testing.T) {
 	)
 	h.AttachSyncer(syncer)
 	r := gin.New()
+	// What middleware.TenantScope publishes in production. Stored directly rather
+	// than resolved, so this rig needs no membership store — but it must be
+	// stored, because a route that CREATES treats an unresolved scope as a 500
+	// rather than as "no memberships" (#436).
+	r.Use(func(c *gin.Context) {
+		tenantscope.Store(c, tenantscope.Scope{OrgIDs: []string{testActingOrg}})
+		c.Next()
+	})
 	r.POST("/api/v1/reconcile", h.ReconcileSources())
 	r.GET("/api/v1/dashboard/overview", h.DashboardOverview())
 
@@ -255,6 +273,14 @@ func TestDashboardOverview_SyncStatusDegraded(t *testing.T) {
 	defer db.Close()
 	h := NewSourcesHandlers(db, nil)
 	r := gin.New()
+	// What middleware.TenantScope publishes in production. Stored directly rather
+	// than resolved, so this rig needs no membership store — but it must be
+	// stored, because a route that CREATES treats an unresolved scope as a 500
+	// rather than as "no memberships" (#436).
+	r.Use(func(c *gin.Context) {
+		tenantscope.Store(c, tenantscope.Scope{OrgIDs: []string{testActingOrg}})
+		c.Next()
+	})
 	r.GET("/api/v1/dashboard/overview", h.DashboardOverview())
 	env := &sourcesEnv{r: r, mock: mock}
 
@@ -295,6 +321,14 @@ func TestDashboardOverview_AggregateCache(t *testing.T) {
 	defer db.Close()
 	h := NewSourcesHandlers(db, nil)
 	r := gin.New()
+	// What middleware.TenantScope publishes in production. Stored directly rather
+	// than resolved, so this rig needs no membership store — but it must be
+	// stored, because a route that CREATES treats an unresolved scope as a 500
+	// rather than as "no memberships" (#436).
+	r.Use(func(c *gin.Context) {
+		tenantscope.Store(c, tenantscope.Scope{OrgIDs: []string{testActingOrg}})
+		c.Next()
+	})
 	r.GET("/api/v1/dashboard/overview", h.DashboardOverview())
 	env := &sourcesEnv{r: r, mock: mock}
 
@@ -349,6 +383,14 @@ func TestDashboardOverview_SourceListError(t *testing.T) {
 	defer db.Close()
 	h := NewSourcesHandlers(db, nil)
 	r := gin.New()
+	// What middleware.TenantScope publishes in production. Stored directly rather
+	// than resolved, so this rig needs no membership store — but it must be
+	// stored, because a route that CREATES treats an unresolved scope as a 500
+	// rather than as "no memberships" (#436).
+	r.Use(func(c *gin.Context) {
+		tenantscope.Store(c, tenantscope.Scope{OrgIDs: []string{testActingOrg}})
+		c.Next()
+	})
 	r.GET("/api/v1/dashboard/overview", h.DashboardOverview())
 
 	env := &sourcesEnv{r: r}
@@ -366,6 +408,14 @@ func TestStatesByVersion_HTTP(t *testing.T) {
 		t.Cleanup(func() { db.Close() })
 		h := NewSourcesHandlers(db, nil)
 		r := gin.New()
+		// What middleware.TenantScope publishes in production. Stored directly rather
+		// than resolved, so this rig needs no membership store — but it must be
+		// stored, because a route that CREATES treats an unresolved scope as a 500
+		// rather than as "no memberships" (#436).
+		r.Use(func(c *gin.Context) {
+			tenantscope.Store(c, tenantscope.Scope{OrgIDs: []string{testActingOrg}})
+			c.Next()
+		})
 		r.GET("/api/v1/dashboard/states-by-version", h.StatesByVersion())
 		return r, mock
 	}
