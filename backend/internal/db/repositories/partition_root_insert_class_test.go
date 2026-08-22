@@ -49,8 +49,13 @@ var exemptInserts = map[string]string{}
 // quietly covering nothing.
 var externallyOwnedInserts = map[string]string{
 	"notification_channels": "the INSERT lives in terraform-suite-identity's " +
-		"identity/notify.ChannelRepository.Create. It is stamped from the consumer side " +
-		"via WithOwningOrganization once that module's release lands here.",
+		"identity/notify.ChannelRepository.Create, which builds its column list at " +
+		"runtime, so no source scan here can read it. It IS stamped: the consumer " +
+		"passes notify.WithOwningOrganization from NotificationHandlers.CreateChannel, " +
+		"and that side is covered by TestCreateChannel_IsStampedWithTheActingOrganization " +
+		"in internal/api. The shared module's own PostgreSQL integration tests cover " +
+		"whether the column DEFAULT still fires when the option is omitted -- the half " +
+		"a mock cannot see.",
 }
 
 var insertPattern = regexp.MustCompile(`(?is)INSERT\s+INTO\s+([a-z_]+)\s*\(([^)]*)\)`)
