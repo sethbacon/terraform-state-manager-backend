@@ -568,10 +568,16 @@ func NewRouter(cfg *config.Config, database *sql.DB, identityDB *sql.DB) (*gin.E
 			notif.WithSMTPSettings(settingsRepo, smtpCfg)
 			notif.WithAPIKeyExpirySettings(&cfg.Notifications)
 		}
+		notif.AttachOrganizations(orgMembers)
+		// A FIFTH TenantScope instance, for admin. The channel routes sit behind
+		// auth.ScopeAdmin, so the scope resolved for them must be the admin one:
+		// handing a scope resolved for a different verb to a route that CREATES is
+		// the widening middleware.TenantScope's own doc warns about (#436).
+		tenantScopeAdmin := middleware.TenantScope(orgMembers, platformAdmins, auth.ScopeAdmin)
 		ng := v1.Group("/notifications", requireAuth, middleware.RequireScope(auth.ScopeAdmin))
 		{
 			ng.GET("/channels", notif.ListChannels())
-			ng.POST("/channels", notif.CreateChannel())
+			ng.POST("/channels", tenantScopeAdmin, notif.CreateChannel())
 			ng.PUT("/channels/:id", notif.UpdateChannel())
 			ng.DELETE("/channels/:id", notif.DeleteChannel())
 			ng.POST("/channels/:id/test", notif.TestChannel())

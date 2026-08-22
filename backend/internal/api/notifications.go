@@ -31,6 +31,7 @@ var validEvents = map[string]bool{notify.EventDriftDetected: true, notify.EventR
 
 // NotificationHandlers serves the notification-channel endpoints.
 type NotificationHandlers struct {
+	orgs     organizationExistence
 	repo     *repositories.NotificationChannelRepository
 	notifier *notify.Notifier
 	audit    auditor
@@ -154,6 +155,10 @@ func (h *NotificationHandlers) ListChannels() gin.HandlerFunc {
 // @Security     BearerAuth
 // @Security     CookieAuth
 // @Router       /notifications/channels [post]
+// AttachOrganizations supplies the existence check the acting-organization
+// resolver uses on the platform-admin branch. See acting_organization.go.
+func (h *NotificationHandlers) AttachOrganizations(orgs organizationExistence) { h.orgs = orgs }
+
 func (h *NotificationHandlers) CreateChannel() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		var req channelRequest
@@ -190,7 +195,23 @@ func (h *NotificationHandlers) CreateChannel() gin.HandlerFunc {
 		ch := &repositories.NotificationChannel{
 			Name: req.Name, Type: req.Type, EncryptedTarget: enc, Events: req.events(), Enabled: enabled,
 		}
-		saved, err := h.repo.Create(c.Request.Context(), ch)
+		// A notification channel is a partition root, and until suite-identity #251
+		// its INSERT omitted organization_id -- which does NOT mean the column went
+		// unset. A Postgres DEFAULT applies precisely when a column is omitted, so
+		// under 000033's tsm_default_organization_id() every tenant's channel was
+		// filed into the DEFAULT organization: invisible to the tenant that created
+		// it, visible to whoever owns the default, and non-NULL, so the boot
+		// backfill that repairs NULLs never looked at it.
+		//
+		// The channel's encrypted_target is a capability-bearing secret (000009:8) --
+		// a Slack or webhook URL anyone holding it can post to -- which is what makes
+		// the misfiling worth a shared-module change rather than a local workaround.
+		organizationID := actingOrganization(c, h.orgs)
+		if organizationID == "" {
+			return // actingOrganization has already written the response
+		}
+		saved, err := h.repo.Create(c.Request.Context(), ch,
+			identitynotify.WithOwningOrganization(organizationID))
 		if err != nil {
 			serverError(c, err, "failed to create channel")
 			return
