@@ -26,9 +26,15 @@ func TestDriftRepository_CreateAndGet(t *testing.T) {
 	db, mock := newMock(t)
 	r := NewDriftRepository(db)
 
-	mock.ExpectQuery("INSERT INTO drift_runs").WillReturnRows(driftRow("tok-1"))
+	// The organization is pinned as the last argument: sqlmock matches the
+	// statement by regex, so without this the column could be dropped from the
+	// INSERT entirely and this test would still pass (#436).
+	mock.ExpectQuery("INSERT INTO drift_runs").
+		WithArgs(sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(),
+			sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), testOrgID).
+		WillReturnRows(driftRow("tok-1"))
 	conn := "p1"
-	created, err := r.Create(ctx, &DriftRun{PipelineConnectionID: &conn, StateKey: "app.tfstate", Status: "pending", CallbackToken: "tok-1"})
+	created, err := r.Create(ctx, &DriftRun{PipelineConnectionID: &conn, StateKey: "app.tfstate", Status: "pending", CallbackToken: "tok-1"}, testOrgID)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}

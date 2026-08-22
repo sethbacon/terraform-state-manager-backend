@@ -20,13 +20,15 @@ import (
 
 // fakeDispatcher records the dispatch and returns a scripted outcome.
 type fakeDispatcher struct {
+	gotOrg string
 	runID  string
 	status string
 	err    error
 	calls  int
 }
 
-func (f *fakeDispatcher) Dispatch(_ context.Context, _ string, _ json.RawMessage, _ string) (string, string, error) {
+func (f *fakeDispatcher) Dispatch(_ context.Context, _ string, _ json.RawMessage, _, organizationID string) (string, string, error) {
+	f.gotOrg = organizationID
 	f.calls++
 	return f.runID, f.status, f.err
 }
@@ -68,12 +70,13 @@ func newSchedulesEnv(t *testing.T) *schedulesEnv {
 }
 
 var scheduleHTTPCols = []string{"id", "name", "cron_expr", "target_type", "target_config", "enabled",
-	"last_run_at", "next_run_at", "last_run_id", "last_status", "created_at", "updated_at"}
+	"last_run_at", "next_run_at", "last_run_id", "last_status", "created_at", "updated_at",
+	"organization_id"}
 
 func scheduleHTTPRow() *sqlmock.Rows {
 	return sqlmock.NewRows(scheduleHTTPCols).
 		AddRow("sc1", "nightly", "0 2 * * *", "drift", []byte(`{"pipeline_connection_id":"p1"}`), true,
-			nil, "2026-06-11 02:00:00", nil, nil, "2026-06-10", "2026-06-10")
+			nil, "2026-06-11 02:00:00", nil, nil, "2026-06-10", "2026-06-10", testActingOrg)
 }
 
 func TestSchedules_CRUD(t *testing.T) {
@@ -485,4 +488,28 @@ func TestStatesByVersion_HTTP(t *testing.T) {
 			t.Errorf("status = %d, want 500", w.Code)
 		}
 	})
+}
+
+// TestSchedules_RunNowUsesTheSchedulesOrganization pins which of two plausible
+// organizations a hand-fired run belongs to.
+//
+// The caller triggers it, but the run is a firing of THIS schedule, so it belongs
+// where the schedule does — a caller who may trigger a schedule does not thereby
+// own its output. Using the caller's acting organization would put the run in the
+// wrong tenant whenever those differ, and they differ exactly when a
+// multi-organization operator is doing their job.
+func TestSchedules_RunNowUsesTheSchedulesOrganization(t *testing.T) {
+	e := newSchedulesEnv(t)
+	e.mock.ExpectQuery("SELECT .+ FROM schedules WHERE id").WithArgs("sc1").WillReturnRows(scheduleHTTPRow())
+	e.mock.ExpectExec("UPDATE schedules").WillReturnResult(sqlmock.NewResult(0, 1))
+	e.mock.ExpectQuery("SELECT .+ FROM schedules WHERE id").WithArgs("sc1").WillReturnRows(scheduleHTTPRow())
+
+	if w := e.do(http.MethodPost, "/api/v1/schedules/sc1/run", ""); w.Code != http.StatusOK {
+		t.Fatalf("run: status = %d (%s)", w.Code, w.Body.String())
+	}
+	if e.dispatcher.gotOrg != testActingOrg {
+		t.Errorf("dispatched with organization %q, want the SCHEDULE's %q. The caller's acting "+
+			"organization is not the answer here: the run belongs where the schedule does.",
+			e.dispatcher.gotOrg, testActingOrg)
+	}
 }

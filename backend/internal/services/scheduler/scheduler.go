@@ -29,7 +29,7 @@ const fireTimeout = 30 * time.Second
 // not import api. runID is the id of the work item created (e.g. a drift run);
 // status is "success" | "failed" | "skipped".
 type Dispatcher interface {
-	Dispatch(ctx context.Context, targetType string, targetConfig json.RawMessage, actor string) (runID, status string, err error)
+	Dispatch(ctx context.Context, targetType string, targetConfig json.RawMessage, actor, organizationID string) (runID, status string, err error)
 }
 
 // Runner polls for due schedules on an interval and fires each via the Dispatcher.
@@ -121,7 +121,10 @@ func (r *Runner) fire(s *repositories.Schedule) {
 		return
 	}
 
-	runID, status, err := r.dispatcher.Dispatch(ctx, s.TargetType, s.TargetConfig, "scheduler")
+	// THE WORKER HAS NO PRINCIPAL, so the organization comes from the SCHEDULE
+	// row it is firing — carried in memory since GetDue selected it, because
+	// there is no edge from a run back to its schedule to join along (#436).
+	runID, status, err := r.dispatcher.Dispatch(ctx, s.TargetType, s.TargetConfig, "scheduler", s.OrganizationID)
 	if err != nil {
 		logger.Error("schedule dispatch failed", "error", err)
 		if status == "" {

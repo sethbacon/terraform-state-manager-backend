@@ -576,6 +576,12 @@ func TestCreateRefusesAnUnownedRow(t *testing.T) {
 				&CISource{Name: "x", Provider: "github"}, "")
 			return err
 		}},
+		{"drift_runs", func(db *sql.DB) error {
+			conn := "p1"
+			_, err := NewDriftRepository(db).Create(context.Background(),
+				&DriftRun{PipelineConnectionID: &conn, Status: "pending", CallbackToken: "t"}, "")
+			return err
+		}},
 		{"schedules", func(db *sql.DB) error {
 			_, err := NewScheduleRepository(db).Create(context.Background(),
 				&Schedule{Name: "x", CronExpr: "@daily", TargetType: "drift_run"}, nil, "\t")

@@ -14,12 +14,12 @@ import (
 // ---------------------------------------------------------------------------
 
 var scheduleCols = []string{"id", "name", "cron_expr", "target_type", "target_config", "enabled",
-	"last_run_at", "next_run_at", "last_run_id", "last_status", "created_at", "updated_at"}
+	"last_run_at", "next_run_at", "last_run_id", "last_status", "created_at", "updated_at", "organization_id"}
 
 func scheduleRow() *sqlmock.Rows {
 	return sqlmock.NewRows(scheduleCols).
 		AddRow("sc1", "nightly drift", "0 2 * * *", "drift_run", []byte(`{"pipeline_connection_id":"p1"}`), true,
-			nil, "2026-06-11 02:00:00", nil, nil, "2026-06-10", "2026-06-10")
+			nil, "2026-06-11 02:00:00", nil, nil, "2026-06-10", "2026-06-10", testOrgID)
 }
 
 func TestScheduleRepository_CRUD(t *testing.T) {
