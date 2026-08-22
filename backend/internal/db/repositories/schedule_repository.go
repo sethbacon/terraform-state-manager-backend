@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"strings"
 	"time"
 )
 
@@ -66,16 +67,30 @@ func scanSchedule(scanner interface{ Scan(dest ...any) error }) (*Schedule, erro
 
 // Create inserts a schedule. nextRun (may be nil) seeds next_run_at so the runner
 // fires it at the right time.
-func (r *ScheduleRepository) Create(ctx context.Context, s *Schedule, nextRun *time.Time) (*Schedule, error) {
+// Create writes a schedule owned by organizationID.
+//
+// schedules CANNOT inherit an organization by join: it references its target
+// only inside target_config JSONB, with no column and no foreign key (000008),
+// which is why 000033 gave it a column of its own. So this stamp is the only
+// thing that will ever say which tenant a schedule belongs to — including for
+// the runs it later fires, which carry it forward in memory through the
+// dispatcher because there is no edge to join back along.
+//
+// An empty organizationID is refused rather than omitted (#436).
+func (r *ScheduleRepository) Create(ctx context.Context, s *Schedule, nextRun *time.Time, organizationID string) (*Schedule, error) {
+	organizationID = strings.TrimSpace(organizationID)
+	if organizationID == "" {
+		return nil, ErrNoOrganization
+	}
 	cfg := s.TargetConfig
 	if len(cfg) == 0 {
 		cfg = json.RawMessage(`{}`)
 	}
 	row := r.db.QueryRowContext(ctx, `
-		INSERT INTO schedules (name, cron_expr, target_type, target_config, enabled, next_run_at)
-		VALUES ($1, $2, $3, $4::jsonb, $5, $6)
+		INSERT INTO schedules (name, cron_expr, target_type, target_config, enabled, next_run_at, organization_id)
+		VALUES ($1, $2, $3, $4::jsonb, $5, $6, $7::uuid)
 		RETURNING `+scheduleColumns,
-		s.Name, s.CronExpr, s.TargetType, string(cfg), s.Enabled, nullTime(nextRun))
+		s.Name, s.CronExpr, s.TargetType, string(cfg), s.Enabled, nullTime(nextRun), organizationID)
 	return scanSchedule(row)
 }
 

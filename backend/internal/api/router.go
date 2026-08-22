@@ -473,10 +473,11 @@ func NewRouter(cfg *config.Config, database *sql.DB, identityDB *sql.DB) (*gin.E
 
 		// Phase 3 drift: CI pipeline connections + drift runs.
 		drift := NewDriftHandlers(cfg, database, identityDB, notifier)
+		drift.AttachOrganizations(orgMembers)
 		p := v1.Group("/pipelines", requireAuth)
 		{
 			p.GET("", middleware.RequireScope(auth.ScopeSourcesManage), drift.ListPipelines())
-			p.POST("", middleware.RequireScope(auth.ScopeSourcesManage), drift.CreatePipeline())
+			p.POST("", middleware.RequireScope(auth.ScopeSourcesManage), tenantScopeSourcesManage, drift.CreatePipeline())
 			p.PUT("/:id", middleware.RequireScope(auth.ScopeSourcesManage), drift.UpdatePipeline())
 			p.DELETE("/:id", middleware.RequireScope(auth.ScopeSourcesManage), drift.DeletePipeline())
 			// Repo-setup wizard preflight: is the callback URL reachable from CI?
@@ -486,10 +487,11 @@ func NewRouter(cfg *config.Config, database *sql.DB, identityDB *sql.DB) (*gin.E
 		// CI sources: org-level CI credentials + pipeline/repo/workflow discovery,
 		// so pipeline connections can be created by selection.
 		ciSources := NewCISourceHandlers(database, identityDB)
+		ciSources.AttachOrganizations(orgMembers)
 		cs := v1.Group("/ci-sources", requireAuth, middleware.RequireScope(auth.ScopeSourcesManage))
 		{
 			cs.GET("", ciSources.ListCISources())
-			cs.POST("", ciSources.CreateCISource())
+			cs.POST("", tenantScopeSourcesManage, ciSources.CreateCISource())
 			cs.DELETE("/:id", ciSources.DeleteCISource())
 			cs.POST("/:id/verify", ciSources.VerifyCISource())
 			cs.GET("/:id/pipelines", ciSources.ListSourcePipelines())
@@ -535,10 +537,11 @@ func NewRouter(cfg *config.Config, database *sql.DB, identityDB *sql.DB) (*gin.E
 		// dispatcher backs the HTTP "run now" endpoint and the background runner.
 		driftDisp := driftDispatcher{drift: drift}
 		scheduleHandlers := NewScheduleHandlers(database, identityDB, driftDisp)
+		scheduleHandlers.AttachOrganizations(orgMembers)
 		sg := v1.Group("/schedules", requireAuth)
 		{
 			sg.GET("", middleware.RequireScope(auth.ScopeStateRead), scheduleHandlers.ListSchedules())
-			sg.POST("", middleware.RequireScope(auth.ScopeSourcesManage), scheduleHandlers.CreateSchedule())
+			sg.POST("", middleware.RequireScope(auth.ScopeSourcesManage), tenantScopeSourcesManage, scheduleHandlers.CreateSchedule())
 			sg.GET("/:id", middleware.RequireScope(auth.ScopeStateRead), scheduleHandlers.GetSchedule())
 			sg.PUT("/:id", middleware.RequireScope(auth.ScopeSourcesManage), scheduleHandlers.UpdateSchedule())
 			sg.DELETE("/:id", middleware.RequireScope(auth.ScopeSourcesManage), scheduleHandlers.DeleteSchedule())

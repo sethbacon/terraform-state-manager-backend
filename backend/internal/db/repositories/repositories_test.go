@@ -287,7 +287,7 @@ func TestCISourceRepository_CRUD(t *testing.T) {
 	}
 
 	mock.ExpectQuery("INSERT INTO ci_sources").WillReturnRows(ciRow())
-	created, err := r.Create(ctx, &CISource{Name: "corp-ado", Provider: "azuredevops", Organization: "corp"})
+	created, err := r.Create(ctx, &CISource{Name: "corp-ado", Provider: "azuredevops", Organization: "corp"}, testOrgID)
 	if err != nil || created.ID != "c1" {
 		t.Fatalf("Create: %v %+v", err, created)
 	}
@@ -331,13 +331,13 @@ func TestPipelineRepository_CRUD(t *testing.T) {
 	}
 
 	mock.ExpectQuery("INSERT INTO pipeline_connections").
-		WithArgs("drift-ci", "github", `{"repo":"org/repo"}`, []byte("tok")).
+		WithArgs("drift-ci", "github", `{"repo":"org/repo"}`, []byte("tok"), testOrgID).
 		WillReturnRows(pipelineRow())
 	created, err := r.Create(ctx, &PipelineConnection{
 		Name: "drift-ci", Provider: "github",
 		Config:         map[string]any{"repo": "org/repo"},
 		EncryptedToken: []byte("tok"),
-	})
+	}, testOrgID)
 	if err != nil || created.ID != "p1" {
 		t.Fatalf("Create: %v %+v", err, created)
 	}
@@ -508,5 +508,96 @@ func TestSourceCreateRefusesAnUnownedRow(t *testing.T) {
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Errorf("unmet expectations: %v", err)
+	}
+}
+
+// TestCISourceCreateStampsTheTenancyColumnNotTheRemoteOwner is the trap
+// migration 000033 names explicitly, asserted.
+//
+// ci_sources already has a column called `organization` — the Azure DevOps
+// organization or GitHub owner, a remote coordinate STRING. The tenancy column
+// added by 000033 is `organization_id`, a uuid naming an identity organization.
+// Two different concepts, one letter apart, in one INSERT.
+//
+// Stamping the wrong one is a silent no-op for tenancy: the row still gets an
+// `organization` (it always did), `organization_id` receives a string that is
+// not a uuid, and nothing at the call site looks wrong. This pins both arguments
+// so the two cannot be transposed.
+func TestCISourceCreateStampsTheTenancyColumnNotTheRemoteOwner(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+	r := NewCISourceRepository(db)
+
+	mock.ExpectQuery("INSERT INTO ci_sources").
+		// $3 is `organization`, the ADO/GitHub owner. $13 is `organization_id`,
+		// the tenancy uuid. Both named, so transposing them fails here.
+		// Only the two columns this test is about are pinned. The credential
+		// blobs in between are AnyArg: asserting their exact nil-vs-empty shape
+		// would make this test fail for reasons that have nothing to do with the
+		// transposition it exists to catch.
+		WithArgs("corp-ado", "azuredevops", "corp-ado-org",
+			sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(),
+			sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(),
+			sqlmock.AnyArg(), testOrgID).
+		WillReturnRows(ciRow())
+
+	if _, err := r.Create(context.Background(), &CISource{
+		Name:         "corp-ado",
+		Provider:     "azuredevops",
+		Organization: "corp-ado-org", // deliberately NOT the tenancy uuid
+	}, testOrgID); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("the INSERT did not carry both columns as expected — the remote owner and the "+
+			"tenancy uuid may have been transposed: %v", err)
+	}
+}
+
+// TestCreateRefusesAnUnownedRow covers the other two roots the same way
+// TestSourceCreateRefusesAnUnownedRow covers state_sources: refusing must happen
+// BEFORE the database, or the column DEFAULT quietly supplies an organization
+// nobody chose (#436).
+func TestCreateRefusesAnUnownedRow(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		create func(*sql.DB) error
+	}{
+		{"pipeline_connections", func(db *sql.DB) error {
+			_, err := NewPipelineRepository(db).Create(context.Background(),
+				&PipelineConnection{Name: "x", Provider: "github"}, "  ")
+			return err
+		}},
+		{"ci_sources", func(db *sql.DB) error {
+			_, err := NewCISourceRepository(db).Create(context.Background(),
+				&CISource{Name: "x", Provider: "github"}, "")
+			return err
+		}},
+		{"schedules", func(db *sql.DB) error {
+			_, err := NewScheduleRepository(db).Create(context.Background(),
+				&Schedule{Name: "x", CronExpr: "@daily", TargetType: "drift_run"}, nil, "\t")
+			return err
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db, mock, err := sqlmock.New()
+			if err != nil {
+				t.Fatalf("sqlmock.New: %v", err)
+			}
+			defer db.Close()
+
+			// No expectation is registered, so ANY statement reaching the
+			// database fails this test. That is the assertion: the refusal is
+			// before the INSERT, not after it.
+			if err := tc.create(db); !errors.Is(err, ErrNoOrganization) {
+				t.Errorf("err = %v, want ErrNoOrganization", err)
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Errorf("a statement reached the database despite the refusal: %v", err)
+			}
+		})
 	}
 }

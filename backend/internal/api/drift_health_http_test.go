@@ -11,6 +11,8 @@ import (
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
 	"github.com/gin-gonic/gin"
 
+	"github.com/terraform-state-manager/terraform-state-manager/internal/tenantscope"
+
 	"github.com/terraform-state-manager/terraform-state-manager/internal/config"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/crypto"
 )
@@ -29,6 +31,14 @@ func newDriftEnv(t *testing.T) *sourcesEnv {
 	hh := NewHealthHandlers(cfg, db, nil, nil)
 
 	r := gin.New()
+	// What middleware.TenantScope publishes in production. Stored directly rather
+	// than resolved, so this rig needs no membership store — but it must be
+	// stored, because a route that CREATES treats an unresolved scope as a 500
+	// rather than as "no memberships" (#436).
+	r.Use(func(c *gin.Context) {
+		tenantscope.Store(c, tenantscope.Scope{OrgIDs: []string{testActingOrg}})
+		c.Next()
+	})
 	v1 := r.Group("/api/v1")
 	v1.GET("/pipelines", h.ListPipelines())
 	v1.POST("/pipelines", h.CreatePipeline())

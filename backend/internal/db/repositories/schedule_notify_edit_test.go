@@ -28,12 +28,12 @@ func TestScheduleRepository_CRUD(t *testing.T) {
 	next := time.Now().Add(time.Hour)
 
 	mock.ExpectQuery("INSERT INTO schedules").
-		WithArgs("nightly drift", "0 2 * * *", "drift_run", `{"pipeline_connection_id":"p1"}`, true, next).
+		WithArgs("nightly drift", "0 2 * * *", "drift_run", `{"pipeline_connection_id":"p1"}`, true, next, testOrgID).
 		WillReturnRows(scheduleRow())
 	created, err := r.Create(ctx, &Schedule{
 		Name: "nightly drift", CronExpr: "0 2 * * *", TargetType: "drift_run",
 		TargetConfig: json.RawMessage(`{"pipeline_connection_id":"p1"}`), Enabled: true,
-	}, &next)
+	}, &next, testOrgID)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -43,9 +43,9 @@ func TestScheduleRepository_CRUD(t *testing.T) {
 
 	// Empty target config defaults to {}.
 	mock.ExpectQuery("INSERT INTO schedules").
-		WithArgs("s", "@daily", "drift_run", `{}`, false, nil).
+		WithArgs("s", "@daily", "drift_run", `{}`, false, nil, testOrgID).
 		WillReturnRows(scheduleRow())
-	if _, err := r.Create(ctx, &Schedule{Name: "s", CronExpr: "@daily", TargetType: "drift_run"}, nil); err != nil {
+	if _, err := r.Create(ctx, &Schedule{Name: "s", CronExpr: "@daily", TargetType: "drift_run"}, nil, testOrgID); err != nil {
 		t.Fatalf("Create empty config: %v", err)
 	}
 

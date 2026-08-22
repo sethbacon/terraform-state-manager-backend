@@ -39,7 +39,17 @@ type DriftHandlers struct {
 	moduleRefRepo *repositories.StateModuleRefRepository
 	audit         auditor
 	notifier      *notify.Notifier // may be nil (notifications disabled / no DB)
+	// orgs verifies that an acting organization exists before a row is stamped
+	// with it. Wired by the router from its single approles.Members; nil is
+	// refused rather than skipped (see actingOrganization).
+	orgs organizationExistence
 }
+
+// AttachOrganizations wires the existence check used before a row is stamped
+// with an acting organization (#436). A setter, and the router supplies its
+// EXISTING approles.Members: internal/approles' guard test refuses a second
+// construction of the shared organization repository.
+func (h *DriftHandlers) AttachOrganizations(orgs organizationExistence) { h.orgs = orgs }
 
 // NewDriftHandlers constructs the handlers over the app (public) connection.
 // identityDB (may be nil) carries the shared audit log; the notifier (may be
@@ -130,7 +140,15 @@ func (h *DriftHandlers) CreatePipeline() gin.HandlerFunc {
 			}
 			pc.EncryptedToken = enc
 		}
-		saved, err := h.pipelineRepo.Create(c.Request.Context(), pc)
+		// The organization this row belongs to, named by the request and verified
+		// against a scope this server resolved (#436). Writes the response
+		// itself on every failure path.
+		orgID := actingOrganization(c, h.orgs)
+		if orgID == "" {
+			return
+		}
+
+		saved, err := h.pipelineRepo.Create(c.Request.Context(), pc, orgID)
 		if err != nil {
 			serverError(c, err, "failed to create pipeline connection")
 			return
