@@ -158,7 +158,7 @@ ALTER TABLE ci_sources ALTER COLUMN organization_id SET DEFAULT tsm_default_orga
 
 -- notification_channels — a root whose encrypted_target is a capability-bearing
 -- secret (000009:8): a Slack or generic webhook URL that anyone holding it can
--- post to. Globally-unique name (000009:16).
+-- post to. Globally-unique name (000009:17).
 ALTER TABLE notification_channels ADD COLUMN IF NOT EXISTS organization_id UUID;
 ALTER TABLE notification_channels ALTER COLUMN organization_id SET DEFAULT tsm_default_organization_id();
 
@@ -169,18 +169,38 @@ ALTER TABLE notification_channels ALTER COLUMN organization_id SET DEFAULT tsm_d
 -- computed by parsing JSON on every read. Its own column is both cheaper and the
 -- only one that stays correct when the referenced source is deleted. Globally
 -- unique name (000008:18).
+--
+-- THE FIFTH ROOT WITH A GLOBAL UNIQUE NAME IS ci_sources (000011:15), and this
+-- prose named only four. Phase 4 must take its re-key inventory from pg_index —
+-- as TestIntegration_Phase4NameRekeyInventory_IsCompleteAndDerived already does —
+-- and never from this comment. A transcribed inventory is a claim about the
+-- schema that stops being checked the moment someone adds a table.
 ALTER TABLE schedules ADD COLUMN IF NOT EXISTS organization_id UUID;
 ALTER TABLE schedules ALTER COLUMN organization_id SET DEFAULT tsm_default_organization_id();
 
 -- state_transfers — has TWO NOT NULL source references, source_id AND
 -- target_source_id (000003:5,7). Inheriting is not merely awkward here, it is
--- AMBIGUOUS: a transfer would have two answers to "whose is this", and under
--- isolation the interesting fact is not either one — it is that they must AGREE.
+-- AMBIGUOUS: a transfer would have two answers to "whose is this".
 -- A state transfer whose two ends sit in different organizations is a supported
 -- way to move a state file ACROSS the tenant boundary this phase exists to draw.
--- Giving the transfer its own column is what lets Phase 4 express the invariant
--- (a composite reference to each end's (id, organization_id)) instead of leaving
--- it as an unwritten assumption.
+--
+-- CORRECTED. This comment used to continue: "the interesting fact is not either
+-- one — it is that they must AGREE", and prescribed that Phase 4 express that
+-- agreement as a composite reference to each end's (id, organization_id). That
+-- contradicts the sentence above it. A composite foreign key to BOTH ends forces
+-- both into the transfer's organization, which forbids exactly the cross-boundary
+-- move the previous sentence calls supported. Phase 4 must NOT emit it, and no
+-- UNIQUE (id, organization_id) on state_sources is needed to support one.
+--
+-- WHAT THE COLUMN ACTUALLY RECORDS, and why a constraint could never have: the
+-- ACTOR's organization — who performed the move — not a property of either end.
+-- The invariant is enforced where both ends are in hand, at the handler
+-- (internal/api/transfer.go, transferEndpointsReachable): a caller may move a
+-- state file across the boundary only if they hold authority on BOTH ends, and a
+-- caller who belongs to several organizations must NAME the one they are acting
+-- as. That is a statement about the caller, which no foreign key can express, so
+-- the invariant is not "left as an unwritten assumption" — it is written
+-- somewhere a schema constraint cannot reach.
 ALTER TABLE state_transfers ADD COLUMN IF NOT EXISTS organization_id UUID;
 ALTER TABLE state_transfers ALTER COLUMN organization_id SET DEFAULT tsm_default_organization_id();
 
