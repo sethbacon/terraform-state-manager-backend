@@ -144,3 +144,42 @@ func TestIntegration_AnUnownedSourceRefusesTheDetection(t *testing.T) {
 		})
 	}
 }
+
+// TestIntegration_ScheduleCarriesItsOrganizationOutOfTheDatabase guards the one
+// link in the worker chain that sqlmock cannot see.
+//
+// The scheduler has no request, so a scheduled drift run is stamped with the
+// organization the SCHEDULE carries in memory. That value has to survive the
+// projection — and a mutation removing organization_id from scheduleColumns
+// passed every unit test, because sqlmock returns whatever columns the FIXTURE
+// declares regardless of what the SQL asked for.
+//
+// Against a real database the column either comes back or it does not.
+func TestIntegration_ScheduleCarriesItsOrganizationOutOfTheDatabase(t *testing.T) {
+	db := newTestDB(t)
+	ctx := context.Background()
+	repo := repositories.NewScheduleRepository(db)
+
+	created, err := repo.Create(ctx, &repositories.Schedule{
+		Name: "nightly", CronExpr: "0 2 * * *", TargetType: "drift",
+	}, nil, orgBeta)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if created.OrganizationID != orgBeta {
+		t.Errorf("Create returned organization %q, want %q", created.OrganizationID, orgBeta)
+	}
+
+	// The read path matters more than the write: this is the value the worker
+	// carries into Dispatch, and it comes from a SELECT.
+	loaded, err := repo.GetByID(ctx, created.ID)
+	if err != nil || loaded == nil {
+		t.Fatalf("GetByID: %v", err)
+	}
+	if loaded.OrganizationID != orgBeta {
+		t.Errorf("a schedule loaded from the database carries organization %q, want %q. "+
+			"Without it the worker dispatches an empty organization and the run is unowned — "+
+			"and there is no edge from a run back to its schedule to recover it.",
+			loaded.OrganizationID, orgBeta)
+	}
+}

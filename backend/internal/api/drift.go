@@ -245,13 +245,19 @@ func (h *DriftHandlers) CreateRun() gin.HandlerFunc {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
+		// A user request: the organization is the one the caller is acting in.
+		orgID := actingOrganization(c, h.orgs)
+		if orgID == "" {
+			return
+		}
+
 		saved, err := h.dispatchDrift(c.Request.Context(), DriftTarget{
 			PipelineConnectionID: req.PipelineConnectionID,
 			SourceID:             req.SourceID,
 			StateKey:             req.StateKey,
 			RepoRef:              req.RepoRef,
 			WorkingDir:           req.WorkingDir,
-		}, userIDOf(c))
+		}, userIDOf(c), orgID)
 		if saved != nil {
 			h.audit.write(c, "drift_run.dispatch", "drift_run", saved.ID, map[string]interface{}{
 				"pipeline_connection_id": req.PipelineConnectionID,
@@ -290,7 +296,7 @@ var errPipelineNotFound = errors.New("pipeline connection not found")
 // alongside the error so the HTTP caller can surface the detail; the callback
 // token is always stripped from the returned run. Shared by CreateRun (HTTP) and
 // the scheduler.
-func (h *DriftHandlers) dispatchDrift(ctx context.Context, tgt DriftTarget, actor string) (*repositories.DriftRun, error) {
+func (h *DriftHandlers) dispatchDrift(ctx context.Context, tgt DriftTarget, actor, organizationID string) (*repositories.DriftRun, error) {
 	conn, err := h.pipelineRepo.GetByID(ctx, tgt.PipelineConnectionID)
 	if err != nil {
 		return nil, fmt.Errorf("load pipeline connection: %w", err)
@@ -316,7 +322,7 @@ func (h *DriftHandlers) dispatchDrift(ctx context.Context, tgt DriftTarget, acto
 	if tgt.SourceID != "" {
 		run.SourceID = &tgt.SourceID
 	}
-	saved, err := h.driftRepo.Create(ctx, run)
+	saved, err := h.driftRepo.Create(ctx, run, organizationID)
 	if err != nil {
 		return nil, fmt.Errorf("create drift run: %w", err)
 	}

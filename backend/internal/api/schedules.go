@@ -22,14 +22,19 @@ import (
 // target_type "drift" fires a drift run on its configured pipeline.
 type driftDispatcher struct{ drift *DriftHandlers }
 
-func (d driftDispatcher) Dispatch(ctx context.Context, targetType string, targetConfig json.RawMessage, actor string) (runID, status string, err error) {
+// Dispatch takes organizationID because the scheduler worker has no request to
+// derive one from. A schedule names its target only inside target_config JSONB,
+// with no column and no foreign key, so a run fired from it cannot join back to
+// discover whose it is — the organization has to travel with the schedule, in
+// memory, across this seam (#436).
+func (d driftDispatcher) Dispatch(ctx context.Context, targetType string, targetConfig json.RawMessage, actor, organizationID string) (runID, status string, err error) {
 	switch targetType {
 	case "drift":
 		var t DriftTarget
 		if uErr := json.Unmarshal(targetConfig, &t); uErr != nil {
 			return "", "failed", fmt.Errorf("invalid drift target config: %w", uErr)
 		}
-		run, dErr := d.drift.dispatchDrift(ctx, t, actor)
+		run, dErr := d.drift.dispatchDrift(ctx, t, actor, organizationID)
 		id := ""
 		if run != nil {
 			id = run.ID
@@ -263,7 +268,20 @@ func (h *ScheduleHandlers) RunSchedule() gin.HandlerFunc {
 			c.JSON(http.StatusNotFound, gin.H{"error": "schedule not found"})
 			return
 		}
-		runID, status, dErr := h.dispatcher.Dispatch(ctx, s.TargetType, s.TargetConfig, userIDOf(c))
+		// THE SCHEDULE'S ORGANIZATION, NOT THE CALLER'S. The run is a firing of
+		// this schedule, so it belongs where the schedule does — a caller who
+		// may trigger it does not thereby own its output. Whether they may
+		// trigger it at all is the route guard's question, not this one.
+		//
+		// Refused rather than defaulted when the schedule is unstamped: a run
+		// with no organization is invisible to every tenant, including the one
+		// whose schedule produced it (#436).
+		if s.OrganizationID == "" {
+			serverError(c, repositories.ErrNoOrganization,
+				"the schedule has no owning organization")
+			return
+		}
+		runID, status, dErr := h.dispatcher.Dispatch(ctx, s.TargetType, s.TargetConfig, userIDOf(c), s.OrganizationID)
 		h.audit.write(c, "schedule.run", "schedule", s.ID,
 			map[string]interface{}{"name": s.Name, "status": status})
 		var runPtr *string

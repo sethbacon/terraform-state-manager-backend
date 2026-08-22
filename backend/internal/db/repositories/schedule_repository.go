@@ -24,6 +24,12 @@ type Schedule struct {
 	LastStatus   *string         `json:"last_status"`
 	CreatedAt    string          `json:"created_at"`
 	UpdatedAt    string          `json:"updated_at"`
+	// OrganizationID is the tenant this schedule belongs to, carried in memory
+	// so a run fired from it can be stamped with the same organization. It is
+	// NOT serialized: the field exists to cross the dispatcher seam, not to be
+	// shown, and putting a tenancy id in an API response is a decision to make
+	// deliberately rather than by adding a struct field (#436).
+	OrganizationID string `json:"-"`
 }
 
 // ScheduleRepository is the DAO for schedules.
@@ -35,17 +41,25 @@ func NewScheduleRepository(db *sql.DB) *ScheduleRepository {
 	return &ScheduleRepository{db: db}
 }
 
+// organization_id is selected because a schedule's organization has to travel
+// with it IN MEMORY: a schedule names its target only inside target_config
+// JSONB, with no column and no foreign key (000008), so a drift run fired from
+// one cannot join back to find out whose it is (#436).
 const scheduleColumns = `id, name, cron_expr, target_type, target_config, enabled,
 	last_run_at::text, next_run_at::text, last_run_id::text, last_status,
-	created_at::text, updated_at::text`
+	created_at::text, updated_at::text, organization_id::text`
 
 func scanSchedule(scanner interface{ Scan(dest ...any) error }) (*Schedule, error) {
 	var s Schedule
 	var targetConfig []byte
-	var lastRunAt, nextRunAt, lastRunID, lastStatus sql.NullString
+	var lastRunAt, nextRunAt, lastRunID, lastStatus, organizationID sql.NullString
 	if err := scanner.Scan(&s.ID, &s.Name, &s.CronExpr, &s.TargetType, &targetConfig, &s.Enabled,
-		&lastRunAt, &nextRunAt, &lastRunID, &lastStatus, &s.CreatedAt, &s.UpdatedAt); err != nil {
+		&lastRunAt, &nextRunAt, &lastRunID, &lastStatus, &s.CreatedAt, &s.UpdatedAt,
+		&organizationID); err != nil {
 		return nil, err
+	}
+	if organizationID.Valid {
+		s.OrganizationID = organizationID.String
 	}
 	if len(targetConfig) > 0 {
 		s.TargetConfig = targetConfig

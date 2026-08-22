@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"strings"
 	"time"
 )
 
@@ -90,14 +91,34 @@ func scanDrift(scanner interface{ Scan(dest ...any) error }) (*DriftRun, error) 
 	return &d, nil
 }
 
-func (r *DriftRepository) Create(ctx context.Context, d *DriftRun) (*DriftRun, error) {
+// Create records a drift run owned by organizationID.
+//
+// THIS TABLE CANNOT INHERIT, and 000033 says why: drift_runs' two parents are
+// both nullable ON DELETE SET NULL, so an inherited organization would become
+// NULL the moment either was deleted — and a NULL organization is unpartitioned,
+// i.e. readable by everyone. Its own column is the only answer that survives.
+//
+// So the organization is supplied by the caller, and there are three of them
+// with three different authority stories (#436): a user request resolves the
+// acting organization; a schedule fired through a handler uses the SCHEDULE's;
+// and the scheduler worker has no request at all and carries the schedule's
+// organization in memory through the dispatcher, because a schedule names its
+// target only inside target_config JSONB and there is no edge to join back on.
+//
+// An empty organizationID is refused rather than omitted, as everywhere else in
+// #436: omitting falls through to the column DEFAULT and looks like success.
+func (r *DriftRepository) Create(ctx context.Context, d *DriftRun, organizationID string) (*DriftRun, error) {
+	organizationID = strings.TrimSpace(organizationID)
+	if organizationID == "" {
+		return nil, ErrNoOrganization
+	}
 	row := r.db.QueryRowContext(ctx, `
 		INSERT INTO drift_runs
-			(pipeline_connection_id, source_id, state_key, repo_ref, working_dir, status, callback_token, actor)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+			(pipeline_connection_id, source_id, state_key, repo_ref, working_dir, status, callback_token, actor, organization_id)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::uuid)
 		RETURNING `+driftColumns,
 		d.PipelineConnectionID, d.SourceID, nullStr(d.StateKey), nullStr(d.RepoRef), nullStr(d.WorkingDir),
-		d.Status, d.CallbackToken, nullStr(d.Actor))
+		d.Status, d.CallbackToken, nullStr(d.Actor), organizationID)
 	return scanDrift(row)
 }
 
