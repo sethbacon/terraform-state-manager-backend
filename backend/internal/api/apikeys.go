@@ -277,6 +277,14 @@ func (h *APIKeysHandlers) CreateAPIKey() gin.HandlerFunc {
 			return
 		}
 		key, created, err := h.mintKey(c, req, expires, userIDOf(c))
+		if errors.Is(err, errActingOrganizationRefused) {
+			return // actingOrganization already wrote the response
+		}
+		if errors.Is(err, errOwnerNotMember) {
+			c.JSON(http.StatusForbidden, gin.H{
+				"error": "the key's owner does not belong to that organization"})
+			return
+		}
 		if err != nil {
 			serverError(c, err, "failed to create API key")
 			return
@@ -287,30 +295,55 @@ func (h *APIKeysHandlers) CreateAPIKey() gin.HandlerFunc {
 	}
 }
 
+// errActingOrganizationRefused reports that actingOrganization already wrote the
+// response, so the caller must return without writing another.
+var errActingOrganizationRefused = errors.New("api: the acting organization was refused")
+
+// errOwnerNotMember reports a key whose owner does not belong to the
+// organization it would be minted into.
+var errOwnerNotMember = errors.New("api: the key's owner is not a member of that organization")
+
 // mintKey generates and persists a key owned by userID, returning the
 // plaintext secret (shown once) and the stored row.
 func (h *APIKeysHandlers) mintKey(c *gin.Context, req apiKeyInput, expires *time.Time, userID string) (string, *models.APIKey, error) {
-	// Every key is stamped with the default organization, so a deployment
-	// without one cannot mint keys at all. Before v0.24.0 that arrived as
-	// (nil, nil) and this function dereferenced org.ID into a panic; naming the
-	// sentinel turns it into an explicit, greppable 500.
-	org, err := h.orgs.GetDefaultOrganization(c.Request.Context())
-	if errors.Is(err, idstore.ErrNotFound) {
-		return "", nil, fmt.Errorf("default organization not found: %w", err)
+	// THE ORGANIZATION THE KEY WILL ACT IN, not the deployment's default one.
+	//
+	// Every key used to be stamped with GetDefaultOrganization regardless of who
+	// minted it, which made api_keys.organization_id a constant -- and left
+	// tenantscope's KeyBindsOrganization off, because binding to a constant would
+	// have placed every key in one organization.
+	//
+	// It also collided with the rule #453 landed on the read side: authentication
+	// now refuses a key unless its owner is still a member of the key's
+	// organization. A member of the second organization minting a key got one
+	// stamped with the FIRST organization, which their own authentication then
+	// refused. The two halves have to agree, and this is the half that was wrong.
+	organizationID := actingOrganization(c, h.orgs)
+	if organizationID == "" {
+		// actingOrganization has already written the response.
+		return "", nil, errActingOrganizationRefused
 	}
+
+	// ...and the owner must be a member of it. Minting is where that becomes
+	// true, so checking it here means a key is never created in a state its own
+	// authentication would refuse. The caller may be minting for someone else
+	// (an admin rotating another user's key), so this is the OWNER's membership
+	// rather than the caller's.
+	member, _, err := h.orgs.CheckMembership(c.Request.Context(), organizationID, userID, idstore.OrgScopeAllOrganizations())
 	if err != nil {
-		return "", nil, err
+		return "", nil, fmt.Errorf("confirm the owner's membership: %w", err)
 	}
-	if org == nil {
-		return "", nil, fmt.Errorf("default organization not found")
+	if !member {
+		return "", nil, errOwnerNotMember
 	}
+
 	fullKey, hash, prefix, err := idauth.GenerateAPIKey(middleware.APIKeyPrefix)
 	if err != nil {
 		return "", nil, err
 	}
 	row := &models.APIKey{
 		UserID:         &userID,
-		OrganizationID: org.ID,
+		OrganizationID: organizationID,
 		Name:           req.Name,
 		KeyHash:        hash,
 		KeyPrefix:      prefix,
@@ -466,6 +499,14 @@ func (h *APIKeysHandlers) RotateAPIKey() gin.HandlerFunc {
 			input.Description = *key.Description
 		}
 		secret, created, err := h.mintKey(c, input, key.ExpiresAt, owner)
+		if errors.Is(err, errActingOrganizationRefused) {
+			return // actingOrganization already wrote the response
+		}
+		if errors.Is(err, errOwnerNotMember) {
+			c.JSON(http.StatusForbidden, gin.H{
+				"error": "the key's owner does not belong to that organization"})
+			return
+		}
 		if err != nil {
 			serverError(c, err, "failed to rotate API key")
 			return

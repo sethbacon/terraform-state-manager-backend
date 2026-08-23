@@ -219,14 +219,30 @@ func NewRouter(cfg *config.Config, database *sql.DB, identityDB *sql.DB) (*gin.E
 		// manages their own keys; admin sees all. No extra scope gate — the
 		// handlers enforce ownership and scope-grant limits themselves.
 		apiKeys := NewAPIKeysHandlers(identityDB, database, approles.RoleSource(cfg.Authz.RoleSource))
+		// A TenantScope for the key routes, resolved on state:read.
+		//
+		// THIS IS AN APPROXIMATION AND IT IS THE CONSERVATIVE ONE. The /apikeys
+		// group carries no RequireScope: minting is self-service, and a key's
+		// privileges are capped at authentication by its owner's live scopes, so
+		// the question here is only "which organizations does this caller belong
+		// to" -- which Resolve cannot answer without being given a verb.
+		// state:read is the weakest assignable scope and the one the viewer role
+		// template grants, so resolving on it approximates plain membership.
+		//
+		// Where the approximation fails it fails CLOSED: a member who somehow
+		// holds only a non-read scope in an organization cannot mint a key there,
+		// and gets a refusal rather than a key in the wrong tenant. The real
+		// authority is mintKey's CheckMembership on the OWNER; this only bounds
+		// which organization the caller may name.
+		tenantScopeAPIKeys := middleware.TenantScope(orgMembers, platformAdmins, auth.ScopeStateRead)
 		ak := v1.Group("/apikeys", requireAuth)
 		{
 			ak.GET("", apiKeys.ListAPIKeys())
-			ak.POST("", apiKeys.CreateAPIKey())
+			ak.POST("", tenantScopeAPIKeys, apiKeys.CreateAPIKey())
 			ak.GET("/:id", apiKeys.GetAPIKey())
 			ak.PUT("/:id", apiKeys.UpdateAPIKey())
 			ak.DELETE("/:id", apiKeys.DeleteAPIKey())
-			ak.POST("/:id/rotate", apiKeys.RotateAPIKey())
+			ak.POST("/:id/rotate", tenantScopeAPIKeys, apiKeys.RotateAPIKey())
 		}
 
 		// Phase 1 read plane: state sources + analysis.
