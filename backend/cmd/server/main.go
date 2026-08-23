@@ -35,6 +35,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"database/sql"
+	"errors"
 	"fmt"
 	"log"
 	"log/slog"
@@ -124,6 +125,34 @@ func run() error {
 			verify = true
 		}
 		return runRekeyTargets(cfg, verify)
+	case "reown-roots":
+		// reown-roots verify | reown-roots move <from-org-uuid> <to-org-uuid>
+		//
+		// Re-owns the partition roots of #436 for rows written before the
+		// acting-organization stamp existed. The mapping is an ARGUMENT and
+		// never a default: this rewrites who owns a tenant's state sources,
+		// credentials and schedules, and the one thing that must not happen is
+		// moving rows nobody meant to move.
+		//
+		// Same typo discipline as rekey-targets, for the same reason and with
+		// more at stake: an unrecognised sub-argument is an error, not a
+		// silently-ignored one.
+		if len(os.Args) < 3 {
+			return fmt.Errorf("usage: %s reown-roots verify | %s reown-roots move <from-org-id> <to-org-id>",
+				os.Args[0], os.Args[0])
+		}
+		switch os.Args[2] {
+		case "verify":
+			return runReownRoots(cfg, "", "")
+		case "move":
+			if len(os.Args) != 5 {
+				return fmt.Errorf("usage: %s reown-roots move <from-org-id> <to-org-id>", os.Args[0])
+			}
+			return runReownRoots(cfg, os.Args[3], os.Args[4])
+		default:
+			return fmt.Errorf("usage: %s reown-roots verify | %s reown-roots move <from-org-id> <to-org-id>",
+				os.Args[0], os.Args[0])
+		}
 	case "authz-drift":
 		// authz-drift — compare this application's role tables against the shared
 		// identity schema and exit non-zero while they disagree.
@@ -136,7 +165,7 @@ func run() error {
 		fmt.Printf("Terraform State Manager v%s (built %s)\n", Version, BuildDate)
 		return nil
 	default:
-		return fmt.Errorf("unknown command: %s\nAvailable commands: serve, migrate, bind-targets, rekey-targets, authz-drift, version", command)
+		return fmt.Errorf("unknown command: %s\nAvailable commands: serve, migrate, bind-targets, rekey-targets, reown-roots, authz-drift, version", command)
 	}
 }
 
@@ -662,6 +691,60 @@ func reportAuthzDrift(ctx context.Context, appDB, identityDB *sql.DB) {
 // Then run this again. Drift that SURVIVES a restart is the report worth acting
 // on: it means the reconcile is failing rather than that a single mirror write
 // slipped, and the startup log will say why.
+// runReownRoots reports ownership across the partition roots, or moves it.
+//
+// An empty from/to is the VERIFY mode. It is the default reading of the command
+// because it is the read-only one -- the writing mode has to be asked for by
+// name and with both organizations spelled out.
+func runReownRoots(cfg *config.Config, from, to string) error {
+	database, err := db.Connect(cfg.Database.GetDSN(), cfg.Database.MaxConnections, cfg.Database.MinIdleConnections)
+	if err != nil {
+		return fmt.Errorf("failed to connect to database: %w", err)
+	}
+	defer func() { _ = database.Close() }()
+
+	ctx := context.Background()
+	if from == "" && to == "" {
+		res, err := maintenance.Census(ctx, database)
+		slog.Info("reown-roots census", "ownership", res.String())
+		return err
+	}
+	// The destination is confirmed against the IDENTITY schema, on its own
+	// connection and search_path. organizations live there, and 000033 gives the
+	// partition no foreign key into it precisely because identity may be a
+	// different database — so the application connection is not the place to ask.
+	identityDB, err := db.Connect(
+		cfg.IdentityDatabase.GetDSNWithSearchPath("identity,public"),
+		cfg.IdentityDatabase.MaxConnections, cfg.IdentityDatabase.MinIdleConnections,
+	)
+	if err != nil {
+		return fmt.Errorf("reown-roots needs the identity schema to confirm the destination organization: %w", err)
+	}
+	defer func() { _ = identityDB.Close() }()
+	// approles.NewMembers, not idstore.NewOrganizationRepository directly: a
+	// repository obtained that way writes identity without writing this
+	// application's own organization_member_roles, and a class guard fails the
+	// build on it. The read below is promoted unchanged through the embedded
+	// repository, so this costs nothing and keeps the one construction path.
+	orgs := approles.NewMembers(identityDB, database, approles.RoleSource(cfg.Authz.RoleSource))
+
+	res, err := maintenance.Move(ctx, database, from, to, func(ctx context.Context, id string) (bool, error) {
+		org, err := orgs.GetByID(ctx, id, idstore.OrgScopeAllOrganizations())
+		if errors.Is(err, idstore.ErrNotFound) {
+			return false, nil
+		}
+		if err != nil {
+			return false, err
+		}
+		return org != nil, nil
+	})
+	if err != nil {
+		return err
+	}
+	slog.Info("reown-roots complete", "from", from, "to", to, "result", res.String())
+	return nil
+}
+
 func runAuthzDrift(cfg *config.Config) error {
 	telemetry.SetupLogger(cfg.Logging.Format, cfg.Logging.Level)
 

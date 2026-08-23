@@ -139,7 +139,7 @@ Start at **[docs/deployment.md](docs/deployment.md)** for the full matrix, prere
 
 ## Documentation
 
-Operations and integration docs live in [`docs/`](docs/) — deployment guides per platform, complete `TSM_*` configuration reference, observability, secrets rotation, disaster recovery, upgrades, and troubleshooting.
+Operations and integration docs live in [`docs/`](docs/) — deployment guides per platform, complete `TSM_*` configuration reference, observability, secrets rotation, disaster recovery, upgrades, troubleshooting, and [re-owning the organization partition](docs/organization-reown.md) for deployments whose rows predate per-organization ownership.
 
 ## History
 
