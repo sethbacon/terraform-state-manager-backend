@@ -3,9 +3,12 @@
 package api
 
 import (
+	"errors"
+
 	"context"
 	"database/sql"
 	"encoding/json"
+	"github.com/terraform-state-manager/terraform-state-manager/internal/tenantscope"
 	"net/http"
 	"strconv"
 	"time"
@@ -341,7 +344,21 @@ func (h *SourcesHandlers) UpdateSource() gin.HandlerFunc {
 			src.EncryptedCredentials = enc
 		}
 
-		updated, err := h.repo.Update(c.Request.Context(), src)
+		// SCOPED. Without the organization predicate this UPDATE finds its row by
+		// id alone, so a caller holding sources:manage in ANY organization could
+		// rewrite another organization's source — including its connector config
+		// and stored credentials.
+		scope, resolved := tenantscope.FromContext(c)
+		if !resolved {
+			serverError(c, errNoTenantScope, "the tenant scope was not resolved for this route")
+			return
+		}
+		updated, err := h.repo.UpdateInScope(c.Request.Context(), src, scope)
+		if errors.Is(err, repositories.ErrNotInScope) {
+			// Rendered as a missing row, not a 403: see tenant_write_scope.go.
+			c.JSON(http.StatusNotFound, gin.H{"error": "source not found"})
+			return
+		}
 		if err != nil {
 			serverError(c, err, "failed to update source")
 			return
@@ -468,8 +485,31 @@ func (h *SourcesHandlers) TestSourceConfig() gin.HandlerFunc {
 func (h *SourcesHandlers) DeleteSource() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		id := c.Param("id")
-		if err := h.repo.Delete(c.Request.Context(), id); err != nil {
+		// SCOPED, and this is the destructive one: state_sources cascades to
+		// state_backups, state_edits, state_locks, state_analyses,
+		// source_sync_status, state_analysis_history, state_module_refs and
+		// state_transfers. Deleting by id alone let a caller holding
+		// sources:manage in ANY organization destroy another organization's
+		// source and everything hanging off it.
+		scope, resolved := tenantscope.FromContext(c)
+		if !resolved {
+			serverError(c, errNoTenantScope, "the tenant scope was not resolved for this route")
+			return
+		}
+		deleted, err := h.repo.DeleteInScope(c.Request.Context(), id, scope)
+		if errors.Is(err, repositories.ErrNotInScope) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "source not found"})
+			return
+		}
+		if err != nil {
 			serverError(c, err, "failed to delete source")
+			return
+		}
+		if !deleted {
+			// A 204 here would report success for a delete that removed nothing,
+			// which is how a caller learns their id was wrong OR belonged to
+			// somebody else. Both are "not found".
+			c.JSON(http.StatusNotFound, gin.H{"error": "source not found"})
 			return
 		}
 		h.audit.write(c, "source.delete", "source", id, nil)

@@ -281,6 +281,12 @@ func NewRouter(cfg *config.Config, database *sql.DB, identityDB *sql.DB) (*gin.E
 		// that neither route is asking.
 		tenantScopeStateExecute := middleware.TenantScope(orgMembers, platformAdmins, auth.ScopeStateExecute)
 		tenantScopeStateTransfer := middleware.TenantScope(orgMembers, platformAdmins, auth.ScopeStateTransfer)
+		// state:drift, for the route that dispatches a drift run. Its handler
+		// resolves an acting organization and therefore 500s without a scope —
+		// so this was not a hardening gap but a BROKEN route: every dispatch
+		// returned "the tenant scope was not resolved". Found by
+		// TestEveryScopeAwareHandlerIsRoutedWithTenantScope.
+		tenantScopeStateDrift := middleware.TenantScope(orgMembers, platformAdmins, auth.ScopeStateDrift)
 		// Bound state-operation requests so a hung or slow backend cannot block the
 		// handler goroutine (and any per-key lock it holds) indefinitely (#263).
 		s := v1.Group("/sources", requireAuth, middleware.RequestTimeout(5*time.Minute))
@@ -291,8 +297,12 @@ func NewRouter(cfg *config.Config, database *sql.DB, identityDB *sql.DB) (*gin.E
 			// segments before params, so POST /sources/test is unambiguous.
 			s.POST("/test", middleware.RequireScope(auth.ScopeSourcesManage), sources.TestSourceConfig())
 			s.GET("/:id", middleware.RequireScope(auth.ScopeStateRead), tenantScopeStateRead, sources.GetSource())
-			s.PUT("/:id", middleware.RequireScope(auth.ScopeSourcesManage), sources.UpdateSource())
-			s.DELETE("/:id", middleware.RequireScope(auth.ScopeSourcesManage), sources.DeleteSource())
+			// tenantScopeSourcesManage on BOTH, because both MUTATE. An update
+			// rewrites a source's connector config and stored credentials; a
+			// delete cascades to eight dependent tables. Neither had a scope
+			// resolved, so neither could check ownership.
+			s.PUT("/:id", middleware.RequireScope(auth.ScopeSourcesManage), tenantScopeSourcesManage, sources.UpdateSource())
+			s.DELETE("/:id", middleware.RequireScope(auth.ScopeSourcesManage), tenantScopeSourcesManage, sources.DeleteSource())
 			s.POST("/:id/test", middleware.RequireScope(auth.ScopeStateRead), sources.TestSource())
 			s.GET("/:id/states", middleware.RequireScope(auth.ScopeStateRead), sources.ListStates())
 			s.GET("/:id/state/analysis", middleware.RequireScope(auth.ScopeStateRead), sources.AnalyzeState())
@@ -519,7 +529,7 @@ func NewRouter(cfg *config.Config, database *sql.DB, identityDB *sql.DB) (*gin.E
 		d := v1.Group("/drift", requireAuth)
 		{
 			d.GET("/workflow", middleware.RequireScope(auth.ScopeStateRead), drift.WorkflowTemplate(templateRepo))
-			d.POST("/runs", middleware.RequireScope(auth.ScopeStateDrift), drift.CreateRun())
+			d.POST("/runs", middleware.RequireScope(auth.ScopeStateDrift), tenantScopeStateDrift, drift.CreateRun())
 			d.GET("/runs", middleware.RequireScope(auth.ScopeStateRead), drift.ListRuns())
 			d.GET("/runs/:id", middleware.RequireScope(auth.ScopeStateRead), drift.GetRun())
 

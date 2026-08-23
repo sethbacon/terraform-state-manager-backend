@@ -55,10 +55,26 @@ func newSourcesEnv(t *testing.T) *sourcesEnv {
 // newSourcesEnvWithScope builds the rig with an explicit scope, so a test can put
 // the caller in two organizations at once -- which is what makes a transfer
 // ACROSS the partition boundary an authorized act rather than a refused one.
+// newSourcesEnvWithoutScope builds the rig with NO tenant scope stored, standing
+// in for a route whose middleware.TenantScope was never wired. A mutating route
+// must treat that as a fault rather than carrying on unscoped.
+func newSourcesEnvWithoutScope(t *testing.T) *sourcesEnv {
+	return newSourcesEnvScoped(t, nil)
+}
+
 func newSourcesEnvWithScope(t *testing.T, scope tenantscope.Scope) *sourcesEnv {
+	return newSourcesEnvScoped(t, &scope)
+}
+
+func newSourcesEnvScoped(t *testing.T, scope *tenantscope.Scope) *sourcesEnv {
 	t.Helper()
 	t.Setenv("TSM_ENCRYPTION_KEY", "0123456789abcdef0123456789abcdef")
-	db, mock, err := sqlmock.New()
+	// newSQLMock, not sqlmock.New: it installs pgxparam.Converter, without which
+	// a []string argument is not a valid driver.Value and the call fails at the
+	// driver before any expectation is consulted. Production runs on pgx, which
+	// takes a []string for `= ANY($n)` — so this rig could not exercise a scoped
+	// statement at all until now. Nothing here had passed one before.
+	db, mock, err := newSQLMock()
 	if err != nil {
 		t.Fatalf("sqlmock.New: %v", err)
 	}
@@ -81,7 +97,9 @@ func newSourcesEnvWithScope(t *testing.T, scope tenantscope.Scope) *sourcesEnv {
 		// here would make every create test fail with the message that says the
 		// route was never wired, which is precisely the distinction worth
 		// keeping.
-		tenantscope.Store(c, scope)
+		if scope != nil {
+			tenantscope.Store(c, *scope)
+		}
 		c.Next()
 	})
 	v1 := r.Group("/api/v1")
@@ -212,9 +230,13 @@ func TestGetAndDeleteSource(t *testing.T) {
 		t.Errorf("missing: status = %d, want 404", w.Code)
 	}
 
-	e.mock.ExpectExec("DELETE FROM state_sources").WithArgs("s1").WillReturnResult(sqlmock.NewResult(0, 1))
+	// The organization list is bound alongside the id: the DELETE is scoped, so a
+	// source in another organization is unreachable rather than merely unlisted.
+	e.mock.ExpectExec(`DELETE FROM state_sources[\s\S]*organization_id`).
+		WithArgs("s1", []string{testActingOrg}).
+		WillReturnResult(sqlmock.NewResult(0, 1))
 	if w := e.do(http.MethodDelete, "/api/v1/sources/s1", ""); w.Code != http.StatusNoContent {
-		t.Errorf("delete: status = %d, want 204", w.Code)
+		t.Errorf("delete: status = %d, want 204 (%s)", w.Code, w.Body.String())
 	}
 }
 
@@ -265,8 +287,8 @@ func TestUpdateSource(t *testing.T) {
 	// credentials pass NULL so the stored secret is kept.
 	e.expectSource("s1", e.dir)
 	cfg, _ := json.Marshal(map[string]any{"base_path": e.dir})
-	e.mock.ExpectQuery("UPDATE state_sources SET").
-		WithArgs("s1", "renamed", nil, sqlmock.AnyArg(), sqlmock.AnyArg(), nil).
+	e.mock.ExpectQuery(`UPDATE state_sources SET[\s\S]*organization_id`).
+		WithArgs("s1", "renamed", nil, sqlmock.AnyArg(), sqlmock.AnyArg(), nil, []string{testActingOrg}).
 		WillReturnRows(sqlmock.NewRows(apiSourceCols).
 			AddRow("s1", "renamed", "local", "", cfg, []byte(`{}`), nil, "2026-06-10", "2026-06-11", testActingOrg))
 	body := fmt.Sprintf(`{"name":"renamed","config":{"base_path":%q}}`, e.dir)
