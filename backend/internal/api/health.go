@@ -297,7 +297,7 @@ func (h *HealthHandlers) RunResults() gin.HandlerFunc {
 			return
 		}
 
-		h.notifyHealthResult(run.ID, status, success, body.Detail)
+		h.notifyHealthResult(run.OrganizationID, run.ID, status, success, body.Detail)
 		c.JSON(http.StatusOK, gin.H{"status": "recorded"})
 	}
 }
@@ -318,7 +318,7 @@ func healthResultFailed(status string, success bool) bool {
 // latency) with its own timeout; a nil notifier (notifications disabled) is a
 // no-op. Shared by the result callback and the background reconciler, so an
 // expiry fires the same run_failed alert a real failure callback would.
-func (h *HealthHandlers) notifyHealthResult(runID, status string, success bool, detail string) {
+func (h *HealthHandlers) notifyHealthResult(organizationID, runID, status string, success bool, detail string) {
 	if h.notifier == nil || !healthResultFailed(status, success) {
 		return
 	}
@@ -327,11 +327,14 @@ func (h *HealthHandlers) notifyHealthResult(runID, status string, success bool, 
 		Title:   "Health run failed",
 		Message: fmt.Sprintf("Health run %s failed: %s", runID, detail),
 	}
-	go func(ev notify.Event) {
+	// Fanned out to THIS organization's channels only. Without the scope the
+	// notifier selects every enabled channel in the deployment, so the health run that failed
+	// would be announced to every other tenant's webhooks (#459).
+	go func(ev notify.Event, organizationID string) {
 		ctx, cancel := context.WithTimeout(context.Background(), notifyTimeout)
 		defer cancel()
-		h.notifier.Notify(ctx, ev)
-	}(ev)
+		h.notifier.Notify(ctx, ev, notify.ForOrganization(organizationID))
+	}(ev, organizationID)
 }
 
 // WorkflowTemplate returns the runner-side health CI definition, served from the

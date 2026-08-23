@@ -35,6 +35,10 @@ type DriftRun struct {
 	// overwrites a record in place — so for per-run history the record is either
 	// absent or describes a later check. See migration 000031.
 	Completeness
+	// OrganizationID is the owning tenant, carried in memory so an alert can be
+	// fanned out to THAT organization's notification channels and no others.
+	// Never serialized: the boundary is enforced server-side (#459).
+	OrganizationID string `json:"-"`
 }
 
 // DriftRepository is the DAO for drift_runs.
@@ -49,10 +53,12 @@ func NewDriftRepository(db *sql.DB) *DriftRepository {
 const driftColumns = `id, pipeline_connection_id, source_id, COALESCE(state_key,''), COALESCE(repo_ref,''),
 	COALESCE(working_dir,''), status, added, changed, destroyed, drifted, summary, COALESCE(detail,''),
 	callback_token, COALESCE(actor,''), created_at::text, updated_at::text,
-	truncated, omitted_entries, omitted_attrs, unparseable, unmasked`
+	truncated, omitted_entries, omitted_attrs, unparseable, unmasked,
+	organization_id::text`
 
 func scanDrift(scanner interface{ Scan(dest ...any) error }) (*DriftRun, error) {
 	var d DriftRun
+	var organizationID sql.NullString
 	var connID, srcID sql.NullString
 	var added, changed, destroyed sql.NullInt64
 	var drifted sql.NullBool
@@ -60,8 +66,12 @@ func scanDrift(scanner interface{ Scan(dest ...any) error }) (*DriftRun, error) 
 	if err := scanner.Scan(&d.ID, &connID, &srcID, &d.StateKey, &d.RepoRef, &d.WorkingDir, &d.Status,
 		&added, &changed, &destroyed, &drifted, &summary, &d.Detail, &d.CallbackToken, &d.Actor,
 		&d.CreatedAt, &d.UpdatedAt,
-		&d.Truncated, &d.OmittedEntries, &d.OmittedAttrs, &d.Unparseable, &d.Unmasked); err != nil {
+		&d.Truncated, &d.OmittedEntries, &d.OmittedAttrs, &d.Unparseable, &d.Unmasked,
+		&organizationID); err != nil {
 		return nil, err
+	}
+	if organizationID.Valid {
+		d.OrganizationID = organizationID.String
 	}
 	if connID.Valid {
 		d.PipelineConnectionID = &connID.String

@@ -30,6 +30,10 @@ type HealthRun struct {
 	Actor                string            `json:"actor"`
 	CreatedAt            string            `json:"created_at"`
 	UpdatedAt            string            `json:"updated_at"`
+	// OrganizationID is the owning tenant, carried in memory so an alert can be
+	// fanned out to THAT organization's notification channels and no others.
+	// Never serialized: the boundary is enforced server-side (#459).
+	OrganizationID string `json:"-"`
 }
 
 // HealthRepository is the DAO for health_runs.
@@ -44,17 +48,23 @@ func NewHealthRepository(db *sql.DB) *HealthRepository {
 const healthColumns = `id, pipeline_connection_id, COALESCE(repo_ref,''), COALESCE(working_dir,''),
 	COALESCE(terraform_version,''), provider_versions, module_versions, COALESCE(registry_host,''), status,
 	init_ok, plan_ok, success, summary, COALESCE(detail,''), callback_token, COALESCE(actor,''),
-	created_at::text, updated_at::text`
+	created_at::text, updated_at::text,
+	organization_id::text`
 
 func scanHealth(scanner interface{ Scan(dest ...any) error }) (*HealthRun, error) {
 	var h HealthRun
+	var organizationID sql.NullString
 	var connID sql.NullString
 	var initOK, planOK, success sql.NullBool
 	var providerVersions, moduleVersions, summary []byte
 	if err := scanner.Scan(&h.ID, &connID, &h.RepoRef, &h.WorkingDir, &h.TerraformVersion, &providerVersions,
 		&moduleVersions, &h.RegistryHost, &h.Status, &initOK, &planOK, &success, &summary, &h.Detail, &h.CallbackToken,
-		&h.Actor, &h.CreatedAt, &h.UpdatedAt); err != nil {
+		&h.Actor, &h.CreatedAt, &h.UpdatedAt,
+		&organizationID); err != nil {
 		return nil, err
+	}
+	if organizationID.Valid {
+		h.OrganizationID = organizationID.String
 	}
 	if connID.Valid {
 		h.PipelineConnectionID = &connID.String

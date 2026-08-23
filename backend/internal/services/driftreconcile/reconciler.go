@@ -36,7 +36,15 @@ const (
 // (so an expiry produces the same run_failed alert a real failure callback
 // would); kept as an interface here so this package does not import api.
 type FailureNotifier interface {
-	NotifyRunFailed(runID, detail string)
+	// organizationID is the run's owning tenant, and it is on this seam rather
+	// than looked up by the notifier because THIS is where the run object is in
+	// hand. Without it the alert fans out to every organization's channels —
+	// one tenant's stuck run announced to every other tenant's webhooks (#459).
+	//
+	// It may be empty: these runs reference their parent ON DELETE SET NULL, so a
+	// run whose source was deleted has no organization to report. The consumer
+	// must treat that as "reaches nobody", not "reaches everybody".
+	NotifyRunFailed(organizationID, runID, detail string)
 }
 
 // Reconciler sweeps for expired dispatched drift runs on an interval.
@@ -129,7 +137,7 @@ func (r *Reconciler) reconcileOnce(ctx context.Context) {
 			continue
 		}
 		expired++
-		r.notifier.NotifyRunFailed(run.ID, detail)
+		r.notifier.NotifyRunFailed(run.OrganizationID, run.ID, detail)
 	}
 	if expired > 0 {
 		r.logger.Info("expired stuck drift runs", "count", expired, "ttl", r.ttl.String())

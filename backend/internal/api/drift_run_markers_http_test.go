@@ -33,7 +33,7 @@ func driftRunRowMarked(status, token string, truncated bool, omittedEntries, omi
 	return sqlmock.NewRows(driftCols).
 		AddRow("d1", "p1", "s1", "envs/prod.tfstate", "", "", status,
 			0, 0, 0, false, nil, "", token, "alice", "2026-06-11", "2026-06-11",
-			truncated, omittedEntries, omittedAttrs, unparseable, unmasked)
+			truncated, omittedEntries, omittedAttrs, unparseable, unmasked, "11111111-1111-4111-8111-111111111111")
 }
 
 // TestRunResults_UnparseableCleanRunRoundTripsMarkersOnTheRun is the headline
