@@ -1,5 +1,12 @@
 # Changelog
 
+## [3.10.0](https://github.com/sethbacon/terraform-state-manager-backend/compare/v3.9.0...v3.10.0) (2026-08-23)
+
+
+### Bug Fixes
+
+* **tenancy:** scope the state plane, and guard the class the other way round ([#460](https://github.com/sethbacon/terraform-state-manager-backend/issues/460)) ([70b8cda](https://github.com/sethbacon/terraform-state-manager-backend/commit/70b8cdac29b2cad503f1ec847bf9188167f63910))
+
 ## [3.9.0](https://github.com/sethbacon/terraform-state-manager-backend/compare/v3.8.0...v3.9.0) (2026-08-23)
 
 
