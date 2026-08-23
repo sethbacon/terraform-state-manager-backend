@@ -113,9 +113,11 @@ type StatesAggregate struct {
 // buildStateWhere renders f as a parameterized WHERE clause (or "" when empty)
 // and the ordered args. Placeholders are $1..$N; callers that append further
 // args (e.g. a LIMIT) must do so AFTER these so the numbering stays correct.
-func buildStateWhere(f StateQueryFilter) (string, []any) {
+// buildStateWhere continues the placeholder sequence from `args`, so a caller
+// that has already bound something (the scoped readers bind the organization
+// array as $1) gets $2 onwards rather than a collision on $1.
+func buildStateWhere(f StateQueryFilter, args []any) (string, []any) {
 	var conds []string
-	var args []any
 	next := func() int { return len(args) + 1 }
 
 	if len(f.SourceIDs) > 0 {
@@ -398,16 +400,7 @@ func (r *StateAnalysisRepository) StateVersions(ctx context.Context) ([]StateVer
 		return nil, err
 	}
 	defer rows.Close()
-
-	var out []StateVersionRow
-	for rows.Next() {
-		var v StateVersionRow
-		if err := rows.Scan(&v.SourceID, &v.SourceName, &v.StateKey, &v.TerraformVersion, &v.RUM); err != nil {
-			return nil, err
-		}
-		out = append(out, v)
-	}
-	return out, rows.Err()
+	return scanStateVersionRows(rows)
 }
 
 // StatesByVersionExact returns up to limit states whose terraform_version equals
@@ -458,7 +451,7 @@ func (r *StateAnalysisRepository) AllStates(ctx context.Context) ([]StateRow, er
 // entire store on every request. The handler applies any residual predicates
 // (semver-range version, provider/type substring) to this reduced set.
 func (r *StateAnalysisRepository) FilterStates(ctx context.Context, f StateQueryFilter) ([]StateRow, error) {
-	where, args := buildStateWhere(f)
+	where, args := buildStateWhere(f, nil)
 	q := `
 		SELECT a.source_id, COALESCE(s.name, ''), COALESCE(s.type, ''), a.state_key,
 		       a.terraform_version, a.serial, a.lineage, a.size,
@@ -473,6 +466,16 @@ func (r *StateAnalysisRepository) FilterStates(ctx context.Context, f StateQuery
 	}
 	defer rows.Close()
 
+	return scanStateRows(rows)
+}
+
+// scanStateRows is shared by FilterStates and FilterStatesInScope so the two
+// cannot drift in what they project.
+func scanStateRows(rows interface {
+	Next() bool
+	Scan(dest ...any) error
+	Err() error
+}) ([]StateRow, error) {
 	out := []StateRow{}
 	for rows.Next() {
 		var v StateRow
@@ -497,7 +500,15 @@ func (r *StateAnalysisRepository) FilterStates(ctx context.Context, f StateQuery
 // match, while only one page of rows crosses the wire and no JSONB is unmarshalled.
 // Only valid when the request carries no residual predicate (see FilterStates).
 func (r *StateAnalysisRepository) PreviewStatesWithTotals(ctx context.Context, f StateQueryFilter, limit int) ([]StateRow, StatesAggregate, error) {
-	where, args := buildStateWhere(f)
+	return r.previewStatesWithTotals(ctx, f, limit, nil, `LEFT JOIN state_sources s ON s.id = a.source_id`)
+}
+
+// previewStatesWithTotals is the shared body. `seed` pre-binds anything the
+// caller has already placed (the scoped reader binds the organization array as
+// $1) and `join` is the ownership edge — an outer join for the unscoped reader,
+// the scoped inner join for its twin.
+func (r *StateAnalysisRepository) previewStatesWithTotals(ctx context.Context, f StateQueryFilter, limit int, seed []any, join string) ([]StateRow, StatesAggregate, error) {
+	where, args := buildStateWhere(f, seed)
 	args = append(args, limit)
 	q := `
 		SELECT a.source_id, COALESCE(s.name, ''), COALESCE(s.type, ''), a.state_key,
@@ -508,8 +519,7 @@ func (r *StateAnalysisRepository) PreviewStatesWithTotals(ctx context.Context, f
 		       COALESCE(SUM(a.managed_resources) OVER(), 0),
 		       COALESCE(SUM(a.data_sources) OVER(), 0),
 		       COALESCE(SUM(a.total_resources) OVER(), 0)
-		FROM state_analyses a
-		LEFT JOIN state_sources s ON s.id = a.source_id`
+		FROM state_analyses a ` + join // #nosec G202 -- `join` is one of two package-level literals (the unscoped LEFT JOIN above, or analysisOrgJoin whose only variable is a bound $1 placeholder); it is never derived from input
 	q += " " + where + " ORDER BY s.name, a.state_key LIMIT $" + fmt.Sprintf("%d", len(args)) // #nosec G202 -- where is fixed column names + $N placeholders from buildStateWhere; all values bound via args
 	rows, err := r.db.QueryContext(ctx, q, args...)                                           // #nosec G202 -- q is built from fixed SQL + placeholders above
 	if err != nil {
@@ -533,8 +543,8 @@ func (r *StateAnalysisRepository) PreviewStatesWithTotals(ctx context.Context, f
 	return out, agg, rows.Err()
 }
 
-func (r *StateAnalysisRepository) jsonbCounts(ctx context.Context, query string) (map[string]int, error) {
-	rows, err := r.db.QueryContext(ctx, query)
+func (r *StateAnalysisRepository) jsonbCounts(ctx context.Context, query string, args ...any) (map[string]int, error) {
+	rows, err := r.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -584,6 +594,15 @@ func (r *StateAnalysisRepository) SyncStatuses(ctx context.Context) (map[string]
 	}
 	defer rows.Close()
 
+	return scanSyncStatuses(rows)
+}
+
+// scanSyncStatuses is shared by SyncStatuses and SyncStatusesInScope.
+func scanSyncStatuses(rows interface {
+	Next() bool
+	Scan(dest ...any) error
+	Err() error
+}) (map[string]SourceSyncStatus, error) {
 	statuses := map[string]SourceSyncStatus{}
 	for rows.Next() {
 		var st SourceSyncStatus
