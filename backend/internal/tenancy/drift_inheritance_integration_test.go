@@ -122,8 +122,13 @@ func TestIntegration_AnUnownedSourceRefusesTheDetection(t *testing.T) {
 	ctx := context.Background()
 	repo := repositories.NewDriftRecordRepository(db)
 
+	// PHASE 4 REMOVED ONE OF THESE CASES BY MAKING IT IMPOSSIBLE. Through phases
+	// 1-3 an unstamped source could exist -- written by a replica on the previous
+	// build, before the backfill -- and UpsertDetection had to refuse it. After
+	// 000034's NOT NULL it cannot be created at all, which is asserted below
+	// instead: "this bad state is handled" becomes "this bad state cannot arise",
+	// and the second is what the phase actually bought.
 	for _, tc := range []struct{ name, sourceID string }{
-		{"unstamped source", seedSourceForDrift(t, db, "", "unstamped-src")},
 		{"missing source", "99999999-9999-4999-8999-999999999999"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -181,5 +186,21 @@ func TestIntegration_ScheduleCarriesItsOrganizationOutOfTheDatabase(t *testing.T
 			"Without it the worker dispatches an empty organization and the run is unowned — "+
 			"and there is no edge from a run back to its schedule to recover it.",
 			loaded.OrganizationID, orgBeta)
+	}
+}
+
+// TestIntegration_AnUnstampedSourceCannotBeCreated is the other half of the case
+// above, and it is the one Phase 4 added.
+//
+// UpsertDetection's refusal still exists and is still correct -- a defence that
+// only holds while the schema does is not a defence -- but the schema now makes
+// the state unreachable, and that is worth pinning separately. If 000034 were
+// reverted this fails, and the refusal above becomes load-bearing again.
+func TestIntegration_AnUnstampedSourceCannotBeCreated(t *testing.T) {
+	db := newTestDB(t)
+	_, err := db.Exec(`INSERT INTO state_sources (name, type, organization_id) VALUES ('unstamped', 'local', NULL)`)
+	if err == nil {
+		t.Fatal("a source was created with no organization: after 000034 that column is NOT NULL, " +
+			"and an unstamped row is invisible to every tenant while visible to a platform admin")
 	}
 }

@@ -139,10 +139,21 @@ func TestIntegration_OrganizationPartition_ColumnShape(t *testing.T) {
 		if err != nil {
 			t.Fatalf("inspect %s: %v", table, err)
 		}
-		if nullable.String != "YES" {
-			t.Errorf("%s.organization_id is NOT NULL; phase 1 must be non-breaking and the column "+
-				"is NULL on every row until the startup backfill runs", table)
+		// PHASE 4 INVERTS THIS. Through phases 1-3 the assertion was that the
+		// column is NULLABLE: phase 1 had to be non-breaking, and the column was
+		// NULL on every row until the startup backfill ran. Migration 000034
+		// makes it NOT NULL, which is the breaking step that phase exists to be —
+		// so the guard now asserts the opposite, and a column that went back to
+		// nullable would mean 000034 was reverted without this being revisited.
+		if nullable.String != "NO" {
+			t.Errorf("%s.organization_id is nullable after 000034; phase 4 makes it NOT NULL, "+
+				"and a nullable column means an unstamped row is once again invisible to every "+
+				"tenant and visible to a platform admin", table)
 		}
+		// The DEFAULT stays after phase 4, deliberately. It is what keeps a write
+		// path that has not been taught the acting organization from failing
+		// outright; the class guard in internal/db/repositories is what makes
+		// such a path a build failure instead.
 		if !colDefault.Valid || colDefault.String != "tsm_default_organization_id()" {
 			t.Errorf("%s.organization_id default = %q, want tsm_default_organization_id() — "+
 				"without it every INSERT writes NULL", table, colDefault.String)
@@ -176,23 +187,28 @@ func TestIntegration_OrganizationPartition_BackfillStampsAndDefaults(t *testing.
 	// A row written BEFORE the carrier is populated — which is every row on an
 	// upgraded deployment, and any row a replica writes between the migration
 	// applying and bootstrap.Run completing.
-	var preSourceID string
-	if err := db.QueryRow(
-		`INSERT INTO state_sources (name, type) VALUES ('pre-backfill', 'local') RETURNING id`).
-		Scan(&preSourceID); err != nil {
-		t.Fatalf("insert a pre-backfill source: %v", err)
-	}
+	// PHASE 4 REPLACED THIS SCENARIO WITH A STRICTER ONE.
+	//
+	// Through phases 1-3 a row could be written with organization_id NULL -- by a
+	// replica still on the previous build, between the migration applying and
+	// bootstrap.Run completing -- and the backfill existed to stamp it. The
+	// assertion here was that such a row comes out NULL.
+	//
+	// After 000034 that row cannot exist, and the write FAILS instead: the column
+	// DEFAULT is tsm_default_organization_id(), which reads the carrier in
+	// system_settings, and the carrier is empty at this point. NULL meets NOT
+	// NULL and Postgres refuses.
+	//
+	// That is the fail-closed direction and it is worth pinning rather than
+	// working around. A deployment that has not established its default
+	// organization cannot write a row that no tenant would be able to see; it
+	// stops instead. (On a real install the ordering holds: migrations run
+	// against empty tables, then bootstrap.Run sets the carrier, then writes
+	// begin.)
 	if _, err := db.Exec(
-		`INSERT INTO drift_runs (status, callback_token) VALUES ('completed', 'tok-pre')`); err != nil {
-		t.Fatalf("insert a pre-backfill drift run: %v", err)
-	}
-
-	// It must be NULL, not an error and not some invented value. If this row came
-	// out already stamped, the default was frozen to something at ALTER time and
-	// the rest of this test would be meaningless.
-	if got := orgOf(t, db, "state_sources", "name = 'pre-backfill'"); got.Valid {
-		t.Fatalf("a source written before the backfill carries organization_id %q; "+
-			"it must be NULL — the carrier is empty at this point", got.String)
+		`INSERT INTO state_sources (name, type) VALUES ('pre-backfill', 'local')`); err == nil {
+		t.Fatal("a source was written before the default organization was established; after " +
+			"000034 the column DEFAULT resolves to NULL there and NOT NULL must refuse it")
 	}
 
 	// An empty id is refused rather than written. Asserted on the MESSAGE, not
@@ -210,14 +226,21 @@ func TestIntegration_OrganizationPartition_BackfillStampsAndDefaults(t *testing.
 		t.Fatalf("Backfill: %v", err)
 	}
 
-	// 1. The pre-existing rows are stamped.
-	for _, c := range []struct{ table, where string }{
-		{"state_sources", "name = 'pre-backfill'"},
-		{"drift_runs", "callback_token = 'tok-pre'"},
-	} {
-		got := orgOf(t, db, c.table, c.where)
-		if !got.Valid || got.String != orgID {
-			t.Errorf("%s after backfill: organization_id = %v, want %s", c.table, got, orgID)
+	// 1. The sweep has nothing left to stamp, and that is the Phase 4 outcome.
+	//
+	// It used to assert that pre-existing NULL rows came out stamped. After
+	// 000034 no such row can be created (see above), so the sweep is a no-op on
+	// these tables and the property that remains is that it runs cleanly and
+	// leaves every row owned. A backfill with nothing to repair is the goal, not
+	// a gap in the test.
+	for _, table := range []string{"state_sources", "drift_runs"} {
+		var unowned int
+		if err := db.QueryRow(
+			`SELECT count(*) FROM ` + table + ` WHERE organization_id IS NULL`).Scan(&unowned); err != nil {
+			t.Fatalf("count unowned %s: %v", table, err)
+		}
+		if unowned != 0 {
+			t.Errorf("%s has %d row(s) with no organization after the backfill", table, unowned)
 		}
 	}
 

@@ -243,6 +243,14 @@ func TestIntegration_ScopedAnalysisReaders_PlatformAdminSeesEverything(t *testin
 func TestIntegration_ScopedAnalysisReaders_UnstampedSourceIsInvisible(t *testing.T) {
 	db := newScopeDB(t)
 	seedTwoTenants(t, db)
+	// Phase 4 (000034) makes organization_id NOT NULL, so this state has to be
+	// created deliberately. It is still worth testing: the join's NULL-exclusion
+	// is DEFENCE IN DEPTH, and the state is reachable in practice by restoring a
+	// backup taken before that migration. A predicate that stopped excluding NULL
+	// would hand every such row to whichever tenant asked.
+	if _, err := db.Exec(`ALTER TABLE state_sources ALTER COLUMN organization_id DROP NOT NULL`); err != nil {
+		t.Fatalf("relax NOT NULL: %v", err)
+	}
 	if _, err := db.Exec(
 		`UPDATE state_sources SET organization_id = NULL WHERE id = '11110000-0000-4000-8000-000000000001'`); err != nil {
 		t.Fatalf("unstamp: %v", err)
