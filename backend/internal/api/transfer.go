@@ -79,7 +79,16 @@ func (h *SourcesHandlers) doTransfer(c *gin.Context, mode string) {
 	actor := userIDOf(c)
 	force := c.Query("force") == "true"
 
-	srcB, err := h.repo.GetByID(ctx, req.TargetSourceID)
+	// Scoped, and the ordering matters: transferEndpointsReachable below already
+	// refuses a target the caller may not reach, but it runs AFTER this load --
+	// and this load decrypts the target's credentials to build its connector. A
+	// refusal that happens after the secret is in memory is a late refusal.
+	scopeB, resolvedB := tenantscope.FromContext(c)
+	if !resolvedB {
+		serverError(c, errNoTenantScope, "the tenant scope was not resolved for this route")
+		return
+	}
+	srcB, err := h.repo.GetByIDInScope(ctx, req.TargetSourceID, scopeB)
 	if err != nil {
 		serverError(c, err, "failed to load target source")
 		return

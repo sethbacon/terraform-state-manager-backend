@@ -263,7 +263,8 @@ func rowsOwnedBy(t *testing.T, _ *sqlmock.Rows, orgID string) *sqlmock.Rows {
 
 func (e *sourcesEnv) expectSourceOwnedBy(id, dir, orgID string) {
 	cfg, _ := json.Marshal(map[string]any{"base_path": dir})
-	e.mock.ExpectQuery("SELECT .+ FROM state_sources WHERE id").WithArgs(id).
+	e.mock.ExpectQuery("SELECT .+ FROM state_sources WHERE organization_id").
+		WithArgs(sqlmock.AnyArg(), id).
 		WillReturnRows(sqlmock.NewRows(apiSourceCols).
 			AddRow(id, "local-"+id, "local", "", cfg, []byte(`{}`), nil, "2026-06-10", "2026-06-10", orgID))
 }

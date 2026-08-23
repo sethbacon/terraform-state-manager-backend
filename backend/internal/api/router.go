@@ -287,6 +287,10 @@ func NewRouter(cfg *config.Config, database *sql.DB, identityDB *sql.DB) (*gin.E
 		// returned "the tenant scope was not resolved". Found by
 		// TestEveryScopeAwareHandlerIsRoutedWithTenantScope.
 		tenantScopeStateDrift := middleware.TenantScope(orgMembers, platformAdmins, auth.ScopeStateDrift)
+		// state:write, for the edit plane. Its routes reach their source through
+		// sourceAndConnector, which now refuses a source the caller's
+		// organization does not own -- and cannot, without a scope to check.
+		tenantScopeStateWrite := middleware.TenantScope(orgMembers, platformAdmins, auth.ScopeStateWrite)
 		// Bound state-operation requests so a hung or slow backend cannot block the
 		// handler goroutine (and any per-key lock it holds) indefinitely (#263).
 		s := v1.Group("/sources", requireAuth, middleware.RequestTimeout(5*time.Minute))
@@ -295,7 +299,7 @@ func NewRouter(cfg *config.Config, database *sql.DB, identityDB *sql.DB) (*gin.E
 			s.POST("", middleware.RequireScope(auth.ScopeSourcesManage), tenantScopeSourcesManage, sources.CreateSource())
 			// Static /test must not collide with /:id below: gin resolves static
 			// segments before params, so POST /sources/test is unambiguous.
-			s.POST("/test", middleware.RequireScope(auth.ScopeSourcesManage), sources.TestSourceConfig())
+			s.POST("/test", middleware.RequireScope(auth.ScopeSourcesManage), tenantScopeSourcesManage, sources.TestSourceConfig())
 			s.GET("/:id", middleware.RequireScope(auth.ScopeStateRead), tenantScopeStateRead, sources.GetSource())
 			// tenantScopeSourcesManage on BOTH, because both MUTATE. An update
 			// rewrites a source's connector config and stored credentials; a
@@ -303,28 +307,28 @@ func NewRouter(cfg *config.Config, database *sql.DB, identityDB *sql.DB) (*gin.E
 			// resolved, so neither could check ownership.
 			s.PUT("/:id", middleware.RequireScope(auth.ScopeSourcesManage), tenantScopeSourcesManage, sources.UpdateSource())
 			s.DELETE("/:id", middleware.RequireScope(auth.ScopeSourcesManage), tenantScopeSourcesManage, sources.DeleteSource())
-			s.POST("/:id/test", middleware.RequireScope(auth.ScopeStateRead), sources.TestSource())
-			s.GET("/:id/states", middleware.RequireScope(auth.ScopeStateRead), sources.ListStates())
-			s.GET("/:id/state/analysis", middleware.RequireScope(auth.ScopeStateRead), sources.AnalyzeState())
-			s.GET("/:id/state/raw", middleware.RequireScope(auth.ScopeStateRead), sources.RawState())
-			s.GET("/:id/state/resources", middleware.RequireScope(auth.ScopeStateRead), sources.ListStateResources())
-			s.GET("/:id/state/outputs", middleware.RequireScope(auth.ScopeStateRead), sources.StateOutputs())
-			s.GET("/:id/state/history", middleware.RequireScope(auth.ScopeStateRead), sources.StateHistory())
-			s.GET("/:id/state/report", middleware.RequireScope(auth.ScopeStateRead), sources.StateReport())
-			s.GET("/:id/modules", middleware.RequireScope(auth.ScopeStateRead), sources.ListStateModules())
+			s.POST("/:id/test", middleware.RequireScope(auth.ScopeStateRead), tenantScopeStateRead, sources.TestSource())
+			s.GET("/:id/states", middleware.RequireScope(auth.ScopeStateRead), tenantScopeStateRead, sources.ListStates())
+			s.GET("/:id/state/analysis", middleware.RequireScope(auth.ScopeStateRead), tenantScopeStateRead, sources.AnalyzeState())
+			s.GET("/:id/state/raw", middleware.RequireScope(auth.ScopeStateRead), tenantScopeStateRead, sources.RawState())
+			s.GET("/:id/state/resources", middleware.RequireScope(auth.ScopeStateRead), tenantScopeStateRead, sources.ListStateResources())
+			s.GET("/:id/state/outputs", middleware.RequireScope(auth.ScopeStateRead), tenantScopeStateRead, sources.StateOutputs())
+			s.GET("/:id/state/history", middleware.RequireScope(auth.ScopeStateRead), tenantScopeStateRead, sources.StateHistory())
+			s.GET("/:id/state/report", middleware.RequireScope(auth.ScopeStateRead), tenantScopeStateRead, sources.StateReport())
+			s.GET("/:id/modules", middleware.RequireScope(auth.ScopeStateRead), tenantScopeStateRead, sources.ListStateModules())
 			// Freshness: locked module versions vs the sibling registry's latest.
 			// Inert when standalone (no active sibling -> every module "no_registry").
-			s.GET("/:id/modules/freshness", middleware.RequireScope(auth.ScopeStateRead), sources.ListStateModuleFreshness(func() *suite.DiscoveryClient { return suiteClient }))
+			s.GET("/:id/modules/freshness", middleware.RequireScope(auth.ScopeStateRead), tenantScopeStateRead, sources.ListStateModuleFreshness(func() *suite.DiscoveryClient { return suiteClient }))
 
 			// Phase 2 edit plane (validate → backup → write → audit; restore).
-			s.PUT("/:id/state/raw", middleware.RequireScope(auth.ScopeStateWrite), sources.EditState())
-			s.POST("/:id/state/diff", middleware.RequireScope(auth.ScopeStateWrite), sources.EditDiff())
-			s.POST("/:id/state/operations", middleware.RequireScope(auth.ScopeStateWrite), sources.StateOperation())
-			s.GET("/:id/state/backups", middleware.RequireScope(auth.ScopeStateRead), sources.ListBackups())
-			s.GET("/:id/state/backups/:backupId", middleware.RequireScope(auth.ScopeStateRead), sources.GetBackupContent())
-			s.GET("/:id/state/backups/:backupId/diff", middleware.RequireScope(auth.ScopeStateRead), sources.DiffBackup())
-			s.POST("/:id/state/backups/:backupId/restore", middleware.RequireScope(auth.ScopeStateWrite), sources.RestoreBackup())
-			s.GET("/:id/state/locks", middleware.RequireScope(auth.ScopeStateRead), sources.ListLocks())
+			s.PUT("/:id/state/raw", middleware.RequireScope(auth.ScopeStateWrite), tenantScopeStateWrite, sources.EditState())
+			s.POST("/:id/state/diff", middleware.RequireScope(auth.ScopeStateWrite), tenantScopeStateWrite, sources.EditDiff())
+			s.POST("/:id/state/operations", middleware.RequireScope(auth.ScopeStateWrite), tenantScopeStateWrite, sources.StateOperation())
+			s.GET("/:id/state/backups", middleware.RequireScope(auth.ScopeStateRead), tenantScopeStateRead, sources.ListBackups())
+			s.GET("/:id/state/backups/:backupId", middleware.RequireScope(auth.ScopeStateRead), tenantScopeStateRead, sources.GetBackupContent())
+			s.GET("/:id/state/backups/:backupId/diff", middleware.RequireScope(auth.ScopeStateRead), tenantScopeStateRead, sources.DiffBackup())
+			s.POST("/:id/state/backups/:backupId/restore", middleware.RequireScope(auth.ScopeStateWrite), tenantScopeStateWrite, sources.RestoreBackup())
+			s.GET("/:id/state/locks", middleware.RequireScope(auth.ScopeStateRead), tenantScopeStateRead, sources.ListLocks())
 			s.DELETE("/:id/state/lock", middleware.RequireScope(auth.ScopeAdmin), sources.ForceUnlock())
 
 			// Phase 2 transfer plane: cross-source backup (copy) and migrate (move).
@@ -535,7 +539,7 @@ func NewRouter(cfg *config.Config, database *sql.DB, identityDB *sql.DB) (*gin.E
 
 			// Drift records: the durable, acknowledgeable layer over runs, plus
 			// push-style ingest for pipelines TSM did not dispatch.
-			d.POST("/ingest", middleware.RequireScope(auth.ScopeStateDrift), drift.IngestDrift())
+			d.POST("/ingest", middleware.RequireScope(auth.ScopeStateDrift), tenantScopeStateDrift, drift.IngestDrift())
 			d.GET("/records", middleware.RequireScope(auth.ScopeStateRead), drift.ListDriftRecords())
 			d.GET("/records/:id", middleware.RequireScope(auth.ScopeStateRead), drift.GetDriftRecord())
 			d.POST("/records/:id/acknowledge", middleware.RequireScope(auth.ScopeStateDrift), drift.AcknowledgeDriftRecord())

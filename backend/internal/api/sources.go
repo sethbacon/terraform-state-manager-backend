@@ -283,13 +283,12 @@ func (h *SourcesHandlers) GetSource() gin.HandlerFunc {
 // @Router       /sources/{id} [put]
 func (h *SourcesHandlers) UpdateSource() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		existing, err := h.repo.GetByID(c.Request.Context(), c.Param("id"))
-		if err != nil {
-			serverError(c, err, "failed to load source")
-			return
-		}
-		if existing == nil {
-			c.JSON(http.StatusNotFound, gin.H{"error": "source not found"})
+		// Scoped, even though the UPDATE below is scoped too. The pre-read
+		// decrypts the stored credentials to validate the new config against
+		// them, so an unscoped load here hands another tenant's secret to the
+		// connector before the write ever refuses.
+		existing, ok := h.sourceInScope(c)
+		if !ok {
 			return
 		}
 
@@ -440,7 +439,15 @@ func (h *SourcesHandlers) TestSourceConfig() gin.HandlerFunc {
 
 		creds := req.Credentials
 		if len(creds) == 0 && req.SourceID != "" {
-			existing, err := h.repo.GetByID(c.Request.Context(), req.SourceID)
+			scope, resolved := tenantscope.FromContext(c)
+			if !resolved {
+				serverError(c, errNoTenantScope, "the tenant scope was not resolved for this route")
+				return
+			}
+			// Scoped: this path exists to merge a source's STORED credentials
+			// into a trial config, so an unscoped lookup lets a caller borrow
+			// another organization's secret to test their own endpoint with.
+			existing, err := h.repo.GetByIDInScope(c.Request.Context(), req.SourceID, scope)
 			if err != nil {
 				c.JSON(http.StatusInternalServerError, gin.H{"status": "failed", "error": "failed to load source"})
 				return
@@ -797,14 +804,42 @@ func (h *SourcesHandlers) StateReport() gin.HandlerFunc {
 
 // connectorFor loads the source by :id and builds its connector, writing an error
 // response and returning ok=false on failure.
-func (h *SourcesHandlers) connectorFor(c *gin.Context) (statesource.Connector, bool) {
-	s, err := h.repo.GetByID(c.Request.Context(), c.Param("id"))
+// sourceInScope resolves the :id source, refusing one the caller's organization
+// does not own.
+//
+// THIS IS THE ENTRY POINT FOR THE WHOLE STATE PLANE -- every /sources/:id/state/*
+// read, the edit plane (PUT state/raw, POST state/operations including
+// deleteState, restore, force-unlock) and the transfer plane all reach their
+// source through here or through sourceAndConnector below. Resolving by id alone
+// meant a caller in organization B could read, rewrite and DELETE organization
+// A's Terraform state files, using A's stored credentials to do it.
+//
+// Not found and not-yours are the SAME answer, for the reason GetByIDInScope
+// gives: 000033's isolation suite already proves that a globally-unique source
+// name discloses another organization's row through a constraint error, and
+// answering "403, that one is not yours" here would rebuild the same disclosure
+// on the read path.
+func (h *SourcesHandlers) sourceInScope(c *gin.Context) (*repositories.Source, bool) {
+	scope, resolved := tenantscope.FromContext(c)
+	if !resolved {
+		serverError(c, errNoTenantScope, "the tenant scope was not resolved for this route")
+		return nil, false
+	}
+	s, err := h.repo.GetByIDInScope(c.Request.Context(), c.Param("id"), scope)
 	if err != nil {
 		serverError(c, err, "failed to load source")
 		return nil, false
 	}
 	if s == nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "source not found"})
+		return nil, false
+	}
+	return s, true
+}
+
+func (h *SourcesHandlers) connectorFor(c *gin.Context) (statesource.Connector, bool) {
+	s, ok := h.sourceInScope(c)
+	if !ok {
 		return nil, false
 	}
 	creds, err := decryptCredentials(s)

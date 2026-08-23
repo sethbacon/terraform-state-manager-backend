@@ -598,9 +598,11 @@ func (h *SourcesHandlers) loadOwnedBackup(c *gin.Context) (*repositories.Backup,
 		c.JSON(http.StatusNotFound, gin.H{"error": "backup not found"})
 		return nil, false
 	}
-	src, err := h.repo.GetByID(c.Request.Context(), c.Param("id"))
-	if err != nil {
-		serverError(c, err, "failed to load source")
+	// Scoped: loadOwnedBackup backs the RESTORE path, which writes the backup's
+	// bytes back over a live state file. Resolving its source by id alone let a
+	// caller restore into another organization's backend.
+	src, ok := h.sourceInScope(c)
+	if !ok {
 		return nil, false
 	}
 	if src == nil || backup.SourceID != src.ID {
@@ -679,13 +681,11 @@ func (h *SourcesHandlers) RestoreBackup() gin.HandlerFunc {
 // sourceAndConnector loads the source by :id and its connector (with decrypted
 // credentials), writing an error response on failure.
 func (h *SourcesHandlers) sourceAndConnector(c *gin.Context) (*repositories.Source, statesource.Connector, bool) {
-	s, err := h.repo.GetByID(c.Request.Context(), c.Param("id"))
-	if err != nil {
-		serverError(c, err, "failed to load source")
-		return nil, nil, false
-	}
-	if s == nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "source not found"})
+	// Scoped: see sourceInScope. This backs the EDIT plane, so an unscoped
+	// resolution here is a cross-tenant state rewrite and delete, not merely a
+	// disclosure.
+	s, ok := h.sourceInScope(c)
+	if !ok {
 		return nil, nil, false
 	}
 	creds, err := decryptCredentials(s)

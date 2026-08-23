@@ -9,6 +9,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/terraform-state-manager/terraform-state-manager/internal/tenantscope"
 	"io"
 	"net/http"
 	"strconv"
@@ -143,12 +144,28 @@ func (h *DriftHandlers) IngestDrift() gin.HandlerFunc {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "source_id and state_key are required"})
 			return
 		}
-		src, err := h.sourceRepo.GetByID(ctx, req.SourceID)
+		// SCOPED, and this is a cross-tenant WRITE if it is not.
+		//
+		// source_id comes from the request BODY, and UpsertDetection inherits the
+		// record's organization from whichever source it names
+		// (`SELECT ... s.organization_id FROM state_sources s WHERE s.id = $1`).
+		// So resolving it by id alone let any holder of state:drift write into
+		// another organization's drift ledger -- and merge onto its live record,
+		// which is the acknowledgeable statement of what is currently wrong with
+		// that tenant's infrastructure.
+		scope, resolved := tenantscope.FromContext(c)
+		if !resolved {
+			serverError(c, errNoTenantScope, "the tenant scope was not resolved for this route")
+			return
+		}
+		src, err := h.sourceRepo.GetByIDInScope(ctx, req.SourceID, scope)
 		if err != nil {
 			serverError(c, err, "failed to load source")
 			return
 		}
 		if src == nil {
+			// Not found and not-yours are the same answer: otherwise a caller can
+			// enumerate source ids and learn which name real sources elsewhere.
 			c.JSON(http.StatusNotFound, gin.H{"error": "source not found"})
 			return
 		}

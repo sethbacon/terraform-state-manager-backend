@@ -152,6 +152,25 @@ func (e *sourcesEnv) read(t *testing.T, name string) string {
 // expectSource queues a GetByID row for a local source rooted at dir.
 func (e *sourcesEnv) expectSource(id, dir string) {
 	cfg, _ := json.Marshal(map[string]any{"base_path": dir})
+	// SCOPED shape: the state plane resolves its source through GetByIDInScope,
+	// which binds the organization array FIRST and the id second. A fixture still
+	// scripting the by-id-alone lookup would be scripting a statement the code no
+	// longer emits.
+	e.mock.ExpectQuery("SELECT .+ FROM state_sources WHERE organization_id").
+		WithArgs(sqlmock.AnyArg(), id).
+		WillReturnRows(sqlmock.NewRows(apiSourceCols).
+			AddRow(id, "local-"+id, "local", "", cfg, []byte(`{}`), nil, "2026-06-10", "2026-06-10", testActingOrg))
+}
+
+// expectSourceUnscoped scripts the BY-ID lookup, for the handlers that still
+// serve the unscoped answer on purpose — GetSource and ListSources are Phase 2b
+// dual-read sites, and flipping them is gated on the estate being re-owned.
+//
+// The two helpers exist separately because the two shapes are now genuinely
+// different statements, and a single tolerant fixture would stop reporting which
+// one a handler actually emits.
+func (e *sourcesEnv) expectSourceUnscoped(id, dir string) {
+	cfg, _ := json.Marshal(map[string]any{"base_path": dir})
 	e.mock.ExpectQuery("SELECT .+ FROM state_sources WHERE id").WithArgs(id).
 		WillReturnRows(sqlmock.NewRows(apiSourceCols).
 			AddRow(id, "local-"+id, "local", "", cfg, []byte(`{}`), nil, "2026-06-10", "2026-06-10", testActingOrg))
@@ -219,7 +238,7 @@ func TestCreateSource(t *testing.T) {
 func TestGetAndDeleteSource(t *testing.T) {
 	e := newSourcesEnv(t)
 
-	e.expectSource("s1", e.dir)
+	e.expectSourceUnscoped("s1", e.dir)
 	if w := e.do(http.MethodGet, "/api/v1/sources/s1", ""); w.Code != http.StatusOK {
 		t.Errorf("get: status = %d", w.Code)
 	}
@@ -308,7 +327,8 @@ func TestUpdateSource(t *testing.T) {
 	if w := e.do(http.MethodPut, "/api/v1/sources/s1", `{}`); w.Code != http.StatusBadRequest {
 		t.Errorf("missing name: status = %d, want 400", w.Code)
 	}
-	e.mock.ExpectQuery("SELECT .+ FROM state_sources WHERE id").WithArgs("ghost").
+	e.mock.ExpectQuery("SELECT .+ FROM state_sources WHERE organization_id").
+		WithArgs(sqlmock.AnyArg(), "ghost").
 		WillReturnRows(sqlmock.NewRows(apiSourceCols))
 	if w := e.do(http.MethodPut, "/api/v1/sources/ghost", `{"name":"x"}`); w.Code != http.StatusNotFound {
 		t.Errorf("ghost: status = %d, want 404", w.Code)
@@ -331,7 +351,8 @@ func TestTestSource(t *testing.T) {
 
 	// A broken backend surfaces as 502 with the connector error.
 	cfg, _ := json.Marshal(map[string]any{"base_path": filepath.Join(e.dir, "gone")})
-	e.mock.ExpectQuery("SELECT .+ FROM state_sources WHERE id").WithArgs("s2").
+	e.mock.ExpectQuery("SELECT .+ FROM state_sources WHERE organization_id").
+		WithArgs(sqlmock.AnyArg(), "s2").
 		WillReturnRows(sqlmock.NewRows(apiSourceCols).
 			AddRow("s2", "broken", "local", "", cfg, []byte(`{}`), nil, "2026-06-10", "2026-06-10", testActingOrg))
 	if w := e.do(http.MethodPost, "/api/v1/sources/s2/test", ""); w.Code != http.StatusBadRequest && w.Code != http.StatusBadGateway {
@@ -380,7 +401,8 @@ func TestTestSourceConfigMergesStoredCredentials(t *testing.T) {
 	}
 
 	// An unknown source_id is a 404, mirroring the by-id routes.
-	e.mock.ExpectQuery("SELECT .+ FROM state_sources WHERE id").WithArgs("ghost").
+	e.mock.ExpectQuery("SELECT .+ FROM state_sources WHERE organization_id").
+		WithArgs(sqlmock.AnyArg(), "ghost").
 		WillReturnRows(sqlmock.NewRows(apiSourceCols))
 	ghost := fmt.Sprintf(`{"type":"local","config":{"base_path":%q},"source_id":"ghost"}`, filepath.ToSlash(e.dir))
 	if w := e.do(http.MethodPost, "/api/v1/sources/test", ghost); w.Code != http.StatusNotFound {
@@ -605,7 +627,8 @@ func TestEditState_AbortsWhenReadFails(t *testing.T) {
 	defer srv.Close()
 
 	cfg, _ := json.Marshal(map[string]any{"address": srv.URL})
-	e.mock.ExpectQuery("SELECT .+ FROM state_sources WHERE id").WithArgs("s1").
+	e.mock.ExpectQuery("SELECT .+ FROM state_sources WHERE organization_id").
+		WithArgs(sqlmock.AnyArg(), "s1").
 		WillReturnRows(sqlmock.NewRows(apiSourceCols).
 			AddRow("s1", "flaky-http", "http", "", cfg, []byte(`{}`), nil, "2026-06-11", "2026-06-11", testActingOrg))
 	// No lock_address => app-level DB lock: TTL reap, acquire, then release.
@@ -1237,7 +1260,8 @@ func TestTransfer_BackupAndMigrate(t *testing.T) {
 
 	// Missing target source → 404.
 	e.expectSource("s1", e.dir)
-	e.mock.ExpectQuery("SELECT .+ FROM state_sources WHERE id").WithArgs("ghost").
+	e.mock.ExpectQuery("SELECT .+ FROM state_sources WHERE organization_id").
+		WithArgs(sqlmock.AnyArg(), "ghost").
 		WillReturnRows(sqlmock.NewRows(apiSourceCols))
 	if w := e.do(http.MethodPost, "/api/v1/sources/s1/state/backup?key=app.tfstate",
 		`{"target_source_id":"ghost","target_key":"k"}`); w.Code != http.StatusNotFound {
