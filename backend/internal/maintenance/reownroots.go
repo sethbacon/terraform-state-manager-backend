@@ -3,6 +3,7 @@ package maintenance
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -144,6 +145,24 @@ func Census(ctx context.Context, db *sql.DB) (CensusResult, error) {
 type MoveResult struct {
 	Moved       map[string]int64
 	Underivable map[string]int64 // rows whose parent is gone, left alone
+	// MovedAwayFromDefault is true when `from` was the deployment's DEFAULT
+	// organization, which the move does not repoint.
+	//
+	// It matters because the default is where things LAND when nothing else
+	// decides: a first login not covered by an OIDC or SAML group mapping is
+	// placed there, and every partition root's column DEFAULT is
+	// tsm_default_organization_id(). So an estate moved away from the default
+	// leaves new users -- and anything still relying on the column default --
+	// arriving in an organization that now owns nothing.
+	//
+	// The move does NOT change the setting. Which organization a deployment
+	// considers its default is an operator decision with effects beyond these
+	// tables, and repointing it while re-owning rows would be two decisions
+	// taken under one command.
+	MovedAwayFromDefault bool
+	// DefaultOrganizationID is the deployment default at the time of the move,
+	// reported so the operator can see what it still points at.
+	DefaultOrganizationID string
 }
 
 func (m MoveResult) String() string {
@@ -161,6 +180,13 @@ func (m MoveResult) String() string {
 		if n := m.Underivable[t]; n > 0 {
 			fmt.Fprintf(&b, "  (%d left: parent deleted, owner not recoverable)", n)
 		}
+	}
+	if m.MovedAwayFromDefault {
+		fmt.Fprintf(&b, "\n\n  WARNING: the rows moved OUT of this deployment's default organization\n"+
+			"  (%s), and that setting is unchanged. New users whose first login is not\n"+
+			"  covered by a group mapping still land there, and so does anything still\n"+
+			"  relying on the column DEFAULT. Repoint it if the destination is now the\n"+
+			"  organization this deployment is really for.", m.DefaultOrganizationID)
 	}
 	return b.String()
 }
@@ -221,6 +247,17 @@ func Move(ctx context.Context, db *sql.DB, from, to string, exists DestinationEx
 		return res, err
 	}
 	defer func() { _ = tx.Rollback() }()
+
+	// Note whether this move empties the deployment's default organization. Read
+	// inside the transaction so the report describes the same instant the move
+	// did.
+	var currentDefault sql.NullString
+	if err := tx.QueryRowContext(ctx,
+		`SELECT default_organization_id::text FROM system_settings WHERE id = 1`).Scan(&currentDefault); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return res, fmt.Errorf("read the deployment default organization: %w", err)
+	}
+	res.DefaultOrganizationID = currentDefault.String
+	res.MovedAwayFromDefault = currentDefault.Valid && currentDefault.String == from
 
 	// 1. The config roots, from the operator's mapping.
 	for _, t := range configRoots {

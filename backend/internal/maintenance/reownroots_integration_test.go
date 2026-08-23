@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"net/url"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/jackc/pgx/v5"
@@ -243,5 +244,56 @@ func TestIntegration_Census_IsReadOnly(t *testing.T) {
 	}
 	if after := ownerOfRow(t, db, "state_sources", "aaaa0000-0000-4000-8000-000000000001"); after != before {
 		t.Errorf("census changed ownership: %s -> %s", before, after)
+	}
+}
+
+// TestIntegration_Move_ReportsWhenItEmptiesTheDefaultOrganization.
+//
+// The default organization is where things land when nothing else decides: a
+// first login not covered by a group mapping is placed there, and every
+// partition root's column DEFAULT is tsm_default_organization_id(). Moving the
+// estate away from it without saying so leaves an operator with new users
+// arriving in an organization that owns nothing, and no signal that it happened.
+//
+// The move deliberately does NOT repoint the setting -- that is a separate
+// operator decision -- so REPORTING is the whole contract, and this is what
+// pins it.
+func TestIntegration_Move_ReportsWhenItEmptiesTheDefaultOrganization(t *testing.T) {
+	db := newReownDB(t)
+	seedEstate(t, db)
+	exec(t, db, `UPDATE system_settings SET default_organization_id = '`+orgDefault+`'::uuid WHERE id = 1`)
+
+	res, err := maintenance.Move(context.Background(), db, orgDefault, orgTwo, knownOrgs(orgDefault, orgTwo))
+	if err != nil {
+		t.Fatalf("Move: %v", err)
+	}
+	if !res.MovedAwayFromDefault {
+		t.Error("moving the estate OUT of the default organization was not reported")
+	}
+	if res.DefaultOrganizationID != orgDefault {
+		t.Errorf("DefaultOrganizationID = %q, want %q", res.DefaultOrganizationID, orgDefault)
+	}
+	if !strings.Contains(res.String(), "WARNING") {
+		t.Errorf("the report does not warn:\n%s", res.String())
+	}
+}
+
+// TestIntegration_Move_DoesNotWarnWhenTheDefaultIsUnaffected is the control:
+// a warning on every move is a warning nobody reads.
+func TestIntegration_Move_DoesNotWarnWhenTheDefaultIsUnaffected(t *testing.T) {
+	db := newReownDB(t)
+	seedEstate(t, db)
+	// The deployment default is org TWO; the move is out of the other one.
+	exec(t, db, `UPDATE system_settings SET default_organization_id = '`+orgTwo+`'::uuid WHERE id = 1`)
+
+	res, err := maintenance.Move(context.Background(), db, orgDefault, orgTwo, knownOrgs(orgDefault, orgTwo))
+	if err != nil {
+		t.Fatalf("Move: %v", err)
+	}
+	if res.MovedAwayFromDefault {
+		t.Error("a move that did not touch the default organization was reported as if it had")
+	}
+	if strings.Contains(res.String(), "WARNING") {
+		t.Errorf("the report warns when it should not:\n%s", res.String())
 	}
 }
