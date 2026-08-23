@@ -3,6 +3,7 @@ package middleware
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -242,9 +243,40 @@ func authenticateAPIKey(c *gin.Context, keys *idstore.APIKeyRepository, users *i
 		}
 		userID := ""
 		if k.UserID != nil {
-			userID = *k.UserID
+			userID = strings.TrimSpace(*k.UserID)
 		}
-		if userID != "" && users != nil {
+
+		// AN API KEY MUST BE TIED TO A MEMBER OF AN ORGANIZATION.
+		//
+		// Both halves below were previously skipped rather than refused, because
+		// every check was gated on `userID != ""` with no else. A key with no
+		// owner therefore skipped the owner-exists lookup AND the live-scope cap
+		// under it, and authenticated at its mint-time scopes forever — the one
+		// key in the system whose privileges tracked nobody (#438).
+		//
+		// A NOTE ON WHAT A NULL OWNER MEANS ELSEWHERE. In the shared identity
+		// schema a NULL user_id means "organization SERVICE credential", and
+		// terraform-registry's namespace authorizer deliberately exempts such a
+		// key from any membership check (suite-identity 000007). That reading is
+		// NOT adopted here: TSM's mintKey has always written an owner, so a
+		// TSM-issued key with no owner is a legacy artifact rather than a service
+		// credential, and this app has no notion of one to honour. Refusing at
+		// this boundary leaves registry's own credentials untouched — it decides
+		// its own — and refuses only what is presented to TSM.
+		if userID == "" {
+			// Logged because AuthMiddleware renders every false as a flat
+			// "Invalid credentials"; without this an operator holding a refused
+			// key has no way to tell this apart from a wrong secret.
+			slog.Warn("api key refused: no owning user",
+				"api_key_id", k.ID, "key_prefix", k.KeyPrefix, "organization_id", k.OrganizationID)
+			return false
+		}
+		if strings.TrimSpace(k.OrganizationID) == "" {
+			slog.Warn("api key refused: no owning organization", "api_key_id", k.ID)
+			return false
+		}
+
+		if users != nil {
 			// Authority derivation, as in AuthMiddleware: the key has already been
 			// proved genuine by the bcrypt compare, and this only establishes that
 			// its owner still exists before the live-scope cap below.
@@ -263,7 +295,27 @@ func authenticateAPIKey(c *gin.Context, keys *idstore.APIKeyRepository, users *i
 		// the key authenticating at its original (possibly admin) scope (#223).
 		// Re-deriving live scopes here makes a key's privileges track its owner
 		// across every de-provisioning path. Fail closed on lookup error.
-		if orgs != nil && userID != "" {
+		if orgs != nil {
+			// ...and the owner must still be a MEMBER of the organization the key
+			// is bound to. Losing the membership is exactly the de-provisioning
+			// event a stored scope list cannot see, and the cap below would not
+			// catch it on its own: GetUserCombinedScopes unions across every
+			// organization the owner still belongs to, so a user removed from A
+			// but still in B keeps a full scope set and A's key keeps working.
+			//
+			// Fail closed on lookup error. CheckMembership deliberately does not
+			// absorb one into "not a member" — a lookup that FAILED is not an
+			// answer — so the two are told apart here rather than conflated.
+			member, _, mErr := orgs.CheckMembership(ctx, k.OrganizationID, userID, idstore.OrgScopeAllOrganizations())
+			if mErr != nil {
+				return false
+			}
+			if !member {
+				slog.Warn("api key refused: owner is not a member of the key's organization",
+					"api_key_id", k.ID, "organization_id", k.OrganizationID)
+				return false
+			}
+
 			live, sErr := orgs.GetUserCombinedScopes(ctx, userID)
 			if sErr != nil {
 				return false

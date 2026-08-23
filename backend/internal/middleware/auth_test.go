@@ -292,6 +292,20 @@ func keyRow(hash, prefix string, scopes string, expires *time.Time) *sqlmock.Row
 		AddRow("k1", "u1", "org1", "ci", nil, hash, prefix, []byte(scopes), expires, nil, nil, time.Now())
 }
 
+// expectKeyOwnerIsMember stubs the membership assertion that authenticateAPIKey
+// makes before capping scopes: the key's owner must still be a member of the
+// organization the key is BOUND to.
+//
+// It is a distinct query from the combined-scopes read that follows it, and
+// stubbing only the latter is not enough — the union across every organization
+// the owner still belongs to is exactly what cannot see a removal from ONE of
+// them, which is why the membership check exists.
+func expectKeyOwnerIsMember(mock sqlmock.Sqlmock, orgID, userID string) {
+	mock.ExpectQuery("FROM organization_members").WithArgs(orgID, userID).
+		WillReturnRows(sqlmock.NewRows([]string{"organization_id", "user_id", "role_template_id", "created_at"}).
+			AddRow(orgID, userID, nil, time.Now()))
+}
+
 func TestAuthMiddleware_APIKeyAuthenticates(t *testing.T) {
 	fullKey, hash, prefix := mintTestKey(t)
 	keyRepo, keyMock := newAPIKeyRepo(t)
@@ -350,6 +364,7 @@ func TestAuthMiddleware_APIKeyScopesCappedByLiveOwnerScopes(t *testing.T) {
 		WillReturnRows(keyRow(hash, prefix, `["admin","state:read"]`, nil))
 	keyMock.ExpectExec("UPDATE api_keys").WillReturnResult(sqlmock.NewResult(0, 1))
 	expectUserFound(userMock, "u1")
+	expectKeyOwnerIsMember(orgMock, "org1", "u1")
 	// Owner is now only a viewer (state:read) — admin was stripped upstream.
 	orgMock.ExpectQuery("FROM organization_members om").WithArgs("u1").
 		WillReturnRows(sqlmock.NewRows(mwMembershipCols).
