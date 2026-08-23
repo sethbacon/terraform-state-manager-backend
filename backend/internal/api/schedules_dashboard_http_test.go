@@ -122,20 +122,20 @@ func TestSchedules_CRUD(t *testing.T) {
 		t.Errorf("missing: status = %d, want 404", w.Code)
 	}
 
-	e.mock.ExpectQuery("UPDATE schedules").WillReturnRows(scheduleHTTPRow())
+	e.mock.ExpectQuery(`UPDATE schedules[\s\S]*WHERE id=\$1 AND organization_id`).WillReturnRows(scheduleHTTPRow())
 	w = e.do(http.MethodPut, "/api/v1/schedules/sc1",
 		`{"name":"nightly","cron_expr":"daily","target_config":{"pipeline_connection_id":"p1"},"enabled":false}`)
 	if w.Code != http.StatusOK {
 		t.Fatalf("update: status = %d (%s)", w.Code, w.Body.String())
 	}
 
-	e.mock.ExpectQuery("UPDATE schedules").WillReturnError(sql.ErrNoRows)
+	e.mock.ExpectQuery(`UPDATE schedules[\s\S]*WHERE id=\$1 AND organization_id`).WillReturnError(sql.ErrNoRows)
 	if w := e.do(http.MethodPut, "/api/v1/schedules/ghost",
 		`{"name":"x","cron_expr":"daily","target_config":{"pipeline_connection_id":"p1"}}`); w.Code != http.StatusNotFound {
 		t.Errorf("update missing: status = %d, want 404", w.Code)
 	}
 
-	e.mock.ExpectExec("DELETE FROM schedules").WithArgs("sc1").WillReturnResult(sqlmock.NewResult(0, 1))
+	e.mock.ExpectExec(`DELETE FROM schedules[\s\S]*organization_id`).WithArgs("sc1", []string{testActingOrg}).WillReturnResult(sqlmock.NewResult(0, 1))
 	if w := e.do(http.MethodDelete, "/api/v1/schedules/sc1", ""); w.Code != http.StatusNoContent {
 		t.Errorf("delete: status = %d, want 204", w.Code)
 	}

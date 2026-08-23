@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/terraform-state-manager/terraform-state-manager/internal/tenantscope"
 )
@@ -160,4 +161,142 @@ func (r *SourceRepository) UpdateInScope(ctx context.Context, s *Source, scope t
 		return nil, fmt.Errorf("failed to update source: %w", err)
 	}
 	return updated, nil
+}
+
+// ---------------------------------------------------------------------------
+// The remaining configuration roots.
+//
+// Same shape as the source pair above, and the same reasons. These are grouped
+// here rather than spread across their own repositories so the pattern is stated
+// once and a new root is written by copying something that is already right.
+
+// DeleteInScope removes a schedule only when the caller's organization owns it.
+func (r *ScheduleRepository) DeleteInScope(ctx context.Context, id string, scope tenantscope.Scope) (bool, error) {
+	w := scopeWrite(scope)
+	if w.Deny {
+		return false, ErrNotInScope
+	}
+	if w.Skip {
+		return true, r.Delete(ctx, id)
+	}
+	return execAffectedOne(ctx, r.db,
+		`DELETE FROM schedules WHERE id = $1 AND organization_id = ANY($2::uuid[])`, id, w.OrgIDs)
+}
+
+// UpdateInScope rewrites a schedule only when the caller's organization owns it.
+//
+// A schedule names a dispatch target in target_config, so an unscoped update let
+// one tenant repoint another tenant's schedule -- and the background runner then
+// executes it on their behalf, on their cron, with their organization's
+// authority.
+func (r *ScheduleRepository) UpdateInScope(ctx context.Context, id string, s *Schedule, nextRun *time.Time, scope tenantscope.Scope) (*Schedule, error) {
+	w := scopeWrite(scope)
+	if w.Deny {
+		return nil, ErrNotInScope
+	}
+	if w.Skip {
+		return r.Update(ctx, id, s, nextRun)
+	}
+	cfg := s.TargetConfig
+	if len(cfg) == 0 {
+		cfg = json.RawMessage(`{}`)
+	}
+	row := r.db.QueryRowContext(ctx, `
+		UPDATE schedules
+		SET name=$2, cron_expr=$3, target_type=$4, target_config=$5::jsonb, enabled=$6,
+		    next_run_at=$7, updated_at=now()
+		WHERE id=$1 AND organization_id = ANY($8::uuid[])
+		RETURNING `+scheduleColumns,
+		id, s.Name, s.CronExpr, s.TargetType, string(cfg), s.Enabled, nullTime(nextRun), w.OrgIDs)
+	sc, err := scanSchedule(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return sc, nil
+}
+
+// DeleteInScope removes a pipeline connection only when the caller's
+// organization owns it. The row holds an encrypted CI token.
+func (r *PipelineRepository) DeleteInScope(ctx context.Context, id string, scope tenantscope.Scope) (bool, error) {
+	w := scopeWrite(scope)
+	if w.Deny {
+		return false, ErrNotInScope
+	}
+	if w.Skip {
+		return true, r.Delete(ctx, id)
+	}
+	return execAffectedOne(ctx, r.db,
+		`DELETE FROM pipeline_connections WHERE id = $1 AND organization_id = ANY($2::uuid[])`, id, w.OrgIDs)
+}
+
+// UpdateInScope rewrites a pipeline connection only when the caller's
+// organization owns it. It can REPLACE the stored CI token, so an unscoped
+// update is a credential overwrite on another tenant's connection.
+func (r *PipelineRepository) UpdateInScope(ctx context.Context, p *PipelineConnection, updateToken bool, scope tenantscope.Scope) (*PipelineConnection, error) {
+	w := scopeWrite(scope)
+	if w.Deny {
+		return nil, ErrNotInScope
+	}
+	if w.Skip {
+		return r.Update(ctx, p, updateToken)
+	}
+	configJSON, err := json.Marshal(orEmptyMap(p.Config))
+	if err != nil {
+		return nil, err
+	}
+	var token any
+	if len(p.EncryptedToken) > 0 {
+		token = p.EncryptedToken
+	}
+	row := r.db.QueryRowContext(ctx, `
+		UPDATE pipeline_connections
+		SET name = $2,
+		    config = $3::jsonb,
+		    encrypted_token = CASE WHEN $4 THEN $5 ELSE encrypted_token END,
+		    updated_at = now()
+		WHERE id = $1 AND organization_id = ANY($6::uuid[])
+		RETURNING `+pipelineColumns,
+		p.ID, p.Name, string(configJSON), updateToken, token, w.OrgIDs)
+	updated, err := scanPipeline(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return updated, nil
+}
+
+// DeleteInScope removes a CI source only when the caller's organization owns it.
+// The row holds a shared CI token that several pipeline connections may use.
+func (r *CISourceRepository) DeleteInScope(ctx context.Context, id string, scope tenantscope.Scope) (bool, error) {
+	w := scopeWrite(scope)
+	if w.Deny {
+		return false, ErrNotInScope
+	}
+	if w.Skip {
+		return true, r.Delete(ctx, id)
+	}
+	return execAffectedOne(ctx, r.db,
+		`DELETE FROM ci_sources WHERE id = $1 AND organization_id = ANY($2::uuid[])`, id, w.OrgIDs)
+}
+
+// execAffectedOne runs a scoped mutation and reports whether it matched a row.
+//
+// A driver that cannot report the row count cannot tell us whether the statement
+// applied, and the caller uses this to choose between success and 404 -- so the
+// error is returned rather than guessed at.
+func execAffectedOne(ctx context.Context, db *sql.DB, query string, args ...any) (bool, error) {
+	res, err := db.ExecContext(ctx, query, args...)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
 }

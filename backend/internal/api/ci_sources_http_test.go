@@ -25,7 +25,10 @@ import (
 func newCISourcesEnv(t *testing.T) *sourcesEnv {
 	t.Helper()
 	t.Setenv("TSM_ENCRYPTION_KEY", "0123456789abcdef0123456789abcdef")
-	db, mock, err := sqlmock.New()
+	// newSQLMock, not sqlmock.New: it installs pgxparam.Converter, without which a
+	// []string bound for `= ANY($n)` is not a valid driver.Value and the call
+	// fails before any expectation is consulted. This rig had never passed one.
+	db, mock, err := newSQLMock()
 	if err != nil {
 		t.Fatalf("sqlmock.New: %v", err)
 	}
@@ -208,7 +211,7 @@ func TestCISources_CRUD(t *testing.T) {
 		t.Error("create response leaked the token")
 	}
 
-	e.mock.ExpectExec("DELETE FROM ci_sources").WithArgs("c1").
+	e.mock.ExpectExec(`DELETE FROM ci_sources[\s\S]*organization_id`).WithArgs("c1", []string{testActingOrg}).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	if w := e.do(http.MethodDelete, "/api/v1/ci-sources/c1", ""); w.Code != http.StatusNoContent {
 		t.Errorf("delete: status = %d, want 204", w.Code)

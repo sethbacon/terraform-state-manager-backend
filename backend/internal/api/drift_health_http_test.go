@@ -141,8 +141,8 @@ func TestPipelines_CRUD(t *testing.T) {
 	}
 
 	// Update edits name+config; an omitted token preserves the stored credential.
-	e.mock.ExpectQuery("UPDATE pipeline_connections").
-		WithArgs("p1", "renamed", `{"owner":"o","repo":"r2"}`, false, nil).
+	e.mock.ExpectQuery(`UPDATE pipeline_connections[\s\S]*WHERE id = \$1 AND organization_id`).
+		WithArgs("p1", "renamed", `{"owner":"o","repo":"r2"}`, false, nil, []string{testActingOrg}).
 		WillReturnRows(pipelineHTTPRow(t, "github_actions", "", map[string]any{"owner": "o", "repo": "r2"}))
 	if w := e.do(http.MethodPut, "/api/v1/pipelines/p1",
 		`{"name":"renamed","config":{"owner":"o","repo":"r2"}}`); w.Code != http.StatusOK {
@@ -150,8 +150,8 @@ func TestPipelines_CRUD(t *testing.T) {
 	}
 
 	// Supplying a token rotates the encrypted credential; it must never echo back.
-	e.mock.ExpectQuery("UPDATE pipeline_connections").
-		WithArgs("p1", "renamed", `{"owner":"o"}`, true, sqlmock.AnyArg()).
+	e.mock.ExpectQuery(`UPDATE pipeline_connections[\s\S]*WHERE id = \$1 AND organization_id`).
+		WithArgs("p1", "renamed", `{"owner":"o"}`, true, sqlmock.AnyArg(), []string{testActingOrg}).
 		WillReturnRows(pipelineHTTPRow(t, "github_actions", "tok", map[string]any{"owner": "o"}))
 	w2 := e.do(http.MethodPut, "/api/v1/pipelines/p1",
 		`{"name":"renamed","config":{"owner":"o"},"token":"ghp_rotated"}`)
@@ -163,13 +163,13 @@ func TestPipelines_CRUD(t *testing.T) {
 	}
 
 	// No row matched → 404.
-	e.mock.ExpectQuery("UPDATE pipeline_connections").
+	e.mock.ExpectQuery(`UPDATE pipeline_connections[\s\S]*WHERE id = \$1 AND organization_id`).
 		WillReturnError(sql.ErrNoRows)
 	if w := e.do(http.MethodPut, "/api/v1/pipelines/ghost", `{"name":"x"}`); w.Code != http.StatusNotFound {
 		t.Errorf("update missing: status = %d, want 404", w.Code)
 	}
 
-	e.mock.ExpectExec("DELETE FROM pipeline_connections").WithArgs("p1").
+	e.mock.ExpectExec(`DELETE FROM pipeline_connections[\s\S]*organization_id`).WithArgs("p1", []string{testActingOrg}).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	if w := e.do(http.MethodDelete, "/api/v1/pipelines/p1", ""); w.Code != http.StatusNoContent {
 		t.Errorf("delete: status = %d, want 204", w.Code)
