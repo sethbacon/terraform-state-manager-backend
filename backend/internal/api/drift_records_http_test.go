@@ -12,7 +12,8 @@ import (
 // sourceRowFor queues a state_sources GetByID row (local type; the ingest path
 // only needs existence + name).
 func sourceRowFor(e *sourcesEnv, id string) {
-	e.mock.ExpectQuery("SELECT .+ FROM state_sources WHERE id").WithArgs(id).
+	e.mock.ExpectQuery("SELECT .+ FROM state_sources WHERE organization_id").
+		WithArgs(sqlmock.AnyArg(), id).
 		WillReturnRows(sqlmock.NewRows(apiSourceCols).
 			AddRow(id, "estate", "local", "", []byte(`{"base_path":"/tmp"}`), []byte(`{}`), nil, "2026-06-11", "2026-06-11", testActingOrg))
 }
@@ -101,7 +102,8 @@ func TestIngestDrift_Validation(t *testing.T) {
 	}
 
 	// Unknown source.
-	e.mock.ExpectQuery("SELECT .+ FROM state_sources WHERE id").WithArgs("ghost").
+	e.mock.ExpectQuery("SELECT .+ FROM state_sources WHERE organization_id").
+		WithArgs(sqlmock.AnyArg(), "ghost").
 		WillReturnRows(sqlmock.NewRows(apiSourceCols))
 	if w := e.do(http.MethodPost, "/api/v1/drift/ingest", `{"source_id":"ghost","state_key":"k","added":1}`); w.Code != http.StatusNotFound {
 		t.Errorf("unknown source: %d", w.Code)

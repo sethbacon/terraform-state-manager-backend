@@ -302,7 +302,8 @@ func TestMigrate_DecommissionSkippedOnSourceDrift(t *testing.T) {
 	defer srv.Close()
 
 	cfg, _ := json.Marshal(map[string]any{"address": srv.URL})
-	e.mock.ExpectQuery("SELECT .+ FROM state_sources WHERE id").WithArgs("s1").
+	e.mock.ExpectQuery("SELECT .+ FROM state_sources WHERE organization_id").
+		WithArgs(sqlmock.AnyArg(), "s1").
 		WillReturnRows(sqlmock.NewRows(httpSourceCols).
 			AddRow("s1", "drifting-http", "http", "", cfg, []byte(`{}`), nil, "2026-06-11", "2026-06-11", testActingOrg))
 	e.expectSource("s2", dirB)
@@ -358,7 +359,8 @@ func TestMigrate_ForceOverridesDecommissionConflict(t *testing.T) {
 	defer srv.Close()
 
 	cfg, _ := json.Marshal(map[string]any{"address": srv.URL})
-	e.mock.ExpectQuery("SELECT .+ FROM state_sources WHERE id").WithArgs("s1").
+	e.mock.ExpectQuery("SELECT .+ FROM state_sources WHERE organization_id").
+		WithArgs(sqlmock.AnyArg(), "s1").
 		WillReturnRows(sqlmock.NewRows(httpSourceCols).
 			AddRow("s1", "drifting-http", "http", "", cfg, []byte(`{}`), nil, "2026-06-11", "2026-06-11", testActingOrg))
 	e.expectSource("s2", dirB)
