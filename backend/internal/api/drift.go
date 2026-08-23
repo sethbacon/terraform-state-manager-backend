@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/terraform-state-manager/terraform-state-manager/internal/tenantscope"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -187,7 +188,18 @@ func (h *DriftHandlers) UpdatePipeline() gin.HandlerFunc {
 			}
 			pc.EncryptedToken = enc
 		}
-		saved, err := h.pipelineRepo.Update(c.Request.Context(), pc, updateToken)
+		scope, resolved := tenantscope.FromContext(c)
+		if !resolved {
+			serverError(c, errNoTenantScope, "the tenant scope was not resolved for this route")
+			return
+		}
+		// Scoped: this can REPLACE the stored CI token, so an unscoped update is
+		// a credential overwrite on another tenant's connection.
+		saved, err := h.pipelineRepo.UpdateInScope(c.Request.Context(), pc, updateToken, scope)
+		if errors.Is(err, repositories.ErrNotInScope) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "pipeline connection not found"})
+			return
+		}
 		if err != nil {
 			serverError(c, err, "failed to update pipeline connection")
 			return
@@ -206,7 +218,17 @@ func (h *DriftHandlers) UpdatePipeline() gin.HandlerFunc {
 func (h *DriftHandlers) DeletePipeline() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		id := c.Param("id")
-		if err := h.pipelineRepo.Delete(c.Request.Context(), id); err != nil {
+		scope, resolved := tenantscope.FromContext(c)
+		if !resolved {
+			serverError(c, errNoTenantScope, "the tenant scope was not resolved for this route")
+			return
+		}
+		deleted, err := h.pipelineRepo.DeleteInScope(c.Request.Context(), id, scope)
+		if errors.Is(err, repositories.ErrNotInScope) || (err == nil && !deleted) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "pipeline connection not found"})
+			return
+		}
+		if err != nil {
 			serverError(c, err, "failed to delete pipeline connection")
 			return
 		}

@@ -9,7 +9,9 @@ package api
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
+	"github.com/terraform-state-manager/terraform-state-manager/internal/tenantscope"
 	"net"
 	"net/http"
 	"net/url"
@@ -253,7 +255,20 @@ func (h *CISourceHandlers) CreateCISource() gin.HandlerFunc {
 func (h *CISourceHandlers) DeleteCISource() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		id := c.Param("id")
-		if err := h.repo.Delete(c.Request.Context(), id); err != nil {
+		scope, resolved := tenantscope.FromContext(c)
+		if !resolved {
+			serverError(c, errNoTenantScope, "the tenant scope was not resolved for this route")
+			return
+		}
+		// Scoped: a CI source holds a SHARED token that several pipeline
+		// connections use, so deleting another tenant's breaks every dispatch
+		// that depended on it.
+		deleted, err := h.repo.DeleteInScope(c.Request.Context(), id, scope)
+		if errors.Is(err, repositories.ErrNotInScope) || (err == nil && !deleted) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "ci source not found"})
+			return
+		}
+		if err != nil {
 			serverError(c, err, "failed to delete CI source")
 			return
 		}

@@ -8,7 +8,9 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"github.com/terraform-state-manager/terraform-state-manager/internal/tenantscope"
 	"net/http"
 	"time"
 
@@ -218,7 +220,19 @@ func (h *ScheduleHandlers) UpdateSchedule() gin.HandlerFunc {
 			Name: req.Name, CronExpr: req.CronExpr, TargetType: req.TargetType,
 			TargetConfig: req.TargetConfig, Enabled: enabled,
 		}
-		updated, err := h.repo.Update(c.Request.Context(), c.Param("id"), s, h.nextRun(req.CronExpr, enabled))
+		scope, resolved := tenantscope.FromContext(c)
+		if !resolved {
+			serverError(c, errNoTenantScope, "the tenant scope was not resolved for this route")
+			return
+		}
+		// Scoped: a schedule names a dispatch target, so an unscoped update lets
+		// one tenant repoint another tenant's schedule — and the background
+		// runner then executes it on their cron, under their organization.
+		updated, err := h.repo.UpdateInScope(c.Request.Context(), c.Param("id"), s, h.nextRun(req.CronExpr, enabled), scope)
+		if errors.Is(err, repositories.ErrNotInScope) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "schedule not found"})
+			return
+		}
 		if err != nil {
 			serverError(c, err, "failed to update schedule")
 			return
@@ -237,7 +251,17 @@ func (h *ScheduleHandlers) UpdateSchedule() gin.HandlerFunc {
 func (h *ScheduleHandlers) DeleteSchedule() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		id := c.Param("id")
-		if err := h.repo.Delete(c.Request.Context(), id); err != nil {
+		scope, resolved := tenantscope.FromContext(c)
+		if !resolved {
+			serverError(c, errNoTenantScope, "the tenant scope was not resolved for this route")
+			return
+		}
+		deleted, err := h.repo.DeleteInScope(c.Request.Context(), id, scope)
+		if errors.Is(err, repositories.ErrNotInScope) || (err == nil && !deleted) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "schedule not found"})
+			return
+		}
+		if err != nil {
 			serverError(c, err, "failed to delete schedule")
 			return
 		}
