@@ -254,6 +254,7 @@ func TestAPIKeyNeverCarriesAdminEvenWhenItsOwnerDoes(t *testing.T) {
 		WillReturnRows(keyRow(hash, prefix, `["admin","state:read"]`, nil))
 	keyMock.ExpectExec("UPDATE api_keys").WillReturnResult(sqlmock.NewResult(0, 1))
 	expectUserFound(userMock, "u1")
+	expectKeyOwnerIsMember(orgMock, "org1", "u1")
 	// The owner IS an admin, so the live-scope cap keeps every stored scope.
 	orgMock.ExpectQuery("FROM organization_members om").WithArgs("u1").
 		WillReturnRows(sqlmock.NewRows(mwMembershipCols).
