@@ -162,6 +162,19 @@ func (h *SourcesHandlers) DashboardOverview() gin.HandlerFunc {
 			resp["refreshed_at"] = refreshedAt
 		}
 		c.JSON(http.StatusOK, resp)
+
+		// After the response, never before it, and only behind the flag —
+		// exactly as the /sources observation is placed (#393 Phase 2b). The
+		// measurement must not be able to delay or replace a read that has
+		// already succeeded, and it costs an extra query.
+		//
+		// What it measures: these aggregates come from state_analyses, which
+		// never touches a partition root, so a Phase 3 flip of the ROOT reads
+		// would leave a correctly-scoped source list sitting beside fleet-wide
+		// totals (#455).
+		if h.tenantDualRead {
+			h.observeAnalysisScope(c, totals.States)
+		}
 	}
 }
 

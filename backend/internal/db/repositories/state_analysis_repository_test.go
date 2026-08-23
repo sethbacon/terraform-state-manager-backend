@@ -325,7 +325,7 @@ func ptrInt64(v int64) *int64 { return &v }
 
 func TestBuildStateWhere(t *testing.T) {
 	t.Run("empty filter yields no clause and no args", func(t *testing.T) {
-		where, args := buildStateWhere(StateQueryFilter{})
+		where, args := buildStateWhere(StateQueryFilter{}, nil)
 		if where != "" || len(args) != 0 {
 			t.Errorf("empty: where=%q args=%v", where, args)
 		}
@@ -340,7 +340,7 @@ func TestBuildStateWhere(t *testing.T) {
 			RUMMin:       ptrInt(10),
 			RUMMax:       ptrInt(100),
 			SizeMax:      ptrInt64(2048),
-		})
+		}, nil)
 		want := "WHERE a.source_id IN ($1,$2) AND strpos(lower(a.state_key), $3) > 0 " +
 			"AND a.terraform_version = $4 AND a.rum >= $5 AND a.rum <= $6 AND a.size <= $7"
 		if where != want {
@@ -354,7 +354,7 @@ func TestBuildStateWhere(t *testing.T) {
 
 	t.Run("empty exact version matches the unknown/empty version", func(t *testing.T) {
 		empty := ""
-		where, args := buildStateWhere(StateQueryFilter{VersionExact: &empty})
+		where, args := buildStateWhere(StateQueryFilter{VersionExact: &empty}, nil)
 		if where != "WHERE a.terraform_version = $1" || len(args) != 1 || args[0] != "" {
 			t.Errorf("unknown-version: where=%q args=%v", where, args)
 		}
