@@ -10,8 +10,8 @@ type healthFailureNotifier struct{ health *HealthHandlers }
 
 // NotifyRunFailed implements healthreconcile.FailureNotifier. An expired run did
 // not succeed, so it is reported as a failed status with success=false.
-func (n healthFailureNotifier) NotifyRunFailed(runID, detail string) {
-	n.health.notifyHealthResult(runID, "failed", false, detail)
+func (n healthFailureNotifier) NotifyRunFailed(organizationID, runID, detail string) {
+	n.health.notifyHealthResult(organizationID, runID, "failed", false, detail)
 }
 
 var _ healthreconcile.FailureNotifier = healthFailureNotifier{}

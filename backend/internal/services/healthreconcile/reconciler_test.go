@@ -13,15 +13,22 @@ import (
 )
 
 // recordingNotifier captures the failure alerts the reconciler fires.
+// testRunOrganization is the organization the seeded run belongs to.
+const testRunOrganization = "11111111-1111-4111-8111-111111111111"
+
 type recordingNotifier struct {
 	mu    sync.Mutex
 	calls []string // "runID|detail"
+	// orgs records the organization each alert carried, so a test can assert the
+	// fan-out is scoped rather than deployment-wide (#459).
+	orgs []string
 }
 
-func (n *recordingNotifier) NotifyRunFailed(runID, detail string) {
+func (n *recordingNotifier) NotifyRunFailed(organizationID, runID, detail string) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	n.calls = append(n.calls, runID+"|"+detail)
+	n.orgs = append(n.orgs, organizationID)
 }
 
 func (n *recordingNotifier) count() int {
@@ -32,12 +39,12 @@ func (n *recordingNotifier) count() int {
 
 var healthCols = []string{"id", "pipeline_connection_id", "repo_ref", "working_dir", "terraform_version",
 	"provider_versions", "module_versions", "registry_host", "status", "init_ok", "plan_ok", "success",
-	"summary", "detail", "callback_token", "actor", "created_at", "updated_at"}
+	"summary", "detail", "callback_token", "actor", "created_at", "updated_at", "organization_id"}
 
 func dispatchedRow(id, token string) *sqlmock.Rows {
 	return sqlmock.NewRows(healthCols).
 		AddRow(id, "p1", "", "", "", []byte(`{}`), []byte(`{}`), "", "dispatched", nil, nil, nil,
-			nil, "", token, "alice", "2026-06-21 10:00:00", "2026-06-21 10:00:00")
+			nil, "", token, "alice", "2026-06-21 10:00:00", "2026-06-21 10:00:00", "11111111-1111-4111-8111-111111111111")
 }
 
 // frozenNow is the reconciler's injected clock so the cutoff is deterministic and
@@ -81,6 +88,13 @@ func TestReconciler_ExpiresStuckDispatchedRun(t *testing.T) {
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Errorf("the run must be expired via the repository: %v", err)
+	}
+	// The alert must carry the run's OWNING organization. Without it the fan-out
+	// selects every enabled channel in the deployment, so one tenant's stuck run
+	// is announced to every other tenant's webhooks (#459). The organization
+	// travels on this seam because this is where the run object is in hand.
+	if len(n.orgs) != 1 || n.orgs[0] != testRunOrganization {
+		t.Errorf("alert carried organizations %v, want [%s]", n.orgs, testRunOrganization)
 	}
 }
 

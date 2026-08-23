@@ -12,13 +12,13 @@ import (
 var driftRecordCols = []string{"id", "source_id", "state_key", "pipeline_connection_id", "last_run_id",
 	"origin", "severity", "added", "changed", "destroyed", "summary", "status", "acknowledged_by",
 	"acknowledged_at", "ack_note", "resolved_at", "external_ref", "detections", "first_detected_at",
-	"last_detected_at", "truncated", "omitted_entries", "omitted_attrs", "unparseable", "unmasked"}
+	"last_detected_at", "truncated", "omitted_entries", "omitted_attrs", "unparseable", "unmasked", "organization_id"}
 
 func driftRecordRow(id, status string) *sqlmock.Rows {
 	return sqlmock.NewRows(driftRecordCols).
 		AddRow(id, "s1", "app.tfstate", nil, nil, "run", "warning", 1, 2, 0, []byte(`[]`), status,
 			"", nil, "", nil, nil, 1, "2026-06-11", "2026-06-11",
-			false, 0, 0, false, false)
+			false, 0, 0, false, false, "11111111-1111-4111-8111-111111111111")
 }
 
 func TestDriftSeverity(t *testing.T) {
@@ -99,7 +99,7 @@ func TestDriftRecordRepository_PersistsCompletenessMarkers(t *testing.T) {
 		WillReturnRows(sqlmock.NewRows(driftRecordCols).
 			AddRow("r1", "s1", "app.tfstate", nil, nil, "ingest", "warning", 1, 0, 0,
 				[]byte(`[]`), "open", "", nil, "", nil, nil, 1, "2026-06-11", "2026-06-11",
-				true, 5, 9, true, true))
+				true, 5, 9, true, true, "11111111-1111-4111-8111-111111111111"))
 
 	rec, err := r.UpsertDetection(ctx, &Detection{
 		SourceID: "s1", StateKey: "app.tfstate", Origin: "ingest", Added: 1,

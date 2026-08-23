@@ -77,22 +77,22 @@ func newDriftEnvWithScope(t *testing.T, scope *tenantscope.Scope) *sourcesEnv {
 
 var driftCols = []string{"id", "pipeline_connection_id", "source_id", "state_key", "repo_ref", "working_dir",
 	"status", "added", "changed", "destroyed", "drifted", "summary", "detail", "callback_token", "actor",
-	"created_at", "updated_at", "truncated", "omitted_entries", "omitted_attrs", "unparseable", "unmasked"}
+	"created_at", "updated_at", "truncated", "omitted_entries", "omitted_attrs", "unparseable", "unmasked", "organization_id"}
 
 func driftRow(token string) *sqlmock.Rows {
 	return sqlmock.NewRows(driftCols).
 		AddRow("d1", "p1", nil, "app.tfstate", "", "", "dispatched", nil, nil, nil, nil, nil, "", token, "alice",
-			"2026-06-10", "2026-06-10", false, 0, 0, false, false)
+			"2026-06-10", "2026-06-10", false, 0, 0, false, false, "11111111-1111-4111-8111-111111111111")
 }
 
 var healthCols = []string{"id", "pipeline_connection_id", "repo_ref", "working_dir", "terraform_version",
 	"provider_versions", "module_versions", "registry_host", "status", "init_ok", "plan_ok", "success",
-	"summary", "detail", "callback_token", "actor", "created_at", "updated_at"}
+	"summary", "detail", "callback_token", "actor", "created_at", "updated_at", "organization_id"}
 
 func healthRow(token string) *sqlmock.Rows {
 	return sqlmock.NewRows(healthCols).
 		AddRow("h1", "p1", "", "", "", []byte(`{}`), []byte(`{}`), "", "dispatched", nil, nil, nil,
-			nil, "", token, "alice", "2026-06-10", "2026-06-10")
+			nil, "", token, "alice", "2026-06-10", "2026-06-10", "11111111-1111-4111-8111-111111111111")
 }
 
 func pipelineHTTPRow(t *testing.T, provider, token string, cfgMap map[string]any) *sqlmock.Rows {

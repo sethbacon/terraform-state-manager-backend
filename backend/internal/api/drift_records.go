@@ -265,7 +265,7 @@ func (h *DriftHandlers) IngestDrift() gin.HandlerFunc {
 		}
 		h.audit.write(c, "drift.ingest", "drift_record", rec.ID,
 			map[string]interface{}{"state_key": req.StateKey, "drifted": true, "severity": rec.Severity, "external_ref": req.ExternalRef})
-		h.notifyIngestedDrift(src.Name, req.StateKey, added, changed, destroyed)
+		h.notifyIngestedDrift(src.OrganizationID, src.Name, req.StateKey, added, changed, destroyed)
 		c.JSON(http.StatusOK, gin.H{"record": rec})
 	}
 }
@@ -291,7 +291,7 @@ func (h *DriftHandlers) captureModuleRefs(ctx context.Context, sourceID, stateKe
 
 // notifyIngestedDrift mirrors notifyDriftResult for the push path (detached,
 // nil-safe). The dispatched path already notifies from the run callback.
-func (h *DriftHandlers) notifyIngestedDrift(sourceName, stateKey string, added, changed, destroyed int) {
+func (h *DriftHandlers) notifyIngestedDrift(organizationID, sourceName, stateKey string, added, changed, destroyed int) {
 	if h.notifier == nil {
 		return
 	}
@@ -300,11 +300,14 @@ func (h *DriftHandlers) notifyIngestedDrift(sourceName, stateKey string, added, 
 		Title:   "Drift detected",
 		Message: fmt.Sprintf("Ingested drift on %s/%s (+%d ~%d -%d).", sourceName, stateKey, added, changed, destroyed),
 	}
-	go func(ev notify.Event) {
+	// Fanned out to THIS organization's channels only. Without the scope the
+	// notifier selects every enabled channel in the deployment, so the drift record that was just ingested
+	// would be announced to every other tenant's webhooks (#459).
+	go func(ev notify.Event, organizationID string) {
 		ctx, cancel := context.WithTimeout(context.Background(), notifyTimeout)
 		defer cancel()
-		h.notifier.Notify(ctx, ev)
-	}(ev)
+		h.notifier.Notify(ctx, ev, notify.ForOrganization(organizationID))
+	}(ev, organizationID)
 }
 
 // ListDriftRecords returns drift records, filterable by status/source/severity

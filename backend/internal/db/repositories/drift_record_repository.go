@@ -39,6 +39,10 @@ type DriftRecord struct {
 	// Completeness markers from the drift contract, describing what the check
 	// did NOT do. Promoted, so the record's JSON keys are unchanged.
 	Completeness
+	// OrganizationID is the owning tenant, carried in memory so an alert can be
+	// fanned out to THAT organization's notification channels and no others.
+	// Never serialized: the boundary is enforced server-side (#459).
+	OrganizationID string `json:"-"`
 }
 
 // DriftSeverity classifies drift the way ogtsm did: destroyed resources are
@@ -62,17 +66,23 @@ func NewDriftRecordRepository(db *sql.DB) *DriftRecordRepository {
 const driftRecordColumns = `id, source_id, state_key, pipeline_connection_id, last_run_id, origin, severity,
 	added, changed, destroyed, summary, status, acknowledged_by, acknowledged_at::text, ack_note,
 	resolved_at::text, external_ref, detections, first_detected_at::text, last_detected_at::text,
-	truncated, omitted_entries, omitted_attrs, unparseable, unmasked`
+	truncated, omitted_entries, omitted_attrs, unparseable, unmasked,
+	organization_id::text`
 
 func scanDriftRecord(scanner interface{ Scan(dest ...any) error }) (*DriftRecord, error) {
 	var r DriftRecord
+	var organizationID sql.NullString
 	var srcID, connID, runID, ackAt, resolvedAt, extRef sql.NullString
 	var summary []byte
 	if err := scanner.Scan(&r.ID, &srcID, &r.StateKey, &connID, &runID, &r.Origin, &r.Severity,
 		&r.Added, &r.Changed, &r.Destroyed, &summary, &r.Status, &r.AcknowledgedBy, &ackAt, &r.AckNote,
 		&resolvedAt, &extRef, &r.Detections, &r.FirstDetectedAt, &r.LastDetectedAt,
-		&r.Truncated, &r.OmittedEntries, &r.OmittedAttrs, &r.Unparseable, &r.Unmasked); err != nil {
+		&r.Truncated, &r.OmittedEntries, &r.OmittedAttrs, &r.Unparseable, &r.Unmasked,
+		&organizationID); err != nil {
 		return nil, err
+	}
+	if organizationID.Valid {
+		r.OrganizationID = organizationID.String
 	}
 	if srcID.Valid {
 		r.SourceID = &srcID.String

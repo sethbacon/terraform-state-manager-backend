@@ -500,7 +500,7 @@ func (h *DriftHandlers) RunResults() gin.HandlerFunc {
 		}
 
 		h.recordDriftOutcome(ctx, run, status, body.Added, body.Changed, body.Destroyed, drifted, body.Summary, body.Completeness)
-		h.notifyDriftResult(run.ID, status, body.Added, body.Changed, body.Destroyed, drifted, body.Detail)
+		h.notifyDriftResult(run.OrganizationID, run.ID, status, body.Added, body.Changed, body.Destroyed, drifted, body.Detail)
 
 		// Best-effort module provenance for dispatched runs: if the runner uploaded
 		// the plan's module calls (+ optional locks), capture them against this
@@ -519,7 +519,7 @@ func (h *DriftHandlers) RunResults() gin.HandlerFunc {
 // notifyDriftResult fires an alert event when a drift result reports drift or a
 // failure. It runs detached (the CI callback must not block on webhook latency)
 // with its own timeout; a nil notifier (notifications disabled) is a no-op.
-func (h *DriftHandlers) notifyDriftResult(runID, status string, added, changed, destroyed int, drifted bool, detail string) {
+func (h *DriftHandlers) notifyDriftResult(organizationID, runID, status string, added, changed, destroyed int, drifted bool, detail string) {
 	if h.notifier == nil {
 		return
 	}
@@ -540,11 +540,14 @@ func (h *DriftHandlers) notifyDriftResult(runID, status string, added, changed, 
 	default:
 		return // no drift, no failure — nothing to alert on
 	}
-	go func(ev notify.Event) {
+	// Fanned out to THIS organization's channels only. Without the scope the
+	// notifier selects every enabled channel in the deployment, so the drift run that failed or drifted
+	// would be announced to every other tenant's webhooks (#459).
+	go func(ev notify.Event, organizationID string) {
 		ctx, cancel := context.WithTimeout(context.Background(), notifyTimeout)
 		defer cancel()
-		h.notifier.Notify(ctx, ev)
-	}(ev)
+		h.notifier.Notify(ctx, ev, notify.ForOrganization(organizationID))
+	}(ev, organizationID)
 }
 
 // WorkflowTemplate returns the runner-side CI definition to copy into a repo.

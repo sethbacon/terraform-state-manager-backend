@@ -13,13 +13,13 @@ import (
 
 var driftCols = []string{"id", "pipeline_connection_id", "source_id", "state_key", "repo_ref", "working_dir",
 	"status", "added", "changed", "destroyed", "drifted", "summary", "detail", "callback_token", "actor",
-	"created_at", "updated_at", "truncated", "omitted_entries", "omitted_attrs", "unparseable", "unmasked"}
+	"created_at", "updated_at", "truncated", "omitted_entries", "omitted_attrs", "unparseable", "unmasked", "organization_id"}
 
 func driftRow(token string) *sqlmock.Rows {
 	return sqlmock.NewRows(driftCols).
 		AddRow("d1", "p1", "s1", "app.tfstate", "refs/heads/main", "infra/",
 			"completed", 1, 2, 0, true, []byte(`{"resources":[]}`), "", token, "alice",
-			"2026-06-10", "2026-06-10", false, 0, 0, false, false)
+			"2026-06-10", "2026-06-10", false, 0, 0, false, false, "11111111-1111-4111-8111-111111111111")
 }
 
 func TestDriftRepository_CreateAndGet(t *testing.T) {
@@ -155,7 +155,7 @@ func TestDriftRepository_UpdateResultPersistsCompletenessMarkers(t *testing.T) {
 		WillReturnRows(sqlmock.NewRows(driftCols).
 			AddRow("d1", "p1", "s1", "app.tfstate", "", "", "completed",
 				0, 0, 0, false, nil, "", "", "alice", "2026-06-10", "2026-06-10",
-				true, 5, 9, true, true))
+				true, 5, 9, true, true, "11111111-1111-4111-8111-111111111111"))
 	got, err := r.GetByID(ctx, "d1")
 	if err != nil || got == nil {
 		t.Fatalf("GetByID: %v %+v", err, got)
@@ -192,13 +192,13 @@ func TestDriftRepository_UpdateResultWidensTruncated(t *testing.T) {
 
 var healthCols = []string{"id", "pipeline_connection_id", "repo_ref", "working_dir", "terraform_version",
 	"provider_versions", "module_versions", "registry_host", "status", "init_ok", "plan_ok", "success",
-	"summary", "detail", "callback_token", "actor", "created_at", "updated_at"}
+	"summary", "detail", "callback_token", "actor", "created_at", "updated_at", "organization_id"}
 
 func healthRow(token string) *sqlmock.Rows {
 	return sqlmock.NewRows(healthCols).
 		AddRow("h1", "p1", "refs/heads/main", "infra/", "1.9.5",
 			[]byte(`{"aws":"5.0.0"}`), []byte(`{}`), "registry.example.com", "completed", true, true, true,
-			[]byte(`{}`), "", token, "alice", "2026-06-10", "2026-06-10")
+			[]byte(`{}`), "", token, "alice", "2026-06-10", "2026-06-10", "11111111-1111-4111-8111-111111111111")
 }
 
 func TestHealthRepository_CreateListGet(t *testing.T) {
