@@ -1,5 +1,16 @@
 # Changelog
 
+## [3.11.0](https://github.com/sethbacon/terraform-state-manager-backend/compare/v3.10.0...v3.11.0) (2026-08-23)
+
+
+### Bug Fixes
+
+* **maintenance:** report when a re-own empties the deployment's default organization ([#467](https://github.com/sethbacon/terraform-state-manager-backend/issues/467)) ([13ccecb](https://github.com/sethbacon/terraform-state-manager-backend/commit/13ccecb4f3ae5fa0d58cc5b5086a8f0247e74e54))
+* **tenancy:** check dispatch targets against the acting organization ([#463](https://github.com/sethbacon/terraform-state-manager-backend/issues/463)) ([5f9b293](https://github.com/sethbacon/terraform-state-manager-backend/commit/5f9b2930dd9fba0ca14d1c4f3e41e1d64feb0879))
+* **tenancy:** fan an alert out to its own organization's channels only ([#462](https://github.com/sethbacon/terraform-state-manager-backend/issues/462)) ([2a64c7b](https://github.com/sethbacon/terraform-state-manager-backend/commit/2a64c7b1406addf9fd8c3b99473e29220edadac8))
+* **tenancy:** mint an API key into the acting organization, not the default one ([#466](https://github.com/sethbacon/terraform-state-manager-backend/issues/466)) ([1a26b15](https://github.com/sethbacon/terraform-state-manager-backend/commit/1a26b154e6c2c3f2495832ddedc18d9d681d389b))
+* **tenancy:** scope the by-id writes on the four remaining config roots ([#464](https://github.com/sethbacon/terraform-state-manager-backend/issues/464)) ([e79563c](https://github.com/sethbacon/terraform-state-manager-backend/commit/e79563c227f539fed6075dc9f3a4c16d5a5d8dff))
+
 ## [3.10.0](https://github.com/sethbacon/terraform-state-manager-backend/compare/v3.9.0...v3.10.0) (2026-08-23)
 
 
