@@ -7,6 +7,8 @@ import (
 	"io/fs"
 	"strings"
 	"testing"
+
+	"github.com/terraform-state-manager/terraform-state-manager/internal/tenantscope"
 )
 
 // Every scoped reader must open with the same two branches, and this is a
@@ -46,6 +48,15 @@ func TestEveryScopedReaderHandlesEmptyAndPlatformAdmin(t *testing.T) {
 				}
 				checked++
 				src := renderBody(fset, fn)
+				// A method may DELEGATE both decisions to scopeWrite, which folds
+				// a Scope into the three outcomes a mutating statement has. That
+				// is better than duplicating the branches, so it satisfies the
+				// requirement — but only because scopeWrite is itself checked,
+				// below. A delegate that did not do the work would otherwise be a
+				// way to satisfy this guard without satisfying its point.
+				if strings.Contains(src, "scopeWrite()") {
+					continue
+				}
 				if !strings.Contains(src, "scope.Empty()") {
 					t.Errorf("%s: %s has no scope.Empty() branch.\n"+
 						"Without it a caller whose tenancy could not be established runs the query "+
@@ -72,6 +83,26 @@ func TestEveryScopedReaderHandlesEmptyAndPlatformAdmin(t *testing.T) {
 	}
 }
 
+// TestScopeWriteHandlesBothEnds is what makes delegating to scopeWrite
+// acceptable above. Without it, "calls scopeWrite" would be an escape hatch
+// rather than a shorthand.
+func TestScopeWriteHandlesBothEnds(t *testing.T) {
+	if got := scopeWrite(tenantscope.Scope{PlatformAdmin: true}); !got.Skip {
+		t.Errorf("scopeWrite(platform admin) = %+v; want Skip, so the caller runs its "+
+			"unscoped statement and can still reach rows whose organization_id is NULL", got)
+	}
+	if got := scopeWrite(tenantscope.Scope{}); !got.Deny {
+		t.Errorf("scopeWrite(empty) = %+v; want Deny. A caller whose tenancy could not be "+
+			"established must not run a mutating statement at all — running it with an empty "+
+			"id list happens to match nothing today, and that is not a thing to depend on", got)
+	}
+	orgs := []string{"aaaaaaaa-0000-4000-8000-000000000001"}
+	got := scopeWrite(tenantscope.Scope{OrgIDs: orgs})
+	if got.Skip || got.Deny || len(got.OrgIDs) != 1 {
+		t.Errorf("scopeWrite(one organization) = %+v; want the organization bound", got)
+	}
+}
+
 func renderBody(fset *token.FileSet, fn *ast.FuncDecl) string {
 	var b strings.Builder
 	ast.Inspect(fn.Body, func(n ast.Node) bool {
@@ -81,10 +112,17 @@ func renderBody(fset *token.FileSet, fn *ast.FuncDecl) string {
 			}
 		}
 		if call, ok := n.(*ast.CallExpr); ok {
-			if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
-				if id, ok := sel.X.(*ast.Ident); ok {
-					b.WriteString(id.Name + "." + sel.Sel.Name + "()\n")
+			switch f := call.Fun.(type) {
+			case *ast.SelectorExpr:
+				if id, ok := f.X.(*ast.Ident); ok {
+					b.WriteString(id.Name + "." + f.Sel.Name + "()\n")
 				}
+			case *ast.Ident:
+				// Bare package-local calls, so a method that DELEGATES the scope
+				// decision (scopeWrite) is visible to the check above. Without
+				// this branch the render only saw selector expressions, and the
+				// delegation looked like an absent decision.
+				b.WriteString(f.Name + "()\n")
 			}
 		}
 		return true
