@@ -82,6 +82,37 @@ The order is not cosmetic. Deriving before the parents move computes every
 child's owner from a parent that is still wrong, and the result is
 indistinguishable from a correct one, with no NULL left to mark it.
 
+### If the move empties the default organization
+
+`move` reports this, and **does not fix it**:
+
+```
+WARNING: the rows moved OUT of this deployment's default organization
+(<uuid>), and that setting is unchanged.
+```
+
+The default organization is where things land when nothing else decides:
+
+- a **first login** not covered by an OIDC or SAML group mapping places the user
+  there (`assignRole`, and the `default_role` fallback in group reconciliation);
+- every partition root's column `DEFAULT` is `tsm_default_organization_id()`, so
+  anything still relying on it writes there.
+
+So after moving the estate to another organization, new users arrive somewhere
+that owns nothing. Repoint the setting if the destination is now the organization
+this deployment is really for:
+
+```sql
+UPDATE system_settings SET default_organization_id = '<destination-uuid>'::uuid,
+       updated_at = now()
+WHERE id = 1;
+```
+
+**The command deliberately does not do this for you.** Which organization a
+deployment considers its default has effects beyond these nine tables, and
+repointing it while re-owning rows would be two decisions taken under one
+command. It is reported so you can make the second one deliberately.
+
 ## Step 3 — census again
 
 ```bash
