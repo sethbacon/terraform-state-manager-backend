@@ -1,6 +1,7 @@
 package api
 
 import (
+	"github.com/terraform-state-manager/terraform-state-manager/internal/tenantscope"
 	"net/http"
 	"strings"
 	"testing"
@@ -33,6 +34,10 @@ func newAPIKeysEnv(t *testing.T) *apiKeysEnv {
 	r.Use(func(c *gin.Context) {
 		c.Set("user_id", "u1")
 		c.Set("scopes", scopes)
+		// What middleware.TenantScope publishes in production. Minting now
+		// resolves an acting organization, and treats an unresolved scope as a
+		// wiring fault rather than as "no memberships" (#459).
+		tenantscope.Store(c, tenantscope.Scope{OrgIDs: []string{testActingOrg}})
 		c.Next()
 	})
 	v1 := r.Group("/api/v1")
@@ -54,16 +59,23 @@ func apiKeyDBRow(id, userID, scopes string) *sqlmock.Rows {
 			[]byte(scopes), nil, nil, nil, time.Now())
 }
 
-func expectDefaultOrg(mock sqlmock.Sqlmock) {
-	mock.ExpectQuery("FROM organizations").WithArgs("default").
-		WillReturnRows(sqlmock.NewRows(
-			[]string{"id", "name", "display_name", "idp_type", "idp_name", "created_at", "updated_at"}).
-			AddRow("org1", "default", "Default", nil, nil, time.Now(), time.Now()))
+// expectOwnerIsMember scripts the membership assertion mintKey makes before
+// creating a key.
+//
+// It REPLACES the old expectDefaultOrg, which scripted a GetDefaultOrganization
+// lookup. Minting no longer resolves the deployment's default organization: it
+// takes the acting one and confirms the OWNER belongs to it, so a key can never
+// be created in a state its own authentication would refuse (#453 caps a key by
+// its owner's membership of the key's organization).
+func expectOwnerIsMember(mock sqlmock.Sqlmock, orgID, userID string) {
+	mock.ExpectQuery("FROM organization_members").WithArgs(orgID, userID).
+		WillReturnRows(sqlmock.NewRows([]string{"organization_id", "user_id", "role_template_id", "created_at"}).
+			AddRow(orgID, userID, nil, time.Now()))
 }
 
 func TestAPIKeys_CreateReturnsSecretOnce(t *testing.T) {
 	e := newAPIKeysEnv(t)
-	expectDefaultOrg(e.mock)
+	expectOwnerIsMember(e.mock, testActingOrg, "u1")
 	e.mock.ExpectExec("INSERT INTO api_keys").WillReturnResult(sqlmock.NewResult(0, 1))
 
 	w := e.do(http.MethodPost, "/api/v1/apikeys", `{"name":"ci-key","scopes":["state:read","state:drift"]}`)
@@ -104,7 +116,7 @@ func TestAPIKeys_CreateValidation(t *testing.T) {
 	}
 	// write implies read for granting (rw pair).
 	*e.scopes = []string{"state:write"}
-	expectDefaultOrg(e.mock)
+	expectOwnerIsMember(e.mock, testActingOrg, "u1")
 	e.mock.ExpectExec("INSERT INTO api_keys").WillReturnResult(sqlmock.NewResult(0, 1))
 	if w := e.do(http.MethodPost, "/api/v1/apikeys", `{"name":"k","scopes":["state:read"]}`); w.Code != http.StatusCreated {
 		t.Errorf("write-implies-read grant: %d (%s)", w.Code, w.Body.String())
@@ -227,7 +239,7 @@ func TestAPIKeys_Rotate(t *testing.T) {
 	// Immediate rotation: mint replacement, revoke old.
 	e.mock.ExpectQuery("FROM api_keys").WithArgs("k1").
 		WillReturnRows(apiKeyDBRow("k1", "u1", `["state:read"]`))
-	expectDefaultOrg(e.mock)
+	expectOwnerIsMember(e.mock, testActingOrg, "u1")
 	e.mock.ExpectExec("INSERT INTO api_keys").WillReturnResult(sqlmock.NewResult(0, 1))
 	e.mock.ExpectExec("DELETE FROM api_keys").WillReturnResult(sqlmock.NewResult(0, 1))
 	w := e.do(http.MethodPost, "/api/v1/apikeys/k1/rotate", `{"grace_period_hours":0}`)
@@ -238,10 +250,15 @@ func TestAPIKeys_Rotate(t *testing.T) {
 		t.Errorf("immediate rotation must revoke the old key: %v", err)
 	}
 
-	// Grace rotation: old key gets an expiry instead of deletion. (The default
-	// org is cached per repository, so no second org query.)
+	// Grace rotation: old key gets an expiry instead of deletion.
+	//
+	// The membership check runs again, and that note about the default
+	// organization being cached no longer applies: minting no longer looks up a
+	// default organization at all. It asks whether THIS owner belongs to the
+	// acting one, which is a per-mint question and not a cacheable constant.
 	e.mock.ExpectQuery("FROM api_keys").WithArgs("k1").
 		WillReturnRows(apiKeyDBRow("k1", "u1", `["state:read"]`))
+	expectOwnerIsMember(e.mock, testActingOrg, "u1")
 	e.mock.ExpectExec("INSERT INTO api_keys").WillReturnResult(sqlmock.NewResult(0, 1))
 	e.mock.ExpectExec("UPDATE api_keys").WillReturnResult(sqlmock.NewResult(0, 1))
 	w = e.do(http.MethodPost, "/api/v1/apikeys/k1/rotate", `{"grace_period_hours":24}`)

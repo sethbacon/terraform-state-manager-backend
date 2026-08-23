@@ -235,7 +235,7 @@ func TestRotate_SelfRotationStillAllowed(t *testing.T) {
 	*e.scopes = []string{"state:read", "state:drift"}
 	e.mock.ExpectQuery("FROM api_keys").WithArgs("k1").
 		WillReturnRows(apiKeyDBRow("k1", "u1", `["state:read","state:drift"]`))
-	expectDefaultOrg(e.mock)
+	expectOwnerIsMember(e.mock, testActingOrg, "u1")
 	e.mock.ExpectExec("INSERT INTO api_keys").WillReturnResult(sqlmock.NewResult(0, 1))
 	e.mock.ExpectExec("DELETE FROM api_keys").WillReturnResult(sqlmock.NewResult(0, 1))
 
@@ -256,7 +256,11 @@ func TestRotate_AdminStillRotatesAnyKey(t *testing.T) {
 	*e.scopes = []string{"admin"}
 	e.mock.ExpectQuery("FROM api_keys").WithArgs("k9").
 		WillReturnRows(apiKeyDBRow("k9", "someone-else", `["state:write","sources:manage"]`))
-	expectDefaultOrg(e.mock)
+	// The OWNER's membership, not the admin's. Rotation preserves the original
+	// owner, so the key must land in an organization that owner belongs to —
+	// an admin cannot rotate someone else's key into an organization that person
+	// is not a member of, because #453's authentication would then refuse it.
+	expectOwnerIsMember(e.mock, testActingOrg, "someone-else")
 	e.mock.ExpectExec("INSERT INTO api_keys").WillReturnResult(sqlmock.NewResult(0, 1))
 	e.mock.ExpectExec("DELETE FROM api_keys").WillReturnResult(sqlmock.NewResult(0, 1))
 

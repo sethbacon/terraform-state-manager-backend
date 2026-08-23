@@ -436,7 +436,7 @@ func TestAPIKeyRotate_OldKeyAlreadyGone_Returns201(t *testing.T) {
 	e := newAPIKeysEnv(t)
 	e.mock.ExpectQuery("FROM api_keys").WithArgs("k1").
 		WillReturnRows(apiKeyDBRow("k1", "u1", `["state:read"]`))
-	expectDefaultOrg(e.mock)
+	expectOwnerIsMember(e.mock, testActingOrg, "u1")
 	e.mock.ExpectExec("INSERT INTO api_keys").WillReturnResult(sqlmock.NewResult(0, 1))
 	e.mock.ExpectExec("DELETE FROM api_keys").WithArgs("k1").WillReturnResult(sqlmock.NewResult(0, 0))
 
@@ -454,7 +454,7 @@ func TestAPIKeyRotate_GracePeriod_OldKeyAlreadyGone_Returns201(t *testing.T) {
 	e := newAPIKeysEnv(t)
 	e.mock.ExpectQuery("FROM api_keys").WithArgs("k1").
 		WillReturnRows(apiKeyDBRow("k1", "u1", `["state:read"]`))
-	expectDefaultOrg(e.mock)
+	expectOwnerIsMember(e.mock, testActingOrg, "u1")
 	e.mock.ExpectExec("INSERT INTO api_keys").WillReturnResult(sqlmock.NewResult(0, 1))
 	e.mock.ExpectExec("UPDATE api_keys").WillReturnResult(sqlmock.NewResult(0, 0))
 
