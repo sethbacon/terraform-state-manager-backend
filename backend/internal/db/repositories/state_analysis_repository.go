@@ -519,7 +519,7 @@ func (r *StateAnalysisRepository) previewStatesWithTotals(ctx context.Context, f
 		       COALESCE(SUM(a.managed_resources) OVER(), 0),
 		       COALESCE(SUM(a.data_sources) OVER(), 0),
 		       COALESCE(SUM(a.total_resources) OVER(), 0)
-		FROM state_analyses a ` + join
+		FROM state_analyses a ` + join // #nosec G202 -- `join` is one of two package-level literals (the unscoped LEFT JOIN above, or analysisOrgJoin whose only variable is a bound $1 placeholder); it is never derived from input
 	q += " " + where + " ORDER BY s.name, a.state_key LIMIT $" + fmt.Sprintf("%d", len(args)) // #nosec G202 -- where is fixed column names + $N placeholders from buildStateWhere; all values bound via args
 	rows, err := r.db.QueryContext(ctx, q, args...)                                           // #nosec G202 -- q is built from fixed SQL + placeholders above
 	if err != nil {
