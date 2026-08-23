@@ -1,5 +1,38 @@
 # Changelog
 
+## [3.9.0](https://github.com/sethbacon/terraform-state-manager-backend/compare/v3.8.0...v3.9.0) (2026-08-23)
+
+
+### Features
+
+* **auth:** an API key must be tied to a member of its organization ([#453](https://github.com/sethbacon/terraform-state-manager-backend/issues/453)) ([9f5aed5](https://github.com/sethbacon/terraform-state-manager-backend/commit/9f5aed578d4a870b209106d06e066cce8ddbb16e))
+* **maintenance:** reown-roots, an operator-supplied re-own for the partition roots ([#454](https://github.com/sethbacon/terraform-state-manager-backend/issues/454)) ([bfbf77d](https://github.com/sethbacon/terraform-state-manager-backend/commit/bfbf77d12eeb8052906c1872a4d4810e6ad919f1))
+* **tenancy:** inherit a drift record's organization from its source, in-statement ([#446](https://github.com/sethbacon/terraform-state-manager-backend/issues/446)) ([47eecc4](https://github.com/sethbacon/terraform-state-manager-backend/commit/47eecc4cc089ae829247cd5be3ff9e0165d2e453))
+* **tenancy:** read state_sources through an organization scope, beside the unscoped read ([#433](https://github.com/sethbacon/terraform-state-manager-backend/issues/433)) ([0130e9c](https://github.com/sethbacon/terraform-state-manager-backend/commit/0130e9ccf439d9684ddf65939f4579323b6af051))
+* **tenancy:** scoped readers for the inherited analysis tables ([#456](https://github.com/sethbacon/terraform-state-manager-backend/issues/456)) ([c2ef1a4](https://github.com/sethbacon/terraform-state-manager-backend/commit/c2ef1a44a9adf0b50369e1bc3df6ad46c4d3ea09))
+* **tenancy:** stamp drift_runs, from whichever of its three creators fired it ([#447](https://github.com/sethbacon/terraform-state-manager-backend/issues/447)) ([4fc50e1](https://github.com/sethbacon/terraform-state-manager-backend/commit/4fc50e148473ad79a64321fd38719587dfecc930))
+* **tenancy:** stamp health_runs and state_transfers with the acting organization ([#448](https://github.com/sethbacon/terraform-state-manager-backend/issues/448)) ([d575a97](https://github.com/sethbacon/terraform-state-manager-backend/commit/d575a978870eb6acd07720ae21b356a1f65b86a4))
+* **tenancy:** stamp notification_channels with the acting organization ([#449](https://github.com/sethbacon/terraform-state-manager-backend/issues/449)) ([2c27044](https://github.com/sethbacon/terraform-state-manager-backend/commit/2c27044777895f6c578ef8b981f41ee2786dd11a))
+* **tenancy:** stamp pipeline_connections, ci_sources and schedules ([#445](https://github.com/sethbacon/terraform-state-manager-backend/issues/445)) ([9af8dc6](https://github.com/sethbacon/terraform-state-manager-backend/commit/9af8dc63a595288925765da69f118b4f229d6932))
+* **tenancy:** stamp state_sources with the organization that created it ([#444](https://github.com/sethbacon/terraform-state-manager-backend/issues/444)) ([eff4270](https://github.com/sethbacon/terraform-state-manager-backend/commit/eff4270f7ee96c12215c37445eb3df7824352953))
+* **tenantscope:** adopt the suite's shared resolver, and state this app's policy ([#443](https://github.com/sethbacon/terraform-state-manager-backend/issues/443)) ([55dbf7f](https://github.com/sethbacon/terraform-state-manager-backend/commit/55dbf7fa8521d45cde34ed58f7936f18cd4ce486))
+* **tenantscope:** give a TSM request an organization it is for ([#432](https://github.com/sethbacon/terraform-state-manager-backend/issues/432)) ([897eb78](https://github.com/sethbacon/terraform-state-manager-backend/commit/897eb787f9358eaaeb940fed3b6a7c7b1d56754c))
+
+
+### Bug Fixes
+
+* **bootstrap:** assert the notification_channels shape at startup ([#442](https://github.com/sethbacon/terraform-state-manager-backend/issues/442)) ([b647269](https://github.com/sethbacon/terraform-state-manager-backend/commit/b6472696a9f0ec97e8dc0b268918490f3b13e905))
+* **ci:** refuse to run signature-replay when Dependabot edited the workflow ([#416](https://github.com/sethbacon/terraform-state-manager-backend/issues/416)) ([a41b55a](https://github.com/sethbacon/terraform-state-manager-backend/commit/a41b55a24cb39cfc80b55c6d78691c3d24d8f474))
+* **tenancy:** scope the mutating source routes, and guard the class ([#458](https://github.com/sethbacon/terraform-state-manager-backend/issues/458)) ([1fb4583](https://github.com/sethbacon/terraform-state-manager-backend/commit/1fb458371699a390d6759f9ec08cb2e9a5cbcbff))
+* **tenancy:** the partition-root guard could not see three INSERT shapes ([#451](https://github.com/sethbacon/terraform-state-manager-backend/issues/451)) ([1e64da1](https://github.com/sethbacon/terraform-state-manager-backend/commit/1e64da1ac3ca0e5f67c67f88f44d43d5c9f45c63))
+* **tenancy:** widen the partition-root INSERT guard to the whole module ([#450](https://github.com/sethbacon/terraform-state-manager-backend/issues/450)) ([cf4be80](https://github.com/sethbacon/terraform-state-manager-backend/commit/cf4be806bd4af4dea0868c773e93c2f7932b31d8))
+
+
+### Documentation
+
+* **security:** record the shared-workflow trust relationship, and fix what it invalidated ([#427](https://github.com/sethbacon/terraform-state-manager-backend/issues/427)) ([447b603](https://github.com/sethbacon/terraform-state-manager-backend/commit/447b603dc9e50b85d1f0225130469b083823aa39))
+* **tenancy:** 000033 contradicted itself about cross-organization transfers ([#452](https://github.com/sethbacon/terraform-state-manager-backend/issues/452)) ([9a867ac](https://github.com/sethbacon/terraform-state-manager-backend/commit/9a867aca5c3f06bb3b1e876388bf1367eb692d26))
+
 ## [3.8.0](https://github.com/sethbacon/terraform-state-manager-backend/compare/v3.7.0...v3.8.0) (2026-08-20)
 
 
