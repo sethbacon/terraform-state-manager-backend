@@ -297,12 +297,28 @@ var errPipelineNotFound = errors.New("pipeline connection not found")
 // token is always stripped from the returned run. Shared by CreateRun (HTTP) and
 // the scheduler.
 func (h *DriftHandlers) dispatchDrift(ctx context.Context, tgt DriftTarget, actor, organizationID string) (*repositories.DriftRun, error) {
-	conn, err := h.pipelineRepo.GetByID(ctx, tgt.PipelineConnectionID)
+	// OWNERSHIP FIRST, because the next call decrypts a credential.
+	// resolvePipelineToken opens the connection's token, or its CI source's
+	// shared token, so a check placed after it is a check that runs with the
+	// other tenant's secret already in memory. Reported as "not found", so a
+	// caller cannot use dispatch to probe which connection ids exist elsewhere.
+	conn, err := pipelineConnectionFor(ctx, h.pipelineRepo, tgt.PipelineConnectionID, organizationID)
+	if errors.Is(err, errNotOwnedHere) {
+		return nil, errPipelineNotFound
+	}
 	if err != nil {
 		return nil, fmt.Errorf("load pipeline connection: %w", err)
 	}
 	if conn == nil {
 		return nil, errPipelineNotFound
+	}
+	// ...and the state source the job will be pointed at, for the same reason:
+	// a target naming another organization's source aims this run at their state.
+	if _, err := sourceFor(ctx, h.sourceRepo, tgt.SourceID, organizationID); err != nil {
+		if errors.Is(err, errNotOwnedHere) {
+			return nil, errPipelineNotFound
+		}
+		return nil, fmt.Errorf("load target source: %w", err)
 	}
 	// Connection-level token, or the shared token of its CI source.
 	token, bearer, err := resolvePipelineToken(ctx, h.ciSourceRepo, conn)

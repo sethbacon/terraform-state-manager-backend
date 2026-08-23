@@ -8,6 +8,7 @@ import (
 	"crypto/subtle"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -97,13 +98,18 @@ func (h *HealthHandlers) CreateRun() gin.HandlerFunc {
 		}
 
 		ctx := c.Request.Context()
-		conn, err := h.pipelineRepo.GetByID(ctx, req.PipelineConnectionID)
-		if err != nil {
-			serverError(c, err, "failed to load pipeline connection")
+		// The shared ownership rule, not a second copy of it: this check and
+		// dispatchDrift's used to be written separately, and only this one
+		// existed. See dispatch_ownership.go.
+		conn, err := pipelineConnectionFor(ctx, h.pipelineRepo, req.PipelineConnectionID, organizationID)
+		if errors.Is(err, errNotOwnedHere) || (err == nil && conn == nil) {
+			// Same shape either way: a caller outside the owning organization
+			// learns nothing about whether the id exists.
+			c.JSON(http.StatusNotFound, gin.H{"error": "pipeline connection not found"})
 			return
 		}
-		if conn == nil {
-			c.JSON(http.StatusNotFound, gin.H{"error": "pipeline connection not found"})
+		if err != nil {
+			serverError(c, err, "failed to load pipeline connection")
 			return
 		}
 		// Connection-level token, or the shared token of its CI source.
@@ -125,13 +131,6 @@ func (h *HealthHandlers) CreateRun() gin.HandlerFunc {
 			CallbackToken:        randomToken(),
 			Actor:                userIDOf(c),
 		}
-		if conn.OrganizationID != "" && conn.OrganizationID != organizationID {
-			// Same shape as a missing connection: a caller outside the owning
-			// organization learns nothing about whether the id exists.
-			c.JSON(http.StatusNotFound, gin.H{"error": "pipeline connection not found"})
-			return
-		}
-
 		saved, err := h.healthRepo.Create(ctx, run, organizationID)
 		if err != nil {
 			serverError(c, err, "failed to create health run")
