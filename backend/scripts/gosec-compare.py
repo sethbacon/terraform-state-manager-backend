@@ -22,7 +22,16 @@ from pathlib import Path
 
 
 def _anchor(code: str) -> str:
-    """Return the first two meaningful code lines, with gosec line-number prefixes stripped."""
+    """Return all meaningful code lines, with gosec line-number prefixes stripped.
+
+    Uses the full snippet gosec reports (not just the first two lines) so that
+    structurally similar but distinct findings — e.g. Go's repetitive
+    io.ReadAll(resp.Body)/resp.Body.Close() error-handling idiom recurring at
+    different call sites in the same file — don't collapse onto the same
+    fingerprint (#655). Line numbers are still stripped from each line so the
+    fingerprint keeps surviving line-number drift from unrelated edits
+    elsewhere in the file.
+    """
     stripped = []
     for raw in code.splitlines():
         s = raw.strip()
@@ -32,8 +41,6 @@ def _anchor(code: str) -> str:
         if ": " in s:
             s = s.split(": ", 1)[1].strip()
         stripped.append(s)
-        if len(stripped) == 2:
-            break
     return " | ".join(stripped)
 
 
@@ -96,6 +103,46 @@ def load_findings(path: str, base_dir: Path) -> tuple[dict, dict]:
         fp = fingerprint(issue, base_dir)
         fps[fp] = issue
     return fps, data.get("Stats", {})
+
+
+def scan_integrity_problems(path: str) -> list[str]:
+    """Reasons this gosec run must not be read as a clean scan.
+
+    A run that analysed nothing writes `"Issues": []` — byte-identical to a run
+    that analysed everything and found nothing. Everything downstream then works
+    correctly on an empty universe: no fingerprints, so no new findings, so
+    exit 0, so a green required check certifying a scan that never happened.
+    `gosec ... || true` in CI discards the one signal that would have shown it.
+
+    Stats.files was already being read here, and printed. Printing a number into
+    the log of a run that passes is not a check — nobody opens it.
+    """
+    with open(path, encoding="utf-8") as fh:
+        data = json.load(fh)
+
+    problems: list[str] = []
+
+    files = (data.get("Stats") or {}).get("files")
+    if not files:
+        problems.append(
+            f"gosec reports {files!r} files scanned. An empty result set from an "
+            "empty scan is indistinguishable from a clean one, so this cannot be "
+            "read as passing."
+        )
+
+    # gosec records per-package compile failures here and still exits reporting
+    # whatever it managed to parse. Findings from a package that did not build
+    # are absent rather than absent-because-clean.
+    errors = data.get("Golang errors") or {}
+    if errors:
+        where = ", ".join(sorted(errors)[:5])
+        problems.append(
+            f"gosec recorded Go compile errors in {len(errors)} package(s) "
+            f"({where}). Those packages were not analysed, so the finding set is "
+            "incomplete rather than clean."
+        )
+
+    return problems
 
 
 def _rel(issue: dict, base_dir: Path) -> str:
@@ -165,6 +212,27 @@ def main() -> None:
     args = parser.parse_args()
 
     base_dir = Path(args.base_dir).resolve()
+
+    # Before comparing anything: a comparison against an empty scan is arithmetic
+    # on nothing, and it produces the same exit 0 as a genuinely clean repo.
+    problems = scan_integrity_problems(args.results)
+    if problems:
+        print("\U0001f6a8 gosec did not produce a usable scan:")
+        for problem in problems:
+            print(f"  - {problem}")
+        body = "\n".join(
+            ["## gosec produced no usable scan", ""]
+            + [f"- {problem}" for problem in problems]
+            + [
+                "",
+                "This is not a report of new findings. The scan itself did not run "
+                "to completion, so the comparison against the baseline was skipped "
+                "rather than passed.",
+            ]
+        )
+        if args.output:
+            Path(args.output).write_text(body, encoding="utf-8")
+        sys.exit(1)
 
     current,  stats_cur  = load_findings(args.results,  base_dir)
     baseline, stats_base = load_findings(args.baseline, base_dir)
