@@ -1,5 +1,14 @@
 # Changelog
 
+## [3.12.0](https://github.com/sethbacon/terraform-state-manager-backend/compare/v3.11.0...v3.12.0) (2026-08-24)
+
+
+### Bug Fixes
+
+* **ci:** refuse a gosec scan that analysed nothing, and close the fingerprint gap ([#474](https://github.com/sethbacon/terraform-state-manager-backend/issues/474)) ([c59a8f1](https://github.com/sethbacon/terraform-state-manager-backend/commit/c59a8f1fa03b42f3e6b147ef564badba30e64317))
+* **mtls:** resolve certificate mappings through the platform-admin carrier ([#476](https://github.com/sethbacon/terraform-state-manager-backend/issues/476)) ([#479](https://github.com/sethbacon/terraform-state-manager-backend/issues/479)) ([d487a14](https://github.com/sethbacon/terraform-state-manager-backend/commit/d487a1439d0ecae6d9d27e8d3651101cab51194f))
+* **release:** keep release-artifacts for 7 days, not 1 ([#472](https://github.com/sethbacon/terraform-state-manager-backend/issues/472)) ([ae0ecf4](https://github.com/sethbacon/terraform-state-manager-backend/commit/ae0ecf4c86c00e434e32b2d8cc2925626abf821f))
+
 ## [3.11.0](https://github.com/sethbacon/terraform-state-manager-backend/compare/v3.10.0...v3.11.0) (2026-08-23)
 
 
