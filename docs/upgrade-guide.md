@@ -200,6 +200,61 @@ Check before rolling: `GET /api/v1/apikeys` lists every key with its scopes and
 automation refreshes a session, is one to re-issue first. Nothing is revoked and
 no schema changes.
 
+## One-time notice: an mTLS mapping granting `admin` must name a user
+
+**Breaking, and it fails at startup rather than at request time.** It affects you
+only if `auth.mtls.enabled` is true AND one of your `auth.mtls.mappings` lists
+`admin` among its scopes.
+
+An mTLS subject mapping used to publish its configured scopes verbatim, so
+`scopes: ["admin"]` made the certificate holder a platform administrator directly
+from the config file — with no `platform_admins` row, no record of who granted
+it, no audit entry, and no revocation short of editing configuration and
+restarting. Sessions and API keys had already been brought under the carrier;
+this was the last path answering "who is a platform administrator?" from
+somewhere else.
+
+A mapping carrying `admin` now has to name the user the certificate acts as:
+
+```yaml
+auth:
+  mtls:
+    mappings:
+      - subject: "CN=break-glass"
+        scopes: ["admin"]
+        user_id: "3f1c9a02-6d4e-4a1b-9f77-2b8e5c0d1a44"   # NEW, and required for `admin`
+```
+
+`user_id` is optional for every other mapping — an ordinary machine credential
+needs no user behind it — and nothing changes for those.
+
+Naming a user does not by itself grant anything. On every request the carrier is
+consulted for that user, exactly as it is for a browser session, so `admin` holds
+only while they hold a carrier row and revoking it disarms the certificate on the
+next request rather than at the next restart.
+
+A repeated `subject` is now refused too. It previously took the last mapping in
+the file silently, which would now bind a certificate to a different principal
+than the line you are reading.
+
+**What you will see if you are affected.** The server refuses to start, naming
+the subject:
+
+```
+failed to initialise mTLS provider: auth.mtls.mappings: subject "CN=ci" carries
+the `admin` scope with no user_id. Platform administration is held in the
+platform_admins carrier, which is keyed on a user; set user_id to the UUID of the
+user this certificate acts as (and grant them platform administration), or remove
+`admin` from the mapping
+```
+
+**Before you deploy.** Search your config for `mtls`. If `enabled` is false or
+absent, nothing here applies. If any mapping lists `admin`, decide who that
+certificate acts as, confirm they hold a carrier row (`GET
+/api/v1/admin/platform-admins`), grant it if not, then add `user_id` to the
+mapping. Removing `admin` from the mapping is also a complete answer if the
+certificate did not need platform-wide reach.
+
 ## Version pinning
 
 Always pin image tags in production (`v1.0.0`, never `latest`); the chart's

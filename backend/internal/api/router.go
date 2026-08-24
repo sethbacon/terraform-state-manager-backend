@@ -53,6 +53,38 @@ func NewRouter(cfg *config.Config, database *sql.DB, identityDB *sql.DB) (*gin.E
 	r.Use(middleware.Metrics())
 	r.Use(middleware.AccessLog())
 
+	// The platform-admin carrier: TSM's own answer to "who administers this
+	// deployment", on the APP connection with its audit outbox beside it, and
+	// resolved against the identity connection where principals live.
+	//
+	// Verified here rather than assumed. The three tables it addresses are all
+	// unqualified and placed by their connection's search_path, so a startup line
+	// naming where each one actually resolved is the difference between finding a
+	// mis-routed carrier now and discovering it as an empty administrator list.
+	// Both connections are nil in the unit-test rig, where there is no carrier and
+	// therefore no elevation.
+	//
+	// CONSTRUCTED HERE, ABOVE THE mTLS REGISTRATION, because that middleware
+	// now resolves a certificate's `admin` against it (#476). Registering the
+	// middleware later instead would have been the smaller diff and the wrong
+	// one: /health, /ready and the two swagger routes register before this
+	// point, and gin binds the global chain at registration time, so they
+	// would have silently stopped seeing mTLS at all.
+	var platformAdmins *platformadmin.Service
+	if database != nil && identityDB != nil {
+		// Its own error variable: this block moved above the point where the
+		// function's shared `err` is declared, and reusing that one only worked
+		// by accident of ordering.
+		svc, cerr := platformadmin.New(database, identityDB)
+		if cerr != nil {
+			return nil, stop, fmt.Errorf("failed to build the platform-admin carrier: %w", cerr)
+		}
+		if verr := svc.Verify(context.Background()); verr != nil {
+			return nil, stop, fmt.Errorf("platform-admin carrier is not usable: %w", verr)
+		}
+		platformAdmins = svc
+	}
+
 	// mTLS: when enabled, a verified client cert (against the configured client CA)
 	// authenticates the request additively, before JWT auth. No-op if not enabled
 	// or if the TLS layer didn't verify a client cert.
@@ -61,7 +93,7 @@ func NewRouter(cfg *config.Config, database *sql.DB, identityDB *sql.DB) (*gin.E
 		if err != nil {
 			return nil, stop, fmt.Errorf("failed to initialise mTLS provider: %w", err)
 		}
-		r.Use(mtls.AuthMiddleware(mtlsProvider))
+		r.Use(mtls.AuthMiddleware(mtlsProvider, platformAdmins))
 	}
 
 	// System endpoints (unversioned; used by orchestrators and probes).
@@ -121,26 +153,6 @@ func NewRouter(cfg *config.Config, database *sql.DB, identityDB *sql.DB) (*gin.E
 				authHandlers.SetOIDCProvider(provider)
 				slog.Info("OIDC provider loaded from database configuration")
 			}
-		}
-	}
-	// The platform-admin carrier: TSM's own answer to "who administers this
-	// deployment", on the APP connection with its audit outbox beside it, and
-	// resolved against the identity connection where principals live.
-	//
-	// Verified here rather than assumed. The three tables it addresses are all
-	// unqualified and placed by their connection's search_path, so a startup line
-	// naming where each one actually resolved is the difference between finding a
-	// mis-routed carrier now and discovering it as an empty administrator list.
-	// Both connections are nil in the unit-test rig, where there is no carrier and
-	// therefore no elevation.
-	var platformAdmins *platformadmin.Service
-	if database != nil && identityDB != nil {
-		platformAdmins, err = platformadmin.New(database, identityDB)
-		if err != nil {
-			return nil, stop, fmt.Errorf("failed to build the platform-admin carrier: %w", err)
-		}
-		if verr := platformAdmins.Verify(context.Background()); verr != nil {
-			return nil, stop, fmt.Errorf("platform-admin carrier is not usable: %w", verr)
 		}
 	}
 

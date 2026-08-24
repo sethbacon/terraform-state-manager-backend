@@ -298,6 +298,41 @@ func (s *Service) SessionScopes(ctx context.Context, userID string, scopes []str
 	return effective, nil
 }
 
+// CertificateScopes returns the effective scopes for an mTLS CLIENT CERTIFICATE:
+// the module's strict reading, with no additive re-add.
+//
+// A THIRD FUNCTION, NOT A FLAG ON THE SECOND. The shared module makes the same
+// move for the same reason — "A SESSION is elevated per request. AN API KEY IS
+// NEVER ELEVATED. Those are two functions, not one function with a flag, because
+// a flag is something a call site can get wrong and a missing parameter is not."
+// A certificate is a third principal kind and gets a third function.
+//
+// WHY IT MUST NOT BE ADDITIVE, WHEN SessionScopes IS
+//
+// SessionScopes re-adds `admin` that the caller already had, deliberately: in a
+// session it arrives from an admin-bearing role template in shared identity,
+// which is where every existing deployment's administrators come from, and
+// stripping it on upgrade would leave those deployments with no administrator.
+//
+// None of that applies to a certificate. An mTLS mapping's scopes are a claim
+// written in a config file, not a legacy grant held by a real user, so there is
+// no upgrade population to protect — and passing them through the additive
+// reading would PRESERVE a config-supplied `admin` rather than remove it. The
+// fix would look applied and change nothing, which is the failure mode
+// sethbacon/terraform-registry-backend#876 found in the sibling repository and
+// #476 found here.
+//
+// The caller must also have established that the certificate names a user: this
+// answers "is THIS user a platform administrator", and a subject with no user
+// has nobody to ask about. mtls.NewProvider refuses to build such a mapping with
+// `admin` in it, and the publish path strips regardless.
+func (s *Service) CertificateScopes(ctx context.Context, userID string, scopes []string) ([]string, error) {
+	if s == nil || s.carrier == nil {
+		return nil, ErrNotConfigured
+	}
+	return s.carrier.SessionScopes(ctx, userID, scopes)
+}
+
 func hasAdmin(scopes []string) bool {
 	for _, s := range scopes {
 		if s == idauth.ScopeAdmin {

@@ -21,7 +21,7 @@ func TestAuthenticate_CN(t *testing.T) {
 	p := newProvider(t, []config.MTLSSubjectMapping{{Subject: "CN=svc-drift", Scopes: []string{"state:drift"}}})
 	// Case-insensitive: cert CN differs in case from the mapping.
 	cert := &x509.Certificate{Subject: pkix.Name{CommonName: "SVC-Drift"}}
-	subject, scopes, err := p.Authenticate(cert)
+	subject, scopes, _, err := p.Authenticate(cert)
 	if err != nil {
 		t.Fatalf("expected match, got error: %v", err)
 	}
@@ -36,7 +36,7 @@ func TestAuthenticate_SANDNS(t *testing.T) {
 		Subject:  pkix.Name{CommonName: "irrelevant"},
 		DNSNames: []string{"machine.example.com"},
 	}
-	_, scopes, err := p.Authenticate(cert)
+	_, scopes, _, err := p.Authenticate(cert)
 	if err != nil || len(scopes) != 1 || scopes[0] != "state:read" {
 		t.Fatalf("expected SAN-DNS match, got scopes=%v err=%v", scopes, err)
 	}
@@ -45,10 +45,10 @@ func TestAuthenticate_SANDNS(t *testing.T) {
 func TestAuthenticate_FullDN(t *testing.T) {
 	name := pkix.Name{CommonName: "svc-x", Organization: []string{"acme"}}
 	dn := (&x509.Certificate{Subject: name}).Subject.String()
-	p := newProvider(t, []config.MTLSSubjectMapping{{Subject: dn, Scopes: []string{"admin"}}})
+	p := newProvider(t, []config.MTLSSubjectMapping{{Subject: dn, Scopes: []string{"states:read"}}})
 	cert := &x509.Certificate{Subject: name}
-	_, scopes, err := p.Authenticate(cert)
-	if err != nil || len(scopes) != 1 || scopes[0] != "admin" {
+	_, scopes, _, err := p.Authenticate(cert)
+	if err != nil || len(scopes) != 1 || scopes[0] != "states:read" {
 		t.Fatalf("expected DN match, got scopes=%v err=%v", scopes, err)
 	}
 }
@@ -56,14 +56,14 @@ func TestAuthenticate_FullDN(t *testing.T) {
 func TestAuthenticate_NoMatch(t *testing.T) {
 	p := newProvider(t, []config.MTLSSubjectMapping{{Subject: "CN=known", Scopes: []string{"state:read"}}})
 	cert := &x509.Certificate{Subject: pkix.Name{CommonName: "attacker"}}
-	if _, _, err := p.Authenticate(cert); err == nil {
+	if _, _, _, err := p.Authenticate(cert); err == nil {
 		t.Fatal("expected no-match error for unmapped subject")
 	}
 }
 
 func TestAuthenticate_NilCert(t *testing.T) {
 	p := newProvider(t, nil)
-	if _, _, err := p.Authenticate(nil); err == nil {
+	if _, _, _, err := p.Authenticate(nil); err == nil {
 		t.Fatal("expected error for nil certificate")
 	}
 }

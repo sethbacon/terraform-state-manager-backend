@@ -496,6 +496,21 @@ type MTLSConfig struct {
 type MTLSSubjectMapping struct {
 	Subject string   `mapstructure:"subject"`
 	Scopes  []string `mapstructure:"scopes"`
+
+	// UserID names the user this certificate acts as, and is what makes an
+	// `admin` mapping resolvable (issue #476).
+	//
+	// Optional for ordinary mappings: a certificate that only needs
+	// `states:read` is a machine credential with no user behind it. REQUIRED
+	// when the mapping carries `admin`, because platform-admin authority is
+	// held in the platform_admins carrier, the carrier is keyed on user_id, and
+	// a subject with no user resolves to nothing to ask about.
+	// mtls.NewProvider refuses such a mapping at startup.
+	//
+	// A UUID rather than an email or a username: it is what the carrier is
+	// keyed on, and it does not change when a user is renamed. A mapping naming
+	// a mutable attribute could silently start pointing at a different person.
+	UserID string `mapstructure:"user_id"`
 }
 
 // OIDCConfig holds generic OpenID Connect provider configuration.

@@ -32,7 +32,7 @@ func middlewareProvider(t *testing.T) *Provider {
 // reports the auth context it established.
 func serveMTLS(p *Provider, state *tls.ConnectionState) (authMethod string, scopes []string, code int) {
 	r := gin.New()
-	r.Use(AuthMiddleware(p))
+	r.Use(AuthMiddleware(p, nil))
 	r.GET("/", func(c *gin.Context) {
 		authMethod = c.GetString("auth_method")
 		if v, ok := c.Get("scopes"); ok {
