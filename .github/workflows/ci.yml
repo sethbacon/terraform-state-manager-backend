@@ -65,7 +65,7 @@ jobs:
       # -- failed this exact step on a pull request containing zero Go changes,
       # and it was reported twice as swagger drift before the log was read.
       - name: Install swag
-        uses: 4cloudguru/shared-workflows/.github/actions/go-install@bc0eaaec5d6f5cf632ef862ff7475da928e32466 # v1.2.0
+        uses: 4cloudguru/shared-workflows/.github/actions/go-install@9276df8e0bdb3152e2529ab98c8b99cfb9e22d4b # v1.13.0
         with:
           package: github.com/swaggo/swag/cmd/swag@v1.16.4
 
