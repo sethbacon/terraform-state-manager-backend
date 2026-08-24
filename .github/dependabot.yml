@@ -56,7 +56,7 @@ updates:
     # their own. Taking a new Go minor stays a deliberate change.
     ignore:
       - dependency-name: "golang"
-        update-types: [ "version-update:semver-minor", "version-update:semver-major" ]
+        update-types: ["version-update:semver-minor", "version-update:semver-major"]
     cooldown:
       default-days: 7
 
@@ -74,7 +74,7 @@ updates:
       - dependencies
       - github-actions
     commit-message:
-      prefix: "chore(ci)"
+      prefix: "chore(deps)"
     groups:
       github-actions-dependencies:
         patterns:
@@ -100,7 +100,7 @@ updates:
       - dependencies
       - github-actions
     commit-message:
-      prefix: "chore(ci)"
+      prefix: "chore(deps)"
     groups:
       commit-message-check:
         patterns:
