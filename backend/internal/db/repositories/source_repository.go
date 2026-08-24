@@ -107,6 +107,49 @@ func (r *SourceRepository) Count(ctx context.Context) (int, error) {
 	return n, err
 }
 
+// ListPageInScope is the scoped twin of ListPage.
+//
+// The page and the COUNT have to agree about which rows exist, which is why the
+// two twins land together: a scoped page beside an unscoped total would report
+// "3 of 400" to a tenant who owns three, and the number that leaks is the one
+// the partition exists to hide.
+func (r *SourceRepository) ListPageInScope(ctx context.Context, scope tenantscope.Scope, limit, offset int) ([]Source, error) {
+	if scope.Empty() {
+		return []Source{}, nil
+	}
+	if scope.PlatformAdmin {
+		return r.ListPage(ctx, limit, offset)
+	}
+	rows, err := r.db.QueryContext(ctx, `SELECT `+sourceColumns+`
+		FROM state_sources WHERE `+sourceOrgPredicate+`
+		ORDER BY created_at DESC
+		LIMIT $2 OFFSET $3`, scope.OrgIDs, limit, offset)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	return scanSources(rows)
+}
+
+// CountInScope is the scoped twin of Count.
+//
+// An empty scope counts ZERO without a query, matching every other reader here:
+// a caller whose tenancy could not be established is told the store is empty
+// rather than told its size.
+func (r *SourceRepository) CountInScope(ctx context.Context, scope tenantscope.Scope) (int, error) {
+	if scope.Empty() {
+		return 0, nil
+	}
+	if scope.PlatformAdmin {
+		return r.Count(ctx)
+	}
+	var n int
+	err := r.db.QueryRowContext(ctx,
+		`SELECT count(*) FROM state_sources WHERE `+sourceOrgPredicate, scope.OrgIDs).Scan(&n)
+	return n, err
+}
+
 func scanSources(rows *sql.Rows) ([]Source, error) {
 	sources := []Source{}
 	for rows.Next() {

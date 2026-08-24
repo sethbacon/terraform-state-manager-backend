@@ -38,13 +38,8 @@ import (
 // comparing the two reads on purpose. "It was awkward to thread" is not a reason.
 // The map is keyed "file:function".
 var justifiedUnscoped = map[string]string{
-	"tenant_dualread.go:observeSourceListScope":        "the dual-read measurement itself: it runs BOTH reads and reports where they disagree, so the unscoped one is half the instrument",
-	"tenant_dualread.go:observeSourceGetScope":         "as observeSourceListScope",
-	"tenant_dualread_analysis.go:observeAnalysisScope": "as observeSourceListScope, for the inherited analysis tables",
-	"sources.go:ListSources":                           "Phase 2b: serves the unscoped answer and observes the scoped one beside it. Flipping this is Phase 3 and is gated on the estate having been re-owned",
-	"sources.go:GetSource":                             "as ListSources",
-	"reconcile.go:ReconcileSources":                    "the statesync reconcile loop reads the whole fleet by design: it syncs every tenant's sources and has no caller to narrow to",
-	"sources.go:Consumers":                             "#439: a suite service-token route with no principal at all. It needs an organization PARAMETER, not a caller scope",
+	"reconcile.go:ReconcileSources": "the statesync reconcile loop reads the whole fleet by design: it syncs every tenant's sources and has no caller to narrow to",
+	"sources.go:Consumers":          "#439: a suite service-token route with no principal at all. It needs an organization PARAMETER, not a caller scope",
 }
 
 // repoFieldTypes maps HANDLER STRUCT -> field name -> repository type, so a call

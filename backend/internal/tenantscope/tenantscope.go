@@ -20,15 +20,31 @@
 // owner's platform authority; internal/middleware/auth.go already caps a key's
 // scopes by its owner's CURRENT ones for the same reason (#223).
 //
-// KeyBindsOrganization is OFF, and this one is temporary. terraform-registry
-// turns it ON, deliberately, after its #719 found that a userless organization
-// service key had no memberships to resolve and so received empty lists and
-// refusals on its OWN organization. That fix is right there and wrong here,
-// because internal/api/apikeys.go:mintKey stamps EVERY key with the deployment's
-// default organization whoever owns it — so the column is a constant, and
-// binding to it would place every key in one organization. It becomes correct
-// once #436 makes that stamp mean something. #438 tracks the gap in the
-// meantime.
+// KeyBindsOrganization is ON, and it was not always. It was off while
+// internal/api/apikeys.go:mintKey stamped EVERY key with the deployment's
+// default organization whoever owned it — the column carried no information, so
+// binding to it would have placed every key in one organization.
+//
+// #436 fixed that stamp: mintKey now writes the ACTING organization and refuses
+// to mint a key its owner is not a member of. The column means something, so the
+// binding is turned on (#459, section 4), which also closes the case
+// terraform-registry's #719 found — a userless service key has no memberships to
+// resolve, so without this it received empty lists and refusals on its OWN
+// organization.
+//
+// WHAT IT CHANGES: an API-key request is scoped to the key's own organization
+// rather than to the union of its owner's memberships. That is a NARROWING for a
+// key owned by a multi-organization member, and the correct one — a key acts
+// where it was minted, not everywhere its owner can reach.
+//
+// KEYS MINTED BEFORE #436 still carry the default-organization stamp, and there
+// is no backfill: their organization is a fact about when they were created
+// rather than about where they are used. Two cases, and only one is new. A
+// legacy key whose owner is not a member of the default organization is ALREADY
+// refused at authentication (#453), so nothing changes for it. A legacy key
+// whose owner IS a member binds to the default organization — which is right in
+// a single-organization deployment and wrong for an owner who works elsewhere.
+// Rotating the key re-mints it against the acting organization and fixes it.
 //
 // PlatformAdmins is the live carrier, not a flat scope. In registry `admin` IS
 // the platform-wide wildcard; here it is granted per organization through an
@@ -73,7 +89,7 @@ func Resolve(c *gin.Context, memberships Memberships, admins PlatformAdmins, req
 		ReadWritePairs: auth.ReadWritePairs(),
 		// Both deliberately left at their zero value; see the package comment.
 		AdminsApplyToAPIKeys: false,
-		KeyBindsOrganization: false,
+		KeyBindsOrganization: true,
 	}
 	if admins != nil {
 		resolver.Admins = notConfiguredShim{inner: admins}
@@ -122,10 +138,37 @@ func principalOf(c *gin.Context) idtenantscope.Principal {
 	return idtenantscope.Principal{
 		UserID:     principal(c),
 		Credential: credentialOf(c),
-		// KeyOrgID is deliberately not populated: KeyBindsOrganization is off,
-		// so the shared resolver would ignore it, and supplying a value the
-		// policy says is meaningless is how it gets trusted later by accident.
+		// KeyOrgID is populated now that KeyBindsOrganization is on (#459). It
+		// is read from the key row the auth middleware already resolved, not
+		// from anything the caller sends: a header-supplied organization would
+		// let a key choose its own scope.
+		//
+		// An empty value is a legacy key with no usable binding, and the shared
+		// resolver falls through to the owner's memberships for exactly that
+		// case rather than scoping to nothing.
+		KeyOrgID: keyOrganization(c),
 	}
+}
+
+// keyOrganization returns the organization the presenting API key is bound to,
+// or "" for any other credential.
+//
+// Gated on the credential rather than merely reading the key id: a session
+// request has no key organization, and returning one from a stale context value
+// would scope a browser to a key's organization.
+func keyOrganization(c *gin.Context) string {
+	if credentialOf(c) != idtenantscope.CredentialAPIKey {
+		return ""
+	}
+	v, ok := c.Get("api_key_organization_id")
+	if !ok {
+		return ""
+	}
+	id, ok := v.(string)
+	if !ok {
+		return ""
+	}
+	return strings.TrimSpace(id)
 }
 
 // credentialOf maps this application's auth_method vocabulary onto the shared

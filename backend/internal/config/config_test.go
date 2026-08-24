@@ -39,25 +39,6 @@ func TestWorkersEnvGate(t *testing.T) {
 
 // The #393 Phase 2b flag: off unless asked for, because it costs a second query
 // per read and a flag whose default changed behaviour would not be a flag.
-func TestTenancyDualReadEnvGate(t *testing.T) {
-	cfg, err := Load("")
-	if err != nil {
-		t.Fatalf("Load returned error: %v", err)
-	}
-	if cfg.Tenancy.DualRead {
-		t.Error("tenancy.dual_read must default to false")
-	}
-
-	t.Setenv("TSM_TENANCY_DUAL_READ", "true")
-	cfg, err = Load("")
-	if err != nil {
-		t.Fatalf("Load returned error: %v", err)
-	}
-	if !cfg.Tenancy.DualRead {
-		t.Error("TSM_TENANCY_DUAL_READ=true must enable the dual read")
-	}
-}
-
 func TestSMTPDefaults(t *testing.T) {
 	cfg, err := Load("")
 	if err != nil {
