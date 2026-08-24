@@ -307,7 +307,7 @@ func (s *Service) SessionScopes(ctx context.Context, userID string, scopes []str
 // a flag is something a call site can get wrong and a missing parameter is not."
 // A certificate is a third principal kind and gets a third function.
 //
-// WHY IT MUST NOT BE ADDITIVE, WHEN SessionScopes IS
+// # WHY IT MUST NOT BE ADDITIVE, WHEN SessionScopes IS
 //
 // SessionScopes re-adds `admin` that the caller already had, deliberately: in a
 // session it arrives from an admin-bearing role template in shared identity,
