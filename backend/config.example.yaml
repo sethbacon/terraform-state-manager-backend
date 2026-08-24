@@ -108,9 +108,19 @@ auth:
   mtls:
     enabled: false
     client_ca_file: ""   # PEM bundle of trusted client-cert CAs
+    #
+    # A mapping's scopes are a claim, not a grant. `admin` is a grant-all
+    # wildcard held in the platform_admins carrier, which is keyed on a user —
+    # so a mapping carrying `admin` MUST name the user the certificate acts as,
+    # and the server refuses to start otherwise. That user's carrier row is
+    # then consulted on every request, so revoking it disarms the certificate
+    # immediately rather than at the next restart (issue #476).
+    #
+    # user_id is optional for ordinary machine credentials, which need no user.
     mappings: []
     #   - { subject: "CN=svc-drift",            scopes: ["state:drift"] }
     #   - { subject: "dns:machine.example.com", scopes: ["state:read"] }
+    #   - { subject: "CN=break-glass", scopes: ["admin"], user_id: "00000000-0000-0000-0000-000000000000" }
 
   # LDAP / Active Directory search-bind auth (POST /api/v1/auth/ldap/login).
   # Usernames are escaped before filter substitution; empty passwords are rejected

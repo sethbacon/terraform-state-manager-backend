@@ -209,6 +209,33 @@ a subject to a list of scopes. The subject may be `CN=<name>`, `dns:<san>`, or a
 full DN. With no matching mapping the cert authenticates but carries **no
 scopes** (so it can reach nothing) — define a mapping for every client cert.
 
+A repeated `subject` is refused at startup. It previously took the last mapping
+in the file silently, which is unacceptable now that a mapping can name a
+principal.
+
+#### `admin` in a mapping needs a user, and the carrier still decides
+
+A mapping is configuration, so the scopes in it are a claim about authority
+rather than a grant of it. `admin` is a grant-all wildcard, and it is held in the
+`platform_admins` carrier, which is keyed on a user. So a mapping carrying
+`admin` must set `user_id` to that user's UUID, and **the server refuses to start
+otherwise**, naming the subject:
+
+```yaml
+auth:
+  mtls:
+    mappings:
+      - { subject: "CN=break-glass", scopes: ["admin"], user_id: "3f1c9a02-6d4e-4a1b-9f77-2b8e5c0d1a44" }
+```
+
+`user_id` is optional for every other mapping — an ordinary machine credential
+needs no user behind it — and nothing changes for those.
+
+Naming a user does not by itself grant anything. On every request the carrier is
+consulted for that user, so `admin` holds only while they hold a carrier row, and
+revoking it disarms the certificate on the next request rather than at the next
+restart. The grant is recorded with who granted it and when, like every other.
+
 API keys (`tsm_…` Bearer tokens, self-service under `/admin/apikeys`) are always
 enabled and are the recommended credential for CI calls such as
 `POST /api/v1/drift/ingest`.
