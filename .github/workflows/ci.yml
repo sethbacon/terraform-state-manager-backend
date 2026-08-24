@@ -286,6 +286,21 @@ jobs:
         # Accepted risks are suppressed inline with // #nosec <rule> -- <reason>.
         run: gosec -fmt json -out gosec-results.json ./... || true
 
+      # The comparator is the only thing standing between a gosec run and a green
+
+      # required check, and nothing in this repository ran its tests -- there were
+
+      # none. A gate whose logic nothing exercises is indistinguishable from one
+
+      # that works.
+
+      - name: The gosec comparator's own tests
+
+        working-directory: backend
+
+        run: python3 scripts/gosec_compare_test.py
+
+
       - name: Compare against baseline
         id: compare
         working-directory: backend
