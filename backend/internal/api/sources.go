@@ -683,6 +683,23 @@ func (h *SourcesHandlers) StateHistory() gin.HandlerFunc {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "key query parameter is required"})
 			return
 		}
+
+		// Gate on the SOURCE, not on the history rows (#459).
+		//
+		// state_analysis_history carries no organization_id — migration 000033
+		// argues that duplicating one onto the inherited tables would create a
+		// second answer to "whose row is this", and the copy is the one that
+		// goes stale. Ownership is the parent's, so authorising the parent
+		// authorises its history, and sourceInScope is the same check every
+		// other per-source route already makes.
+		//
+		// Without it this route took a source id from the path and read that
+		// source's analysis history for anyone who could guess the id — the one
+		// per-source read on this handler that had no gate.
+		if _, ok := h.sourceInScope(c); !ok {
+			return
+		}
+
 		limit, _ := strconv.Atoi(c.DefaultQuery("limit", "0"))
 		history, err := h.analysisRepo.History(c.Request.Context(), c.Param("id"), key, limit)
 		if err != nil {

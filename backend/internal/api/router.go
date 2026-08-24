@@ -376,8 +376,14 @@ func NewRouter(cfg *config.Config, database *sql.DB, identityDB *sql.DB) (*gin.E
 		v1.POST("/audit/ingest", middleware.RequireSuiteServiceToken(cfg.Suite.ServiceToken), auditIngest.Ingest())
 
 		// Home dashboard: cross-source aggregated overview.
-		v1.GET("/dashboard/overview", requireAuth, middleware.RequireScope(auth.ScopeStateRead), sources.DashboardOverview())
-		v1.GET("/dashboard/states-by-version", requireAuth, middleware.RequireScope(auth.ScopeStateRead), sources.StatesByVersion())
+		// The dashboard and report routes resolve a scope now (#459), so they
+		// need the middleware that publishes one. tenantScopeStateRead is the
+		// correct instance and not merely a convenient one: these routes READ,
+		// and a scope resolved for sources:manage would answer "which
+		// organizations may this caller WRITE in", which is a different and
+		// narrower question that would hide rows they are entitled to see.
+		v1.GET("/dashboard/overview", requireAuth, middleware.RequireScope(auth.ScopeStateRead), tenantScopeStateRead, sources.DashboardOverview())
+		v1.GET("/dashboard/states-by-version", requireAuth, middleware.RequireScope(auth.ScopeStateRead), tenantScopeStateRead, sources.StatesByVersion())
 
 		// State-store reconcile. A POST (CSRF-protected) so the state-changing
 		// re-read cannot be triggered by a replayable cross-site GET (#215); the
@@ -385,8 +391,8 @@ func NewRouter(cfg *config.Config, database *sql.DB, identityDB *sql.DB) (*gin.E
 		v1.POST("/reconcile", requireAuth, middleware.RequireScope(auth.ScopeStateRead), sources.ReconcileSources())
 
 		// Reports: cross-fleet state-file query, preview, and multi-format export.
-		v1.GET("/reports/states", requireAuth, middleware.RequireScope(auth.ScopeStateRead), sources.ReportStates())
-		v1.GET("/reports/states/export", requireAuth, middleware.RequireScope(auth.ScopeStateRead), sources.ReportStatesExport())
+		v1.GET("/reports/states", requireAuth, middleware.RequireScope(auth.ScopeStateRead), tenantScopeStateRead, sources.ReportStates())
+		v1.GET("/reports/states/export", requireAuth, middleware.RequireScope(auth.ScopeStateRead), tenantScopeStateRead, sources.ReportStatesExport())
 
 		// Identity management (admin scope): users, organizations, roles, audit log.
 		admin := NewAdminHandlers(identityDB, database, approles.RoleSource(cfg.Authz.RoleSource), WithAdminCredentialSweeper(credSweeper))

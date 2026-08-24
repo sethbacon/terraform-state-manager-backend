@@ -12,6 +12,7 @@ import (
 
 	"github.com/terraform-state-manager/terraform-state-manager/internal/db/repositories"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/reporting"
+	"github.com/terraform-state-manager/terraform-state-manager/internal/tenantscope"
 )
 
 // reportPreviewCap bounds the rows returned to the live Reports table; the
@@ -274,11 +275,21 @@ func (h *SourcesHandlers) ReportStates() gin.HandlerFunc {
 			return
 		}
 
+		// Scoped (#459). A report is the widest read this API offers: it filters
+		// the whole analysis store by provider, resource type, version and size,
+		// and returns state files by name with their resource counts. Unscoped
+		// it answered those questions about every organization at once.
+		scope, resolved := tenantscope.FromContext(c)
+		if !resolved {
+			serverError(c, errNoTenantScope, "the tenant scope was not resolved for this route")
+			return
+		}
+
 		// Fast path: with no residual predicate, the SQL WHERE fully captures the
 		// filter, so the DB returns the exact page plus the full-match COUNT/SUMs
 		// (window functions) — no full-store load, no JSONB unmarshal, no Go pass.
 		if !f.hasResidual() {
-			preview, agg, err := h.analysisRepo.PreviewStatesWithTotals(ctx, f.sqlFilter(), reportPreviewCap)
+			preview, agg, err := h.analysisRepo.PreviewStatesWithTotalsInScope(ctx, scope, f.sqlFilter(), reportPreviewCap)
 			if err != nil {
 				c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load states"})
 				return
@@ -301,7 +312,7 @@ func (h *SourcesHandlers) ReportStates() gin.HandlerFunc {
 		// Residual path: the WHERE clause still reduces the scan to the clean
 		// predicates; the semver-range / provider / resource-type predicates are
 		// applied in Go over that reduced set.
-		rows, err := h.analysisRepo.FilterStates(ctx, f.sqlFilter())
+		rows, err := h.analysisRepo.FilterStatesInScope(ctx, scope, f.sqlFilter())
 		if err != nil {
 			serverError(c, err, "failed to load states")
 			return
@@ -343,10 +354,20 @@ func (h *SourcesHandlers) ReportStatesExport() gin.HandlerFunc {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
+
+		// Scoped (#459), and this is the route where it matters most: the export
+		// writes every matched row to a file the caller keeps. A disclosure here
+		// leaves the deployment.
+		scope, resolved := tenantscope.FromContext(c)
+		if !resolved {
+			serverError(c, errNoTenantScope, "the tenant scope was not resolved for this route")
+			return
+		}
+
 		format := reporting.Format(c.DefaultQuery("format", "json"))
 		// Exports need every matched row (all columns), so the WHERE clause reduces
 		// the scan to the clean predicates and the residual pass finishes the rest.
-		rows, err := h.analysisRepo.FilterStates(c.Request.Context(), f.sqlFilter())
+		rows, err := h.analysisRepo.FilterStatesInScope(c.Request.Context(), scope, f.sqlFilter())
 		if err != nil {
 			serverError(c, err, "failed to load states")
 			return
