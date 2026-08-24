@@ -16,6 +16,7 @@ import (
 	"github.com/terraform-state-manager/terraform-state-manager/internal/db/repositories"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/services/statesync"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/statesource"
+	"github.com/terraform-state-manager/terraform-state-manager/internal/tenantscope"
 )
 
 // refreshEnv wires the Reports route over a syncer-attached handler with a real
@@ -54,6 +55,13 @@ func newRefreshEnv(t *testing.T) *refreshEnv {
 		connect,
 	))
 	r := gin.New()
+	// ReportStates resolves a tenant scope now (#459); the reconcile route does
+	// not, and the middleware being global here is harmless — a stored scope
+	// nothing reads changes nothing.
+	r.Use(func(c *gin.Context) {
+		tenantscope.Store(c, tenantscope.Scope{OrgIDs: []string{testActingOrg}})
+		c.Next()
+	})
 	r.POST("/api/v1/reconcile", h.ReconcileSources())
 	r.GET("/api/v1/reports/states", h.ReportStates())
 	env.r = r

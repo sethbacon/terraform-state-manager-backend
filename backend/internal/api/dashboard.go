@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -11,6 +12,7 @@ import (
 
 	"github.com/terraform-state-manager/terraform-state-manager/internal/analyzer"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/db/repositories"
+	"github.com/terraform-state-manager/terraform-state-manager/internal/tenantscope"
 	semver "github.com/terraform-state-manager/terraform-state-manager/internal/version"
 )
 
@@ -20,14 +22,57 @@ import (
 // one triggered via POST /reconcile — changes the key and recomputes immediately,
 // while repeated dashboard loads between syncs reuse the cached aggregates.
 // State edits that bypass sync are visible at worst overviewCacheTTL late.
+// overviewAggCache memoizes the dashboard aggregates PER TENANT SCOPE.
+//
+// It used to be a single slot keyed only on the newest last_sync_at, which was
+// correct while every read was store-wide: one set of numbers, the same for
+// everybody. Scoping the reads (#459) makes that a cross-tenant leak and a worse
+// one than the disclosure it fixes — tenant A loads the dashboard, the slot
+// fills with A's totals, and tenant B's load inside the TTL is served A's
+// numbers under B's name. Today's behaviour at least shows everyone the same
+// fleet-wide figures; a scope-blind cache would show B a subset that is not B's.
+//
+// So the scope is part of the key. Entries are bounded: distinct keys are
+// distinct MEMBERSHIP SETS rather than distinct users, which is small in
+// practice, but "small in practice" is not a bound and this map is reachable
+// from an unauthenticated-shaped request count.
 type overviewAggCache struct {
-	mu        sync.Mutex
-	key       string // newest last_sync_at when the aggregates were computed
+	mu      sync.Mutex
+	entries map[string]overviewAggEntry
+}
+
+type overviewAggEntry struct {
 	expires   time.Time
 	totals    *repositories.AnalysisTotals
 	providers map[string]int
 	resTypes  map[string]int
 	versions  map[string]int
+}
+
+// overviewCacheMaxEntries bounds the memo. On overflow the whole map is dropped
+// rather than one entry evicted: picking a victim needs recency tracking this
+// does not carry, and a full clear costs one recomputation per active scope
+// against a table the TTL already re-reads every 30 seconds.
+const overviewCacheMaxEntries = 64
+
+// scopeCacheKey renders a scope into a stable string.
+//
+// SORTED, because tenantscope.Scope documents that OrgIDs order is not
+// significant — two requests with the same membership in a different order must
+// hit the same entry, and would not if the key were built by concatenation
+// alone.
+//
+// The platform-admin key is separate and cannot collide with any organization
+// set: an administrator's numbers are the fleet's, and serving them to a tenant
+// whose id list happened to render the same way is the leak this key exists to
+// prevent.
+func scopeCacheKey(scope tenantscope.Scope) string {
+	if scope.PlatformAdmin {
+		return "platform-admin"
+	}
+	ids := append([]string(nil), scope.OrgIDs...)
+	sort.Strings(ids)
+	return "orgs:" + strings.Join(ids, ",")
 }
 
 // overviewCacheTTL bounds staleness for store changes that do not go through a
@@ -37,31 +82,41 @@ const overviewCacheTTL = 30 * time.Second
 // overviewAggregates returns the four store-wide aggregates, cached. The lock
 // is held across the queries on purpose: concurrent dashboard loads coalesce
 // into one recomputation instead of racing the same four scans.
-func (h *SourcesHandlers) overviewAggregates(ctx context.Context, syncKey string) (*repositories.AnalysisTotals, map[string]int, map[string]int, map[string]int, error) {
+func (h *SourcesHandlers) overviewAggregates(ctx context.Context, syncKey string, scope tenantscope.Scope) (*repositories.AnalysisTotals, map[string]int, map[string]int, map[string]int, error) {
 	c := &h.overviewCache
+	key := syncKey + "\x00" + scopeCacheKey(scope)
+
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.totals != nil && c.key == syncKey && time.Now().Before(c.expires) {
-		return c.totals, c.providers, c.resTypes, c.versions, nil
+	if e, ok := c.entries[key]; ok && e.totals != nil && time.Now().Before(e.expires) {
+		return e.totals, e.providers, e.resTypes, e.versions, nil
 	}
-	totals, err := h.analysisRepo.Totals(ctx)
+	totals, err := h.analysisRepo.TotalsInScope(ctx, scope)
 	if err != nil {
 		return nil, nil, nil, nil, err
 	}
-	providers, err := h.analysisRepo.ProviderCounts(ctx)
+	providers, err := h.analysisRepo.ProviderCountsInScope(ctx, scope)
 	if err != nil {
 		return nil, nil, nil, nil, err
 	}
-	resTypes, err := h.analysisRepo.ResourceTypeCounts(ctx)
+	resTypes, err := h.analysisRepo.ResourceTypeCountsInScope(ctx, scope)
 	if err != nil {
 		return nil, nil, nil, nil, err
 	}
-	versions, err := h.analysisRepo.VersionCounts(ctx)
+	versions, err := h.analysisRepo.VersionCountsInScope(ctx, scope)
 	if err != nil {
 		return nil, nil, nil, nil, err
 	}
-	c.key, c.expires = syncKey, time.Now().Add(overviewCacheTTL)
-	c.totals, c.providers, c.resTypes, c.versions = totals, providers, resTypes, versions
+	if c.entries == nil || len(c.entries) >= overviewCacheMaxEntries {
+		c.entries = make(map[string]overviewAggEntry, overviewCacheMaxEntries)
+	}
+	c.entries[key] = overviewAggEntry{
+		expires:   time.Now().Add(overviewCacheTTL),
+		totals:    totals,
+		providers: providers,
+		resTypes:  resTypes,
+		versions:  versions,
+	}
 	return totals, providers, resTypes, versions, nil
 }
 
@@ -88,14 +143,26 @@ func (h *SourcesHandlers) DashboardOverview() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		ctx := c.Request.Context()
 
-		sources, err := h.repo.List(ctx)
+		// Scoped throughout (#459). The dashboard is the widest aggregate this
+		// API serves: totals, provider and resource-type distributions, and
+		// per-source sync freshness, all previously computed store-wide. A
+		// tenant reading it saw the whole fleet's shape — how many states other
+		// organizations hold, which providers they run, which Terraform
+		// versions they are on — without ever naming a row it could not fetch.
+		scope, resolved := tenantscope.FromContext(c)
+		if !resolved {
+			serverError(c, errNoTenantScope, "the tenant scope was not resolved for this route")
+			return
+		}
+
+		sources, err := h.repo.ListInScope(ctx, scope)
 		if err != nil {
 			serverError(c, err, "failed to list sources")
 			return
 		}
 		// Statuses load first (small table, always fresh — the sync panel must
 		// not lag); their newest last_sync_at keys the aggregate cache.
-		statuses, err := h.analysisRepo.SyncStatuses(ctx)
+		statuses, err := h.analysisRepo.SyncStatusesInScope(ctx, scope)
 		if err != nil {
 			serverError(c, err, "failed to load sync status")
 			return
@@ -106,7 +173,7 @@ func (h *SourcesHandlers) DashboardOverview() gin.HandlerFunc {
 				syncKey = st.LastSyncAt
 			}
 		}
-		totals, providers, resTypes, versions, err := h.overviewAggregates(ctx, syncKey)
+		totals, providers, resTypes, versions, err := h.overviewAggregates(ctx, syncKey, scope)
 		if err != nil {
 			serverError(c, err, "failed to aggregate analyses")
 			return
@@ -219,6 +286,15 @@ func (h *SourcesHandlers) StatesByVersion() gin.HandlerFunc {
 		}
 		ctx := c.Request.Context()
 
+		// Scoped (#459). This route answers "which states run version X", and
+		// unscoped it answered it for the whole fleet — a tenant clicking a bar
+		// on its own dashboard listed other organizations' state files by name.
+		scope, resolved := tenantscope.FromContext(c)
+		if !resolved {
+			serverError(c, errNoTenantScope, "the tenant scope was not resolved for this route")
+			return
+		}
+
 		// Exact match (the common click-a-version-bar case) pushes the predicate and
 		// a cap into SQL instead of loading the whole store to filter in Go. The
 		// dashboard's "unknown" bucket is the empty version the store records.
@@ -227,7 +303,7 @@ func (h *SourcesHandlers) StatesByVersion() gin.HandlerFunc {
 			if v == "unknown" {
 				v = ""
 			}
-			states, total, err := h.analysisRepo.StatesByVersionExact(ctx, v, versionStatesCap)
+			states, total, err := h.analysisRepo.StatesByVersionExactInScope(ctx, scope, v, versionStatesCap)
 			if err != nil {
 				serverError(c, err, "failed to load states by version")
 				return
@@ -244,7 +320,7 @@ func (h *SourcesHandlers) StatesByVersion() gin.HandlerFunc {
 
 		// Range operators need semantic-version comparison, so load and filter in Go,
 		// then cap the result (with a truncated flag) to bound a very large bucket.
-		rows, err := h.analysisRepo.StateVersions(ctx)
+		rows, err := h.analysisRepo.StateVersionsInScope(ctx, scope)
 		if err != nil {
 			serverError(c, err, "failed to load state versions")
 			return

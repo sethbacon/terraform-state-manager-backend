@@ -12,6 +12,8 @@ import (
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
 	"github.com/gin-gonic/gin"
 
+	"github.com/terraform-state-manager/terraform-state-manager/internal/tenantscope"
+
 	"github.com/terraform-state-manager/terraform-state-manager/internal/db/repositories"
 )
 
@@ -254,13 +256,24 @@ func previewRows() *sqlmock.Rows {
 // reportEnv wires the two Reports routes over a sqlmock app DB.
 func reportEnv(t *testing.T) (*gin.Engine, sqlmock.Sqlmock) {
 	t.Helper()
-	db, mock, err := sqlmock.New()
+	// newSQLMock, not sqlmock.New: the scoped report statements bind
+	// scope.OrgIDs as a []string to `= ANY($1::uuid[])`, which the default
+	// converter rejects at the driver before any expectation is consulted.
+	db, mock, err := newSQLMock()
 	if err != nil {
 		t.Fatalf("sqlmock.New: %v", err)
 	}
 	t.Cleanup(func() { db.Close() })
 	h := NewSourcesHandlers(db, nil)
 	r := gin.New()
+	// What middleware.TenantScope publishes in production (#459). Stored rather
+	// than resolved, so this rig needs no membership store — but it must be
+	// stored, because these routes now treat an unresolved scope as a wiring
+	// fault and answer 500 rather than reading the whole store.
+	r.Use(func(c *gin.Context) {
+		tenantscope.Store(c, tenantscope.Scope{OrgIDs: []string{testActingOrg}})
+		c.Next()
+	})
 	r.GET("/api/v1/reports/states", h.ReportStates())
 	r.GET("/api/v1/reports/states/export", h.ReportStatesExport())
 	return r, mock

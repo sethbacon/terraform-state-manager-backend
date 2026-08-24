@@ -221,6 +221,11 @@ func TestDashboardOverview_StoreAggregation(t *testing.T) {
 
 	// Sync cycle: list sources, diff markers (none yet), upsert the analysis,
 	// prune nothing, record status.
+	//
+	// UNSCOPED, and correctly so: statesync is a background reconciler, not a
+	// request. It reconciles every source in the deployment because the store it
+	// maintains is what the (scoped) handlers then read from — scoping the
+	// reconciler would leave rows nobody refreshes.
 	mock.ExpectQuery("SELECT .+ FROM state_sources ORDER BY").WillReturnRows(sourceListRows())
 	mock.ExpectQuery("SELECT state_key, version_marker FROM state_analyses").WithArgs("s1").
 		WillReturnRows(sqlmock.NewRows([]string{"state_key", "version_marker"}))
@@ -228,19 +233,26 @@ func TestDashboardOverview_StoreAggregation(t *testing.T) {
 	mock.ExpectExec("DELETE FROM state_analyses WHERE source_id").WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectExec("INSERT INTO source_sync_status").WillReturnResult(sqlmock.NewResult(0, 1))
 
-	// Handler aggregation over the store.
-	mock.ExpectQuery("SELECT .+ FROM state_sources ORDER BY").WillReturnRows(sourceListRows())
-	mock.ExpectQuery(`SELECT COUNT\(\*\),`).WillReturnRows(
+	// Handler aggregation over the store, SCOPED (#459). Every statement below
+	// now carries the caller's organizations: the source list constrains on
+	// organization_id, and each analysis aggregate joins state_sources to derive
+	// the owner of a table that has no organization column of its own.
+	mock.ExpectQuery("SELECT .+ FROM state_sources WHERE").WithArgs([]string{testActingOrg}).
+		WillReturnRows(sourceListRows())
+	// Sync status loads BEFORE the aggregates — its newest last_sync_at is what
+	// keys the aggregate cache — so it is expected in that order here.
+	mock.ExpectQuery("FROM source_sync_status").WithArgs([]string{testActingOrg}).
+		WillReturnRows(
+			sqlmock.NewRows([]string{"source_id", "last_sync_at", "states_listed", "read_errors", "last_error", "stored"}).
+				AddRow("s1", "2026-06-11T09:00:00Z", 1, 0, "", 1))
+	mock.ExpectQuery(`SELECT COUNT\(\*\),`).WithArgs([]string{testActingOrg}).WillReturnRows(
 		sqlmock.NewRows([]string{"count", "rum", "managed", "data", "total"}).AddRow(1, 2, 2, 0, 2))
-	mock.ExpectQuery(`jsonb_each_text\(providers\)`).WillReturnRows(
+	mock.ExpectQuery(`jsonb_each_text\(a.providers\)`).WithArgs([]string{testActingOrg}).WillReturnRows(
 		sqlmock.NewRows([]string{"key", "sum"}).AddRow("aws", 2))
-	mock.ExpectQuery(`jsonb_each_text\(resource_types\)`).WillReturnRows(
+	mock.ExpectQuery(`jsonb_each_text\(a.resource_types\)`).WithArgs([]string{testActingOrg}).WillReturnRows(
 		sqlmock.NewRows([]string{"key", "sum"}).AddRow("aws_instance", 1).AddRow("aws_vpc", 1))
-	mock.ExpectQuery("SELECT CASE WHEN terraform_version").WillReturnRows(
+	mock.ExpectQuery("CASE WHEN a.terraform_version").WithArgs([]string{testActingOrg}).WillReturnRows(
 		sqlmock.NewRows([]string{"v", "count"}).AddRow("1.9.5", 1))
-	mock.ExpectQuery("FROM source_sync_status").WillReturnRows(
-		sqlmock.NewRows([]string{"source_id", "last_sync_at", "states_listed", "read_errors", "last_error", "stored"}).
-			AddRow("s1", "2026-06-11T09:00:00Z", 1, 0, "", 1))
 
 	// Reconcile (POST) runs the sync cycle; the dashboard GET then aggregates the
 	// store it produced.
@@ -288,18 +300,18 @@ func TestDashboardOverview_SyncStatusDegraded(t *testing.T) {
 	env := &sourcesEnv{r: r, mock: mock}
 
 	cfg, _ := json.Marshal(map[string]any{"base_path": "/tmp"})
-	mock.ExpectQuery("SELECT .+ FROM state_sources ORDER BY").WillReturnRows(
+	mock.ExpectQuery("SELECT .+ FROM state_sources WHERE").WithArgs([]string{testActingOrg}).WillReturnRows(
 		sqlmock.NewRows(apiSourceCols).
 			AddRow("s1", "demo", "local", "", cfg, []byte(`{}`), nil, "2026-06-10", "2026-06-10", testActingOrg).
 			AddRow("s2", "fresh", "local", "", cfg, []byte(`{}`), nil, "2026-06-10", "2026-06-10", testActingOrg))
-	mock.ExpectQuery("FROM source_sync_status").WillReturnRows(
+	mock.ExpectQuery("FROM source_sync_status").WithArgs([]string{testActingOrg}).WillReturnRows(
 		sqlmock.NewRows([]string{"source_id", "last_sync_at", "states_listed", "read_errors", "last_error", "stored"}).
 			AddRow("s1", "2026-06-11T09:00:00Z", 165, 3, "read ws-1: 429", 162))
-	mock.ExpectQuery(`SELECT COUNT\(\*\),`).WillReturnRows(
+	mock.ExpectQuery(`SELECT COUNT\(\*\),`).WithArgs([]string{testActingOrg}).WillReturnRows(
 		sqlmock.NewRows([]string{"count", "rum", "managed", "data", "total"}).AddRow(80, 5009, 5012, 992, 6004))
-	mock.ExpectQuery(`jsonb_each_text\(providers\)`).WillReturnRows(sqlmock.NewRows([]string{"key", "sum"}))
-	mock.ExpectQuery(`jsonb_each_text\(resource_types\)`).WillReturnRows(sqlmock.NewRows([]string{"key", "sum"}))
-	mock.ExpectQuery("SELECT CASE WHEN terraform_version").WillReturnRows(sqlmock.NewRows([]string{"v", "count"}))
+	mock.ExpectQuery(`jsonb_each_text\(a.providers\)`).WithArgs([]string{testActingOrg}).WillReturnRows(sqlmock.NewRows([]string{"key", "sum"}))
+	mock.ExpectQuery(`jsonb_each_text\(a.resource_types\)`).WithArgs([]string{testActingOrg}).WillReturnRows(sqlmock.NewRows([]string{"key", "sum"}))
+	mock.ExpectQuery("CASE WHEN a.terraform_version").WithArgs([]string{testActingOrg}).WillReturnRows(sqlmock.NewRows([]string{"v", "count"}))
 
 	w := env.do(http.MethodGet, "/api/v1/dashboard/overview", "")
 	if w.Code != http.StatusOK {
@@ -345,23 +357,23 @@ func TestDashboardOverview_AggregateCache(t *testing.T) {
 			AddRow("s1", syncedAt, 1, 0, "", 1)
 	}
 	expectAggregates := func(rum int) {
-		mock.ExpectQuery(`SELECT COUNT\(\*\),`).WillReturnRows(
+		mock.ExpectQuery(`SELECT COUNT\(\*\),`).WithArgs([]string{testActingOrg}).WillReturnRows(
 			sqlmock.NewRows([]string{"count", "rum", "managed", "data", "total"}).AddRow(1, rum, 2, 0, 2))
-		mock.ExpectQuery(`jsonb_each_text\(providers\)`).WillReturnRows(sqlmock.NewRows([]string{"key", "sum"}))
-		mock.ExpectQuery(`jsonb_each_text\(resource_types\)`).WillReturnRows(sqlmock.NewRows([]string{"key", "sum"}))
-		mock.ExpectQuery("SELECT CASE WHEN terraform_version").WillReturnRows(sqlmock.NewRows([]string{"v", "count"}))
+		mock.ExpectQuery(`jsonb_each_text\(a.providers\)`).WithArgs([]string{testActingOrg}).WillReturnRows(sqlmock.NewRows([]string{"key", "sum"}))
+		mock.ExpectQuery(`jsonb_each_text\(a.resource_types\)`).WithArgs([]string{testActingOrg}).WillReturnRows(sqlmock.NewRows([]string{"key", "sum"}))
+		mock.ExpectQuery("CASE WHEN a.terraform_version").WithArgs([]string{testActingOrg}).WillReturnRows(sqlmock.NewRows([]string{"v", "count"}))
 	}
 
 	// First load: cold cache, aggregates computed.
-	mock.ExpectQuery("SELECT .+ FROM state_sources ORDER BY").WillReturnRows(sourceRows())
-	mock.ExpectQuery("FROM source_sync_status").WillReturnRows(statusRows("2026-06-11T09:00:00Z"))
+	mock.ExpectQuery("SELECT .+ FROM state_sources WHERE").WithArgs([]string{testActingOrg}).WillReturnRows(sourceRows())
+	mock.ExpectQuery("FROM source_sync_status").WithArgs([]string{testActingOrg}).WillReturnRows(statusRows("2026-06-11T09:00:00Z"))
 	expectAggregates(2)
 	// Second load, same last_sync_at: served from cache — NO aggregate queries.
-	mock.ExpectQuery("SELECT .+ FROM state_sources ORDER BY").WillReturnRows(sourceRows())
-	mock.ExpectQuery("FROM source_sync_status").WillReturnRows(statusRows("2026-06-11T09:00:00Z"))
+	mock.ExpectQuery("SELECT .+ FROM state_sources WHERE").WithArgs([]string{testActingOrg}).WillReturnRows(sourceRows())
+	mock.ExpectQuery("FROM source_sync_status").WithArgs([]string{testActingOrg}).WillReturnRows(statusRows("2026-06-11T09:00:00Z"))
 	// Third load, newer last_sync_at: cache invalidated, aggregates recomputed.
-	mock.ExpectQuery("SELECT .+ FROM state_sources ORDER BY").WillReturnRows(sourceRows())
-	mock.ExpectQuery("FROM source_sync_status").WillReturnRows(statusRows("2026-06-11T09:05:00Z"))
+	mock.ExpectQuery("SELECT .+ FROM state_sources WHERE").WithArgs([]string{testActingOrg}).WillReturnRows(sourceRows())
+	mock.ExpectQuery("FROM source_sync_status").WithArgs([]string{testActingOrg}).WillReturnRows(statusRows("2026-06-11T09:05:00Z"))
 	expectAggregates(9)
 
 	for i, wantRUM := range []string{`"rum":2`, `"rum":2`, `"rum":9`} {
@@ -427,7 +439,7 @@ func TestStatesByVersion_HTTP(t *testing.T) {
 	t.Run("eq pushes to SQL and reports total + truncated", func(t *testing.T) {
 		r, mock := newEnv(t)
 		// Window full_count 502 but only two rows returned -> truncated.
-		mock.ExpectQuery(`WHERE a.terraform_version = \$1`).WithArgs("1.5.7", versionStatesCap).
+		mock.ExpectQuery(`WHERE a.terraform_version = \$2`).WithArgs([]string{testActingOrg}, "1.5.7", versionStatesCap).
 			WillReturnRows(sqlmock.NewRows(exactCols).
 				AddRow("s2", "dev", "d.tfstate", "1.5.7", 12, 502).
 				AddRow("s2", "dev", "e.tfstate", "1.5.7", 4, 502))
@@ -450,7 +462,7 @@ func TestStatesByVersion_HTTP(t *testing.T) {
 
 	t.Run("unknown maps to the empty version", func(t *testing.T) {
 		r, mock := newEnv(t)
-		mock.ExpectQuery(`WHERE a.terraform_version = \$1`).WithArgs("", versionStatesCap).
+		mock.ExpectQuery(`WHERE a.terraform_version = \$2`).WithArgs([]string{testActingOrg}, "", versionStatesCap).
 			WillReturnRows(sqlmock.NewRows(exactCols).AddRow("s2", "dev", "f.tfstate", "", 0, 1))
 		w := doGet(r, "/api/v1/dashboard/states-by-version?version=unknown")
 		if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"total":1`) {

@@ -43,11 +43,6 @@ var justifiedUnscoped = map[string]string{
 	"tenant_dualread_analysis.go:observeAnalysisScope": "as observeSourceListScope, for the inherited analysis tables",
 	"sources.go:ListSources":                           "Phase 2b: serves the unscoped answer and observes the scoped one beside it. Flipping this is Phase 3 and is gated on the estate having been re-owned",
 	"sources.go:GetSource":                             "as ListSources",
-	"reports.go:ReportStates":                          "PENDING (#455/#459): the scoped twin exists and is unused. Listed so the count is honest rather than absent",
-	"reports.go:ReportStatesExport":                    "as ReportStates",
-	"dashboard.go:DashboardOverview":                   "PENDING (#455/#459): scoped twins exist; the flip is gated on the re-own. observeAnalysisScope already measures the gap",
-	"dashboard.go:StatesByVersion":                     "PENDING (#455/#459): as DashboardOverview, and with no observation yet",
-	"dashboard.go:overviewAggregates":                  "PENDING (#455/#459): the cached aggregate behind DashboardOverview",
 	"reconcile.go:ReconcileSources":                    "the statesync reconcile loop reads the whole fleet by design: it syncs every tenant's sources and has no caller to narrow to",
 	"sources.go:Consumers":                             "#439: a suite service-token route with no principal at all. It needs an organization PARAMETER, not a caller scope",
 }

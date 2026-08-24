@@ -458,6 +458,10 @@ func TestStateHistory(t *testing.T) {
 	histCols := []string{"source_id", "state_key", "version_marker", "size", "terraform_version",
 		"serial", "lineage", "rum", "managed_resources", "data_sources", "total_resources",
 		"providers", "resource_types", "analyzed_at"}
+	// The route resolves its SOURCE first now (#459): state_analysis_history has
+	// no organization_id, so authorising the parent is what authorises the
+	// history. Without this the handler 404s before reaching the query below.
+	e.expectSource("s1", t.TempDir())
 	e.mock.ExpectQuery("FROM state_analysis_history").WithArgs("s1", "app.tfstate", 200).
 		WillReturnRows(sqlmock.NewRows(histCols).
 			AddRow("s1", "app.tfstate", "12|y", 12, "1.9.5", 8, "lin", 5, 5, 1, 6,

@@ -212,13 +212,30 @@ var tsmPartitionRoots = []string{
 	"state_sources", "state_transfers",
 }
 
-// globallyUniqueNameIndexes returns every UNIQUE index in the public schema
-// whose key is exactly one column called `name`, as table -> index name.
+// globallyUniqueNameIndexes returns every UNIQUE index in the public schema that
+// constrains `name` WITHOUT partitioning by organization, as table -> index name.
 //
 // Read out of the catalog rather than transcribed from the migrations on
 // purpose. A hand-maintained list is a claim about the schema that stops being
 // checked the moment someone adds a table, and that is precisely how the gap
 // this test exists to close was created.
+//
+// # The blind spot this used to have (#459, section 6)
+//
+// The first version matched `indnkeyatts = 1` — a key of exactly one column
+// called `name`. That is one SHAPE of the defect rather than the defect, and it
+// made a composite key invisible: UNIQUE (name, kind) constrains names globally
+// just as surely as UNIQUE (name), discloses a neighbour's row through the same
+// constraint error, and was not reported at all.
+//
+// So the question is asked properly now: does the key include `name` and NOT
+// include `organization_id`? That admits UNIQUE (organization_id, name) — which
+// is the shape Phase 4 re-keyed to and the one that is correct — and reports
+// every other arrangement, single-column or not.
+//
+// indkey is sliced to indnkeyatts because a covering index's INCLUDE columns are
+// in indkey too and are not part of the key. An organization_id that is merely
+// stored alongside constrains nothing.
 func globallyUniqueNameIndexes(t *testing.T, db *sql.DB) map[string]string {
 	t.Helper()
 	rows, err := db.Query(`
@@ -227,11 +244,16 @@ func globallyUniqueNameIndexes(t *testing.T, db *sql.DB) map[string]string {
 		JOIN pg_class     i ON i.oid = x.indexrelid
 		JOIN pg_class     t ON t.oid = x.indrelid
 		JOIN pg_namespace n ON n.oid = t.relnamespace
-		JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = x.indkey[0]
 		WHERE n.nspname = 'public'
 		  AND x.indisunique
-		  AND x.indnkeyatts = 1
-		  AND a.attname = 'name'`)
+		  AND EXISTS (
+		        SELECT 1 FROM unnest(x.indkey[0:x.indnkeyatts-1]) AS k(attnum)
+		        JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = k.attnum
+		        WHERE a.attname = 'name')
+		  AND NOT EXISTS (
+		        SELECT 1 FROM unnest(x.indkey[0:x.indnkeyatts-1]) AS k(attnum)
+		        JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = k.attnum
+		        WHERE a.attname = 'organization_id')`)
 	if err != nil {
 		t.Fatalf("query unique name indexes: %v", err)
 	}
