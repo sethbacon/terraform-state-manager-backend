@@ -196,11 +196,11 @@ func (e *sourcesEnv) do(method, path, body string) *httptest.ResponseRecorder {
 func TestListSources(t *testing.T) {
 	e := newSourcesEnv(t)
 	cfg, _ := json.Marshal(map[string]any{"base_path": e.dir})
-	e.mock.ExpectQuery("SELECT .+ FROM state_sources ORDER BY").
+	e.mock.ExpectQuery("SELECT .+ FROM state_sources WHERE organization_id").
 		WillReturnRows(sqlmock.NewRows(apiSourceCols).
 			AddRow("s1", "demo", "local", "", cfg, []byte(`{}`), nil, "2026-06-10", "2026-06-10", testActingOrg))
 	// The listing is paginated, so the handler also asks for the total (#282).
-	e.mock.ExpectQuery("SELECT count").
+	e.mock.ExpectQuery("SELECT count.+WHERE organization_id").
 		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
 
 	w := e.do(http.MethodGet, "/api/v1/sources", "")
@@ -238,12 +238,20 @@ func TestCreateSource(t *testing.T) {
 func TestGetAndDeleteSource(t *testing.T) {
 	e := newSourcesEnv(t)
 
-	e.expectSourceUnscoped("s1", e.dir)
+	// SCOPED now (#393 Phase 3 / #459): GetSource resolves through
+	// sourceInScope, which binds the organization array first and the id second.
+	// The unscoped fixture would be scripting a statement the handler no longer
+	// emits.
+	e.expectSource("s1", e.dir)
 	if w := e.do(http.MethodGet, "/api/v1/sources/s1", ""); w.Code != http.StatusOK {
 		t.Errorf("get: status = %d", w.Code)
 	}
 
-	e.mock.ExpectQuery("SELECT .+ FROM state_sources WHERE id").WithArgs("ghost").
+	// A source outside the scope is indistinguishable from one that does not
+	// exist, which is the point: 404 rather than 403 tells the caller nothing
+	// about another organization's rows.
+	e.mock.ExpectQuery("SELECT .+ FROM state_sources WHERE organization_id").
+		WithArgs(sqlmock.AnyArg(), "ghost").
 		WillReturnRows(sqlmock.NewRows(apiSourceCols))
 	if w := e.do(http.MethodGet, "/api/v1/sources/ghost", ""); w.Code != http.StatusNotFound {
 		t.Errorf("missing: status = %d, want 404", w.Code)
@@ -1285,8 +1293,8 @@ func TestListSourcesIsBounded(t *testing.T) {
 	}
 
 	// No params: capped at the 500 default, offset 0.
-	e.mock.ExpectQuery("SELECT .+ FROM state_sources ORDER BY").WithArgs(500, 0).WillReturnRows(row())
-	e.mock.ExpectQuery("SELECT count").WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
+	e.mock.ExpectQuery("SELECT .+ FROM state_sources WHERE organization_id").WithArgs(sqlmock.AnyArg(), 500, 0).WillReturnRows(row())
+	e.mock.ExpectQuery("SELECT count.+WHERE organization_id").WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
 	w := e.do(http.MethodGet, "/api/v1/sources", "")
 	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"demo"`) {
 		t.Fatalf("status = %d (%s)", w.Code, w.Body.String())
@@ -1297,8 +1305,8 @@ func TestListSourcesIsBounded(t *testing.T) {
 	}
 
 	// Explicit paging.
-	e.mock.ExpectQuery("SELECT .+ FROM state_sources ORDER BY").WithArgs(2, 4).WillReturnRows(row())
-	e.mock.ExpectQuery("SELECT count").WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(9))
+	e.mock.ExpectQuery("SELECT .+ FROM state_sources WHERE organization_id").WithArgs(sqlmock.AnyArg(), 2, 4).WillReturnRows(row())
+	e.mock.ExpectQuery("SELECT count.+WHERE organization_id").WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(9))
 	if w := e.do(http.MethodGet, "/api/v1/sources?page=3&per_page=2", ""); w.Code != http.StatusOK {
 		t.Errorf("paged: status = %d (%s)", w.Code, w.Body.String())
 	}
@@ -1306,8 +1314,8 @@ func TestListSourcesIsBounded(t *testing.T) {
 	// Over-cap and junk per_page fall back to the default rather than erroring,
 	// so a hostile value cannot widen the response.
 	for _, q := range []string{"?per_page=100000", "?per_page=-1", "?per_page=abc", "?page=0"} {
-		e.mock.ExpectQuery("SELECT .+ FROM state_sources ORDER BY").WithArgs(500, 0).WillReturnRows(row())
-		e.mock.ExpectQuery("SELECT count").WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
+		e.mock.ExpectQuery("SELECT .+ FROM state_sources WHERE organization_id").WithArgs(sqlmock.AnyArg(), 500, 0).WillReturnRows(row())
+		e.mock.ExpectQuery("SELECT count.+WHERE organization_id").WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
 		if w := e.do(http.MethodGet, "/api/v1/sources"+q, ""); w.Code != http.StatusOK {
 			t.Errorf("%s: status = %d (%s)", q, w.Code, w.Body.String())
 		}

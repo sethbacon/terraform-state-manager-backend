@@ -261,8 +261,7 @@ func NewRouter(cfg *config.Config, database *sql.DB, identityDB *sql.DB) (*gin.E
 		sources := NewSourcesHandlers(database, identityDB)
 		// #393 Phase 2b: measure the organization-scoped reads against the
 		// unscoped ones this route family still serves. Off by default; changes
-		// nothing that is returned. See internal/api/tenant_dualread.go.
-		sources.EnableTenantDualRead(cfg.Tenancy.DualRead)
+		// nothing that is returned.
 		// The existence check for an acting organization (#436). orgMembers is
 		// this deployment's ONE construction of the shared organization
 		// repository — internal/approles' guard test refuses a second one — and

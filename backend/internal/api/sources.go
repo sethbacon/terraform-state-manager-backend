@@ -40,11 +40,6 @@ type SourcesHandlers struct {
 	// overviewCache memoizes the dashboard's store-wide aggregations (see
 	// dashboard.go). Zero value ready; guarded by its own mutex.
 	overviewCache overviewAggCache
-	// tenantDualRead runs the organization-scoped read beside the unscoped read
-	// on the two /sources read routes and reports where they disagree, without
-	// changing what is served (#393 Phase 2b, TSM_TENANCY_DUAL_READ). Off unless
-	// the router turns it on; deleted in Phase 3 along with tenant_dualread.go.
-	tenantDualRead bool
 	// orgs verifies that an acting organization exists before a row is stamped
 	// with it. Nil in rigs with no identity connection; actingOrganization
 	// REFUSES rather than proceeding, because stamping an unverified id is the
@@ -84,15 +79,6 @@ func (h *SourcesHandlers) AttachOrganizations(orgs organizationExistence) { h.or
 // builds both and connects them).
 func (h *SourcesHandlers) AttachSyncer(s *statesync.Syncer) { h.syncer = s }
 
-// EnableTenantDualRead turns on the #393 Phase 2b equivalence measurement (see
-// tenant_dualread.go). A setter rather than a constructor parameter for the
-// reason AttachSyncer is one: the router holds the config and the handlers do
-// not, and this is one line for Phase 3 to delete rather than a signature every
-// caller and test would have to be walked through twice.
-func (h *SourcesHandlers) EnableTenantDualRead(on bool) { h.tenantDualRead = on }
-
-// ConnectSource builds a live connector for a source, decrypting its
-// credentials. Exported shape for the statesync service's Connect dependency.
 func ConnectSource(s *repositories.Source) (statesource.Connector, error) {
 	creds, err := decryptCredentials(s)
 	if err != nil {
@@ -132,7 +118,18 @@ func (h *SourcesHandlers) ListSources() gin.HandlerFunc {
 			page = v
 		}
 		ctx := c.Request.Context()
-		sources, err := h.repo.ListPage(ctx, perPage, (page-1)*perPage)
+
+		// Phase 3 flip (#393, #459). This served the UNSCOPED answer while the
+		// dual-read measured the scoped one beside it, because a scoped read
+		// before the estate was re-owned returns nothing to a member of any
+		// organization but the default. The re-own has happened.
+		scope, resolved := tenantscope.FromContext(c)
+		if !resolved {
+			serverError(c, errNoTenantScope, "the tenant scope was not resolved for this route")
+			return
+		}
+
+		sources, err := h.repo.ListPageInScope(ctx, scope, perPage, (page-1)*perPage)
 		if err != nil {
 			serverError(c, err, "failed to list sources")
 			return
@@ -140,18 +137,17 @@ func (h *SourcesHandlers) ListSources() gin.HandlerFunc {
 		// total lets a client detect that the page it got is not the whole
 		// fleet; without it the cap would truncate silently. The legacy
 		// `sources` key is unchanged, so existing clients are unaffected.
-		total, err := h.repo.Count(ctx)
+		//
+		// SCOPED TOO, and that pairing is the point: a scoped page beside an
+		// unscoped total reports "3 of 400" to a tenant who owns three, and the
+		// number that leaks is exactly the one the partition hides.
+		total, err := h.repo.CountInScope(ctx, scope)
 		if err != nil {
 			serverError(c, err, "failed to list sources")
 			return
 		}
 		c.JSON(http.StatusOK, gin.H{"sources": sources, "total": total, "page": page, "per_page": perPage})
 
-		// After the response, never before it: the measurement must not be able
-		// to delay or replace a read that has already succeeded (#393 Phase 2b).
-		if h.tenantDualRead {
-			h.observeSourceListScope(c)
-		}
 	}
 }
 
@@ -246,24 +242,18 @@ func (h *SourcesHandlers) CreateSource() gin.HandlerFunc {
 // @Router       /sources/{id} [get]
 func (h *SourcesHandlers) GetSource() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		s, err := h.repo.GetByID(c.Request.Context(), c.Param("id"))
-		if err != nil {
-			serverError(c, err, "failed to load source")
-			return
-		}
-		if s == nil {
-			c.JSON(http.StatusNotFound, gin.H{"error": "source not found"})
+		// Phase 3 flip (#393, #459), and #393 names this the highest blast
+		// radius of the lot: /sources/:id hands the row to the credential
+		// decryption in ConnectSource, so a row the scoped read would have
+		// withheld is a credential one tenant can decrypt of another's.
+		//
+		// sourceInScope is the same helper the rest of the state plane already
+		// uses, so this route stops being the exception that reads by id alone.
+		s, ok := h.sourceInScope(c)
+		if !ok {
 			return
 		}
 		c.JSON(http.StatusOK, s)
-
-		// This is the read #393 names as the highest blast radius: /sources/:id
-		// hands the row to the credential decryption in ConnectSource, so a row
-		// the scoped read would have withheld is a credential one tenant can
-		// decrypt of another's (#393 Phase 2b).
-		if h.tenantDualRead {
-			h.observeSourceGetScope(c, s)
-		}
 	}
 }
 

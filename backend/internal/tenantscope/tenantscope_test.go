@@ -747,40 +747,63 @@ func TestActingOrganizationReadsTheHeaderAndVerifiesIt(t *testing.T) {
 	})
 }
 
-// TestKeyOrganizationBindingIsLockedTwice documents a deliberate belt-and-braces
-// that a single mutation cannot expose, and therefore has to be asserted.
+// The key-organization binding is LIVE, and both halves have to stay wired.
 //
-// terraform-registry binds an API key to the organization named on it, after its
-// #719 found a userless service key had no memberships and so was refused its
-// OWN organization. That fix is wrong HERE while mintKey stamps every key with
-// the deployment default (#438), so the adapter turns it off in two independent
-// places:
+// It was locked off in two independent places while mintKey stamped every key
+// with the deployment default (#438): the policy said not to read KeyOrgID, and
+// principalOf supplied no value to read. Flipping either alone changed nothing —
+// deliberately, so whoever enabled it had to touch both.
 //
-//	Resolver.KeyBindsOrganization = false   the policy says do not read it
-//	principalOf leaves KeyOrgID empty       there is nothing to read
-//
-// Flipping either alone changes nothing, which is the point: whoever enables
-// this for #436 has to touch both, and cannot do it by editing one line while
-// reviewing another.
-func TestKeyOrganizationBindingIsLockedTwice(t *testing.T) {
+// #436 fixed the stamp and #459 enabled the binding, so this is inverted rather
+// than deleted: it fails if EITHER half is turned back off, which is the same
+// property read from the other side.
+func TestKeyOrganizationBindingIsLive(t *testing.T) {
 	c := newContext(t, "u1", "apikey", nil)
-	// Even with a key organization sitting on the context, the adapter must not
-	// carry it into the Principal.
 	c.Set("api_key_organization_id", orgB)
 
-	if got := principalOf(c).KeyOrgID; got != "" {
-		t.Errorf("principalOf carried KeyOrgID = %q. The policy ignores it today, so supplying "+
-			"it means the day somebody flips KeyBindsOrganization the binding silently goes "+
-			"live against a column that is a deployment default for every key.", got)
+	if got := principalOf(c).KeyOrgID; got != orgB {
+		t.Errorf("principalOf carried KeyOrgID = %q, want %q. Half the binding is off: the "+
+			"policy reads this field now, so leaving it empty scopes every key to its owner's "+
+			"memberships instead of to the key's own organization.", got, orgB)
 	}
 
-	// And the resolved answer is the OWNER's memberships, not the key's org.
+	members := &fakeMemberships{scope: idstore.OrgScopeOrganizations(orgA)}
+	got, err := Resolve(c, members, &fakeAdmins{}, auth.ScopeStateRead)
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if !sameIDs(got.OrgIDs, []string{orgB}) {
+		t.Errorf("OrgIDs = %v, want the KEY's organization %v. Falling back to the owner's "+
+			"memberships %v is the pre-#459 behaviour: a key owned by a multi-organization "+
+			"member would reach every organization its owner can.", got.OrgIDs, []string{orgB}, []string{orgA})
+	}
+}
+
+// A key minted before #436 carries no usable binding. The resolver falls through
+// to the owner's memberships rather than scoping it to nothing — those keys keep
+// working, and rotating one re-mints it against the acting organization.
+func TestLegacyKeyWithNoBindingFallsBackToMemberships(t *testing.T) {
+	c := newContext(t, "u1", "apikey", nil)
+
 	members := &fakeMemberships{scope: idstore.OrgScopeOrganizations(orgA)}
 	got, err := Resolve(c, members, &fakeAdmins{}, auth.ScopeStateRead)
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}
 	if !sameIDs(got.OrgIDs, []string{orgA}) {
-		t.Errorf("OrgIDs = %v, want the owner's memberships %v", got.OrgIDs, []string{orgA})
+		t.Errorf("OrgIDs = %v, want the owner's memberships %v — an unbound legacy key must "+
+			"keep working, not be scoped to nothing", got.OrgIDs, []string{orgA})
+	}
+}
+
+// A SESSION must never pick up a key organization, even with one sitting on the
+// context. keyOrganization gates on the credential for exactly this.
+func TestSessionIgnoresAnyKeyOrganization(t *testing.T) {
+	c := newContext(t, "u1", "jwt", nil)
+	c.Set("api_key_organization_id", orgB)
+
+	if got := principalOf(c).KeyOrgID; got != "" {
+		t.Errorf("a session carried KeyOrgID = %q; the binding is an API-key rule and reading "+
+			"it here would scope a browser to a key's organization", got)
 	}
 }

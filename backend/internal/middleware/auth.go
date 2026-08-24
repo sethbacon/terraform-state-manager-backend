@@ -335,6 +335,22 @@ func authenticateAPIKey(c *gin.Context, keys *idstore.APIKeyRepository, users *i
 		c.Set("scopes", scopes)
 		c.Set("auth_method", "apikey")
 		c.Set("api_key_id", k.ID)
+		// The organization the key was minted for. tenantscope reads this to
+		// scope the request to the key's own organization rather than to the
+		// union of its owner's memberships (#459) — a key acts where it was
+		// minted, not everywhere its owner can reach.
+		//
+		// From the key ROW, never from a header: an organization the caller
+		// could supply would let a key choose its own scope.
+		c.Set("api_key_organization_id", k.OrganizationID)
+		// The organization the key was minted for. tenantscope reads this to
+		// scope the request to the key's own organization rather than to the
+		// union of its owner's memberships (#459) — a key acts where it was
+		// minted, not everywhere its owner can reach.
+		//
+		// From the key ROW, never from a header: an organization the caller
+		// could supply would let a key choose its own scope.
+
 		go func(id string) {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
