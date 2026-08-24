@@ -44,11 +44,34 @@ import (
 // startup backfill populates the carrier. That is not a hypothetical row: it is
 // every row on an upgraded deployment before its first successful boot, and
 // every row a replica still running the previous build writes after it.
+// seedUnownedSource writes a source with organization_id NULL.
+//
+// AFTER PHASE 4 THE SCHEMA FORBIDS THIS, so the helper relaxes the constraint for
+// the length of the test and restores it. That is deliberate, not a workaround:
+// the read layer's refusal to hand an unowned row to a tenant is DEFENCE IN
+// DEPTH, and defence in depth is exactly what must keep working when the layer
+// above it is absent.
+//
+// The state is still reachable in practice -- restoring a backup taken before
+// 000034 produces exactly these rows -- and a `= ANY($1::uuid[])` predicate that
+// stopped excluding NULL would hand every one of them to whichever tenant asked
+// first. Deleting this test because the column is NOT NULL now would remove the
+// only check on that.
 func seedUnownedSource(t *testing.T, db *sql.DB, name string) string {
 	t.Helper()
+	if _, err := db.Exec(`ALTER TABLE state_sources ALTER COLUMN organization_id DROP NOT NULL`); err != nil {
+		t.Fatalf("relax NOT NULL to seed an unowned source: %v", err)
+	}
+	t.Cleanup(func() {
+		// Restored even on failure: a later test in this package would otherwise
+		// run against a schema this one quietly weakened.
+		_, _ = db.Exec(`DELETE FROM state_sources WHERE organization_id IS NULL`)
+		_, _ = db.Exec(`ALTER TABLE state_sources ALTER COLUMN organization_id SET NOT NULL`)
+	})
 	var id string
 	if err := db.QueryRow(
-		`INSERT INTO state_sources (name, type) VALUES ($1, 'local') RETURNING id`, name).Scan(&id); err != nil {
+		`INSERT INTO state_sources (name, type, organization_id) VALUES ($1, 'local', NULL) RETURNING id`,
+		name).Scan(&id); err != nil {
 		t.Fatalf("seed unowned source %q: %v", name, err)
 	}
 	var org sql.NullString

@@ -35,7 +35,6 @@ package tenancy
 import (
 	"context"
 	"database/sql"
-	"strings"
 	"testing"
 
 	"github.com/terraform-state-manager/terraform-state-manager/internal/db/repositories"
@@ -165,31 +164,41 @@ func TestIntegration_CrossTenantList_ReturnsEveryOrganization(t *testing.T) {
 //
 // Phase 4 replaces this with UNIQUE (organization_id, name). The Phase 1 index
 // idx_state_sources_org is deliberately a prefix of that future index.
-func TestIntegration_SourceNameUniquenessIsGlobal_AndDiscloses(t *testing.T) {
+func TestIntegration_SourceNameIsUniquePerOrganization_AndDisclosesNothing(t *testing.T) {
 	db := newTestDB(t)
 
 	seedSourceInOrg(t, db, orgAlpha, "production")
 
-	// Beta now tries to name its own source "production". Different organization,
-	// different data, no relationship to Alpha's row whatsoever.
+	// Beta names its own source "production". Different organization, different
+	// data, no relationship to Alpha's row whatsoever — and after 000034 that is
+	// simply allowed.
+	//
+	// INVERTED BY PHASE 4. This test used to assert the opposite and was named
+	// ...IsGlobal_AndDiscloses: idx_state_sources_name was UNIQUE on (name)
+	// alone, so Beta's INSERT failed, and the failure DISCLOSED that some other
+	// organization already held that name. A tenant could enumerate names and
+	// learn what its neighbours had called things. 000034 re-keys the index to
+	// UNIQUE (organization_id, name), which is what removes the disclosure.
 	var id string
-	err := db.QueryRow(
+	if err := db.QueryRow(
 		`INSERT INTO state_sources (name, type, organization_id)
-		 VALUES ('production', 'local', $1) RETURNING id`, orgBeta).Scan(&id)
-
-	if err == nil {
-		t.Fatalf("a second organization created a source named 'production' (id %s) — "+
-			"idx_state_sources_name is no longer globally unique, so Phase 4's re-keying "+
-			"may already have landed and this test needs inverting", id)
-	}
-	if !strings.Contains(err.Error(), "idx_state_sources_name") &&
-		!strings.Contains(strings.ToLower(err.Error()), "unique") {
-		t.Fatalf("INSERT failed for an unexpected reason: %v", err)
+		 VALUES ('production', 'local', $1) RETURNING id`, orgBeta).Scan(&id); err != nil {
+		t.Fatalf("a second organization could not name its own source 'production': %v\n"+
+			"After 000034 the unique key is (organization_id, name), so this must succeed. "+
+			"A failure here means the global index survived the re-key.", err)
 	}
 
-	t.Logf("PROVED: organization %s cannot create a source named 'production' because "+
-		"organization %s already has one, and the rejection tells it so. Error: %v",
-		orgBeta, orgAlpha, err)
+	// ...and the name is still unique WITHIN an organization: the re-key must not
+	// have simply dropped the constraint.
+	if _, err := db.Exec(
+		`INSERT INTO state_sources (name, type, organization_id) VALUES ('production', 'local', $1)`,
+		orgBeta); err == nil {
+		t.Fatal("one organization created two sources named 'production': the re-key dropped " +
+			"uniqueness instead of narrowing it")
+	}
+
+	t.Logf("PROVED: organizations %s and %s each hold a source named 'production', and neither "+
+		"can learn of the other's through a constraint error.", orgAlpha, orgBeta)
 }
 
 // tsmPartitionRoots is the nine tables migration 000033 gave their OWN
@@ -298,14 +307,17 @@ func TestIntegration_Phase4NameRekeyInventory_IsCompleteAndDerived(t *testing.T)
 		roots[r] = true
 	}
 
-	// The five that Phase 4 must re-key to UNIQUE (organization_id, name).
-	wantRoots := map[string]bool{
-		"state_sources":         true,
-		"pipeline_connections":  true,
-		"schedules":             true,
-		"notification_channels": true,
-		"ci_sources":            true,
-	}
+	// EMPTY, AND THAT IS PHASE 4 DONE. This held the five roots that still
+	// carried a global UNIQUE(name) and had to be re-keyed; migration 000034
+	// re-keyed all five to UNIQUE (organization_id, name), so none of them
+	// should appear in a scan for single-column `name` uniqueness any more.
+	//
+	// The map stays rather than being deleted, and so does the check below it: a
+	// root that reappears here means a global name index came BACK -- restored by
+	// a rollback, or added by a new migration that copied an older one -- and
+	// that is a tenancy regression with a constraint error that discloses another
+	// organization's row.
+	wantRoots := map[string]bool{}
 	// Tables outside the partition that may hold a global unique name, each
 	// because 000033 argues they are not tenant data.
 	allowedNonRoots := map[string]string{
@@ -330,6 +342,14 @@ func TestIntegration_Phase4NameRekeyInventory_IsCompleteAndDerived(t *testing.T)
 		}
 	}
 
+	for table := range gotRoots {
+		if !wantRoots[table] {
+			t.Errorf("%s carries a globally-unique `name` index again. Phase 4 (000034) re-keyed "+
+				"every partition root to UNIQUE (organization_id, name); a single-column one here "+
+				"means the global namespace is back, and with it a constraint error that tells one "+
+				"organization what another has named its rows.", table)
+		}
+	}
 	for table := range wantRoots {
 		if !gotRoots[table] {
 			t.Errorf("%s no longer has a globally-unique `name` index. If Phase 4 "+
