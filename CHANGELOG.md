@@ -1,5 +1,12 @@
 # Changelog
 
+## [3.13.1](https://github.com/sethbacon/terraform-state-manager-backend/compare/v3.13.0...v3.13.1) (2026-08-25)
+
+
+### Bug Fixes
+
+* **auth:** fail closed when the optional-auth revocation lookup errors ([#489](https://github.com/sethbacon/terraform-state-manager-backend/issues/489)) ([984a9e6](https://github.com/sethbacon/terraform-state-manager-backend/commit/984a9e6c891981abca8ae93afbe4e0806ff4a426)), closes [#341](https://github.com/sethbacon/terraform-state-manager-backend/issues/341)
+
 ## [3.13.0](https://github.com/sethbacon/terraform-state-manager-backend/compare/v3.12.0...v3.13.0) (2026-08-24)
 
 
