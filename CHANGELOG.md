@@ -1,5 +1,14 @@
 # Changelog
 
+## [3.13.2](https://github.com/sethbacon/terraform-state-manager-backend/compare/v3.13.1...v3.13.2) (2026-08-25)
+
+
+### Bug Fixes
+
+* **api:** treat a client-abandoned request as 499, not a server error ([#493](https://github.com/sethbacon/terraform-state-manager-backend/issues/493)) ([04e64fe](https://github.com/sethbacon/terraform-state-manager-backend/commit/04e64fefaf761abded9c2d4e2be84c7b977b19f2)), closes [#487](https://github.com/sethbacon/terraform-state-manager-backend/issues/487)
+* **approles:** a write that changed nothing must not end the principal's sessions ([#496](https://github.com/sethbacon/terraform-state-manager-backend/issues/496)) ([bd043ec](https://github.com/sethbacon/terraform-state-manager-backend/commit/bd043ec5f8843b2c0ee1e7336774953824d2d496)), closes [#491](https://github.com/sethbacon/terraform-state-manager-backend/issues/491)
+* **credlifecycle:** let the credential sweep see platform-admin authority ([#495](https://github.com/sethbacon/terraform-state-manager-backend/issues/495)) ([e594546](https://github.com/sethbacon/terraform-state-manager-backend/commit/e59454678930474bce2df1d0c9726560303d798a)), closes [#492](https://github.com/sethbacon/terraform-state-manager-backend/issues/492)
+
 ## [3.13.1](https://github.com/sethbacon/terraform-state-manager-backend/compare/v3.13.0...v3.13.1) (2026-08-25)
 
 
