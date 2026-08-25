@@ -162,7 +162,9 @@ func elevate(ctx context.Context, platformAdmins *platformadmin.Service, userID 
 // present but never aborts. Used for endpoints like logout that are idempotent
 // and must work even without (or with an expired) session. It honours the same
 // revoke-all watermark as AuthMiddleware (#330), so a revoked session is treated
-// as no session rather than as an authenticated one.
+// as no session rather than as an authenticated one. Both revocation lookups
+// fail CLOSED: if revocation status cannot be established the request
+// proceeds unauthenticated, never as a session.
 //
 // It elevates through the same carrier, so the scope set it publishes cannot
 // disagree with AuthMiddleware's. A carrier lookup FAILURE here leaves the
@@ -182,7 +184,23 @@ func OptionalAuthMiddleware(userRepo *idstore.UserRepository, tokenRepo *idstore
 			return
 		}
 		if claims.JTI != "" && tokenRepo != nil {
-			if revoked, rErr := tokenRepo.IsTokenRevoked(c.Request.Context(), claims.JTI); rErr == nil && revoked {
+			// FAIL CLOSED on a lookup error, matching the watermark check below
+			// and both checks in AuthMiddleware. A lookup that failed is not an
+			// answer: a token whose revocation status could not be established
+			// must not be published as an authenticated session.
+			//
+			// The library already answers this way -- TokenRepository
+			// .IsTokenRevoked returns (true, err) on its error paths -- and the
+			// previous `rErr == nil &&` threw that deliberate answer away.
+			//
+			// Note the polarity. This is a DENY gate, so it must trigger on
+			// error; the GetUserByID gate below is an ADMIT gate (`err == nil`)
+			// and is already fail-closed for the same reason. Do not "align" them.
+			//
+			// Closed here means ANONYMOUS, not an abort: this middleware's
+			// contract is that it never fails a request, and c.Next() without
+			// setAuthContext is exactly the unauthenticated outcome.
+			if revoked, rErr := tokenRepo.IsTokenRevoked(c.Request.Context(), claims.JTI); rErr != nil || revoked {
 				c.Next()
 				return
 			}
