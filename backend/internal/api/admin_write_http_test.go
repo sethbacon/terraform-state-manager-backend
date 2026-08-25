@@ -34,7 +34,9 @@ func newAdminWriteEnv(t *testing.T) *sourcesEnv {
 		credlifecycle.NewSweeper(
 			repositories.NewUserTokenRevocationRepository(db),
 			idstore.NewAPIKeyRepository(db),
-			approles.NewMembers(db, nil, approles.RoleSourceIdentity))))
+			approles.NewMembers(db, nil, approles.RoleSourceIdentity),
+			credlifecycle.NoPlatformAdminCarrier{},
+		)))
 	r := gin.New()
 	admin := r.Group("/api/v1/admin")
 	admin.POST("/users", h.CreateUser())
@@ -373,7 +375,9 @@ func TestAdminEraseUser_StripsMembershipsInEveryOrganization(t *testing.T) {
 		credlifecycle.NewSweeper(
 			repositories.NewUserTokenRevocationRepository(db),
 			idstore.NewAPIKeyRepository(db),
-			approles.NewMembers(db, nil, approles.RoleSourceIdentity))))
+			approles.NewMembers(db, nil, approles.RoleSourceIdentity),
+			credlifecycle.NoPlatformAdminCarrier{},
+		)))
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
 	r.Use(func(c *gin.Context) { c.Set("user_id", "caller-1"); c.Next() })
@@ -457,7 +461,9 @@ func TestDeleteUser_PurgesTheMirrorOnlyWhenTheDeleteApplied(t *testing.T) {
 			credlifecycle.NewSweeper(
 				repositories.NewUserTokenRevocationRepository(identityDB),
 				idstore.NewAPIKeyRepository(identityDB),
-				approles.NewMembers(identityDB, nil, approles.RoleSourceIdentity))))
+				approles.NewMembers(identityDB, nil, approles.RoleSourceIdentity),
+				credlifecycle.NoPlatformAdminCarrier{},
+			)))
 		r := gin.New()
 		r.DELETE("/api/v1/admin/users/:id", h.DeleteUser())
 

@@ -141,7 +141,9 @@ func classSweeper(db *sql.DB) *credlifecycle.Sweeper {
 	return credlifecycle.NewSweeper(
 		repositories.NewUserTokenRevocationRepository(db),
 		idstore.NewAPIKeyRepository(db),
-		approles.NewMembers(db, nil, approles.RoleSourceIdentity))
+		approles.NewMembers(db, nil, approles.RoleSourceIdentity),
+		credlifecycle.NoPlatformAdminCarrier{},
+	)
 }
 
 // newClassAuthHandlers builds AuthHandlers with the sweeper wired, for the IdP

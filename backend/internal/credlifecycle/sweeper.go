@@ -56,6 +56,7 @@ import (
 	"github.com/terraform-state-manager/terraform-state-manager/internal/approles"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/auth"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/db/repositories"
+	"github.com/terraform-state-manager/terraform-state-manager/internal/platformadmin"
 )
 
 // AuthorityRetained reports whether every scope in have is still granted by
@@ -100,16 +101,49 @@ type Sweeper struct {
 	// orgs re-derives the authority the principal RETAINS after the change, so
 	// only keys that now over-ask are revoked.
 	orgs *approles.Members
+	// platformAdmins answers whether the principal ALSO holds authority through
+	// the platform-admin carrier. Memberships alone are not the whole picture:
+	// a platform admin need not be a member of any organization (see #485), in
+	// which case the membership-derived set is EMPTY and every key they own
+	// looks like it over-asks.
+	//
+	// Required, not optional. Without it the sweep cannot tell "this principal
+	// retains nothing" from "this principal's authority is invisible to me",
+	// and those have opposite safe answers. Making it a constructor parameter
+	// means a construction that forgets it does not compile, rather than
+	// silently destroying a platform admin's credentials.
+	platformAdmins platformAdminSource
+}
+
+// NoPlatformAdminCarrier is the source for a wiring that has no platform-admin
+// carrier at all. It answers ErrNotConfigured, which the sweep reads as "no
+// carrier-held authority exists here" -- memberships are then the whole picture
+// -- rather than as an authority it failed to determine.
+//
+// Exists so that "there is no carrier" has to be SAID. An untyped nil would
+// panic, and a bare false would be a lie the sweep acts on destructively.
+type NoPlatformAdminCarrier struct{}
+
+// IsPlatformAdmin implements platformAdminSource.
+func (NoPlatformAdminCarrier) IsPlatformAdmin(context.Context, string) (bool, error) {
+	return false, platformadmin.ErrNotConfigured
+}
+
+// platformAdminSource is the narrow question this package asks of the carrier.
+// Declared here rather than taking *platformadmin.Service so tests can answer
+// it directly, including with an error.
+type platformAdminSource interface {
+	IsPlatformAdmin(ctx context.Context, userID string) (bool, error)
 }
 
 // NewSweeper builds a Sweeper. Any repository may be nil, in which case the
 // corresponding half is not swept; if every one is nil the constructor returns
 // nil so callers can store the result directly and rely on the no-op receiver.
-func NewSweeper(userRevocations *repositories.UserTokenRevocationRepository, apiKeys *idstore.APIKeyRepository, orgs *approles.Members) *Sweeper {
+func NewSweeper(userRevocations *repositories.UserTokenRevocationRepository, apiKeys *idstore.APIKeyRepository, orgs *approles.Members, platformAdmins platformAdminSource) *Sweeper {
 	if userRevocations == nil && apiKeys == nil {
 		return nil
 	}
-	return &Sweeper{userRevocations: userRevocations, apiKeys: apiKeys, orgs: orgs}
+	return &Sweeper{userRevocations: userRevocations, apiKeys: apiKeys, orgs: orgs, platformAdmins: platformAdmins}
 }
 
 // Outcome reports what a sweep actually managed to invalidate. Every sweep is
@@ -268,6 +302,33 @@ func (s *Sweeper) revokeOverAskingKeys(ctx context.Context, userID, reason strin
 	if err != nil {
 		slog.Error("credlifecycle: failed to re-derive retained scopes for revocation",
 			"user_id", userID, "reason", reason, "error", err)
+		return Outcome{Incomplete: true}
+	}
+	// Memberships are not the whole authority. A platform admin holds theirs
+	// through the carrier, and need not be a member of anything (#485) -- so
+	// without this the retained set for such a principal is EMPTY, every key
+	// they own over-asks, and all of them are hard-deleted (#492).
+	//
+	// auth.ScopeAdmin satisfies any required scope in HasScope, so adding it
+	// retains every key, which is the correct answer for a platform admin.
+	isAdmin, aerr := s.platformAdmins.IsPlatformAdmin(ctx, userID)
+	switch {
+	case aerr == nil:
+		if isAdmin {
+			retained = append(retained, string(auth.ScopeAdmin))
+		}
+	case errors.Is(aerr, platformadmin.ErrNotConfigured):
+		// No carrier in this deployment, so there is no carrier-held authority
+		// to miss and memberships ARE the whole picture. Proceed. A deployment
+		// that HAS a carrier cannot reach this: the server refuses to start if
+		// the carrier fails to build or verify.
+	default:
+		// Any other failure means the authority is UNKNOWN, not absent. Deleting
+		// on an unknown is how a platform admin loses every key they own, and
+		// the deletion is unrecoverable -- there is no revoked_at. Same
+		// reasoning as the missing-orgs branch above.
+		slog.Error("credlifecycle: cannot determine platform-admin authority; API keys not swept",
+			"user_id", userID, "reason", reason, "error", aerr)
 		return Outcome{Incomplete: true}
 	}
 	// Platform-wide: a TSM key's organization_id is the default organization,
