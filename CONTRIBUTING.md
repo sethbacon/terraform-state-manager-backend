@@ -123,7 +123,35 @@ PR titles are validated in CI by `amannn/action-semantic-pull-request`.
 > fixes and `build:`/`chore:` for dependency updates.
 
 Breaking changes: append `!` to the type (`feat!:`) **or** add a `BREAKING CHANGE:`
-footer in the commit body. These trigger a major version bump.
+footer in the commit body. Keep doing this — the footer is what warns an operator,
+and CI's `Breaking-change footers survive the squash` check enforces exactly one
+declaration per merged commit.
+
+**A breaking change defaults to a MAJOR bump, and usually should not take one.**
+This is an application: nothing imports it, so there is no Go `/vN` import-path
+requirement and the major number is pure signalling. A release carrying one
+behaviour change does not warrant announcing a redesign — that is what took this
+repository from `2.7.1` to `3.0.0` in a single afternoon (#345).
+
+So when a PR carries a breaking change, add a `Release-As:` footer naming the next
+MINOR, and release-please cuts that instead of the major:
+
+```text
+feat(tenancy)!: organization_id is NOT NULL on the partition roots
+
+BREAKING CHANGE: names that were globally unique are now unique per
+organization.
+
+Release-As: 3.14.0
+```
+
+Two footers, doing two different jobs: `BREAKING CHANGE` tells the operator, and
+`Release-As` decides the number. Neither substitutes for the other, and dropping
+the first to avoid the second is how a break ships unannounced.
+
+Read the current version off the latest tag (`gh release list --limit 1`) and add
+one to the minor. **A genuine major redesign takes the major** — just leave
+`Release-As` off and let the default happen.
 
 Keep the subject line under **72 characters**. Reference issues in the commit body with
 `Closes #123`.

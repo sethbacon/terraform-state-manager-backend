@@ -1,13 +1,11 @@
 {
   "draft": true,
   "force-tag-creation": true,
-  "versioning": "always-bump-minor",
   "packages": {
     ".": {
       "release-type": "go",
       "package-name": "terraform-state-manager",
       "include-component-in-tag": false,
-      "versioning": "always-bump-minor",
       "changelog-sections": [
         {
           "type": "feat",
