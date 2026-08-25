@@ -1,5 +1,22 @@
 # Changelog
 
+## [3.13.0](https://github.com/sethbacon/terraform-state-manager-backend/compare/v3.12.0...v3.13.0) (2026-08-24)
+
+
+### ⚠ BREAKING CHANGES
+
+* **tenancy:** organization_id is NOT NULL on all nine partition roots, and the unique key on state_sources, pipeline_connections, ci_sources, schedules and notification_channels names is now (organization_id, name) rather than (name). Names that were globally unique are now unique per organization, and any client relying on a global name namespace will see collisions become legal.
+
+### Features
+
+* **tenancy:** complete the Phase 3 read flip and bind API keys to their organization ([#459](https://github.com/sethbacon/terraform-state-manager-backend/issues/459)) ([#482](https://github.com/sethbacon/terraform-state-manager-backend/issues/482)) ([eba27bb](https://github.com/sethbacon/terraform-state-manager-backend/commit/eba27bbf95c21337268f765c4768f327549de6c8))
+* **tenancy:** Phase 4 — organization_id NOT NULL, and per-organization names ([#468](https://github.com/sethbacon/terraform-state-manager-backend/issues/468)) ([3bdd938](https://github.com/sethbacon/terraform-state-manager-backend/commit/3bdd938b0e79ebe27af18ea6b04f91669d9f9982))
+
+
+### Bug Fixes
+
+* **tenancy:** scope the aggregate reads, and let the inventory guard see ([#481](https://github.com/sethbacon/terraform-state-manager-backend/issues/481)) ([ca2e5b3](https://github.com/sethbacon/terraform-state-manager-backend/commit/ca2e5b32613a64c2e84520e5124baa1a6796b51d)), closes [#459](https://github.com/sethbacon/terraform-state-manager-backend/issues/459)
+
 ## [3.12.0](https://github.com/sethbacon/terraform-state-manager-backend/compare/v3.11.0...v3.12.0) (2026-08-24)
 
 
