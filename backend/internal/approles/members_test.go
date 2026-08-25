@@ -32,12 +32,35 @@ const templateID = "11111111-1111-1111-1111-111111111111"
 // reduction that does not sweep leaves the credentials which froze that
 // authority working, so "it was supplied" is not the property — "it ran, for
 // this principal" is.
-type sweeps struct{ users []string }
+type sweeps struct {
+	users []string
+	// changed records, per sweep, whether the caller reported that authority
+	// ACTUALLY moved. Recorded rather than ignored because a sweep that runs
+	// with the wrong answer here ends every session the principal holds for a
+	// write that changed nothing (#491).
+	changed []bool
+}
 
 func (sw *sweeps) reducer() AuthorityReducer {
-	return func(_ context.Context, userID string) error {
+	return func(_ context.Context, userID string, authorityChanged bool) error {
 		sw.users = append(sw.users, userID)
+		sw.changed = append(sw.changed, authorityChanged)
 		return nil
+	}
+}
+
+// wantsChanged asserts the authority-changed flags the sweeps were told, in
+// order. Separate from wants so an existing test keeps asserting exactly what
+// it always did.
+func (sw *sweeps) wantsChanged(t *testing.T, want ...bool) {
+	t.Helper()
+	if len(sw.changed) != len(want) {
+		t.Fatalf("authority-changed flags %v, want %v", sw.changed, want)
+	}
+	for i := range want {
+		if sw.changed[i] != want[i] {
+			t.Errorf("sweep %d reported authorityChanged=%v, want %v", i, sw.changed[i], want[i])
+		}
 	}
 }
 
@@ -935,4 +958,225 @@ func TestTheAddPathsRefuseAMissingSweep(t *testing.T) {
 	if !strings.Contains(err.Error(), "no credential sweep") {
 		t.Fatalf("the error does not say what is missing: %v", err)
 	}
+}
+
+// ---------------------------------------------------------------------------
+// #491 — a write that changed nothing must not end the principal's sessions.
+//
+// The API-key half of a sweep re-derives the retained authority and keeps every
+// key still covered, so it is harmless on a no-op. The token half moves a
+// PLATFORM-WIDE per-user watermark and ends every session that principal holds,
+// in every organization. Running that for a write that moved nothing is pure
+// damage, and both no-op paths are reachable through routes that deliberately
+// absorb "not a member" into a success status.
+// ---------------------------------------------------------------------------
+
+// expectPriorRole stages the pre-write read of the role currently recorded.
+func expectPriorRole(mock sqlmock.Sqlmock, roleID interface{}) {
+	mock.ExpectQuery("(?s)SELECT organization_id, user_id, role_template_id, created_at.*FROM organization_members").
+		WillReturnRows(sqlmock.NewRows([]string{"organization_id", "user_id", "role_template_id", "created_at"}).
+			AddRow("org-1", "user-1", roleID, time.Now()))
+}
+
+func TestUpdateMemberRoleTemplate_SameRoleDoesNotEndSessions(t *testing.T) {
+	m, identityMock, appMock, done := twoConnections(t)
+	defer done()
+	var sw sweeps
+
+	roleID := templateID
+	expectPriorRole(identityMock, roleID) // already holds it
+	identityMock.ExpectExec("UPDATE organization_members").
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	appMock.ExpectQuery(regexp.QuoteMeta(`SELECT 1 FROM role_templates WHERE id = $1`)).
+		WithArgs(roleID).
+		WillReturnRows(sqlmock.NewRows([]string{"?column?"}).AddRow(1))
+	appMock.ExpectExec("INSERT INTO organization_member_roles").
+		WillReturnResult(sqlmock.NewResult(0, 1))
+
+	if err := m.UpdateMemberRoleTemplate(context.Background(), "org-1", "user-1", &roleID, idstore.OrgScopeOrganizations("org-1"), sw.reducer()); err != nil {
+		t.Fatalf("UpdateMemberRoleTemplate: %v", err)
+	}
+	sw.wants(t, "user-1")     // the key half still runs
+	sw.wantsChanged(t, false) // the session half must not
+}
+
+// The falsification: a genuine reassignment must still end the sessions that
+// froze the old authority. Without this, reporting false unconditionally would
+// satisfy the test above and disable #330 entirely.
+func TestUpdateMemberRoleTemplate_DifferentRoleEndsSessions(t *testing.T) {
+	m, identityMock, appMock, done := twoConnections(t)
+	defer done()
+	var sw sweeps
+
+	roleID := templateID
+	expectPriorRole(identityMock, "00000000-0000-0000-0000-0000000000ff") // a different role
+	identityMock.ExpectExec("UPDATE organization_members").
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	appMock.ExpectQuery(regexp.QuoteMeta(`SELECT 1 FROM role_templates WHERE id = $1`)).
+		WithArgs(roleID).
+		WillReturnRows(sqlmock.NewRows([]string{"?column?"}).AddRow(1))
+	appMock.ExpectExec("INSERT INTO organization_member_roles").
+		WillReturnResult(sqlmock.NewResult(0, 1))
+
+	if err := m.UpdateMemberRoleTemplate(context.Background(), "org-1", "user-1", &roleID, idstore.OrgScopeOrganizations("org-1"), sw.reducer()); err != nil {
+		t.Fatalf("UpdateMemberRoleTemplate: %v", err)
+	}
+	sw.wantsChanged(t, true)
+}
+
+// A prior-role read that FAILS must report changed, not unchanged. Uncertainty
+// has to cost an unnecessary sweep, never a missed reduction.
+func TestUpdateMemberRoleTemplate_UnreadablePriorRoleEndsSessions(t *testing.T) {
+	m, identityMock, appMock, done := twoConnections(t)
+	defer done()
+	var sw sweeps
+
+	roleID := templateID
+	identityMock.ExpectQuery("(?s)SELECT organization_id, user_id, role_template_id, created_at.*FROM organization_members").
+		WillReturnError(errors.New("identity database unavailable"))
+	identityMock.ExpectExec("UPDATE organization_members").
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	appMock.ExpectQuery(regexp.QuoteMeta(`SELECT 1 FROM role_templates WHERE id = $1`)).
+		WithArgs(roleID).
+		WillReturnRows(sqlmock.NewRows([]string{"?column?"}).AddRow(1))
+	appMock.ExpectExec("INSERT INTO organization_member_roles").
+		WillReturnResult(sqlmock.NewResult(0, 1))
+
+	if err := m.UpdateMemberRoleTemplate(context.Background(), "org-1", "user-1", &roleID, idstore.OrgScopeOrganizations("org-1"), sw.reducer()); err != nil {
+		t.Fatalf("UpdateMemberRoleTemplate: %v", err)
+	}
+	sw.wantsChanged(t, true)
+}
+
+// DELETE naming a user who is not a member: the route absorbs ErrNotFound into
+// a 204, which made this a way to sign a stranger out of every organization,
+// from an organization they were never in.
+func TestRemoveMember_NonMemberDoesNotEndSessions(t *testing.T) {
+	m, identityMock, appMock, done := twoConnections(t)
+	defer done()
+	var sw sweeps
+
+	appMock.ExpectExec("DELETE FROM organization_member_roles").
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	identityMock.ExpectExec("DELETE FROM organization_members").
+		WillReturnResult(sqlmock.NewResult(0, 0)) // no row: ErrNotFound
+
+	err := m.RemoveMember(context.Background(), "org-1", "user-1", idstore.OrgScopeOrganizations("org-1"), sw.reducer())
+	if !errors.Is(err, idstore.ErrNotFound) {
+		t.Fatalf("expected ErrNotFound, got %v", err)
+	}
+	sw.wants(t, "user-1")     // the key half still runs, as it always did
+	sw.wantsChanged(t, false) // the session half must not
+}
+
+func TestRemoveMember_ActualRemovalEndsSessions(t *testing.T) {
+	m, identityMock, appMock, done := twoConnections(t)
+	defer done()
+	var sw sweeps
+
+	appMock.ExpectExec("DELETE FROM organization_member_roles").
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	identityMock.ExpectExec("DELETE FROM organization_members").
+		WillReturnResult(sqlmock.NewResult(0, 1))
+
+	if err := m.RemoveMember(context.Background(), "org-1", "user-1", idstore.OrgScopeOrganizations("org-1"), sw.reducer()); err != nil {
+		t.Fatalf("RemoveMember: %v", err)
+	}
+	sw.wantsChanged(t, true)
+}
+
+// CLEARING a member's role is a reduction, and it is the case where the
+// unreadable-prior-role guard actually bites.
+//
+// With the read failing, `before` is nil. Comparing a nil prior against a
+// PRESENT new role already yields "changed", so the guard looks redundant --
+// until the new role is ALSO nil, when a nil-vs-nil comparison says "unchanged"
+// and the sessions holding the old authority survive a write that removed it.
+func TestUpdateMemberRoleTemplate_ClearingRoleWithUnreadablePriorEndsSessions(t *testing.T) {
+	m, identityMock, appMock, done := twoConnections(t)
+	defer done()
+	var sw sweeps
+
+	identityMock.ExpectQuery("(?s)SELECT organization_id, user_id, role_template_id, created_at.*FROM organization_members").
+		WillReturnError(errors.New("identity database unavailable"))
+	identityMock.ExpectExec("UPDATE organization_members").
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	appMock.ExpectExec("INSERT INTO organization_member_roles").
+		WillReturnResult(sqlmock.NewResult(0, 1))
+
+	// nil roleTemplateID: the mirror keeps the row but holds no role -- migration
+	// 000055 keeps "no mirrored row" and "mirrored row, no role" distinct.
+	if err := m.UpdateMemberRoleTemplate(context.Background(), "org-1", "user-1", nil, idstore.OrgScopeOrganizations("org-1"), sw.reducer()); err != nil {
+		t.Fatalf("UpdateMemberRoleTemplate: %v", err)
+	}
+	sw.wantsChanged(t, true)
+}
+
+// The IdP group-mapping reconcile calls UpdateMemberRole by NAME on every
+// login. Before #491 that ended every OTHER session the user held each time
+// they signed in anywhere, for as long as they were in a mapped organization.
+func TestUpdateMemberRole_SameRoleNameDoesNotEndSessions(t *testing.T) {
+	m, identityMock, appMock, done := twoConnections(t)
+	defer done()
+	var sw sweeps
+
+	identityMock.ExpectQuery("(?s)FROM organization_members").
+		WillReturnRows(sqlmock.NewRows([]string{
+			"organization_id", "user_id", "role_template_id", "created_at",
+			"user_name", "user_email",
+			"role_template_name", "role_template_display_name", "role_template_scopes",
+		}).AddRow("org-1", "user-1", templateID, time.Now(),
+			"Alice", "alice@example.com",
+			"editor", "Editor", []byte(`["states:read"]`)))
+	// identity resolves the NAME to an id on its own connection, then updates.
+	identityMock.ExpectQuery(regexp.QuoteMeta(`SELECT id FROM role_templates WHERE name = $1`)).
+		WithArgs("editor").
+		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(templateID))
+	identityMock.ExpectExec("UPDATE organization_members").
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	// then the mirror, on the app connection.
+	appMock.ExpectQuery(regexp.QuoteMeta(`SELECT id FROM role_templates WHERE name = $1`)).
+		WithArgs("editor").
+		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(templateID))
+	appMock.ExpectExec("INSERT INTO organization_member_roles").
+		WillReturnResult(sqlmock.NewResult(0, 1))
+
+	if err := m.UpdateMemberRole(context.Background(), "org-1", "user-1", "editor", idstore.OrgScopeOrganizations("org-1"), sw.reducer()); err != nil {
+		t.Fatalf("UpdateMemberRole: %v", err)
+	}
+	sw.wantsChanged(t, false)
+}
+
+// A genuine promotion or demotion on that same path must still end the sessions
+// that froze the old authority.
+func TestUpdateMemberRole_DifferentRoleNameEndsSessions(t *testing.T) {
+	m, identityMock, appMock, done := twoConnections(t)
+	defer done()
+	var sw sweeps
+
+	identityMock.ExpectQuery("(?s)FROM organization_members").
+		WillReturnRows(sqlmock.NewRows([]string{
+			"organization_id", "user_id", "role_template_id", "created_at",
+			"user_name", "user_email",
+			"role_template_name", "role_template_display_name", "role_template_scopes",
+		}).AddRow("org-1", "user-1", templateID, time.Now(),
+			"Alice", "alice@example.com",
+			"viewer", "Viewer", []byte(`["states:read"]`)))
+	// identity resolves the NAME to an id on its own connection, then updates.
+	identityMock.ExpectQuery(regexp.QuoteMeta(`SELECT id FROM role_templates WHERE name = $1`)).
+		WithArgs("editor").
+		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(templateID))
+	identityMock.ExpectExec("UPDATE organization_members").
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	// then the mirror, on the app connection.
+	appMock.ExpectQuery(regexp.QuoteMeta(`SELECT id FROM role_templates WHERE name = $1`)).
+		WithArgs("editor").
+		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(templateID))
+	appMock.ExpectExec("INSERT INTO organization_member_roles").
+		WillReturnResult(sqlmock.NewResult(0, 1))
+
+	if err := m.UpdateMemberRole(context.Background(), "org-1", "user-1", "editor", idstore.OrgScopeOrganizations("org-1"), sw.reducer()); err != nil {
+		t.Fatalf("UpdateMemberRole: %v", err)
+	}
+	sw.wantsChanged(t, true)
 }

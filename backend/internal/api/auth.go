@@ -945,7 +945,7 @@ func (h *AuthHandlers) reconcileManagedMemberships(ctx context.Context, userID s
 // call AuthorityReduced and do move the watermark. See
 // credlifecycle.Sweeper.KeysOnly.
 func (h *AuthHandlers) sweepIdPReduction(reason string) approles.AuthorityReducer {
-	return func(ctx context.Context, userID string) error {
+	return func(ctx context.Context, userID string, authorityChanged bool) error {
 		out := h.creds.KeysOnly(ctx, userID, reason)
 		if out.KeysRevoked > 0 || out.Incomplete {
 			slog.Info("idp reconciliation: credential sweep",

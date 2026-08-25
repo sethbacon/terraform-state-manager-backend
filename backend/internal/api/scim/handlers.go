@@ -129,7 +129,10 @@ func (h *Handlers) deprovisionUser(ctx context.Context, userID, reason string) e
 	// rather than conventional: the strip cannot be spelled without it.
 	var out credlifecycle.Outcome
 	removed, err := h.orgRepo.RemoveAllMembershipsForUser(ctx, userID, idstore.OrgScopeAllOrganizations(),
-		func(ctx context.Context, uid string) error {
+		func(ctx context.Context, uid string, _ bool) error {
+			// The flag is ignored here on purpose. A SCIM deprovision destroys
+			// the principal outright, so there is no "nothing changed" case to
+			// protect: ending every session is the intent, not a side effect.
 			out = h.creds.UserDeprovisioned(ctx, uid, reason)
 			return nil // best-effort: see the doc above, SCIM clients replay 5xx
 		})
