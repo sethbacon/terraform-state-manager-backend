@@ -47,7 +47,17 @@ func notFound(err error) bool { return errors.Is(err, idstore.ErrNotFound) }
 // change did not apply when it did. EraseUser is the exception and supplies its
 // own reducer, because there an incomplete sweep IS fatal.
 func sweepReduced(creds *credlifecycle.Sweeper, reason string) approles.AuthorityReducer {
-	return func(ctx context.Context, userID string) error {
+	return func(ctx context.Context, userID string, authorityChanged bool) error {
+		if !authorityChanged {
+			// Nothing moved, so the principal's live sessions still describe
+			// their authority accurately and must not be ended (#491). The
+			// API-key half still runs: it re-derives what is retained and only
+			// removes a key that over-asks, which is correct on a no-op and is
+			// the ONE thing worth doing here -- it reaps a key that was already
+			// over-asking before this request.
+			creds.KeysOnly(ctx, userID, reason)
+			return nil
+		}
 		creds.AuthorityReduced(ctx, userID, reason)
 		return nil
 	}
@@ -61,7 +71,7 @@ func sweepReduced(creds *credlifecycle.Sweeper, reason string) approles.Authorit
 // need a sweep" is a claim somebody wrote down. Every use of this must carry the
 // argument at its call site, and internal/api's credential_lifecycle_class_test.go
 // holds the reviewed list.
-func noAuthorityReduction(context.Context, string) error { return nil }
+func noAuthorityReduction(context.Context, string, bool) error { return nil }
 
 // buildAuditLog assembles an AuditLog from the request context (acting user,
 // client IP) and the given fields. A non-empty orgID stamps the owning
@@ -471,7 +481,9 @@ func (h *AdminHandlers) EraseUser() gin.HandlerFunc {
 		// is a compliance claim about credentials as well as rows.
 		var out credlifecycle.Outcome
 		removed, err := h.orgRepo.RemoveAllMembershipsForUser(ctx, id, idstore.OrgScopeAllOrganizations(),
-			func(ctx context.Context, uid string) error {
+			func(ctx context.Context, uid string, _ bool) error {
+				// Ignored deliberately: an erasure destroys the principal, so
+				// ending every session is the intent, not a side effect.
 				out = h.creds.UserDeprovisioned(ctx, uid, "admin: user erased (GDPR)")
 				if out.Incomplete {
 					return errCredentialSweepIncomplete

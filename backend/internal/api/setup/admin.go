@@ -50,7 +50,7 @@ import (
 // as a bare literal at each, so the exemption is one reviewable thing rather than
 // two that can drift apart. Recorded the same way in internal/api's
 // credential_lifecycle_class_test.go exemption list.
-func noSetupSweep(context.Context, string) error { return nil }
+func noSetupSweep(context.Context, string, bool) error { return nil }
 
 func (h *Handlers) ConfigureAdmin(c *gin.Context) {
 	if !h.cfg.Suite.ShouldSeedRoles("tsm") {

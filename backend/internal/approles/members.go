@@ -145,7 +145,18 @@ type Members struct {
 // must not know what a credential family is. It is reported by the method that
 // ran the reduction, so a caller that treats an incomplete sweep as fatal — the
 // GDPR erasure route does — still can.
-type AuthorityReducer func(ctx context.Context, userID string) error
+// authorityChanged reports whether the write that precedes the sweep ACTUALLY
+// changed what the principal may do. It is false only where the caller is
+// certain nothing moved -- a removal that removed no row, a reassignment to the
+// role already held. Anything uncertain passes true, so a mistake here costs an
+// unnecessary sweep rather than a missed reduction.
+//
+// The distinction exists because the two halves of a sweep are not equally safe
+// to run on a no-op. The API-key half re-derives the retained authority and
+// keeps every key still covered, so it is harmless. The token half moves a
+// PLATFORM-WIDE per-user watermark and ends every session that principal holds,
+// everywhere, which on a no-op is pure damage (#491).
+type AuthorityReducer func(ctx context.Context, userID string, authorityChanged bool) error
 
 // NewMembers wraps the shared organization repository with TSM's role mirror.
 //
@@ -232,7 +243,7 @@ func (m *Members) AddMemberWithRoleTemplate(ctx context.Context, orgID, userID s
 	// outcomes: here the reduction is a side effect of a write that may not have
 	// happened, and sweeping before it would revoke credentials for an authority
 	// change that then failed.
-	return reduceAuthority(ctx, reduce, userID)
+	return reduceAuthority(ctx, reduce, userID, true)
 }
 
 // AddMemberWithParams grants membership by role NAME, and mirrors the assignment.
@@ -246,7 +257,7 @@ func (m *Members) AddMemberWithParams(ctx context.Context, orgID, userID, roleTe
 	if err := m.mirrorSetByName(ctx, orgID, userID, roleTemplateName, scope); err != nil {
 		return err
 	}
-	return reduceAuthority(ctx, reduce, userID)
+	return reduceAuthority(ctx, reduce, userID, true)
 }
 
 // UpdateMemberRoleTemplate changes a member's role template id, and mirrors it.
@@ -255,6 +266,23 @@ func (m *Members) AddMemberWithParams(ctx context.Context, orgID, userID, roleTe
 // escalation, but the safe ordering for the pair as a whole is the one that
 // never leaves this app holding authority identity does not.
 func (m *Members) UpdateMemberRoleTemplate(ctx context.Context, orgID, userID string, roleTemplateID *string, scope idstore.OrgScope, reduce AuthorityReducer) error {
+	// Read the role currently recorded BEFORE the write, so a reassignment to
+	// the role already held can be recognised as the no-op it is (#491).
+	//
+	// Read through identityOrgs, not through m.GetMember: this compares against
+	// the value identityOrgs.UpdateMemberRoleTemplate is about to overwrite, on
+	// the same axis. m.GetMember may substitute the app mirror's role id
+	// depending on the configured source, and the two spaces are not
+	// interchangeable -- comparing across them would silently answer "changed"
+	// or "unchanged" on the wrong evidence.
+	//
+	// A read that FAILS yields true: uncertainty must cost an unnecessary sweep,
+	// never a missed reduction.
+	authorityChanged := true
+	if before, berr := m.identityOrgs.GetMember(ctx, orgID, userID, scope); berr == nil && before != nil {
+		authorityChanged = !sameRoleTemplate(before.RoleTemplateID, roleTemplateID)
+	}
+
 	err := m.identityOrgs.UpdateMemberRoleTemplate(ctx, orgID, userID, roleTemplateID, scope)
 	if err == nil {
 		err = m.mirrorSetByID(ctx, orgID, userID, roleTemplateID, scope)
@@ -262,22 +290,45 @@ func (m *Members) UpdateMemberRoleTemplate(ctx context.Context, orgID, userID st
 	// A reassignment is a REDUCTION whenever the new template grants less than
 	// the old one, and the sweep re-derives the retained set rather than
 	// comparing, so it runs on both outcomes for the same reason RemoveMember's
-	// does.
-	if serr := reduceAuthority(ctx, reduce, userID); serr != nil {
+	// does. Only the SESSION half is withheld when nothing moved.
+	if serr := reduceAuthority(ctx, reduce, userID, authorityChanged); serr != nil {
 		return serr
 	}
 	return err
+}
+
+// sameRoleTemplate compares two nullable role-template ids. Two absent roles are
+// the same role; an absent one and a present one are not.
+func sameRoleTemplate(a, b *string) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return *a == *b
 }
 
 // UpdateMemberRole changes a member's role by NAME, and mirrors it.
 //
 // GRANT: identity first.
 func (m *Members) UpdateMemberRole(ctx context.Context, orgID, userID, roleTemplateName string, scope idstore.OrgScope, reduce AuthorityReducer) error {
+	// Same no-op detection as the id variant, on the NAME axis because that is
+	// what this method writes (#491). Read through identityOrgs for the same
+	// reason: it is identity's own record of the role, which is what
+	// identityOrgs.UpdateMemberRole is about to overwrite. Comparing against the
+	// app mirror's id would be comparing across two id spaces.
+	//
+	// This path matters most. Its caller is the IdP group-mapping reconcile on
+	// the LOGIN path, so before this a user in a mapped organization had every
+	// other session they held ended each time they signed in anywhere.
+	authorityChanged := true
+	if before, berr := m.identityOrgs.GetMemberWithRole(ctx, orgID, userID, scope); berr == nil && before != nil && before.RoleTemplateName != nil {
+		authorityChanged = *before.RoleTemplateName != roleTemplateName
+	}
+
 	err := m.identityOrgs.UpdateMemberRole(ctx, orgID, userID, roleTemplateName, scope)
 	if err == nil {
 		err = m.mirrorSetByName(ctx, orgID, userID, roleTemplateName, scope)
 	}
-	if serr := reduceAuthority(ctx, reduce, userID); serr != nil {
+	if serr := reduceAuthority(ctx, reduce, userID, authorityChanged); serr != nil {
 		return serr
 	}
 	return err
@@ -302,12 +353,16 @@ func (m *Members) RemoveMember(ctx context.Context, orgID, userID string, scope 
 		return err
 	}
 	err := m.identityOrgs.RemoveMember(ctx, orgID, userID, scope)
-	// The sweep runs even when the removal reported ErrNotFound, and that is the
-	// pre-existing decision this method inherited from its call site: the sweep
-	// re-derives what the principal RETAINS rather than assuming a row moved, so
-	// it is correct on a no-op and skipping it would depend on a row count to
-	// decide whether authority changed.
-	if serr := reduceAuthority(ctx, reduce, userID); serr != nil {
+	// The sweep still runs when the removal reported ErrNotFound: it re-derives
+	// what the principal RETAINS rather than assuming a row moved, so it is
+	// correct on a no-op and reaps a key that was already over-asking.
+	//
+	// What it must NOT do on a no-op is end that principal's sessions (#491).
+	// ErrNotFound means no row was removed, so no authority changed, and the
+	// route above absorbs it into a 204 -- which made "DELETE a user who is not
+	// a member" a way to sign that user out of every organization, from an
+	// organization they were never in.
+	if serr := reduceAuthority(ctx, reduce, userID, !errors.Is(err, idstore.ErrNotFound)); serr != nil {
 		return serr
 	}
 	return err
@@ -335,7 +390,7 @@ func (m *Members) RemoveAllMembershipsForUser(ctx context.Context, userID string
 	if perr := m.mirrorDeleteForUser(ctx, userID, removed); perr != nil {
 		return removed, perr
 	}
-	return removed, reduceAuthority(ctx, reduce, userID)
+	return removed, reduceAuthority(ctx, reduce, userID, true)
 }
 
 // Delete removes an organization, and removes every mirrored assignment in it.
@@ -380,7 +435,7 @@ func (m *Members) Delete(ctx context.Context, orgID string, scope idstore.OrgSco
 		return err
 	}
 	for _, member := range members {
-		if serr := reduceAuthority(ctx, reduce, member.UserID); serr != nil {
+		if serr := reduceAuthority(ctx, reduce, member.UserID, true); serr != nil {
 			return serr
 		}
 	}
@@ -424,11 +479,11 @@ func (m *Members) PurgeUserRoles(ctx context.Context, userID string, scope idsto
 // mandatory parameter is that the answer is never left to a zero value. Every
 // method here is one that reduces derived authority; running one with no sweep
 // leaves the credentials that froze that authority working.
-func reduceAuthority(ctx context.Context, reduce AuthorityReducer, userID string) error {
+func reduceAuthority(ctx context.Context, reduce AuthorityReducer, userID string, authorityChanged bool) error {
 	if reduce == nil {
 		return fmt.Errorf("approles: authority was reduced for user %s with no credential sweep supplied", userID)
 	}
-	return reduce(ctx, userID)
+	return reduce(ctx, userID, authorityChanged)
 }
 
 // mirrorSetByID records an assignment whose role is named by identity's template
