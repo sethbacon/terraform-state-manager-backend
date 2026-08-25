@@ -2,6 +2,7 @@ package middleware
 
 import (
 	"database/sql"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -566,5 +567,60 @@ func TestOptionalAuthMiddleware_WatermarkLeavesRequestUnauthenticated(t *testing
 	}
 	if !contains(w.Body.String(), `"authed":false`) {
 		t.Errorf("a revoked session must not be treated as authenticated: %s", w.Body.String())
+	}
+}
+
+// #341: the optional-auth JTI denylist must FAIL CLOSED.
+//
+// Before the fix the lookup was gated on `rErr == nil && revoked`, so a failed
+// revocation lookup skipped the deny gate entirely and the request fell through
+// to setAuthContext as a fully authenticated session -- user_id, jwt_claims,
+// auth_method and scopes all published -- with the token's revocation status
+// unknown.
+//
+// This is reachable rather than theoretical: the denylist runs on the identity
+// connection while the watermark below it runs on the app connection (separable
+// via TSM_IDENTITY_DATABASE_*), so an identity outage with a healthy app
+// database lands exactly here.
+//
+// THE STAGING BELOW IS THE POINT. The watermark is staged NOT revoked and the
+// user IS found, so every gate after the denylist would ADMIT. That makes the
+// denylist the only thing that can keep this request anonymous, and it is what
+// makes the test able to fail: staging nothing after the denylist lets the
+// fail-open path reach an unexpected-call error on the watermark, which is
+// itself fail-closed and returns the same "authed":false for the wrong reason.
+// An earlier version of this test did exactly that and passed against the bug.
+//
+// "Closed" means ANONYMOUS, not an abort -- this middleware never fails a
+// request. Asserting the 200 as well as "authed":false is what stops a later
+// change from turning this into a 500 on every logout.
+func TestOptionalAuthMiddleware_RevocationLookupErrorLeavesRequestUnauthenticated(t *testing.T) {
+	userRepo, userMock := newUserRepo(t)
+	tokenRepo, tokenMock := newTokenRepo(t)
+	revRepo, revMock := newUserRevocationRepo(t)
+
+	tokenMock.ExpectQuery("SELECT EXISTS").
+		WillReturnError(errors.New("identity database unavailable"))
+	// Everything downstream would admit, so only the denylist can refuse.
+	expectWatermark(revMock, false)
+	expectUserFound(userMock, "user-1")
+
+	r := gin.New()
+	r.Use(OptionalAuthMiddleware(userRepo, tokenRepo, revRepo, nil))
+	r.GET("/", func(c *gin.Context) {
+		_, authed := c.Get("user_id")
+		c.JSON(http.StatusOK, gin.H{"authed": authed})
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("Authorization", "Bearer "+generateTestJWT(t, "user-1"))
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (optional auth never aborts)", w.Code)
+	}
+	if !contains(w.Body.String(), `"authed":false`) {
+		t.Errorf("a token whose revocation status could not be established must not be authenticated: %s", w.Body.String())
 	}
 }
