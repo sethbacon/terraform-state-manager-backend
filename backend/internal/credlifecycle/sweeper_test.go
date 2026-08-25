@@ -3,6 +3,7 @@ package credlifecycle
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"testing"
 	"time"
 
@@ -37,6 +38,34 @@ func newSweeper(t *testing.T) (*Sweeper, sqlmock.Sqlmock) {
 		repositories.NewUserTokenRevocationRepository(db),
 		idstore.NewAPIKeyRepository(db),
 		approles.NewMembers(db, nil, approles.RoleSourceIdentity),
+		NoPlatformAdminCarrier{},
+	), mock
+}
+
+// stubPlatformAdmins answers the carrier question directly, including with an
+// error, which is the case the sweep must not read as "not an admin".
+type stubPlatformAdmins struct {
+	isAdmin bool
+	err     error
+}
+
+func (f stubPlatformAdmins) IsPlatformAdmin(context.Context, string) (bool, error) {
+	return f.isAdmin, f.err
+}
+
+// sweeperWithAdmins builds a Sweeper whose carrier answers as given.
+func sweeperWithAdmins(t *testing.T, src platformAdminSource) (*Sweeper, sqlmock.Sqlmock) {
+	t.Helper()
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+	return NewSweeper(
+		repositories.NewUserTokenRevocationRepository(db),
+		idstore.NewAPIKeyRepository(db),
+		approles.NewMembers(db, nil, approles.RoleSourceIdentity),
+		src,
 	), mock
 }
 
@@ -85,7 +114,7 @@ func TestNilSweeperIsNoOp(t *testing.T) {
 			t.Errorf("nil sweeper returned %+v, want zero Outcome", out)
 		}
 	}
-	if NewSweeper(nil, nil, nil) != nil {
+	if NewSweeper(nil, nil, nil, NoPlatformAdminCarrier{}) != nil {
 		t.Error("NewSweeper with no repositories must return nil so the no-op receiver applies")
 	}
 }
@@ -220,10 +249,126 @@ func TestSweepFailuresReportIncomplete(t *testing.T) {
 			t.Fatalf("sqlmock.New: %v", err)
 		}
 		defer db.Close()
-		s := NewSweeper(repositories.NewUserTokenRevocationRepository(db), idstore.NewAPIKeyRepository(db), nil)
+		s := NewSweeper(repositories.NewUserTokenRevocationRepository(db), idstore.NewAPIKeyRepository(db), nil, NoPlatformAdminCarrier{})
 		mock.ExpectExec("INSERT INTO user_token_revocations").WillReturnResult(sqlmock.NewResult(0, 1))
 		if out := s.AuthorityReduced(ctx, "u1", "test"); !out.Incomplete || out.KeysRevoked != 0 {
 			t.Errorf("AuthorityReduced = %+v, want Incomplete with nothing revoked", out)
 		}
 	})
+}
+
+// ---------------------------------------------------------------------------
+// #492 — the retained set must include authority held through the platform-admin
+// carrier, not only through organization memberships.
+//
+// A platform admin need not be a member of any organization (#485 exists
+// because they cannot administer one they do not belong to), so the
+// membership-derived set for such a principal is EMPTY. Every key they own then
+// looks like it over-asks, and all of them are hard-deleted with no revoked_at.
+// ---------------------------------------------------------------------------
+
+// expectNoMemberships stages the membership read returning nothing, which is the
+// normal state for a platform admin.
+func expectNoMemberships(mock sqlmock.Sqlmock) {
+	mock.ExpectQuery("(?s)FROM organization_members").
+		WillReturnRows(sqlmock.NewRows([]string{
+			"organization_id", "user_id", "role_template_id", "created_at",
+			"role_name", "role_display_name", "role_scopes",
+		}))
+}
+
+func TestRevokeOverAskingKeys_PlatformAdminKeysAreRetained(t *testing.T) {
+	s, mock := sweeperWithAdmins(t, stubPlatformAdmins{isAdmin: true})
+
+	mock.ExpectExec("INSERT INTO user_token_revocations").WillReturnResult(sqlmock.NewResult(0, 1))
+	expectNoMemberships(mock)
+	mock.ExpectQuery("(?s)FROM api_keys").
+		WillReturnRows(keyRow("key-1", `["states:write","sources:write"]`))
+	// No DELETE is staged. That IS the assertion: sqlmock rejects a statement it
+	// was not told to expect, so a revocation here fails the test.
+
+	out := s.AuthorityReduced(context.Background(), "admin-1", "admin: membership removed")
+
+	if out.KeysRevoked != 0 {
+		t.Errorf("KeysRevoked = %d, want 0: a platform admin's authority covers these keys", out.KeysRevoked)
+	}
+	if out.KeysRetained != 1 {
+		t.Errorf("KeysRetained = %d, want 1", out.KeysRetained)
+	}
+}
+
+// The falsification. Without it, retaining EVERYTHING unconditionally would
+// satisfy the test above and disable the sweep entirely.
+func TestRevokeOverAskingKeys_NonAdminWithNoMembershipsStillLosesKeys(t *testing.T) {
+	s, mock := sweeperWithAdmins(t, stubPlatformAdmins{isAdmin: false})
+
+	mock.ExpectExec("INSERT INTO user_token_revocations").WillReturnResult(sqlmock.NewResult(0, 1))
+	expectNoMemberships(mock)
+	mock.ExpectQuery("(?s)FROM api_keys").
+		WillReturnRows(keyRow("key-1", `["states:write"]`))
+	mock.ExpectExec("DELETE FROM api_keys WHERE id").
+		WillReturnResult(sqlmock.NewResult(0, 1))
+
+	out := s.AuthorityReduced(context.Background(), "user-1", "admin: membership removed")
+
+	if out.KeysRevoked != 1 {
+		t.Errorf("KeysRevoked = %d, want 1: a fully deprovisioned principal retains nothing", out.KeysRevoked)
+	}
+}
+
+// An unreadable carrier means the authority is UNKNOWN, not absent. Deleting on
+// an unknown is exactly how a platform admin loses every key they own, and the
+// deletion cannot be undone.
+func TestRevokeOverAskingKeys_CarrierErrorRevokesNothingAndReportsIncomplete(t *testing.T) {
+	s, mock := sweeperWithAdmins(t, stubPlatformAdmins{err: errors.New("platform_admins unreadable")})
+
+	mock.ExpectExec("INSERT INTO user_token_revocations").WillReturnResult(sqlmock.NewResult(0, 1))
+	expectNoMemberships(mock)
+	// The key list and a DELETE ARE staged, deliberately, even though the sweep
+	// must not reach them.
+	//
+	// Staging nothing here does not work: the sweep would then stop at the
+	// unstaged key list instead of at the carrier check, report the same
+	// Incomplete, and the test would pass against a version that ignores the
+	// carrier error entirely. Staging a viable path means a sweep that carries
+	// on WILL delete the key and be caught by KeysRevoked below.
+	//
+	// ExpectationsWereMet is deliberately NOT asserted: leaving these unconsumed
+	// is the correct outcome.
+	mock.ExpectQuery("(?s)FROM api_keys").
+		WillReturnRows(keyRow("key-1", `["states:write"]`))
+	mock.ExpectExec("DELETE FROM api_keys WHERE id").
+		WillReturnResult(sqlmock.NewResult(0, 1))
+
+	out := s.AuthorityReduced(context.Background(), "admin-1", "admin: membership removed")
+
+	if out.KeysRevoked != 0 {
+		t.Errorf("KeysRevoked = %d, want 0: an authority that could not be determined must never authorise an irreversible delete", out.KeysRevoked)
+	}
+	if !out.Incomplete {
+		t.Error("Incomplete must be set: the sweep did not run, and that has to be visible")
+	}
+}
+
+// A deployment with no carrier at all is not an unknown: there is no
+// carrier-held authority to miss, so memberships are the whole picture and the
+// sweep proceeds exactly as before.
+func TestRevokeOverAskingKeys_NoCarrierConfiguredStillSweeps(t *testing.T) {
+	s, mock := sweeperWithAdmins(t, NoPlatformAdminCarrier{})
+
+	mock.ExpectExec("INSERT INTO user_token_revocations").WillReturnResult(sqlmock.NewResult(0, 1))
+	expectNoMemberships(mock)
+	mock.ExpectQuery("(?s)FROM api_keys").
+		WillReturnRows(keyRow("key-1", `["states:write"]`))
+	mock.ExpectExec("DELETE FROM api_keys WHERE id").
+		WillReturnResult(sqlmock.NewResult(0, 1))
+
+	out := s.AuthorityReduced(context.Background(), "user-1", "admin: membership removed")
+
+	if out.KeysRevoked != 1 {
+		t.Errorf("KeysRevoked = %d, want 1", out.KeysRevoked)
+	}
+	if out.Incomplete {
+		t.Error("a deployment without a carrier is a known state, not an incomplete sweep")
+	}
 }

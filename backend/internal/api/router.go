@@ -125,6 +125,7 @@ func NewRouter(cfg *config.Config, database *sql.DB, identityDB *sql.DB) (*gin.E
 		userRevocationRepo,
 		idstore.NewAPIKeyRepository(identityDB),
 		orgMembers,
+		platformAdmins,
 	)
 
 	authHandlers, err := NewAuthHandlers(cfg, identityDB, database, WithAuthCredentialSweeper(credSweeper))
