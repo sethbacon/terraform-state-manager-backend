@@ -42,6 +42,26 @@ func AccessLog() gin.HandlerFunc {
 		// Surface the cause (attached by handlers via c.Error / serverError) in the
 		// server-side log so a request_id can be traced to a real error, and log at
 		// Error level so 5xx is alertable. The response body is unchanged.
+		// A request the CLIENT abandoned is not a server fault, whatever status
+		// the handler managed to write before noticing (#487).
+		//
+		// api.serverError already answers 499 for the paths that go through it,
+		// which is most of them. This second check exists for the handlers that
+		// write a 500 directly: it cannot change the status they already sent,
+		// but it does keep a client disconnect out of the Error stream, which is
+		// where the actual harm was -- an ERROR line on every single login makes
+		// the level meaningless for the faults it is supposed to surface.
+		//
+		// Read from the REQUEST context, not from c.Errors: the handler may have
+		// swallowed the cancellation without attaching anything.
+		if c.Request != nil && c.Request.Context().Err() != nil {
+			attrs = append(attrs, "client_disconnected", true)
+			if len(c.Errors) > 0 {
+				attrs = append(attrs, "error", c.Errors.String())
+			}
+			slog.Info("http_request", attrs...)
+			return
+		}
 		if status >= 500 {
 			if len(c.Errors) > 0 {
 				attrs = append(attrs, "error", c.Errors.String())
