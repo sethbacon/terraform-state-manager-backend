@@ -2019,6 +2019,18 @@
                     },
                     {
                         "type": "string",
+                        "description": "Organization UUID the caller may read; repeat for several. Required unless fleet=1.",
+                        "name": "organization",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Set to 1 by the sibling for a platform admin, who crosses organization boundaries. Mutually exclusive with organization.",
+                        "name": "fleet",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
                         "description": "Shared suite service token (server-to-server cross-app read)",
                         "name": "X-Suite-Service-Token",
                         "in": "header",

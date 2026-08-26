@@ -4,6 +4,9 @@ package api
 
 import (
 	"errors"
+	"github.com/google/uuid"
+	"log/slog"
+	"strings"
 
 	"context"
 	"database/sql"
@@ -734,6 +737,8 @@ func (h *SourcesHandlers) ListStateModules() gin.HandlerFunc {
 // @Produce      json
 // @Param        host    query  string  true  "Registry host, e.g. registry.terraform.io"
 // @Param        module                 query   string  true  "Module source as namespace/name/system"
+// @Param        organization           query   string  false "Organization UUID the caller may read; repeat for several. Required unless fleet=1."
+// @Param        fleet                  query   string  false "Set to 1 by the sibling for a platform admin, who crosses organization boundaries. Mutually exclusive with organization."
 // @Param        X-Suite-Service-Token  header  string  true  "Shared suite service token (server-to-server cross-app read)"
 // @Success      200  {object}  map[string]interface{}
 // @Failure      400  {object}  map[string]interface{}
@@ -765,7 +770,24 @@ func (h *SourcesHandlers) Consumers() gin.HandlerFunc {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "host and module query parameters are required"})
 			return
 		}
-		consumers, err := h.moduleRefRepo.FindConsumers(c.Request.Context(), hosts, module)
+
+		// WHOSE CONSUMERS? (#439)
+		//
+		// This route has no principal of its own -- it is authenticated only by
+		// the shared suite service token -- so it cannot work out who is asking
+		// and used to answer fleet-wide. The sibling registry proxies it for any
+		// authenticated user and forwards the rows opaquely, which meant a user
+		// in one organization saw another's source names and state keys.
+		//
+		// The registry is the only side that knows the caller, so it says: either
+		// one repeated organization= per organization the caller may read, or
+		// fleet=1 for a platform admin. Exactly one of the two must be present.
+		scope, ok := consumersScope(c)
+		if !ok {
+			return
+		}
+
+		consumers, err := h.moduleRefRepo.FindConsumersInScope(c.Request.Context(), scope, hosts, module)
 		if err != nil {
 			serverError(c, err, "failed to load consumers")
 			return
@@ -896,4 +918,67 @@ func (h *SourcesHandlers) readState(c *gin.Context) (*statesource.RawState, bool
 		return nil, false
 	}
 	return rs, true
+}
+
+// consumersScope reads the tenancy the sibling registry declared on a
+// /consumers request, and refuses a request that declares none (#439).
+//
+// WHY ABSENCE IS REFUSED RATHER THAN READ AS FLEET-WIDE. A missing parameter is
+// indistinguishable from a caller that simply did not send one -- an older
+// registry build, a misconfiguration, any future caller -- so treating absence
+// as "show everything" would hand every organization's state topology to
+// anything that omitted it. That is the disclosure this change closes, and
+// reading absence as permission would reintroduce it through the very mechanism
+// meant to close it. The sibling therefore says fleet=1 EXPLICITLY.
+//
+// It reports failure by writing the response itself, so the caller returns.
+func consumersScope(c *gin.Context) (tenantscope.Scope, bool) {
+	seen := map[string]struct{}{}
+	orgIDs := make([]string, 0, len(c.QueryArray("organization")))
+	for _, raw := range c.QueryArray("organization") {
+		v := strings.TrimSpace(raw)
+		if v == "" {
+			continue
+		}
+		// Validated, not passed through: `= ANY($3::uuid[])` on a non-UUID raises
+		// Postgres 22P02, which would surface as a 500 for what is a malformed
+		// request.
+		if _, err := uuid.Parse(v); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "organization must be a UUID"})
+			return tenantscope.Scope{}, false
+		}
+		if _, dup := seen[v]; dup {
+			continue
+		}
+		seen[v] = struct{}{}
+		orgIDs = append(orgIDs, v)
+	}
+
+	fleet := c.Query("fleet") == "1"
+
+	switch {
+	case fleet && len(orgIDs) > 0:
+		// Contradictory: the sibling sends one or the other. Refusing beats
+		// guessing which one it meant.
+		c.JSON(http.StatusBadRequest, gin.H{"error": "organization and fleet are mutually exclusive"})
+		return tenantscope.Scope{}, false
+	case fleet:
+		return tenantscope.Scope{PlatformAdmin: true}, true
+	case len(orgIDs) > 0:
+		return tenantscope.Scope{OrgIDs: orgIDs}, true
+	}
+
+	// LOUD ON PURPOSE. The sibling converts any non-200 into an empty 200, so
+	// this refusal is invisible from the user's side -- the "Consumed by" panel
+	// simply shows nothing. If a stale sibling is deployed, this log line is the
+	// only thing that says so, so it must be findable without knowing to look.
+	slog.Warn("consumers: request declared no tenancy; refusing rather than answering fleet-wide",
+		"module", c.Query("module"),
+		"remote_addr", c.ClientIP(),
+		"hint", "the sibling registry must send organization=<uuid> (repeatable) or fleet=1; a build older than terraform-registry-backend v4.11.1 sends neither")
+	c.JSON(http.StatusBadRequest, gin.H{
+		"error":   "organization query parameter is required",
+		"details": "send one organization=<uuid> per organization the caller may read, or fleet=1 for a platform admin",
+	})
+	return tenantscope.Scope{}, false
 }

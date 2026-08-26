@@ -70,8 +70,11 @@ func TestConsumers_HostMatchedJoin(t *testing.T) {
 	w := httptest.NewRecorder()
 	// Mixed-case + default port on the inbound host must be folded to the
 	// canonical form before the join (and de-duplicated against itself).
+	// fleet=1 keeps this test about HOST canonicalization: it is the platform-admin
+	// path, which delegates to the same unscoped query, so the join being asserted
+	// is unchanged by #439's tenancy work.
 	r.ServeHTTP(w, httptest.NewRequest(http.MethodGet,
-		"/api/v1/consumers?host=Registry.Terraform.io:443&module=terraform-aws-modules/vpc/aws", nil))
+		"/api/v1/consumers?host=Registry.Terraform.io:443&module=terraform-aws-modules/vpc/aws&fleet=1", nil))
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d (%s)", w.Code, w.Body.String())
 	}
@@ -84,5 +87,78 @@ func TestConsumers_HostMatchedJoin(t *testing.T) {
 	}
 	if resp.Total != 1 || len(resp.Consumers) != 1 || resp.Consumers[0]["source_name"] != "prod" {
 		t.Fatalf("unexpected consumers: %+v (total %d)", resp.Consumers, resp.Total)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// #439 — /consumers has no principal, so the sibling registry must declare the
+// tenancy on the caller's behalf, and a request declaring none is refused.
+//
+// Refusing is what makes the disclosure closable. Reading a MISSING parameter
+// as "fleet-wide" cannot be told apart from a caller that simply did not send
+// one, so it would hand every organization's state topology to anything that
+// omitted it.
+// ---------------------------------------------------------------------------
+
+func TestConsumers_NoTenancyDeclaredIsRefused(t *testing.T) {
+	r, _ := newModulesRouter(t)
+
+	// No query is staged. That is the assertion: the refusal must happen before
+	// the database is touched at all, so an un-scoped read cannot occur even
+	// momentarily.
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, httptest.NewRequest(http.MethodGet,
+		"/api/v1/consumers?host=registry.terraform.io&module=acme/vpc/aws", nil))
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 (%s)", w.Code, w.Body.String())
+	}
+}
+
+func TestConsumers_OrganizationScopesTheJoin(t *testing.T) {
+	r, mock := newModulesRouter(t)
+	cols := []string{"source_id", "source_name", "state_key", "module_version", "observed_at"}
+	// The scoped query carries the organization predicate as a THIRD argument,
+	// joined through state_sources -- state_module_refs has no organization_id.
+	mock.ExpectQuery("JOIN state_sources s ON s.id = r.source_id AND s.organization_id").
+		WithArgs([]string{"registry.terraform.io"}, "acme/vpc/aws",
+			[]string{"11111111-1111-1111-1111-111111111111"}).
+		WillReturnRows(sqlmock.NewRows(cols).AddRow("s1", "prod", "app.tfstate", nil, "2026-06-14"))
+
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, httptest.NewRequest(http.MethodGet,
+		"/api/v1/consumers?host=registry.terraform.io&module=acme/vpc/aws"+
+			"&organization=11111111-1111-1111-1111-111111111111", nil))
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d (%s)", w.Code, w.Body.String())
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("unmet expectations: %v", err)
+	}
+}
+
+// A malformed organization must be a 400, not a 500: `= ANY($3::uuid[])` on a
+// non-UUID raises Postgres 22P02.
+func TestConsumers_MalformedOrganizationIsABadRequest(t *testing.T) {
+	r, _ := newModulesRouter(t)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, httptest.NewRequest(http.MethodGet,
+		"/api/v1/consumers?host=registry.terraform.io&module=acme/vpc/aws&organization=not-a-uuid", nil))
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 (%s)", w.Code, w.Body.String())
+	}
+}
+
+// The two declarations are mutually exclusive; refusing beats guessing which
+// one the sibling meant.
+func TestConsumers_FleetAndOrganizationTogetherIsRefused(t *testing.T) {
+	r, _ := newModulesRouter(t)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, httptest.NewRequest(http.MethodGet,
+		"/api/v1/consumers?host=registry.terraform.io&module=acme/vpc/aws"+
+			"&organization=11111111-1111-1111-1111-111111111111&fleet=1", nil))
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 (%s)", w.Code, w.Body.String())
 	}
 }
