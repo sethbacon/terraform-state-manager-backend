@@ -153,6 +153,36 @@ Read the current version off the latest tag (`gh release list --limit 1`) and ad
 one to the minor. **A genuine major redesign takes the major** — just leave
 `Release-As` off and let the default happen.
 
+### `Release-As` must survive the squash as a TRAILER
+
+This is the part that bites, and it has already cost one wrong version here.
+
+`Release-As` only counts when it is in the commit's **trailer block** — the
+footers at the very end. This repository squashes with `COMMIT_MESSAGES`, so the
+merged commit is every commit body on the branch concatenated in order. A second
+commit therefore lands *after* your footer and pushes it out of trailer position:
+
+```text
+Release-As: 3.14.0        <- was a trailer on the branch...
+
+Closes #439
+
+* test(repositories): cover the new branches    <- ...and is not one any more
+```
+
+release-please then ignores it and cuts the MAJOR that `BREAKING CHANGE` implies.
+That is exactly what happened on #499, which asked for `3.14.0` and produced a
+release PR for `4.0.0`.
+
+**So on a branch declaring a breaking change, keep the `Release-As` footer in the
+LAST commit.** If you add a fix-up commit afterwards — a coverage top-up, a lint
+fix, a review response — either amend it into the existing commit, or repeat the
+footer in the new one.
+
+If a wrong version has already been computed, do not rewrite `main`. Land a
+follow-up commit whose own trailer is the `Release-As` you wanted; release-please
+recomputes the pending release PR from the whole range.
+
 Keep the subject line under **72 characters**. Reference issues in the commit body with
 `Closes #123`.
 
