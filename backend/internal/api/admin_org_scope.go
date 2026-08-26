@@ -83,6 +83,19 @@ func (h *AdminHandlers) requireOrgScope() gin.HandlerFunc {
 			return
 		}
 
+		// The per-organization check below is what a platform admin cannot
+		// satisfy for an organization they are not a member of, and on the one
+		// bootstrap route the carrier stands in for it (#485).
+		//
+		// AFTER the credential ceiling above, never instead of it: the presented
+		// credential must still itself carry organization-management authority,
+		// so a narrowed key belonging to a platform admin is refused here exactly
+		// as it was before. This bypasses membership, not the credential.
+		if h.platformAdminMayBootstrap(c) {
+			c.Next()
+			return
+		}
+
 		scopes, err := h.orgRepo.GetUserScopesForOrg(c.Request.Context(), uid, orgID)
 		if err != nil {
 			c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "failed to verify organization membership"})

@@ -395,7 +395,7 @@ func NewRouter(cfg *config.Config, database *sql.DB, identityDB *sql.DB) (*gin.E
 		v1.GET("/reports/states/export", requireAuth, middleware.RequireScope(auth.ScopeStateRead), tenantScopeStateRead, sources.ReportStatesExport())
 
 		// Identity management (admin scope): users, organizations, roles, audit log.
-		admin := NewAdminHandlers(identityDB, database, approles.RoleSource(cfg.Authz.RoleSource), WithAdminCredentialSweeper(credSweeper))
+		admin := NewAdminHandlers(identityDB, database, approles.RoleSource(cfg.Authz.RoleSource), WithAdminCredentialSweeper(credSweeper), WithPlatformAdmins(platformAdmins))
 		ag := v1.Group("/admin", requireAuth, middleware.RequireScope(auth.ScopeAdmin))
 		{
 			ag.GET("/stats", admin.Stats())

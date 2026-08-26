@@ -445,13 +445,32 @@ const platformWideScope = "OrgScopeAllOrganizations"
 //
 // The bar for adding an entry: the path must have NO tenant to scope by — not
 // "the scope was inconvenient to thread". Authentication qualifies, because the
-// scope that would narrow it is the one it exists to compute. An admin READ
-// never qualifies: "admin" in TSM is granted per organization and merely
-// surfaces as a flat scope, so every /admin caller is somebody's tenant admin.
+// scope that would narrow it is the one it exists to compute.
+//
+// AN ADMIN READ ALMOST NEVER QUALIFIES, and the reason is worth keeping: "admin"
+// in TSM is granted per organization and merely surfaces as a flat scope, so
+// holding it does NOT make a caller platform-wide — every /admin caller is
+// somebody's tenant admin. A site that widens on the flat scope is wrong.
+//
+// THE ONE EXCEPTION, added with #485. TSM does now have a genuine platform-wide
+// principal: the platform_admins carrier (migration 000030), which is a
+// deliberate grant recorded in its own table, not a role template that happens
+// to confer `admin`. A site may consult THAT and widen for a caller it verifies
+// against it. The prose above this map used to say TSM had no platform-wide
+// principal at all; that was true when it was written and stopped being true at
+// 000030.
+//
+// Such a site must: ask the carrier directly (never the flat scope), refuse an
+// API-key credential, and fail closed when the carrier cannot be reached. This
+// map cannot express "widens only for that principal", so an entry here is a
+// statement that the site was reviewed — the conditionality is pinned by the
+// site's own tests.
 //
 // Nothing in this map reads audit_logs, and that is the invariant
-// TestNoPlatformWideOrgScopeInAuditHandlers enforces separately.
+// TestNoPlatformWideOrgScopeInAuditHandlers enforces separately. The #485
+// exception deliberately does not touch those paths.
 var reviewedPlatformWideSites = map[string]string{
+	"internal/api/admin.go:ListOrganizations":                "#485: widens ONLY for a caller verified against the platform_admins carrier (never the flat admin scope), and only for the organization DIRECTORY. A platform admin who is not a member of the target organization cannot otherwise select it anywhere — not here, and not in the group-mapping organization field, which reads this same list. Session credentials only; a carrier that cannot be reached answers no. Pinned by TestListOrganizations_*PlatformAdmin*",
 	"internal/middleware/auth.go:AuthMiddleware":             "authority derivation: resolves the token's subject, which is the prerequisite of every tenant check",
 	"internal/middleware/auth.go:OptionalAuthMiddleware":     "authority derivation, as AuthMiddleware",
 	"internal/middleware/auth.go:authenticateAPIKey":         "authority derivation: confirms a bcrypt-verified key's owner still exists",

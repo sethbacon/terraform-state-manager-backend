@@ -36,6 +36,12 @@ type AdminHandlers struct {
 	// (no sweep) so the handler set stays constructible without the revocation
 	// subsystem.
 	creds *credlifecycle.Sweeper
+	// platformAdmins answers whether a principal holds platform-admin authority
+	// through the carrier, as opposed to holding `admin` because some role
+	// template in some organization grants it. The two are NOT the same
+	// question and only the first may cross an organization boundary here.
+	// May be nil, in which case no bypass ever fires.
+	platformAdmins platformAdminSource
 }
 
 // AdminOption configures optional AdminHandlers construction behaviour.
@@ -43,6 +49,14 @@ type AdminOption func(*AdminHandlers)
 
 // WithAdminCredentialSweeper wires the credential sweep the user- and
 // membership-lifecycle routes perform.
+// WithPlatformAdmins wires the platform-admin carrier, which is what lets a
+// platform admin bootstrap access to an organization they are not a member of
+// (#485). Optional: without it the bypass simply never fires and behaviour is
+// exactly as before.
+func WithPlatformAdmins(p platformAdminSource) AdminOption {
+	return func(h *AdminHandlers) { h.platformAdmins = p }
+}
+
 func WithAdminCredentialSweeper(s *credlifecycle.Sweeper) AdminOption {
 	return func(h *AdminHandlers) { h.creds = s }
 }
@@ -170,10 +184,30 @@ func (h *AdminHandlers) ListOrganizations() gin.HandlerFunc {
 		// tenant's organization directory to any single-org member. Scoped to the
 		// organizations the caller's role template grants organizations:read in,
 		// which is the same set requireOrgScope re-derives for the :id routes.
-		scope, err := h.callerScopeFor(c, auth.ScopeOrganizationsRead)
-		if err != nil {
-			serverError(c, err, "failed to resolve caller organizations")
-			return
+		// A platform admin sees the whole directory (#485). Without this the
+		// organization they need to administer does not appear anywhere they can
+		// select it -- not here, and not in the group-mapping organization field,
+		// which is populated from this same list.
+		//
+		// Gated on the CARRIER, not on the flat admin scope: in TSM `admin` is
+		// granted per organization and merely surfaces as a flat scope, so
+		// widening on it would hand every single-organization admin the entire
+		// directory. This is the directory only; every other cross-tenant read on
+		// these paths still derives scope from membership.
+		//
+		// Asked BEFORE the membership derivation, not after: a platform admin's
+		// directory does not depend on their memberships, so it must not fail
+		// when that read does.
+		var scope idstore.OrgScope
+		if h.callerIsPlatformAdmin(c) {
+			scope = idstore.OrgScopeAllOrganizations()
+		} else {
+			var err error
+			scope, err = h.callerScopeFor(c, auth.ScopeOrganizationsRead)
+			if err != nil {
+				serverError(c, err, "failed to resolve caller organizations")
+				return
+			}
 		}
 		limit, offset := pageParams(c)
 		orgs, err := h.orgRepo.List(c.Request.Context(), limit, offset, scope)
