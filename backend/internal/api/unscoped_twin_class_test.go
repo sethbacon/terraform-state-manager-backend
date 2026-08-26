@@ -39,7 +39,6 @@ import (
 // The map is keyed "file:function".
 var justifiedUnscoped = map[string]string{
 	"reconcile.go:ReconcileSources": "the statesync reconcile loop reads the whole fleet by design: it syncs every tenant's sources and has no caller to narrow to",
-	"sources.go:Consumers":          "#439: a suite service-token route with no principal at all. It needs an organization PARAMETER, not a caller scope",
 }
 
 // repoFieldTypes maps HANDLER STRUCT -> field name -> repository type, so a call
