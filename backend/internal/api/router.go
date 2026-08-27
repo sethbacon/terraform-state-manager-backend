@@ -31,6 +31,7 @@ import (
 	"github.com/terraform-state-manager/terraform-state-manager/internal/crypto"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/db/repositories"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/egress"
+	"github.com/terraform-state-manager/terraform-state-manager/internal/legalhold"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/middleware"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/platformadmin"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/services/notify"
@@ -399,6 +400,27 @@ func NewRouter(cfg *config.Config, database *sql.DB, identityDB *sql.DB) (*gin.E
 		ag := v1.Group("/admin", requireAuth, middleware.RequireScope(auth.ScopeAdmin))
 		{
 			ag.GET("/stats", admin.Stats())
+
+			// Audit legal holds (#373).
+			//
+			// Built on identityDB, NOT the app pool. audit_logs is reached
+			// through the identity connection and so is the retention sweep's
+			// exemption -- a hold written on a different pool than the sweep
+			// reads is invisible to it, and every hold would look placed while
+			// the sweep deleted the rows anyway. Passing the same handle makes
+			// them the same connection by construction.
+			//
+			// A nil handle (the unit-test rig) leaves the routes registered and
+			// answering 503, rather than absent: a route that vanishes with the
+			// database is one whose authorization nothing ever checks.
+			holdRepo, holdErr := legalhold.New(identityDB)
+			if holdErr != nil {
+				slog.Warn("legal holds unavailable", "error", holdErr)
+			}
+			holds := NewLegalHoldHandlers(holdRepo, idstore.NewAuditRepository(identityDB))
+			ag.GET("/legal-holds", holds.ListHolds())
+			ag.POST("/legal-holds", holds.PlaceHold())
+			ag.POST("/legal-holds/:id/release", holds.ReleaseHold())
 
 			// Users: list/search + CRUD + memberships + GDPR data-subject actions.
 			// Every route naming a specific target user (:id), other than list and
