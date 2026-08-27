@@ -151,6 +151,10 @@ ciphertext copied from one encrypted column into another no longer decrypts. The
 purpose is stamped into the ciphertext, so a reader dispatches on what it finds
 rather than on what it expected.
 
+Secrets are bound from the release carrying this note onward. Reading a bound
+value shipped one release earlier, so an upgrade across the pair is safe in
+either order of replica restart.
+
 **Forward only. Nothing is re-encrypted, ever.** A row converts when its secret
 is next saved and not otherwise, and unbound values are read for as long as they
 exist — there is no sweep, no backfill and no cutover. That is deliberate: a

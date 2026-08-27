@@ -73,7 +73,7 @@ func (h *Handlers) SaveSource(c *gin.Context) {
 			return
 		}
 		plain, _ := json.Marshal(req.Credentials)
-		enc, err := crypto.Encrypt(plain)
+		enc, err := crypto.EncryptFor(plain, crypto.PurposeStateSourceCredentials)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to encrypt credentials"})
 			return

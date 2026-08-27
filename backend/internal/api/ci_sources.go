@@ -173,7 +173,7 @@ func (h *CISourceHandlers) CreateCISource() gin.HandlerFunc {
 				c.JSON(http.StatusBadRequest, gin.H{"error": "token is required for auth_method 'pat'"})
 				return
 			}
-			enc, err := crypto.Encrypt([]byte(req.Token))
+			enc, err := crypto.EncryptFor([]byte(req.Token), crypto.PurposeCISourcePAT)
 			if err != nil {
 				serverError(c, err, "failed to encrypt token")
 				return
@@ -188,7 +188,7 @@ func (h *CISourceHandlers) CreateCISource() gin.HandlerFunc {
 					c.JSON(http.StatusBadRequest, gin.H{"error": "azure_devops app auth requires tenant_id, client_id, and client_secret"})
 					return
 				}
-				enc, err := crypto.Encrypt([]byte(req.ClientSecret))
+				enc, err := crypto.EncryptFor([]byte(req.ClientSecret), crypto.PurposeCISourceClientSecret)
 				if err != nil {
 					serverError(c, err, "failed to encrypt client secret")
 					return
@@ -207,7 +207,7 @@ func (h *CISourceHandlers) CreateCISource() gin.HandlerFunc {
 					c.JSON(http.StatusBadRequest, gin.H{"error": "app_private_key must be a PEM-encoded RSA private key"})
 					return
 				}
-				enc, err := crypto.Encrypt([]byte(req.AppPrivateKey))
+				enc, err := crypto.EncryptFor([]byte(req.AppPrivateKey), crypto.PurposeCISourceAppPrivateKey)
 				if err != nil {
 					serverError(c, err, "failed to encrypt app private key")
 					return

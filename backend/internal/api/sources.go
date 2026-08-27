@@ -201,7 +201,7 @@ func (h *SourcesHandlers) CreateSource() gin.HandlerFunc {
 				return
 			}
 			plain, _ := json.Marshal(req.Credentials)
-			enc, err := crypto.Encrypt(plain)
+			enc, err := crypto.EncryptFor(plain, crypto.PurposeStateSourceCredentials)
 			if err != nil {
 				serverError(c, err, "failed to encrypt credentials")
 				return
@@ -328,7 +328,7 @@ func (h *SourcesHandlers) UpdateSource() gin.HandlerFunc {
 				return
 			}
 			plain, _ := json.Marshal(req.Credentials)
-			enc, err := crypto.Encrypt(plain)
+			enc, err := crypto.EncryptFor(plain, crypto.PurposeStateSourceCredentials)
 			if err != nil {
 				serverError(c, err, "failed to encrypt credentials")
 				return

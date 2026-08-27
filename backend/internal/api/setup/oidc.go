@@ -101,7 +101,7 @@ func (h *Handlers) SaveOIDCConfig(c *gin.Context) {
 		return
 	}
 
-	enc, err := crypto.Encrypt([]byte(req.ClientSecret))
+	enc, err := crypto.EncryptFor([]byte(req.ClientSecret), crypto.PurposeOIDCClientSecret)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to encrypt client secret"})
 		return

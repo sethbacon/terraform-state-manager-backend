@@ -134,7 +134,7 @@ func (h *DriftHandlers) CreatePipeline() gin.HandlerFunc {
 				c.JSON(http.StatusBadRequest, gin.H{"error": "cannot store token: encryption key not configured (set TSM_ENCRYPTION_KEY)"})
 				return
 			}
-			enc, err := crypto.Encrypt([]byte(req.Token))
+			enc, err := crypto.EncryptFor([]byte(req.Token), crypto.PurposePipelineDispatchToken)
 			if err != nil {
 				serverError(c, err, "failed to encrypt token")
 				return
@@ -181,7 +181,7 @@ func (h *DriftHandlers) UpdatePipeline() gin.HandlerFunc {
 				c.JSON(http.StatusBadRequest, gin.H{"error": "cannot store token: encryption key not configured (set TSM_ENCRYPTION_KEY)"})
 				return
 			}
-			enc, err := crypto.Encrypt([]byte(req.Token))
+			enc, err := crypto.EncryptFor([]byte(req.Token), crypto.PurposePipelineDispatchToken)
 			if err != nil {
 				serverError(c, err, "failed to encrypt token")
 				return

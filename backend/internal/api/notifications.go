@@ -541,7 +541,7 @@ func (h *NotificationHandlers) PutSMTPConfig() gin.HandlerFunc {
 				c.JSON(http.StatusBadRequest, gin.H{"error": "cannot store password: encryption key not configured (set TSM_ENCRYPTION_KEY)"})
 				return
 			}
-			enc, err := crypto.Encrypt([]byte(input.Password))
+			enc, err := crypto.EncryptFor([]byte(input.Password), crypto.PurposeSMTPRelayPassword)
 			if err != nil {
 				serverError(c, err, "failed to encrypt smtp password")
 				return

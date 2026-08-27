@@ -153,7 +153,17 @@ func scanSecretSites(t *testing.T) scanned {
 				if !ok {
 					return true
 				}
-				if pkg, ok := sel.X.(*ast.Ident); ok && pkg.Name == "crypto" && sel.Sel.Name == "Encrypt" {
+				// Encrypt AND EncryptFor. #277 bound these values to a purpose,
+				// which changed the function name and nothing this inventory is
+				// about: the columns are still sealed by internal/crypto, still
+				// never re-encrypted, and so still stay on whichever key was
+				// current when each was last written.
+				//
+				// Matching only "Encrypt" made this guard report an EMPTY set the
+				// moment the writers moved -- and an empty set is how an
+				// inventory stops covering anything while still passing.
+				if pkg, ok := sel.X.(*ast.Ident); ok && pkg.Name == "crypto" &&
+					(sel.Sel.Name == "Encrypt" || sel.Sel.Name == "EncryptFor") {
 					out.unboundEncrypts[site] = site
 				}
 				if !strings.Contains(sel.Sel.Name, "WithContext") {
@@ -269,8 +279,8 @@ func TestRekeyCoverage_SweptInventoryMatchesTheRegistry(t *testing.T) {
 func TestRekeyCoverage_EveryUnboundEncryptSiteIsDeclared(t *testing.T) {
 	found := scanSecretSites(t).unboundEncrypts
 	if len(found) == 0 {
-		t.Fatal("the scan found no internal/crypto.Encrypt call sites at all; it has stopped " +
-			"matching and would accept any inventory as complete")
+		t.Fatal("the scan found no internal/crypto seal sites at all; it has stopped matching and " +
+			"would accept any inventory as complete")
 	}
 
 	for site := range found {
