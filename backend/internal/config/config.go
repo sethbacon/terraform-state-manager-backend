@@ -41,6 +41,7 @@ type Config struct {
 	StateSource StateSourceConfig `mapstructure:"statesource"`
 	// BackupRetention bounds the state_backups table (#257).
 	BackupRetention BackupRetentionConfig `mapstructure:"backup_retention"`
+	AuditRetention  AuditRetentionConfig  `mapstructure:"audit_retention"`
 }
 
 // AuthzConfig controls where authorization decisions read a principal's role
@@ -242,6 +243,51 @@ type BackupRetentionConfig struct {
 	Enabled bool          `mapstructure:"enabled"`
 	Keep    int           `mapstructure:"keep"`
 	MaxAge  time.Duration `mapstructure:"max_age"`
+}
+
+// AuditRetentionConfig bounds audit_logs (#373).
+//
+// DISABLED BY DEFAULT, and that asymmetry with BackupRetention (which ships
+// enabled) is the decision, not an oversight.
+//
+// BackupRetention is safe on by default because of its KEEP FLOOR: a state
+// untouched for max_age still keeps its newest `keep` restore points, so the
+// age cap can never take the last copy of anything. An age-based audit sweep
+// has no equivalent floor -- a quiet month is simply gone -- so an enabled
+// default would delete audit history on the first boot after an upgrade, before
+// any operator had chosen a retention period.
+//
+// Deletion is irreversible. Unbounded growth, which is the CURRENT behaviour,
+// is not. Shipping disabled therefore changes nothing on upgrade, which is the
+// entire point.
+//
+// Two reasons specific to this app, beyond the general one:
+//
+//   - docs/capacity-planning.md has told operators that audit_logs are not
+//     pruned and to plan their own policy. Some will have. Enabling by default
+//     would turn an external cron into a double-delete.
+//   - In a coupled suite both apps write one shared identity.audit_logs, so two
+//     independently-configured sweeps over one table means the SHORTER
+//     retention silently wins. Enabling here by default would change a registry
+//     operator's effective retention without their knowledge.
+type AuditRetentionConfig struct {
+	Enabled bool `mapstructure:"enabled"`
+	// RetentionDays is how long an audit entry is kept. There is no safe
+	// default, so the zero value is INVALID when enabled rather than being
+	// quietly interpreted -- half-enabling must be a config error at load, not
+	// a surprise purge on the first sweep.
+	RetentionDays int `mapstructure:"retention_days"`
+	// Interval between sweeps.
+	Interval time.Duration `mapstructure:"interval"`
+	// BatchSize bounds one DELETE.
+	BatchSize int `mapstructure:"batch_size"`
+	// MaxBatches bounds one sweep RUN.
+	//
+	// Termination must not rest solely on "deleted == 0", because that rests in
+	// turn on the shared module keeping its exemption inside the LIMIT
+	// subselect. It does today -- and a sweep whose liveness depends on a
+	// detail of another repository's SQL is one bad refactor from looping.
+	MaxBatches int `mapstructure:"max_batches"`
 }
 
 // ServerConfig holds HTTP server settings.
@@ -638,6 +684,36 @@ func (c *Config) Validate() error {
 			problems = append(problems, fmt.Sprintf(
 				"backup_retention.max_age must be > 0 when backup_retention.enabled is true, got %s", c.BackupRetention.MaxAge))
 		}
+
+	}
+	// Audit retention: a stated period is mandatory when enabled. There is no
+	// safe default, so half-enabling is refused at load rather than resolved
+	// into a surprise purge on the first sweep. A NEGATIVE value is the
+	// dangerous one -- it puts the cutoff in the FUTURE, which deletes every
+	// unheld row.
+	if c.AuditRetention.Enabled {
+		if c.AuditRetention.RetentionDays <= 0 {
+			problems = append(problems, fmt.Sprintf(
+				"audit_retention.retention_days must be > 0 when audit_retention.enabled is true, got %d "+
+					"(a zero or negative value puts the cutoff at or after now, which would delete every "+
+					"audit entry no legal hold covers)", c.AuditRetention.RetentionDays))
+		}
+		if c.AuditRetention.Interval <= 0 {
+			problems = append(problems, fmt.Sprintf(
+				"audit_retention.interval must be > 0 when audit_retention.enabled is true, got %s",
+				c.AuditRetention.Interval))
+		}
+		if c.AuditRetention.BatchSize <= 0 {
+			problems = append(problems, fmt.Sprintf(
+				"audit_retention.batch_size must be > 0 when audit_retention.enabled is true, got %d",
+				c.AuditRetention.BatchSize))
+		}
+		if c.AuditRetention.MaxBatches <= 0 {
+			problems = append(problems, fmt.Sprintf(
+				"audit_retention.max_batches must be > 0 when audit_retention.enabled is true, got %d",
+				c.AuditRetention.MaxBatches))
+		}
+
 	}
 
 	if _, ok := validSSLModes[c.Database.SSLMode]; !ok {
@@ -717,6 +793,15 @@ func setDefaults(v *viper.Viper) {
 
 	// Backup retention: keep the newest 20 backups per state regardless of age,
 	// and drop anything older than 90 days beyond that floor.
+	// Audit retention ships DISABLED -- see AuditRetentionConfig for why the
+	// default differs from backup_retention's. retention_days has no default
+	// because there is no safe one.
+	v.SetDefault("audit_retention.enabled", false)
+	v.SetDefault("audit_retention.retention_days", 0)
+	v.SetDefault("audit_retention.interval", 24*time.Hour)
+	v.SetDefault("audit_retention.batch_size", 1000)
+	v.SetDefault("audit_retention.max_batches", 1000)
+
 	v.SetDefault("backup_retention.enabled", true)
 	v.SetDefault("backup_retention.keep", 20)
 	v.SetDefault("backup_retention.max_age", 90*24*time.Hour)

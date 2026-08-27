@@ -1,6 +1,7 @@
 package config
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -419,5 +420,57 @@ func TestRoleSourceDefaultsToThisApplicationsTables(t *testing.T) {
 	}
 	if cfg.Authz.DriftInterval <= 0 {
 		t.Errorf("authz.drift_interval defaults to %v, so the standing detector never runs", cfg.Authz.DriftInterval)
+	}
+}
+
+// TestAuditRetentionShipsDisabled pins the decision, not the value.
+//
+// backup_retention ships ENABLED and audit_retention ships DISABLED, and the
+// asymmetry is deliberate: backup pruning is safe on by default because of its
+// KEEP FLOOR -- a state untouched for max_age still keeps its newest `keep`
+// restore points, so the age cap can never take the last copy of anything. An
+// age-based audit sweep has no equivalent floor; a quiet month is simply gone.
+//
+// So an enabled default would delete audit history on the first boot after an
+// upgrade, before any operator had chosen a retention period. Deletion is
+// irreversible; unbounded growth, which is the CURRENT behaviour, is not.
+func TestAuditRetentionShipsDisabled(t *testing.T) {
+	cfg, err := Load("")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	if cfg.AuditRetention.Enabled {
+		t.Error("audit_retention ships ENABLED.\n" +
+			"That deletes audit history on the first boot after an upgrade, before any operator " +
+			"has chosen a retention period -- and docs/capacity-planning.md has told operators " +
+			"these logs are never pruned, so some will have built external policies against that.")
+	}
+	if days := cfg.AuditRetention.RetentionDays; days != 0 {
+		t.Errorf("audit_retention.retention_days defaults to %d; it must be 0 so that enabling "+
+			"without stating a period is a config error rather than a surprise purge", days)
+	}
+	// The contrast, asserted so the two cannot silently converge.
+	if !cfg.BackupRetention.Enabled {
+		t.Error("backup_retention is no longer enabled by default; if that changed deliberately, " +
+			"the asymmetry argued above needs revisiting")
+	}
+}
+
+// TestEnablingAuditRetentionWithoutAPeriodIsRefused.
+//
+// Half-enabling must fail at load. A zero or negative retention puts the cutoff
+// at or after now, which deletes every entry no legal hold covers.
+func TestEnablingAuditRetentionWithoutAPeriodIsRefused(t *testing.T) {
+	for _, days := range []int{0, -1} {
+		cfg := &Config{}
+		cfg.AuditRetention = AuditRetentionConfig{
+			Enabled: true, RetentionDays: days,
+			Interval: time.Hour, BatchSize: 100, MaxBatches: 10,
+		}
+		err := cfg.Validate()
+		if err == nil || !strings.Contains(err.Error(), "audit_retention.retention_days") {
+			t.Errorf("retention_days=%d with enabled=true was not refused: %v", days, err)
+		}
 	}
 }

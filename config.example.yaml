@@ -50,6 +50,24 @@ drift:
   run_ttl: 2h
   reconcile_interval: 5m
 
+# Audit log retention (#373). DISABLED BY DEFAULT, and deliberately so: an
+# enabled sweep would delete audit history on the first boot after an upgrade,
+# before you had chosen a retention period. Deletion is irreversible; unbounded
+# growth is not.
+#
+# There is no default retention_days, so enabling without stating one is a
+# config error rather than a surprise purge. A suggested value is commented out
+# below -- a suggestion in an example file that deletes nothing.
+#
+# Entries covered by an active legal hold (/api/v1/admin/legal-holds) are never
+# deleted, and the sweep refuses to run at all if the hold table is unreachable.
+audit_retention:
+  enabled: false
+  # retention_days: 365
+  interval: 24h
+  batch_size: 1000
+  max_batches: 1000
+
 backup_retention:
   # Every state edit, rm/mv, restore, and decommissioning migrate snapshots the
   # full pre-edit state into state_backups, so the table grows for the lifetime
