@@ -182,7 +182,7 @@ func TestResolveSAMLGroupMappings(t *testing.T) {
 	}
 
 	t.Run("matching group -> desired role, all orgs managed", func(t *testing.T) {
-		desired, managed := ResolveSAMLGroupMappings([]string{"tf-admins"}, mappings)
+		desired, managed, _ := ResolveSAMLGroupMappings([]string{"tf-admins"}, mappings)
 		if !reflect.DeepEqual(desired, map[string]string{"default": "admin"}) {
 			t.Fatalf("desired = %v", desired)
 		}
@@ -192,7 +192,7 @@ func TestResolveSAMLGroupMappings(t *testing.T) {
 	})
 
 	t.Run("no matching group -> empty desired, orgs still managed (revoked)", func(t *testing.T) {
-		desired, managed := ResolveSAMLGroupMappings([]string{"unrelated"}, mappings)
+		desired, managed, _ := ResolveSAMLGroupMappings([]string{"unrelated"}, mappings)
 		if len(desired) != 0 {
 			t.Fatalf("desired should be empty, got %v", desired)
 		}
@@ -202,7 +202,7 @@ func TestResolveSAMLGroupMappings(t *testing.T) {
 	})
 
 	t.Run("group match is exact (case-sensitive)", func(t *testing.T) {
-		desired, _ := ResolveSAMLGroupMappings([]string{"TF-Admins"}, mappings)
+		desired, _, _ := ResolveSAMLGroupMappings([]string{"TF-Admins"}, mappings)
 		if len(desired) != 0 {
 			t.Fatalf("expected no match for differing case, got %v", desired)
 		}

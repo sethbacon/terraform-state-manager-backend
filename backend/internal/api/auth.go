@@ -10,6 +10,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	identitymodels "github.com/sethbacon/terraform-suite-identity/identity/models"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -777,25 +778,57 @@ func (h *AuthHandlers) effectiveOIDCGroupConfig(ctx context.Context) (claimName 
 }
 
 // resolveGroupMappings computes, from a user's verified IdP groups and the
-// admin-configured mappings, the desired role per organization (orgName -> role,
-// last matching mapping wins) and the set of "IdP-managed" organizations (every
-// organization referenced by any mapping). Managed organizations are treated as
-// IdP-authoritative: a user's membership there must reflect their current groups.
+// admin-configured mappings, the desired role per organization, the set of
+// "IdP-managed" organizations (every organization any mapping references), and
+// EVERY role a matching mapping resolved to per organization.
+//
+// PRECEDENCE NOW COMES FROM THE SHARED MODULE (#488, identity#269). This app
+// took the LAST matching mapping and the registry took the FIRST, off the same
+// shared type, so one stored mapping list granted different roles depending on
+// which app read it. First-wins is the estate's canonical rule: appending a
+// mapping cannot then change the outcome for anyone already matched, which is
+// what an authorization list edited incrementally through a UI needs.
+//
+// WHY `allMatching` EXISTS, AND WHY IT IS NOT JUST THE WINNER. The admin
+// preservation this reconciler depends on used to be an emergent property of
+// ORDERING: a mapping resolving to an admin role is refused by
+// guardProvisionableRole, which deliberately does not fall through to the
+// revoke branch, so a matching-but-refused admin mapping was the only supported
+// way to hold a manual admin grant in an IdP-managed organization -- and that
+// only worked while the admin mapping was the one that WON.
+//
+// Under any precedence change that mechanism breaks silently: a weaker mapping
+// wins instead, PASSES the guard, and demotes a real administrator with no
+// error anywhere. Returning every matching role lets the caller ask the
+// question that actually matters -- "does ANY mapping for this organization
+// resolve to a role I may not auto-provision?" -- which is true regardless of
+// which one wins. The preservation stops depending on array order.
+//
 // Pure and side-effect-free so the security-critical decision is unit-tested.
-func resolveGroupMappings(groups []string, mappings []config.OIDCGroupMapping) (desired map[string]string, managed map[string]struct{}) {
-	desired = make(map[string]string)
-	managed = make(map[string]struct{})
+func resolveGroupMappings(groups []string, mappings []config.OIDCGroupMapping) (desired map[string]string, managed map[string]struct{}, allMatching map[string][]string) {
+	shared := make([]identitymodels.OIDCGroupMapping, 0, len(mappings))
+	for _, m := range mappings {
+		shared = append(shared, identitymodels.OIDCGroupMapping{
+			Group: m.Group, Organization: m.Organization, Role: m.Role,
+		})
+	}
+	res := identitymodels.ResolveGroupMappings(groups, shared)
+
+	desired = res.DesiredRole
+	managed = res.Managed
+
 	groupSet := make(map[string]struct{}, len(groups))
 	for _, g := range groups {
 		groupSet[g] = struct{}{}
 	}
+	allMatching = make(map[string][]string)
 	for _, m := range mappings {
-		managed[m.Organization] = struct{}{}
-		if _, ok := groupSet[m.Group]; ok {
-			desired[m.Organization] = m.Role
+		if _, held := groupSet[m.Group]; !held {
+			continue
 		}
+		allMatching[m.Organization] = append(allMatching[m.Organization], m.Role)
 	}
-	return desired, managed
+	return desired, managed, allMatching
 }
 
 // applyGroupMappings reconciles the user's organization memberships against their
@@ -824,8 +857,8 @@ func (h *AuthHandlers) applyGroupMappings(ctx context.Context, userID string, gr
 	if len(mappings) == 0 && defaultRole == "" {
 		return nil
 	}
-	desired, managed := resolveGroupMappings(groups, mappings)
-	return h.reconcileManagedMemberships(ctx, userID, desired, managed, defaultRole)
+	desired, managed, allMatching := resolveGroupMappings(groups, mappings)
+	return h.reconcileManagedMemberships(ctx, userID, desired, managed, allMatching, defaultRole)
 }
 
 // reconcileManagedMemberships applies a desired (orgName->role) set against the
@@ -834,7 +867,11 @@ func (h *AuthHandlers) applyGroupMappings(ctx context.Context, userID string, gr
 // default-role membership in a non-managed default org when nothing was desired.
 // Shared by OIDC and LDAP group mapping so both get the same deprovisioning
 // semantics. Organizations outside the managed set are never touched.
-func (h *AuthHandlers) reconcileManagedMemberships(ctx context.Context, userID string, desired map[string]string, managed map[string]struct{}, defaultRole string) error {
+// allMatching carries EVERY role a matching mapping resolved to per
+// organization, not only the winner. The admin-preservation guard below asks
+// about all of them, so that preservation does not depend on which mapping the
+// precedence rule happened to pick -- see resolveGroupMappings' doc (#488).
+func (h *AuthHandlers) reconcileManagedMemberships(ctx context.Context, userID string, desired map[string]string, managed map[string]struct{}, allMatching map[string][]string, defaultRole string) error {
 	// Reconcile each IdP-managed organization.
 	for orgName := range managed {
 		org, err := h.orgRepo.GetByName(ctx, orgName, loginScope())
@@ -853,9 +890,41 @@ func (h *AuthHandlers) reconcileManagedMemberships(ctx context.Context, userID s
 			// through to the revoke branch below: rejection must leave an
 			// existing (possibly unrelated, legitimately-granted) membership
 			// untouched, not tear it down.
-			if guardErr := h.guardProvisionableRole(ctx, role); guardErr != nil {
-				slog.Warn("group mapping rejected: resolved role is not automatically provisionable by an IdP-driven mapping; a human admin must grant it explicitly",
-					"user_id", userID, "org", orgName, "role", role, "error", guardErr)
+			// ASK ABOUT EVERY MATCHING MAPPING, NOT ONLY THE WINNER (#488).
+			//
+			// Guarding just `role` made the preservation depend on the guarded
+			// mapping being the one that won, which was true under last-wins
+			// only because operators ordered their arrays for it. Under
+			// first-wins the same configuration lets a weaker mapping win, PASS
+			// this guard, and demote a real administrator -- no error, no
+			// warning, visible only as lost authority at the next login.
+			//
+			// So the question is asked of every role any matching mapping
+			// resolved to for this organization. If ANY of them may not be
+			// auto-provisioned, the organization is left alone entirely. That is
+			// the same outcome the old code produced for a correctly-ordered
+			// array, and now it does not depend on the order at all.
+			// FALL BACK TO THE WINNER, NEVER TO NOTHING. A caller that supplies
+			// no list -- or an organization with no entry in it -- must still get
+			// the original per-winner guard. Degrading to an empty loop would
+			// silently disable the admin refusal entirely, which is a far worse
+			// failure than the ordering dependence being fixed here.
+			candidates := allMatching[orgName]
+			if len(candidates) == 0 {
+				candidates = []string{role}
+			}
+			refused := ""
+			var refusedErr error
+			for _, candidate := range candidates {
+				if guardErr := h.guardProvisionableRole(ctx, candidate); guardErr != nil {
+					refused, refusedErr = candidate, guardErr
+					break
+				}
+			}
+			if refusedErr != nil {
+				slog.Warn("group mapping rejected: a matching role is not automatically provisionable by an IdP-driven mapping; a human admin must grant it explicitly",
+					"user_id", userID, "org", orgName, "winning_role", role,
+					"refused_role", refused, "error", refusedErr)
 				continue
 			}
 			if isMember {

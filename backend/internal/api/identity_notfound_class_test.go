@@ -335,7 +335,7 @@ func TestReconcile_AlreadyRemovedMembership_CompletesLoop(t *testing.T) {
 		WillReturnResult(sqlmock.NewResult(0, 1))
 
 	err := h.reconcileManagedMemberships(context.Background(), "u1",
-		map[string]string{}, map[string]struct{}{"alpha": {}, "beta": {}}, "")
+		map[string]string{}, map[string]struct{}{"alpha": {}, "beta": {}}, nil, "")
 	if err != nil {
 		t.Fatalf("an already-removed membership must not abort the loop: %v", err)
 	}
@@ -359,7 +359,7 @@ func TestReconcile_MembershipVanishedBeforeRoleUpdate_Continues(t *testing.T) {
 	mock.ExpectExec("UPDATE organization_members").WillReturnResult(sqlmock.NewResult(0, 0))
 
 	err := h.reconcileManagedMemberships(context.Background(), "u1",
-		map[string]string{"platform": "editor"}, map[string]struct{}{"platform": {}}, "")
+		map[string]string{"platform": "editor"}, map[string]struct{}{"platform": {}}, nil, "")
 	if err != nil {
 		t.Fatalf("a vanished membership must be skipped, not abort the login: %v", err)
 	}
