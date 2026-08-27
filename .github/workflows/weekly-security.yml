@@ -72,20 +72,49 @@ jobs:
         with:
           persist-credentials: false
 
-      # Call analysis is deliberately disabled here. The scanner image ships its
-      # own Go toolchain (1.26.2 in v2.3.8) and invokes it with GOTOOLCHAIN=local,
-      # so it cannot build a module whose go directive names a newer release than
-      # the one baked into the image. When that happens its internal govulncheck
-      # pass aborts and osv-scanner exits 127 — an *error* code, distinct from the
-      # exit 1 that means "vulnerabilities found" — while still reporting zero
+      # Call analysis is deliberately disabled here.
+      #
+      # The scanner image is built FROM a golang base, so it carries exactly one
+      # Go toolchain, and the official golang images set GOTOOLCHAIN=local —
+      # which forbids downloading or switching to another. It therefore cannot
+      # build a module whose go directive names a newer release than the one
+      # baked in. When that happens its internal govulncheck pass aborts and
+      # osv-scanner exits 127 — an *error* code, distinct from the exit 1 that
+      # means "vulnerabilities found" — while still reporting zero
       # vulnerabilities. `continue-on-error` collapses both into outcome=failure,
       # so the tooling error silently filed a "vulnerabilities found" issue that
-      # listed nothing (issue #334, and again on the 2026-08-10 run).
+      # listed nothing. That was issue #334, and it recurred on the 2026-08-10
+      # run.
+      #
+      # RE-MEASURED 2026-08-27 at the pin below, v2.5.1, the newest release, by
+      # pulling ghcr.io/google/osv-scanner-action:v2.5.1 and running the real
+      # scanner: the image reports go1.26.5 while backend/go.mod declares
+      # go 1.26.6, and the pass aborts with
+      #   "go.mod requires go >= 1.26.6 (running go 1.26.5; GOTOOLCHAIN=local)"
+      # exiting 127 with an EMPTY results array. The same invocation with the
+      # flag exits 0. The note here previously said go1.26.2 in v2.3.8; that was
+      # true of a pin no longer in use, and the numbers moved without the
+      # conclusion changing.
+      #
+      # A NEWER PIN DOES NOT FIX THIS AND CANNOT: the image will always trail the
+      # toolchain this module builds on. A GOTOOLCHAIN=auto override was also
+      # measured and does work, and is deliberately not adopted — it duplicates
+      # the govulncheck job at an older govulncheck, makes a hermetic scan depend
+      # on fetching and executing a toolchain at scan time inside a root
+      # container, and returns to exit 127 with an empty report whenever that
+      # fetch fails.
       #
       # Nothing is lost by disabling it: reachability is the govulncheck job's job,
       # and that job resolves the toolchain from backend/go.mod, so it always
       # matches the module. This job stays responsible for the flat known-vuln
       # sweep of go.sum, which needs no toolchain at all.
+      #
+      # THE PAIRING IS NOW GATED, not merely described. The replay signature
+      # `osv-reachability-delegation` asserts, on every push and pull request and
+      # daily, that this flag stays paired with a govulncheck job that covers
+      # backend/go.mod, reads its toolchain from backend/go.mod, and has its
+      # result consumed rather than swallowed. Removing either half fails the
+      # signature-replay check.
       - name: Run OSV-Scanner
         id: osv
         uses: google/osv-scanner-action/osv-scanner-action@6e4298ebc4db23e847df9b2e2de2939d6f066c67 # v2.5.1
