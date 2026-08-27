@@ -66,31 +66,30 @@ func TestEveryReaderIsPurposeBound(t *testing.T) {
 	}
 }
 
-// TestWritersAreStillUnbound is the R1/R2 ORDERING guard, and it is meant to
-// fail when R2 lands.
+// TestEveryWriterIsPurposeBound is the R2 property, and it replaces the R1
+// ordering guard that used to sit here.
 //
-// It asserts the release sequence rather than a code property: while this test
-// is present, writers must NOT be bound. R2 flips the writers and deletes this
-// test in the same change, which is what makes the two-release ordering a thing
-// someone has to do deliberately rather than a thing they can do by accident in
-// one merge.
+// R1 shipped every READER on DecryptFor while writers stayed unbound, because
+// the deployment runs 2-3 backend replicas and a bound value written by a new
+// replica must never reach an old one that cannot read it. That guard asserted
+// the writers were still unbound and FAILED when they were not, so flipping
+// them was something someone had to do deliberately. This is that deliberate
+// step: R1 is deployed, and the guard is now the mirror image.
 //
-// If you are reading this while trying to land R2: delete this test, that is
-// the intended step. Do not land it before R1 is deployed on every replica.
-func TestWritersAreStillUnbound(t *testing.T) {
+// From here a new writer that calls the unbound crypto.Encrypt is a column
+// whose fresh secrets are not bound to anything -- silently, because the site
+// works fine.
+func TestEveryWriterIsPurposeBound(t *testing.T) {
 	offenders, scanned := scanFor(t, unboundWriterPattern)
 	if err := checkScanNotVacuous(scanned); err != nil {
 		t.Fatalf("%v", err)
 	}
-	if len(offenders) == 0 {
-		t.Fatal("no unbound writers remain, so this looks like R2.\n\n" +
-			"That is fine IF R1 (readers on DecryptFor) is already deployed on every replica. " +
-			"The deployment runs 2-3 backend replicas, so a bound value written by a new replica " +
-			"and read by an old one fails.\n\n" +
-			"If R1 is live: delete this test, which is the intended R2 step. If it is not: revert " +
-			"the writer change and ship R1 first.")
+	for _, o := range offenders {
+		t.Errorf("%s calls crypto.Encrypt, which binds the value to nothing.\n"+
+			"Use crypto.EncryptFor with the purpose for that column. A secret written unbound is "+
+			"one a ciphertext from another column could later be swapped for without any "+
+			"cryptographic signal (#277).", o)
 	}
-	t.Logf("R1: %d writer site(s) still unbound, as intended at this stage", len(offenders))
 }
 
 // scanFor walks internal/ and returns the sites matching pat, excluding the
