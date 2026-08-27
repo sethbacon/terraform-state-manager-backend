@@ -41,7 +41,6 @@ type Config struct {
 	StateSource StateSourceConfig `mapstructure:"statesource"`
 	// BackupRetention bounds the state_backups table (#257).
 	BackupRetention BackupRetentionConfig `mapstructure:"backup_retention"`
-	// Tenancy carries the organization-partition rollout controls (#393).
 }
 
 // AuthzConfig controls where authorization decisions read a principal's role
@@ -710,10 +709,6 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("telemetry.metrics.prometheus_port", 9090)
 
 	v.SetDefault("workers.enabled", true)
-
-	// Organization-partition rollout (#393). Off: Phase 2b observes nothing
-	// unless an operator asks it to, and observing costs a second query per
-	// read. See TenancyConfig.
 
 	// Drift-run reconciler: fail a dispatched run whose CI job never called back
 	// after run_ttl, sweeping every reconcile_interval.
