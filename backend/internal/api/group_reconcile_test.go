@@ -67,7 +67,7 @@ func TestReconcile_UpsertExistingMember(t *testing.T) {
 		WillReturnResult(sqlmock.NewResult(0, 1))
 
 	err := h.reconcileManagedMemberships(context.Background(), "u1",
-		map[string]string{"platform": "editor"}, map[string]struct{}{"platform": {}}, "")
+		map[string]string{"platform": "editor"}, map[string]struct{}{"platform": {}}, nil, "")
 	if err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
@@ -89,7 +89,7 @@ func TestReconcile_AddsNewMember(t *testing.T) {
 		WillReturnResult(sqlmock.NewResult(0, 1))
 
 	err := h.reconcileManagedMemberships(context.Background(), "u1",
-		map[string]string{"platform": "viewer"}, map[string]struct{}{"platform": {}}, "")
+		map[string]string{"platform": "viewer"}, map[string]struct{}{"platform": {}}, nil, "")
 	if err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
@@ -109,7 +109,7 @@ func TestReconcile_DeprovisionsOnGroupLoss(t *testing.T) {
 		WillReturnResult(sqlmock.NewResult(0, 1))
 
 	err := h.reconcileManagedMemberships(context.Background(), "u1",
-		map[string]string{}, map[string]struct{}{"platform": {}}, "")
+		map[string]string{}, map[string]struct{}{"platform": {}}, nil, "")
 	if err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
@@ -125,7 +125,7 @@ func TestReconcile_UnknownOrgIsSkipped(t *testing.T) {
 		WillReturnRows(sqlmock.NewRows(orgRowCols))
 
 	err := h.reconcileManagedMemberships(context.Background(), "u1",
-		map[string]string{"ghost-org": "viewer"}, map[string]struct{}{"ghost-org": {}}, "")
+		map[string]string{"ghost-org": "viewer"}, map[string]struct{}{"ghost-org": {}}, nil, "")
 	if err != nil {
 		t.Fatalf("a mapping to a missing org must be skipped, not fatal: %v", err)
 	}
@@ -145,7 +145,7 @@ func TestReconcile_DefaultRoleFirstLoginOnly(t *testing.T) {
 	mock.ExpectExec("INSERT INTO organization_members").
 		WillReturnResult(sqlmock.NewResult(0, 1))
 
-	if err := h.reconcileManagedMemberships(context.Background(), "u1", nil, nil, "viewer"); err != nil {
+	if err := h.reconcileManagedMemberships(context.Background(), "u1", nil, nil, nil, "viewer"); err != nil {
 		t.Fatalf("first login: %v", err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
@@ -158,7 +158,7 @@ func TestReconcile_DefaultRoleFirstLoginOnly(t *testing.T) {
 	mock2.ExpectQuery("FROM organization_members").WithArgs("o-def", "u1", []string{"o-def"}).
 		WillReturnRows(sqlmock.NewRows(memberRowCols).AddRow("o-def", "u1", "rt-admin", time.Now()))
 
-	if err := h2.reconcileManagedMemberships(context.Background(), "u1", nil, nil, "viewer"); err != nil {
+	if err := h2.reconcileManagedMemberships(context.Background(), "u1", nil, nil, nil, "viewer"); err != nil {
 		t.Fatalf("existing member: %v", err)
 	}
 	if err := mock2.ExpectationsWereMet(); err != nil {
@@ -176,7 +176,7 @@ func TestReconcile_SkipsManagedDefaultOrgFallback(t *testing.T) {
 	expectOrgByName(mock, "o-def", "default") // GetDefaultOrganization lookup
 
 	err := h.reconcileManagedMemberships(context.Background(), "u1",
-		map[string]string{}, map[string]struct{}{"default": {}}, "viewer")
+		map[string]string{}, map[string]struct{}{"default": {}}, nil, "viewer")
 	if err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
@@ -208,7 +208,7 @@ func TestReconcile_ResolvedRoleCarriesScopeAdmin_AddPath_Rejected(t *testing.T) 
 	expectRoleScopesLookup(mock, "admin", []string{"admin"})
 
 	err := h.reconcileManagedMemberships(context.Background(), "u1",
-		map[string]string{"platform": "admin"}, map[string]struct{}{"platform": {}}, "")
+		map[string]string{"platform": "admin"}, map[string]struct{}{"platform": {}}, nil, "")
 	if err != nil {
 		t.Fatalf("reconcile: unexpected error: %v", err)
 	}
@@ -229,7 +229,7 @@ func TestReconcile_ResolvedRoleCarriesScopeAdmin_UpdatePath_Rejected(t *testing.
 	// No UPDATE (or the revoke DELETE) must follow.
 
 	err := h.reconcileManagedMemberships(context.Background(), "u1",
-		map[string]string{"platform": "admin"}, map[string]struct{}{"platform": {}}, "")
+		map[string]string{"platform": "admin"}, map[string]struct{}{"platform": {}}, nil, "")
 	if err != nil {
 		t.Fatalf("reconcile: unexpected error: %v", err)
 	}
@@ -257,7 +257,7 @@ func TestReconcile_GuardProvisionableRole_UnknownRoleTemplate_DefersToRealLookup
 		WillReturnRows(sqlmock.NewRows([]string{"id"}))
 
 	err := h.reconcileManagedMemberships(context.Background(), "u1",
-		map[string]string{"platform": "ghost-role"}, map[string]struct{}{"platform": {}}, "")
+		map[string]string{"platform": "ghost-role"}, map[string]struct{}{"platform": {}}, nil, "")
 	if err == nil {
 		t.Fatal("expected error from AddMemberWithParams' role-template lookup, got nil")
 	}
@@ -299,5 +299,43 @@ func TestApplyGroupMappings_EndToEnd(t *testing.T) {
 		WillReturnRows(sqlmock.NewRows([]string{"oidc_group_claim_name", "oidc_default_role", "oidc_group_mappings", "updated_at"}))
 	if err := h2.applyGroupMappings(context.Background(), "u1", []string{"any"}); err != nil {
 		t.Fatalf("no-op path: %v", err)
+	}
+}
+
+// #488 — THE SILENT DEMOTION. This is the regression the precedence flip would
+// have caused, and the reason the guard reads every matching role rather than
+// the winner.
+//
+// Two mappings match this user for one organization: `editor` and `admin`.
+// Under first-wins the WINNER is `editor` — a role that passes
+// guardProvisionableRole perfectly well. Guarding only the winner would
+// therefore apply it, and UpdateMemberRole would demote a real administrator
+// with no error, no warning, and nothing visible until they lost authority at
+// their next login.
+//
+// Staging no UPDATE and no DELETE is the assertion: the organization must be
+// left entirely alone because a REFUSED role also matched, whichever one won.
+func TestReconcile_AdminMappingThatLosesStillPreservesTheMembership(t *testing.T) {
+	h, mock := newReconcileEnv(t, nil)
+
+	expectOrgByName(mock, "o1", "platform")
+	mock.ExpectQuery("FROM organization_members").WithArgs("o1", "u1", []string{"o1"}).
+		WillReturnRows(sqlmock.NewRows(memberRowCols).AddRow("o1", "u1", "rt-admin", time.Now()))
+	// The guard walks the matching roles in order and stops at the refused one.
+	expectRoleScopesLookup(mock, "editor", []string{"states:read", "states:write"})
+	expectRoleScopesLookup(mock, "admin", []string{"admin"})
+
+	err := h.reconcileManagedMemberships(context.Background(), "u1",
+		// desired is the WINNER under first-wins: the non-admin role.
+		map[string]string{"platform": "editor"},
+		map[string]struct{}{"platform": {}},
+		// ...but both roles matched, and that is what the guard must see.
+		map[string][]string{"platform": {"editor", "admin"}},
+		"")
+	if err != nil {
+		t.Fatalf("reconcile: unexpected error: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("unmet expectations — no UPDATE or DELETE may be issued when a refused role also matched: %v", err)
 	}
 }

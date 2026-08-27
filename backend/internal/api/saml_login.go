@@ -205,8 +205,8 @@ func (h *AuthHandlers) SAMLACSHandler() gin.HandlerFunc {
 
 		// Reconcile memberships from the SAML group attribute using the shared
 		// (deprovisioning) reconciler — same semantics as OIDC/LDAP group mapping.
-		desired, managed := saml.ResolveSAMLGroupMappings(info.Groups, h.cfg.Auth.SAML.GroupMappings)
-		if mapErr := h.reconcileManagedMemberships(ctx, user.ID, desired, managed, h.cfg.Auth.SAML.DefaultRole); mapErr != nil {
+		desired, managed, allMatching := saml.ResolveSAMLGroupMappings(info.Groups, h.cfg.Auth.SAML.GroupMappings)
+		if mapErr := h.reconcileManagedMemberships(ctx, user.ID, desired, managed, allMatching, h.cfg.Auth.SAML.DefaultRole); mapErr != nil {
 			slog.Warn("failed to apply SAML group mappings", "user_id", user.ID, "error", mapErr)
 		}
 

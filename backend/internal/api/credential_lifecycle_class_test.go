@@ -500,7 +500,7 @@ func TestCredentialLifecycleClass_AuthorityReductionInvalidatesEveryCredentialFa
 			run: func(t *testing.T, db *sql.DB, mock sqlmock.Sqlmock) {
 				h := newClassAuthHandlers(t, db, nil)
 				mappings := []config.OIDCGroupMapping{{Group: "platform-team", Organization: "acme", Role: "editor"}}
-				desired, managed := resolveGroupMappings([]string{"other-team"}, mappings)
+				desired, managed, _ := resolveGroupMappings([]string{"other-team"}, mappings)
 
 				expectOrgByName(mock, "o1", "acme")
 				mock.ExpectQuery("FROM organization_members").WithArgs("o1", "u1", []string{"o1"}).
@@ -510,7 +510,7 @@ func TestCredentialLifecycleClass_AuthorityReductionInvalidatesEveryCredentialFa
 				expectRetainedScopes(mock, "u1", `["state:read"]`)
 				expectKeyRevoked(mock, "u1", "k-idp-deprovisioned")
 
-				if err := h.reconcileManagedMemberships(context.Background(), "u1", desired, managed, ""); err != nil {
+				if err := h.reconcileManagedMemberships(context.Background(), "u1", desired, managed, nil, ""); err != nil {
 					t.Fatalf("reconcile: %v", err)
 				}
 			},
@@ -528,7 +528,7 @@ func TestCredentialLifecycleClass_AuthorityReductionInvalidatesEveryCredentialFa
 				h := newClassAuthHandlers(t, db, nil)
 				// LDAP resolves its mappings with its own helper; the reconciler
 				// (and therefore the sweep) is shared with OIDC and SAML.
-				desired, managed := ldap.ResolveLDAPGroupMappings(
+				desired, managed, _ := ldap.ResolveLDAPGroupMappings(
 					[]string{"cn=platform,ou=groups"},
 					[]config.LDAPGroupMapping{{GroupDN: "cn=platform,ou=groups", Organization: "acme", Role: "viewer"}})
 
@@ -542,7 +542,7 @@ func TestCredentialLifecycleClass_AuthorityReductionInvalidatesEveryCredentialFa
 				expectRetainedScopes(mock, "u1", `["state:read"]`)
 				expectKeyRevoked(mock, "u1", "k-idp-demoted")
 
-				if err := h.reconcileManagedMemberships(context.Background(), "u1", desired, managed, ""); err != nil {
+				if err := h.reconcileManagedMemberships(context.Background(), "u1", desired, managed, nil, ""); err != nil {
 					t.Fatalf("reconcile: %v", err)
 				}
 			},
@@ -555,7 +555,7 @@ func TestCredentialLifecycleClass_AuthorityReductionInvalidatesEveryCredentialFa
 			wantJWTSweep: false,
 			run: func(t *testing.T, db *sql.DB, mock sqlmock.Sqlmock) {
 				h := newClassAuthHandlers(t, db, nil)
-				desired, managed := saml.ResolveSAMLGroupMappings(
+				desired, managed, _ := saml.ResolveSAMLGroupMappings(
 					[]string{"other-team"},
 					[]config.SAMLGroupMapping{{Group: "platform-team", Organization: "acme", Role: "editor"}})
 
@@ -567,7 +567,7 @@ func TestCredentialLifecycleClass_AuthorityReductionInvalidatesEveryCredentialFa
 				expectRetainedScopes(mock, "u1", `["state:read"]`)
 				expectKeyRevoked(mock, "u1", "k-saml-deprovisioned")
 
-				if err := h.reconcileManagedMemberships(context.Background(), "u1", desired, managed, ""); err != nil {
+				if err := h.reconcileManagedMemberships(context.Background(), "u1", desired, managed, nil, ""); err != nil {
 					t.Fatalf("reconcile: %v", err)
 				}
 			},
@@ -634,7 +634,7 @@ func TestCredentialLifecycleClass_PromotionRetainsKeys(t *testing.T) {
 	expectKeyList(mock, "u1", "k-promoted", `["state:read"]`)
 
 	if err := h.reconcileManagedMemberships(context.Background(), "u1",
-		map[string]string{"acme": "editor"}, map[string]struct{}{"acme": {}}, ""); err != nil {
+		map[string]string{"acme": "editor"}, map[string]struct{}{"acme": {}}, nil, ""); err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {

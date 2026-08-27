@@ -60,7 +60,7 @@ func TestResolveLDAPGroupMappings(t *testing.T) {
 	}
 
 	t.Run("case-insensitive DN match", func(t *testing.T) {
-		desired, managed := ResolveLDAPGroupMappings(
+		desired, managed, _ := ResolveLDAPGroupMappings(
 			[]string{"CN=TF-Admins,OU=Groups,DC=example,DC=com"}, mappings)
 		if !reflect.DeepEqual(desired, map[string]string{"default": "admin"}) {
 			t.Fatalf("desired = %v", desired)
@@ -71,7 +71,7 @@ func TestResolveLDAPGroupMappings(t *testing.T) {
 	})
 
 	t.Run("no matching group -> empty desired, orgs still managed (revoked)", func(t *testing.T) {
-		desired, managed := ResolveLDAPGroupMappings([]string{"cn=unrelated,dc=example,dc=com"}, mappings)
+		desired, managed, _ := ResolveLDAPGroupMappings([]string{"cn=unrelated,dc=example,dc=com"}, mappings)
 		if len(desired) != 0 {
 			t.Fatalf("desired should be empty, got %v", desired)
 		}

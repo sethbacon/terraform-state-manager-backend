@@ -33,6 +33,7 @@ import (
 	"crypto/x509"
 	"encoding/xml"
 	"fmt"
+	identitymodels "github.com/sethbacon/terraform-suite-identity/identity/models"
 	"io"
 	"log/slog"
 	"net/http"
@@ -195,20 +196,37 @@ func extractUserInfo(assertion *saml.Assertion, groupAttr string) *UserInfo {
 // SAML group-attribute values and the admin-configured mappings. Group values are
 // matched exactly. Pure and side-effect-free for unit testing; the caller feeds
 // the result into the shared membership reconciler (which also deprovisions).
-func ResolveSAMLGroupMappings(groups []string, mappings []config.SAMLGroupMapping) (desired map[string]string, managed map[string]struct{}) {
-	desired = make(map[string]string)
-	managed = make(map[string]struct{})
-	groupSet := make(map[string]struct{}, len(groups))
-	for _, g := range groups {
-		groupSet[g] = struct{}{}
-	}
+// PRECEDENCE COMES FROM THE SHARED MODULE (#488, identity#269). This
+// application took the LAST matching mapping and the registry took the FIRST,
+// off the same shared type, so one stored list granted different roles
+// depending on which app read it. First-wins is canonical: appending a mapping
+// cannot then change the outcome for anyone already matched.
+//
+// allMatching returns EVERY role a matching mapping resolved to per
+// organization, not only the winner. reconcileManagedMemberships guards on all
+// of them, so that admin preservation does not depend on which mapping the
+// precedence rule happened to pick -- see api.resolveGroupMappings' doc.
+func ResolveSAMLGroupMappings(groups []string, mappings []config.SAMLGroupMapping) (desired map[string]string, managed map[string]struct{}, allMatching map[string][]string) {
+	shared := make([]identitymodels.OIDCGroupMapping, 0, len(mappings))
 	for _, m := range mappings {
-		managed[m.Organization] = struct{}{}
-		if _, ok := groupSet[m.Group]; ok {
-			desired[m.Organization] = m.Role
-		}
+		shared = append(shared, identitymodels.OIDCGroupMapping{
+			Group: m.Group, Organization: m.Organization, Role: m.Role,
+		})
 	}
-	return desired, managed
+	res := identitymodels.ResolveGroupMappings(groups, shared)
+
+	held := make(map[string]struct{}, len(groups))
+	for _, g := range groups {
+		held[g] = struct{}{}
+	}
+	allMatching = make(map[string][]string)
+	for _, m := range mappings {
+		if _, ok := held[m.Group]; !ok {
+			continue
+		}
+		allMatching[m.Organization] = append(allMatching[m.Organization], m.Role)
+	}
+	return res.DesiredRole, res.Managed, allMatching
 }
 
 // resolveIdPMetadata loads IdP metadata from inline XML or a metadata URL.

@@ -74,8 +74,8 @@ func (h *AuthHandlers) LDAPLoginHandler() gin.HandlerFunc {
 
 		// Reconcile memberships from LDAP groups using the shared (deprovisioning)
 		// reconciler — same semantics as OIDC group mapping.
-		desired, managed := ldap.ResolveLDAPGroupMappings(info.Groups, h.cfg.Auth.LDAP.GroupMappings)
-		if mapErr := h.reconcileManagedMemberships(ctx, user.ID, desired, managed, h.cfg.Auth.LDAP.DefaultRole); mapErr != nil {
+		desired, managed, allMatching := ldap.ResolveLDAPGroupMappings(info.Groups, h.cfg.Auth.LDAP.GroupMappings)
+		if mapErr := h.reconcileManagedMemberships(ctx, user.ID, desired, managed, allMatching, h.cfg.Auth.LDAP.DefaultRole); mapErr != nil {
 			slog.Warn("failed to apply LDAP group mappings", "user_id", user.ID, "error", mapErr)
 		}
 
