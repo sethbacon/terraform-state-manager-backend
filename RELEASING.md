@@ -67,6 +67,35 @@ cosign verify \
 3. Squash-merge the release PR.
 4. Watch `release.yml` run in the Actions tab. No manual dispatch required.
 
+### If "Release PR closes only what it completes" is red
+
+release-please renders **every** issue reference a commit carries as a closing keyword in
+the changelog, including a `Refs #N` trailer written deliberately to link an issue
+*without* closing it. This repository squash-merges, so the release PR body becomes the
+merge commit message, and GitHub acts on the keywords in it. A `Refs` trailer therefore
+closes its issue anyway, one release later.
+
+That is not hypothetical: `ca2e5b3` ends `Refs #459`, release PR #480 rendered it as a
+closing keyword, and #459 closed one second after #480 merged.
+
+The guard fails the release PR when its body would close an issue that is **open** and
+that **no commit in the release asked to close**. When it is red:
+
+1. Read the job log. It names each issue and why.
+2. Edit the release PR body: change `closes` to `refs` on those lines only. Leave the
+   genuine ones alone.
+3. Merge promptly. release-please regenerates the body on the next push to `main`, which
+   undoes the edit and turns the check red again — the check re-runs on `edited` and
+   `synchronize` precisely so the body that actually merges is the body that was checked.
+
+There is no configuration that removes the hazard at the source today. The verb is
+hardcoded in `conventional-changelog-conventionalcommits`' commit partial, and
+release-please's config schema exposes nothing that reaches it. Upstream fixed it in the
+library in release-please **17.10.4**; release-please-action **v5.0.0** — which
+`shared-workflows` pins — still bundles release-please 17.6.0, and the action's `main`
+bundles 17.6.1. When an action release ships 17.10.4 or newer, bumping the shared pin
+removes the hazard and this guard becomes the proof that it stayed removed.
+
 ## Hotfix flow
 
 1. Create a `fix/` branch from `main`.
