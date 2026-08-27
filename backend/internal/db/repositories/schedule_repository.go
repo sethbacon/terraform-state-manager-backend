@@ -7,6 +7,8 @@ import (
 	"errors"
 	"strings"
 	"time"
+
+	"github.com/terraform-state-manager/terraform-state-manager/internal/tenantscope"
 )
 
 // Schedule is a cron-driven recurring task. target_config is opaque to the DAO;
@@ -114,6 +116,22 @@ func (r *ScheduleRepository) List(ctx context.Context) ([]Schedule, error) {
 		return nil, err
 	}
 	defer rows.Close()
+	return scanSchedules(rows)
+}
+
+func (r *ScheduleRepository) GetByID(ctx context.Context, id string) (*Schedule, error) {
+	row := r.db.QueryRowContext(ctx, `SELECT `+scheduleColumns+` FROM schedules WHERE id = $1`, id)
+	s, err := scanSchedule(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return s, nil
+}
+
+func scanSchedules(rows *sql.Rows) ([]Schedule, error) {
 	out := []Schedule{}
 	for rows.Next() {
 		s, err := scanSchedule(rows)
@@ -125,8 +143,97 @@ func (r *ScheduleRepository) List(ctx context.Context) ([]Schedule, error) {
 	return out, rows.Err()
 }
 
-func (r *ScheduleRepository) GetByID(ctx context.Context, id string) (*Schedule, error) {
-	row := r.db.QueryRowContext(ctx, `SELECT `+scheduleColumns+` FROM schedules WHERE id = $1`, id)
+// ===========================================================================
+// THE PHASE 3 READ FLIP FOR schedules -- #393.
+//
+// The write side of this root was scoped first (tenant_write_scope.go) because a
+// scoped write has no re-ownership window. The read side is the other half, and
+// until now a caller holding state:read in ANY organization listed every
+// organization's schedules -- including target_config, which names the pipeline
+// connection a firing dispatches to.
+//
+// GetByIDInScope matters more than the list. RunSchedule loads a schedule BY ID
+// and hands its target_config to the dispatcher, stamped with the SCHEDULE's
+// organization: an unscoped load therefore let a caller in one organization fire
+// another organization's schedule, on another organization's CI connection,
+// decrypting that connection's token to do it. That is an execution path, not a
+// disclosure, which is why it is flipped in the same change as the list rather
+// than after it.
+//
+// WHAT IS DELIBERATELY NOT SCOPED HERE: GetDue, ClaimDue, RecordOutcome. The
+// background runner (internal/services/scheduler) has no request and therefore
+// no principal, and #393 settled that a worker is an explicit exemption rather
+// than a synthetic platform admin. It carries each schedule's organization
+// forward in memory instead -- see Create's comment on why there is no edge to
+// join back along.
+// ===========================================================================
+
+// scheduleOrgPredicate is the organization filter, written once so the two
+// scoped readers below cannot come to mean different things. That is the failure
+// mode that matters here: a predicate that has drifted on ONE of them still
+// passes every test written against the other.
+//
+// `= ANY($n::uuid[])` rather than a generated IN list: one parameter, so the
+// plan is stable whatever the caller's organization count, and no string
+// concatenation reaches the query at all.
+//
+// IT EXCLUDES NULL, and deliberately. `NULL = ANY(...)` is NULL, never true, so
+// a row whose organization_id was never stamped is invisible to every tenant
+// instead of visible to all of them. Migration 000034 made the column NOT NULL,
+// so this schema can no longer produce such a row -- but a database restored
+// from a backup taken before it still holds them, and this is the layer that has
+// to keep working when the constraint above it is absent.
+const scheduleOrgPredicate = `organization_id = ANY($1::uuid[])`
+
+// ListInScope returns the schedules the scope permits, newest first.
+//
+// An empty scope reads NOTHING, and does so WITHOUT A QUERY. That is the
+// fail-closed direction: a caller whose tenancy could not be established, or who
+// holds the required scope in no organization, selects no rows rather than every
+// row. The early return is not an optimisation -- `= ANY('{}')` returns the same
+// empty set -- it is here so the "reads nothing" answer does not depend on a
+// Postgres subtlety a later edit could change by accident.
+func (r *ScheduleRepository) ListInScope(ctx context.Context, scope tenantscope.Scope) ([]Schedule, error) {
+	if scope.Empty() {
+		return []Schedule{}, nil
+	}
+	if scope.PlatformAdmin {
+		// The one principal that is genuinely deployment-wide. It also reaches
+		// rows whose organization_id is NULL, which the predicate below cannot
+		// match and no tenant should see.
+		return r.List(ctx)
+	}
+	rows, err := r.db.QueryContext(ctx, `SELECT `+scheduleColumns+`
+		FROM schedules WHERE `+scheduleOrgPredicate+`
+		ORDER BY created_at DESC`, scope.OrgIDs)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanSchedules(rows)
+}
+
+// GetByIDInScope returns the schedule with the given id when the scope permits
+// it, and (nil, nil) otherwise.
+//
+// A row that exists but belongs to another organization is reported EXACTLY as a
+// row that does not exist, and the caller must not be able to tell the two
+// apart: answering "that one is not yours" would let them enumerate ids and
+// learn which of them name real schedules somewhere in the deployment. 404 is
+// the whole answer, which is also what the already-scoped UpdateInScope and
+// DeleteInScope on this table return.
+func (r *ScheduleRepository) GetByIDInScope(ctx context.Context, id string, scope tenantscope.Scope) (*Schedule, error) {
+	if scope.Empty() {
+		return nil, nil
+	}
+	if scope.PlatformAdmin {
+		return r.GetByID(ctx, id)
+	}
+	// The organization array is $1 and the id is $2, so both readers share one
+	// predicate string rather than keeping two copies that agree only as long as
+	// somebody remembers they must.
+	row := r.db.QueryRowContext(ctx, `SELECT `+scheduleColumns+`
+		FROM schedules WHERE `+scheduleOrgPredicate+` AND id = $2`, scope.OrgIDs, id)
 	s, err := scanSchedule(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
@@ -175,15 +282,7 @@ func (r *ScheduleRepository) GetDue(ctx context.Context, now time.Time) ([]Sched
 		return nil, err
 	}
 	defer rows.Close()
-	out := []Schedule{}
-	for rows.Next() {
-		s, err := scanSchedule(rows)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, *s)
-	}
-	return out, rows.Err()
+	return scanSchedules(rows)
 }
 
 // RecordRun stamps the outcome of a fired schedule and schedules the next fire.

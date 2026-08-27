@@ -623,12 +623,16 @@ func NewRouter(cfg *config.Config, database *sql.DB, identityDB *sql.DB) (*gin.E
 		scheduleHandlers.AttachOrganizations(orgMembers)
 		sg := v1.Group("/schedules", requireAuth)
 		{
-			sg.GET("", middleware.RequireScope(auth.ScopeStateRead), scheduleHandlers.ListSchedules())
+			// Every route in this group resolves a tenant scope, and each one
+			// resolves it for the verb the route is guarded by: a scope resolved
+			// for state:read handed to a route that dispatches would answer a
+			// question about reading in order to permit an execution.
+			sg.GET("", middleware.RequireScope(auth.ScopeStateRead), tenantScopeStateRead, scheduleHandlers.ListSchedules())
 			sg.POST("", middleware.RequireScope(auth.ScopeSourcesManage), tenantScopeSourcesManage, scheduleHandlers.CreateSchedule())
-			sg.GET("/:id", middleware.RequireScope(auth.ScopeStateRead), scheduleHandlers.GetSchedule())
+			sg.GET("/:id", middleware.RequireScope(auth.ScopeStateRead), tenantScopeStateRead, scheduleHandlers.GetSchedule())
 			sg.PUT("/:id", middleware.RequireScope(auth.ScopeSourcesManage), tenantScopeSourcesManage, scheduleHandlers.UpdateSchedule())
 			sg.DELETE("/:id", middleware.RequireScope(auth.ScopeSourcesManage), tenantScopeSourcesManage, scheduleHandlers.DeleteSchedule())
-			sg.POST("/:id/run", middleware.RequireScope(auth.ScopeSourcesManage), scheduleHandlers.RunSchedule())
+			sg.POST("/:id/run", middleware.RequireScope(auth.ScopeSourcesManage), tenantScopeSourcesManage, scheduleHandlers.RunSchedule())
 		}
 
 		// Notification channels (admin): alert destinations + the drift-event hook.

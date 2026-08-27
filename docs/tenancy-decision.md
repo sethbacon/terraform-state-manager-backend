@@ -40,21 +40,36 @@ a shared design. It is what an organization already meant, finally enforced.
 ## Where the migration actually stands
 
 Isolation is **not complete**, and this is the honest position rather than the
-advertised one. Of the nine partition roots, one has scoped reads:
+advertised one. Of the nine partition roots, two have scoped reads:
 
 | Reads are organization-scoped | Reads still return every row |
 | --- | --- |
-| `state_sources` | `pipeline_connections`, `ci_sources`, `notification_channels`, `schedules`, `state_transfers`, `drift_runs`, `drift_records`, `health_runs` |
+| `state_sources`, `schedules` | `pipeline_connections`, `ci_sources`, `notification_channels`, `state_transfers`, `drift_runs`, `drift_records`, `health_runs` |
 
-That is eight planes on which a caller still sees other organizations' rows.
+That is seven planes on which a caller still sees other organizations' rows.
 The remaining flips are tracked by [#393][issue393]; do not read this page as
 saying the application is isolated today.
 
-That table is **not maintained by hand**. `internal/tenancy/scoping_status_test.go`
-declares the status of every root, checked against `PartitionedTables` in both
-directions, and prints the current split in its test output. Adding a partition
-root without deciding its scoping status fails the build. If this page and that
-file disagree, the file is right.
+One clarification the `schedules` flip earned. On that root the unscoped read
+was not only a disclosure: `POST /schedules/{id}/run` loaded the schedule by id
+and dispatched its target under the *schedule's* organization, so a caller in
+another organization could execute it on that organization's pipeline
+connection. Where a root's reads feed a dispatch, an unscoped read is an
+execution boundary and not merely a visibility one.
+
+That table is **checked against the code, not maintained by hand**.
+`internal/tenancy/scoping_status_test.go` declares the status of every root,
+checked against `PartitionedTables` in both directions, and prints the current
+split in its test output. Adding a partition root without deciding its scoping
+status fails the build.
+
+The table on this page is parsed by that same test and compared to the
+declaration, in both directions, so the two cannot disagree: a flip that updates
+the code and forgets this page fails the build, and so does the reverse. That
+guard was added when the `schedules` flip found this page still claiming one
+scoped root — a second hand-copy of an inventory is the same hazard as the first
+one, and this page previously asserted it was not hand-maintained while being
+exactly that.
 
 [issue393]: https://github.com/sethbacon/terraform-state-manager-backend/issues/393
 

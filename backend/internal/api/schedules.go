@@ -123,7 +123,21 @@ func (req *scheduleRequest) validate() error {
 // @Router       /schedules [get]
 func (h *ScheduleHandlers) ListSchedules() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		items, err := h.repo.List(c.Request.Context())
+		// The Phase 3 read flip for schedules (#393). Unscoped, this listed
+		// every organization's schedules to any caller holding state:read in one
+		// of them, target_config included -- which names the pipeline connection
+		// a firing dispatches to.
+		//
+		// An UNRESOLVED scope is a 500, never an empty one and certainly never a
+		// full one: it means the route was registered without
+		// middleware.TenantScope, and reading unscoped because a line is missing
+		// from the router is the least visible way to reintroduce this leak.
+		scope, resolved := tenantscope.FromContext(c)
+		if !resolved {
+			serverError(c, errNoTenantScope, "the tenant scope was not resolved for this route")
+			return
+		}
+		items, err := h.repo.ListInScope(c.Request.Context(), scope)
 		if err != nil {
 			serverError(c, err, "failed to list schedules")
 			return
@@ -180,7 +194,15 @@ func (h *ScheduleHandlers) CreateSchedule() gin.HandlerFunc {
 // GetSchedule returns a single schedule.
 func (h *ScheduleHandlers) GetSchedule() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		s, err := h.repo.GetByID(c.Request.Context(), c.Param("id"))
+		scope, resolved := tenantscope.FromContext(c)
+		if !resolved {
+			serverError(c, errNoTenantScope, "the tenant scope was not resolved for this route")
+			return
+		}
+		// A schedule in another organization is reported as a schedule that does
+		// not exist, which is the same answer UpdateSchedule and DeleteSchedule
+		// already give. Anything else lets a caller enumerate ids.
+		s, err := h.repo.GetByIDInScope(c.Request.Context(), c.Param("id"), scope)
 		if err != nil {
 			serverError(c, err, "failed to load schedule")
 			return
@@ -283,7 +305,18 @@ func (h *ScheduleHandlers) DeleteSchedule() gin.HandlerFunc {
 func (h *ScheduleHandlers) RunSchedule() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		ctx := c.Request.Context()
-		s, err := h.repo.GetByID(ctx, c.Param("id"))
+		// SCOPED, and this is the read that mattered most on this root. The load
+		// below decides which target_config gets dispatched, so an unscoped one
+		// let a caller in one organization fire another organization's schedule
+		// -- on that organization's pipeline connection, decrypting its token to
+		// do it. Whether the caller may run a schedule at all is the route
+		// guard's question; WHICH schedules exist for them is this one's.
+		scope, resolved := tenantscope.FromContext(c)
+		if !resolved {
+			serverError(c, errNoTenantScope, "the tenant scope was not resolved for this route")
+			return
+		}
+		s, err := h.repo.GetByIDInScope(ctx, c.Param("id"), scope)
 		if err != nil {
 			serverError(c, err, "failed to load schedule")
 			return
@@ -317,7 +350,7 @@ func (h *ScheduleHandlers) RunSchedule() gin.HandlerFunc {
 			c.JSON(http.StatusBadGateway, gin.H{"error": dErr.Error(), "status": status})
 			return
 		}
-		updated, _ := h.repo.GetByID(ctx, s.ID)
+		updated, _ := h.repo.GetByIDInScope(ctx, s.ID, scope)
 		c.JSON(http.StatusOK, updated)
 	}
 }
