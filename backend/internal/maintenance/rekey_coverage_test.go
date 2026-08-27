@@ -17,12 +17,13 @@ package maintenance
 //	                             is the decryption fallback). ONE column today:
 //	                             notification_channels.encrypted_target. This is
 //	                             what the sweep covers.
-//	internal/crypto              nil AAD, and NO previous-key fallback at all --
-//	                             loadKey() reads only TSM_ENCRYPTION_KEY. Every
-//	                             other stored credential. A key change makes
-//	                             these unreadable IMMEDIATELY, on the restart,
-//	                             regardless of the previous key; they must be
-//	                             re-entered by hand.
+//	internal/crypto              nil AAD, dual-key on READ since #368: Decrypt
+//	                             retries TSM_ENCRYPTION_KEY_PREVIOUS. Every other
+//	                             stored credential. A key change no longer makes
+//	                             these unreadable at the restart -- but nothing
+//	                             re-encrypts them either, so each stays on the OLD
+//	                             key until it is next saved, and dropping the
+//	                             previous key destroys every one that has not been.
 //
 // So the two inventories below answer two different questions, and both are
 // checked in BOTH directions because a one-way check rots:
@@ -59,13 +60,24 @@ var sweptAADContexts = map[string]string{
 var unsweptAADContexts = map[string]string{}
 
 // unboundEncryptSites is every internal/crypto.Encrypt call site: the secrets
-// sealed with a nil AAD and a single key.
+// sealed with a nil AAD, and never re-encrypted after a key rotation.
 //
-// These are NOT covered by the rekey gate and CANNOT be, because internal/crypto
-// has no previous-key fallback to retire -- a rotation makes them unreadable at
-// the restart, not at the moment the previous key is dropped. They are inventoried
-// here so the list in docs/secrets-rotation.md ("what you must re-enter by hand")
-// cannot silently fall out of date, and so that adding a ninth is a decision.
+// These are NOT covered by the rekey gate, and the reason CHANGED with #368
+// without this comment changing with it -- which is the failure this file exists
+// to prevent, one level up.
+//
+// It used to be that internal/crypto had no previous-key fallback to retire, so
+// a rotation made these unreadable at the restart. Decrypt now retries
+// TSM_ENCRYPTION_KEY_PREVIOUS, so they survive the rotation. What they still lack
+// is anything that RE-ENCRYPTS them: each stays sealed under whichever key was
+// current when it was last written, indefinitely, so dropping the previous key
+// destroys every one that has not been saved since.
+//
+// So the gate cannot cover them for a different reason than before -- not
+// "they break immediately" but "nothing converts them, and no command reports
+// which are still on the old key." They are inventoried here so the table in
+// docs/secrets-rotation.md cannot silently fall out of date, and so that adding
+// a ninth is a decision.
 //
 // Giving these the dual-key treatment means moving them onto TokenCipher with a
 // per-row AAD, which is a change to the storage format of eight columns and
@@ -263,12 +275,12 @@ func TestRekeyCoverage_EveryUnboundEncryptSiteIsDeclared(t *testing.T) {
 
 	for site := range found {
 		if _, ok := unboundEncryptSites[site]; !ok {
-			t.Errorf("%s seals a secret with internal/crypto (nil AAD, single key) and is not in "+
-				"unboundEncryptSites.\nThat cipher has NO previous-key fallback, so a "+
-				"TSM_ENCRYPTION_KEY rotation makes this value unreadable at the restart and "+
-				"`rekey-targets verify` will still report zero.\nDeclare it with the column it "+
-				"writes, and add that column to the manual re-entry list in "+
-				"docs/secrets-rotation.md.", site)
+			t.Errorf("%s seals a secret with internal/crypto (nil AAD) and is not in "+
+				"unboundEncryptSites.\nThat cipher reads through TSM_ENCRYPTION_KEY_PREVIOUS "+
+				"but nothing re-encrypts it, so this value stays on whichever key was current "+
+				"when it was written -- and `rekey-targets verify` reports zero without ever "+
+				"looking at it.\nDeclare it with the column it writes, and add that column to "+
+				"the rotation table in docs/secrets-rotation.md.", site)
 		}
 	}
 	for site, why := range unboundEncryptSites {
