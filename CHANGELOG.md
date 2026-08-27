@@ -1,5 +1,25 @@
 # Changelog
 
+## [3.15.0](https://github.com/sethbacon/terraform-state-manager-backend/compare/v3.14.0...v3.15.0) (2026-08-27)
+
+
+### ⚠ BREAKING CHANGES
+
+* **auth:** group-mapping precedence changes from last-match-wins to first-match-wins across OIDC, LDAP and SAML. A deployment with two mappings targeting the same organization for the same user will resolve a different role after upgrading. Review any such configuration and order it strongest-first. Administrators are NOT at risk: an organization with a refused role among its matching mappings is now left untouched regardless of order.
+
+### Bug Fixes
+
+* **api:** a unique-constraint violation is a 409, not a 500 ([#508](https://github.com/sethbacon/terraform-state-manager-backend/issues/508)) ([46764f4](https://github.com/sethbacon/terraform-state-manager-backend/commit/46764f4a3a387eeba6ff4c4552efffa34a7718f5)), closes [#486](https://github.com/sethbacon/terraform-state-manager-backend/issues/486)
+* **auth:** resolve group mappings first-match-wins, and stop admin preservation depending on order ([#504](https://github.com/sethbacon/terraform-state-manager-backend/issues/504)) ([caa223d](https://github.com/sethbacon/terraform-state-manager-backend/commit/caa223d15d010a843b564da83c3732ff07b6f2e0)), closes [#488](https://github.com/sethbacon/terraform-state-manager-backend/issues/488)
+* **crypto:** try the previous key when decrypting, so a rotation is survivable ([#505](https://github.com/sethbacon/terraform-state-manager-backend/issues/505)) ([a3ec28f](https://github.com/sethbacon/terraform-state-manager-backend/commit/a3ec28f8f8317d4dc1491fe489eea3037c7444e4)), closes [#368](https://github.com/sethbacon/terraform-state-manager-backend/issues/368)
+* **notifications:** the SMTP password was destroyed as it was saved ([#509](https://github.com/sethbacon/terraform-state-manager-backend/issues/509)) ([8898a89](https://github.com/sethbacon/terraform-state-manager-backend/commit/8898a897f33c65bca2b8d9b80d730cfdfbe4b2af))
+
+
+### Documentation
+
+* **rotation:** internal/crypto has a previous-key fallback now ([#510](https://github.com/sethbacon/terraform-state-manager-backend/issues/510)) ([f028201](https://github.com/sethbacon/terraform-state-manager-backend/commit/f028201762273bbad34b0e9e223749711286a97c))
+* **tenancy:** state that the state manager is organization-isolated ([#507](https://github.com/sethbacon/terraform-state-manager-backend/issues/507)) ([198e7b9](https://github.com/sethbacon/terraform-state-manager-backend/commit/198e7b9ecea2e074c0e29bff631fc3f3c35d4f3b)), closes [#502](https://github.com/sethbacon/terraform-state-manager-backend/issues/502)
+
 ## [3.14.0](https://github.com/sethbacon/terraform-state-manager-backend/compare/v3.13.2...v3.14.0) (2026-08-26)
 
 
