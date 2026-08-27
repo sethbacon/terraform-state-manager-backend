@@ -125,9 +125,22 @@ edit/restore/transfer rate should add `backup_count × avg_state_size` on top.
 Most of the long-tail growth is `state_analysis_history`, `drift_runs`,
 `audit_logs`, and `state_backups`. `state_analysis_history` is auto-pruned
 after 180 days by the sync worker, and `state_backups` is auto-pruned by the
-retention sweep described above; `drift_runs` and `audit_logs` are not pruned
-by the application, so plan periodic pruning of old run/history rows per your
-retention policy.
+retention sweep described above.
+
+`audit_logs` **can now be pruned by the application, and is not by default**
+(#373). Set `audit_retention.enabled` with an explicit `retention_days` to turn
+the sweep on; leaving it off preserves the behaviour every earlier release had,
+which is why the default did not change on upgrade. If you already prune this
+table with an external job, enabling the sweep as well means two things deleting
+from it — pick one.
+
+The sweep exempts any entry covered by an active **legal hold**, and refuses to
+run at all if the hold table is not readable on the connection it sweeps. See
+[secrets-rotation.md](secrets-rotation.md) for the neighbouring retention
+controls and `/api/v1/admin/legal-holds` for placing holds.
+
+`drift_runs` is still not pruned by the application, so plan periodic pruning of
+old run rows per your retention policy.
 
 `state_backups` is still stored **unencrypted** at rest, protected only by
 database access control and the `state:read`-scoped API — unlike source/CI

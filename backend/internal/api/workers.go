@@ -3,6 +3,8 @@ package api
 import (
 	"context"
 	"database/sql"
+	"github.com/terraform-state-manager/terraform-state-manager/internal/legalhold"
+	"github.com/terraform-state-manager/terraform-state-manager/internal/services/auditretention"
 	"log/slog"
 
 	"github.com/sethbacon/terraform-suite-identity/identity/auditoutbox"
@@ -18,6 +20,7 @@ import (
 	"github.com/terraform-state-manager/terraform-state-manager/internal/services/notify"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/services/scheduler"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/services/statesync"
+	"time"
 )
 
 // backgroundWorkerDeps carries everything the leader-elected background worker
@@ -36,6 +39,49 @@ type backgroundWorkerDeps struct {
 	// auditRelay drains the platform-admin audit outbox into identity.audit_logs.
 	// Nil on a deployment with no carrier (the nil-DB unit-test rig).
 	auditRelay *auditoutbox.Relay
+}
+
+// startAuditRetention builds the audit sweeper, or returns nil with a logged
+// reason.
+//
+// A nil return is the DISABLED-or-UNSAFE case and both are fine: the table
+// grows, which is the behaviour every release before this one had. What is not
+// fine is sweeping where holds cannot be honoured, so a verification failure
+// returns nil too rather than degrading to an unprotected sweep.
+func (d backgroundWorkerDeps) startAuditRetention() *auditretention.Sweeper {
+	if !d.cfg.AuditRetention.Enabled {
+		return nil
+	}
+	if d.identityDB == nil {
+		slog.Warn("audit retention is enabled but there is no identity connection; not sweeping")
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	sweeper, err := auditretention.New(
+		ctx,
+		idstore.NewAuditRepository(d.identityDB),
+		// Verified on the identity handle -- the same one the repository above
+		// was built with, and the same one the sweep will run on. Passing a
+		// different handle would verify a table the sweep never reads.
+		func(ctx context.Context, table string) error {
+			return idstore.VerifyLegalHoldTable(ctx, d.identityDB, table)
+		},
+		legalhold.Table,
+		auditretention.Config{
+			RetentionDays: d.cfg.AuditRetention.RetentionDays,
+			Interval:      d.cfg.AuditRetention.Interval,
+			BatchSize:     d.cfg.AuditRetention.BatchSize,
+			MaxBatches:    d.cfg.AuditRetention.MaxBatches,
+		},
+	)
+	if err != nil {
+		slog.Error("audit retention will NOT run", "error", err)
+		return nil
+	}
+	sweeper.Start()
+	return sweeper
 }
 
 // newBackgroundWorkers attaches the always-on state syncer to the sources plane
@@ -119,6 +165,16 @@ func (d backgroundWorkerDeps) startAuditRelay() (stop func()) {
 func (d backgroundWorkerDeps) startWorkers(syncer *statesync.Syncer) (stop func()) {
 	runner := scheduler.New(repositories.NewScheduleRepository(d.database), d.driftDisp)
 	runner.Start()
+	// Bound audit_logs (#373). LEADER-GATED like everything else here, so a
+	// multi-replica deployment has exactly one process deleting.
+	//
+	// Constructed rather than merely configured: New verifies the legal-hold
+	// table is readable ON THE IDENTITY CONNECTION -- the one the sweep runs on
+	// -- and returns an error if it is not. A deployment whose holds cannot be
+	// honoured therefore gets NO SWEEP, which is the fail-closed direction: an
+	// unbounded table is a problem, an unbounded table plus silent evidence
+	// loss is a worse one.
+	auditSweeper := d.startAuditRetention()
 	syncer.Start()
 	// Reap drift runs stuck in "dispatched" whose CI job never called back
 	// (build/agent died), firing the same failure alert a real callback would.
@@ -168,6 +224,9 @@ func (d backgroundWorkerDeps) startWorkers(syncer *statesync.Syncer) (stop func(
 	go func() { _ = expiryNotifier.Start(context.Background()) }()
 
 	return func() {
+		if auditSweeper != nil {
+			auditSweeper.Stop()
+		}
 		runner.Stop()
 		syncer.Stop()
 		reconciler.Stop()

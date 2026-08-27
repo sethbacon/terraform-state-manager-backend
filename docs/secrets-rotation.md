@@ -174,6 +174,31 @@ an unbound one is.
 
 [reg878]: https://github.com/sethbacon/terraform-registry-backend/issues/878
 
+### Audit log retention (#373)
+
+`audit_logs` can be bounded by an application sweep. It is **disabled by
+default**, and stays disabled on upgrade: an enabled default would delete audit
+history on the first boot, before any operator had chosen a period.
+
+```yaml
+audit_retention:
+  enabled: true
+  retention_days: 365   # no default; enabling without one is a config error
+```
+
+**Entries covered by an active legal hold are never deleted.** Place holds
+through `/api/v1/admin/legal-holds`; placing and releasing are themselves
+audited, because changing what may be deleted is a privileged act.
+
+The sweep **refuses to start** if the legal-hold table is not readable on the
+connection it sweeps — a deployment whose holds cannot be honoured gets no sweep
+at all. An unbounded table is a problem; an unbounded table plus silent evidence
+loss is a worse one.
+
+In a coupled suite both apps write one shared `identity.audit_logs`, so two
+independently-configured sweeps over one table means **the shorter retention
+wins**. Decide which app owns audit retention before enabling it in either.
+
 ### Deliberately not encrypted
 
 | Column | Why |
