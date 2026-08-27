@@ -324,7 +324,7 @@ func sourceToken(ctx context.Context, src *repositories.CISource) (string, error
 	if src.AuthMethod == "app" {
 		switch src.Provider {
 		case "azure_devops":
-			secret, err := crypto.Decrypt(src.EncryptedClientSecret)
+			secret, err := crypto.DecryptFor(src.EncryptedClientSecret, crypto.PurposeCISourceClientSecret)
 			if err != nil {
 				return "", fmt.Errorf("decrypt client secret: %w", err)
 			}
@@ -334,7 +334,7 @@ func sourceToken(ctx context.Context, src *repositories.CISource) (string, error
 				ClientSecret: string(secret),
 			})
 		case "github_actions":
-			key, err := crypto.Decrypt(src.EncryptedAppPrivateKey)
+			key, err := crypto.DecryptFor(src.EncryptedAppPrivateKey, crypto.PurposeCISourceAppPrivateKey)
 			if err != nil {
 				return "", fmt.Errorf("decrypt app private key: %w", err)
 			}
@@ -347,7 +347,7 @@ func sourceToken(ctx context.Context, src *repositories.CISource) (string, error
 			return "", fmt.Errorf("app auth is not supported for provider %q", src.Provider)
 		}
 	}
-	pt, err := crypto.Decrypt(src.EncryptedToken)
+	pt, err := crypto.DecryptFor(src.EncryptedToken, crypto.PurposeCISourcePAT)
 	if err != nil {
 		return "", fmt.Errorf("decrypt CI source token: %w", err)
 	}
@@ -574,7 +574,7 @@ func (h *CISourceHandlers) CreateSourcePipeline() gin.HandlerFunc {
 // credentials with its own message).
 func resolvePipelineToken(ctx context.Context, ciRepo *repositories.CISourceRepository, conn *repositories.PipelineConnection) (token string, bearer bool, err error) {
 	if len(conn.EncryptedToken) > 0 {
-		pt, decErr := crypto.Decrypt(conn.EncryptedToken)
+		pt, decErr := crypto.DecryptFor(conn.EncryptedToken, crypto.PurposePipelineDispatchToken)
 		if decErr != nil {
 			return "", false, fmt.Errorf("decrypt pipeline token: %w", decErr)
 		}

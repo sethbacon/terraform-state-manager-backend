@@ -144,6 +144,32 @@ with no command in this service reporting that it was about to happen.
 | `oidc_configs.client_secret_encrypted` | `internal/crypto` | As above |
 | `system_settings` → SMTP password | `internal/crypto`, base64 in `smtp.password_sealed` | As above — **but** a password saved before the encoding fix was corrupted when it was written and must be re-entered regardless of any key |
 
+### Purpose binding (#277)
+
+Secrets written by this release onward are bound to **what they are for**, so a
+ciphertext copied from one encrypted column into another no longer decrypts. The
+purpose is stamped into the ciphertext, so a reader dispatches on what it finds
+rather than on what it expected.
+
+**Forward only. Nothing is re-encrypted, ever.** A row converts when its secret
+is next saved and not otherwise, and unbound values are read for as long as they
+exist — there is no sweep, no backfill and no cutover. That is deliberate: a
+sweep that derived a purpose wrongly would re-seal rows under the wrong binding,
+pass its own round-trip check, and report success permanently
+([terraform-registry-backend#878][reg878] is that failure, found in the sibling
+app before it shipped).
+
+So **coverage is a function of how often an administrator edits things.** On a
+deployment where nobody touches a source for a year, this is closed in the
+tracker and unmoved in the database. That is the honest position, and it is
+preferred to the alternative, which risks making credentials unreadable.
+
+Nothing to configure, and no operator action. It does not interact with key
+rotation: a bound value is read through `TSM_ENCRYPTION_KEY_PREVIOUS` exactly as
+an unbound one is.
+
+[reg878]: https://github.com/sethbacon/terraform-registry-backend/issues/878
+
 ### Deliberately not encrypted
 
 | Column | Why |
