@@ -1,5 +1,26 @@
 # Changelog
 
+## [3.14.0](https://github.com/sethbacon/terraform-state-manager-backend/compare/v3.13.2...v3.14.0) (2026-08-26)
+
+
+### ⚠ BREAKING CHANGES
+
+* **consumers:** GET /api/v1/consumers now requires the caller's tenancy to be declared, as one or more organization=<uuid> parameters or fleet=1, and answers 400 when neither is present. Any caller other than terraform-registry-backend v4.11.1 or later must be updated to send it.
+
+### Features
+
+* **consumers:** require the caller's tenancy on the suite consumers read ([#499](https://github.com/sethbacon/terraform-state-manager-backend/issues/499)) ([861db63](https://github.com/sethbacon/terraform-state-manager-backend/commit/861db6399f9aedb76aab4e81b7104a4673cab9f4))
+
+
+### Bug Fixes
+
+* **admin:** let a platform admin bootstrap access to an organization ([#497](https://github.com/sethbacon/terraform-state-manager-backend/issues/497)) ([6a9f71a](https://github.com/sethbacon/terraform-state-manager-backend/commit/6a9f71a3cad3d69ea386e16a537ce2145ec5df4f)), closes [#485](https://github.com/sethbacon/terraform-state-manager-backend/issues/485)
+
+
+### Documentation
+
+* **contributing:** a Release-As footer must survive the squash as a trailer ([#500](https://github.com/sethbacon/terraform-state-manager-backend/issues/500)) ([7d9ae9e](https://github.com/sethbacon/terraform-state-manager-backend/commit/7d9ae9edcb895d8520822a180d2c09f8ca3a78da))
+
 ## [3.13.2](https://github.com/sethbacon/terraform-state-manager-backend/compare/v3.13.1...v3.13.2) (2026-08-25)
 
 
