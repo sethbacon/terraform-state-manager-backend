@@ -144,10 +144,23 @@ with no command in this service reporting that it was about to happen.
 | `oidc_configs.client_secret_encrypted` | `internal/crypto` | As above |
 | `system_settings` → SMTP password | `internal/crypto`, base64 in `smtp.password_sealed` | As above — **but** a password saved before the encoding fix was corrupted when it was written and must be re-entered regardless of any key |
 
+### Deliberately not encrypted
+
+| Column | Why |
+| --- | --- |
+| `drift_runs.callback_token` | A single-use nonce, not a stored credential. Consumed by an atomic compare-and-clear (`UPDATE … SET callback_token='' WHERE id=$1 AND callback_token=$2`), which is what makes the CI callback one-shot — a replay finds it already cleared. **Encrypting it would break that**: AES-GCM re-nonces per seal, so the equality could never match. |
+| `health_runs.callback_token` | As above, same mechanism, same reason. |
+
+Neither is affected by a key rotation, because neither is sealed.
+
 That table is enforced, not decorative:
 `internal/maintenance/rekey_coverage_test.go` walks the source tree and fails the
 build if an AAD-bound column is neither swept nor explicitly declared unswept
 with a reason, or if a new `internal/crypto.Encrypt` call site appears that this
-list does not mention — checked in both directions, so a stale entry fails too. A
+list does not mention — checked in both directions, so a stale entry fails too.
+`internal/maintenance/plaintext_secret_columns_test.go` does the third: every
+credential-named column in the schema must be either sealed or declared
+plaintext with a reason, so a new token column stored in the clear is a
+decision rather than an omission (#511). A
 gate that quietly stopped covering a column would keep reporting success right up
 until an operator deleted the key it was still guarding.
