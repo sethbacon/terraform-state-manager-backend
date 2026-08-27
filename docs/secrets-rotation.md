@@ -8,7 +8,7 @@
 | LDAP bind password | Same pattern | |
 | API keys (`tsm_…`) | Self-service rotate in `/admin/apikeys` (0–72h grace overlap) | Update the consumer during the grace window |
 | TLS certs | cert-manager auto-renews (chart); certbot renew (binary) | None |
-| `TSM_ENCRYPTION_KEY` | **Special** — see [Rotating `TSM_ENCRYPTION_KEY`](#rotating-tsm_encryption_key) below. Notification-channel targets rotate with no downtime and no re-entry (`TSM_ENCRYPTION_KEY_PREVIOUS` + `rekey-targets`); every **other** stored credential must still be re-entered by hand | Partial: one column re-encrypts itself, the rest are manual |
+| `TSM_ENCRYPTION_KEY` | **Special** — see [Rotating `TSM_ENCRYPTION_KEY`](#rotating-tsm_encryption_key) below. Set `TSM_ENCRYPTION_KEY_PREVIOUS` to the outgoing key and **nothing needs re-entering**: notification-channel targets convert with `rekey-targets`, and every other credential is read through the previous key until it is next saved | Covered, as long as the previous key stays set |
 | `TSM_SUITE_SERVICE_TOKEN` | **Lockstep** — set the SAME new value on **both** this app and the sibling registry (its matching suite service token), then restart both. Rated *High* sensitivity by the [threat model](threat-model.md); see [ADR-001](adr/001-suite-coupling-shared-identity.md) for the coordination hazard | Cross-app reads (`/consumers`, `/audit/ingest`) return 401 until both sides carry the matching token; a leaked-but-unrotated token stays valid on whichever side was not updated |
 
 Kubernetes mechanics: rotating a Key Vault/Secrets Manager value updates the
@@ -119,20 +119,30 @@ A zero exit means: **no notification-channel target requires
 `TSM_ENCRYPTION_KEY_PREVIOUS` any more.** That is exactly the set of data the
 previous key protects — nothing else in this service ever reads it.
 
-It says nothing about the rest of the estate, because the rest of the estate has
-no dual-key support to retire. `internal/crypto` (the package that seals
-everything below) reads only `TSM_ENCRYPTION_KEY`; there is no previous-key
-fallback, so these values stop decrypting at the **restart in step 3**, not when
-the previous key is deleted.
+**It says nothing about the columns sealed by `internal/crypto`**, and that is a
+narrower statement than it used to be. Until #368 that package read only
+`TSM_ENCRYPTION_KEY`, so those values stopped decrypting at the restart in step 3
+and every one had to be re-entered by hand. It now retries
+`TSM_ENCRYPTION_KEY_PREVIOUS` on a failed open, so they keep working across a
+rotation — but nothing re-encrypts them, so each stays on the OLD key until it
+is next saved.
+
+The practical consequence, and the reason this section changed rather than being
+deleted: **a zero exit from `rekey-targets verify` does not authorise deleting
+`TSM_ENCRYPTION_KEY_PREVIOUS`.** That gate covers
+`notification_channels.encrypted_target` and nothing else. Every column in the
+table below is still sealed under whichever key was current when it was last
+written, and deleting the previous key makes those unreadable — permanently, and
+with no command in this service reporting that it was about to happen.
 
 | Encrypted at rest | Cipher | Rotation behaviour |
 |---|---|---|
 | `notification_channels.encrypted_target` | shared identity `TokenCipher`, bound per row, dual-key | **Covered.** Keeps working across the rotation; `rekey-targets` completes it |
-| `state_sources.encrypted_credentials` | `internal/crypto`, no AAD, single key | Re-enter by hand (Sources → edit → paste the secret again) |
-| `ci_sources.encrypted_token` / `encrypted_client_secret` / `encrypted_app_private_key` | `internal/crypto` | Re-enter by hand |
-| drift `pipeline_connections.encrypted_token` | `internal/crypto` | Re-enter by hand |
-| `oidc_configs.client_secret_encrypted` | `internal/crypto` | Re-enter by hand |
-| `system_settings` → SMTP password | `internal/crypto` | Re-enter by hand |
+| `state_sources.encrypted_credentials` | `internal/crypto`, no AAD, dual-key on read | **Keeps working** while `TSM_ENCRYPTION_KEY_PREVIOUS` is set. Not re-encrypted: converts only when the source is next saved |
+| `ci_sources.encrypted_token` / `encrypted_client_secret` / `encrypted_app_private_key` | `internal/crypto` | As above |
+| drift `pipeline_connections.encrypted_token` | `internal/crypto` | As above |
+| `oidc_configs.client_secret_encrypted` | `internal/crypto` | As above |
+| `system_settings` → SMTP password | `internal/crypto`, base64 in `smtp.password_sealed` | As above — **but** a password saved before the encoding fix was corrupted when it was written and must be re-entered regardless of any key |
 
 That table is enforced, not decorative:
 `internal/maintenance/rekey_coverage_test.go` walks the source tree and fails the
