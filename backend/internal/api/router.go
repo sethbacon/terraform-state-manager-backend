@@ -717,11 +717,32 @@ func reloadNotificationsSMTPConfigFromDB(smtp *notify.SMTPConfig, settingsRepo *
 	smtp.Username = dbc.SMTP.Username
 	smtp.From = dbc.SMTP.From
 	smtp.TLSMode = identitymailer.TLSModeForUseTLS(dbc.SMTP.UseTLS)
-	if dbc.SMTP.PasswordEncrypted != "" {
-		if pw, derr := crypto.Decrypt([]byte(dbc.SMTP.PasswordEncrypted)); derr != nil {
-			slog.Error("notifications startup: failed to decrypt persisted smtp password", "error", derr)
-		} else {
+	// Resolved through the shared helper so this and the API agree on which
+	// field holds the password, and on what an unreadable one means.
+	if ct, legacy, ok := dbc.SMTP.decodeStoredPassword(); ok {
+		pw, derr := crypto.Decrypt(ct)
+		switch {
+		case derr == nil:
 			smtp.Password = string(pw)
+		case legacy:
+			// EXPECTED, and the message has to be actionable rather than
+			// alarming. This value was written by the pre-fix path, which
+			// stored the ciphertext as a Go string inside a JSON blob --
+			// json.Marshal replaced every non-UTF-8 byte with U+FFFD, so the
+			// password was destroyed as it was saved. It cannot be recovered
+			// from anything; it has to be entered again.
+			slog.Error("notifications startup: the stored SMTP password predates the encoding fix "+
+				"and cannot be decrypted. It was corrupted when it was saved, not since, and no "+
+				"key or backup will recover it. Re-enter it under Notifications > SMTP; sending "+
+				"will authenticate without a password until you do",
+				"error", derr)
+		default:
+			// A sealed value that will not open is a different problem: the
+			// bytes survived, so this is a key mismatch or genuine corruption.
+			slog.Error("notifications startup: failed to decrypt persisted smtp password. The stored "+
+				"value is well-formed, so check TSM_ENCRYPTION_KEY (and TSM_ENCRYPTION_KEY_PREVIOUS "+
+				"if you have rotated) before re-entering it",
+				"error", derr)
 		}
 	}
 }
