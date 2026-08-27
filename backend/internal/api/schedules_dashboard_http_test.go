@@ -40,6 +40,17 @@ type schedulesEnv struct {
 
 func newSchedulesEnv(t *testing.T) *schedulesEnv {
 	t.Helper()
+	return newSchedulesEnvWithScope(t, &tenantscope.Scope{OrgIDs: []string{testActingOrg}})
+}
+
+// newSchedulesEnvWithScope builds the rig with the scope middleware.TenantScope
+// would have published.
+//
+// A NIL scope publishes none at all, which is the wiring-fault case rather than
+// an empty one: every handler in this group must refuse it instead of falling
+// back to an unscoped statement (#393).
+func newSchedulesEnvWithScope(t *testing.T, scope *tenantscope.Scope) *schedulesEnv {
+	t.Helper()
 	db, mock, err := newSQLMock()
 	if err != nil {
 		t.Fatalf("sqlmock.New: %v", err)
@@ -55,7 +66,9 @@ func newSchedulesEnv(t *testing.T) *schedulesEnv {
 	// stored, because a route that CREATES treats an unresolved scope as a 500
 	// rather than as "no memberships" (#436).
 	r.Use(func(c *gin.Context) {
-		tenantscope.Store(c, tenantscope.Scope{OrgIDs: []string{testActingOrg}})
+		if scope != nil {
+			tenantscope.Store(c, *scope)
+		}
 		c.Next()
 	})
 	v1 := r.Group("/api/v1")
@@ -82,7 +95,11 @@ func scheduleHTTPRow() *sqlmock.Rows {
 func TestSchedules_CRUD(t *testing.T) {
 	e := newSchedulesEnv(t)
 
-	e.mock.ExpectQuery("SELECT .+ FROM schedules ORDER BY").WillReturnRows(scheduleHTTPRow())
+	// SCOPED (#393 Phase 3). The organization array is bound as $1, so an
+	// expectation that did not name it would also match the old unscoped
+	// statement -- which is the whole thing this flip removed.
+	e.mock.ExpectQuery("FROM schedules WHERE organization_id = ANY").
+		WithArgs([]string{testActingOrg}).WillReturnRows(scheduleHTTPRow())
 	if w := e.do(http.MethodGet, "/api/v1/schedules", ""); w.Code != http.StatusOK {
 		t.Errorf("list: status = %d", w.Code)
 	}
@@ -111,12 +128,16 @@ func TestSchedules_CRUD(t *testing.T) {
 		t.Fatalf("create: status = %d (%s)", w.Code, w.Body.String())
 	}
 
-	e.mock.ExpectQuery("SELECT .+ FROM schedules WHERE id").WithArgs("sc1").WillReturnRows(scheduleHTTPRow())
+	// The organization array is $1 and the id is $2. Pinning that order matters:
+	// a by-id read bound to the wrong parameter is somebody else's row.
+	e.mock.ExpectQuery("FROM schedules WHERE organization_id = ANY").
+		WithArgs([]string{testActingOrg}, "sc1").WillReturnRows(scheduleHTTPRow())
 	if w := e.do(http.MethodGet, "/api/v1/schedules/sc1", ""); w.Code != http.StatusOK {
 		t.Errorf("get: status = %d", w.Code)
 	}
 
-	e.mock.ExpectQuery("SELECT .+ FROM schedules WHERE id").WithArgs("ghost").
+	e.mock.ExpectQuery("FROM schedules WHERE organization_id = ANY").
+		WithArgs([]string{testActingOrg}, "ghost").
 		WillReturnRows(sqlmock.NewRows(scheduleHTTPCols))
 	if w := e.do(http.MethodGet, "/api/v1/schedules/ghost", ""); w.Code != http.StatusNotFound {
 		t.Errorf("missing: status = %d, want 404", w.Code)
@@ -144,9 +165,11 @@ func TestSchedules_CRUD(t *testing.T) {
 func TestSchedules_RunNow(t *testing.T) {
 	e := newSchedulesEnv(t)
 
-	e.mock.ExpectQuery("SELECT .+ FROM schedules WHERE id").WithArgs("sc1").WillReturnRows(scheduleHTTPRow())
+	e.mock.ExpectQuery("FROM schedules WHERE organization_id = ANY").
+		WithArgs([]string{testActingOrg}, "sc1").WillReturnRows(scheduleHTTPRow())
 	e.mock.ExpectExec("UPDATE schedules").WillReturnResult(sqlmock.NewResult(0, 1)) // RecordRun
-	e.mock.ExpectQuery("SELECT .+ FROM schedules WHERE id").WithArgs("sc1").WillReturnRows(scheduleHTTPRow())
+	e.mock.ExpectQuery("FROM schedules WHERE organization_id = ANY").
+		WithArgs([]string{testActingOrg}, "sc1").WillReturnRows(scheduleHTTPRow())
 
 	if w := e.do(http.MethodPost, "/api/v1/schedules/sc1/run", ""); w.Code != http.StatusOK {
 		t.Fatalf("run: status = %d (%s)", w.Code, w.Body.String())
@@ -158,13 +181,15 @@ func TestSchedules_RunNow(t *testing.T) {
 	// Dispatch failure surfaces as 502 but still records the outcome.
 	e.dispatcher.err = errors.New("pipeline rejected the run")
 	e.dispatcher.status = "failed"
-	e.mock.ExpectQuery("SELECT .+ FROM schedules WHERE id").WithArgs("sc1").WillReturnRows(scheduleHTTPRow())
+	e.mock.ExpectQuery("FROM schedules WHERE organization_id = ANY").
+		WithArgs([]string{testActingOrg}, "sc1").WillReturnRows(scheduleHTTPRow())
 	e.mock.ExpectExec("UPDATE schedules").WillReturnResult(sqlmock.NewResult(0, 1))
 	if w := e.do(http.MethodPost, "/api/v1/schedules/sc1/run", ""); w.Code != http.StatusBadGateway {
 		t.Errorf("failed dispatch: status = %d, want 502", w.Code)
 	}
 
-	e.mock.ExpectQuery("SELECT .+ FROM schedules WHERE id").WithArgs("ghost").
+	e.mock.ExpectQuery("FROM schedules WHERE organization_id = ANY").
+		WithArgs([]string{testActingOrg}, "ghost").
 		WillReturnRows(sqlmock.NewRows(scheduleHTTPCols))
 	if w := e.do(http.MethodPost, "/api/v1/schedules/ghost/run", ""); w.Code != http.StatusNotFound {
 		t.Errorf("missing: status = %d, want 404", w.Code)
@@ -512,9 +537,11 @@ func TestStatesByVersion_HTTP(t *testing.T) {
 // multi-organization operator is doing their job.
 func TestSchedules_RunNowUsesTheSchedulesOrganization(t *testing.T) {
 	e := newSchedulesEnv(t)
-	e.mock.ExpectQuery("SELECT .+ FROM schedules WHERE id").WithArgs("sc1").WillReturnRows(scheduleHTTPRow())
+	e.mock.ExpectQuery("FROM schedules WHERE organization_id = ANY").
+		WithArgs([]string{testActingOrg}, "sc1").WillReturnRows(scheduleHTTPRow())
 	e.mock.ExpectExec("UPDATE schedules").WillReturnResult(sqlmock.NewResult(0, 1))
-	e.mock.ExpectQuery("SELECT .+ FROM schedules WHERE id").WithArgs("sc1").WillReturnRows(scheduleHTTPRow())
+	e.mock.ExpectQuery("FROM schedules WHERE organization_id = ANY").
+		WithArgs([]string{testActingOrg}, "sc1").WillReturnRows(scheduleHTTPRow())
 
 	if w := e.do(http.MethodPost, "/api/v1/schedules/sc1/run", ""); w.Code != http.StatusOK {
 		t.Fatalf("run: status = %d (%s)", w.Code, w.Body.String())
