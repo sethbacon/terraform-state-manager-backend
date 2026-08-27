@@ -1,5 +1,10 @@
 # Re-owning the organization partition
 
+> **Read [tenancy-decision.md](tenancy-decision.md) first** if you are upgrading
+> past v3.13.0. It states what organizations mean here — isolation, not a shared
+> fleet — and how far that isolation actually reaches today. This page is the
+> mechanics; that page is whether you need them.
+
 Rows written before the acting-organization stamp shipped all sit at the
 deployment's **default organization**. This is how you move them to the
 organization that actually owns them.
