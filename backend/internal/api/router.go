@@ -139,7 +139,7 @@ func NewRouter(cfg *config.Config, database *sql.DB, identityDB *sql.DB) (*gin.E
 	oidcConfigRepo := repositories.NewOIDCConfigRepository(database)
 	if database != nil {
 		if active, oerr := oidcConfigRepo.GetActiveOIDCConfig(context.Background()); oerr == nil && active != nil {
-			if secret, derr := crypto.Decrypt(active.ClientSecretEncrypted); derr != nil {
+			if secret, derr := crypto.DecryptFor(active.ClientSecretEncrypted, crypto.PurposeOIDCClientSecret); derr != nil {
 				slog.Error("failed to decrypt stored OIDC client secret", "error", derr)
 			} else if provider, perr := auth.NewOIDCProvider(&config.OIDCConfig{
 				Enabled:      true,
@@ -720,7 +720,7 @@ func reloadNotificationsSMTPConfigFromDB(smtp *notify.SMTPConfig, settingsRepo *
 	// Resolved through the shared helper so this and the API agree on which
 	// field holds the password, and on what an unreadable one means.
 	if ct, legacy, ok := dbc.SMTP.decodeStoredPassword(); ok {
-		pw, derr := crypto.Decrypt(ct)
+		pw, derr := crypto.DecryptFor(ct, crypto.PurposeSMTPRelayPassword)
 		switch {
 		case derr == nil:
 			smtp.Password = string(pw)

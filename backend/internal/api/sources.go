@@ -890,7 +890,7 @@ func decryptCredentials(s *repositories.Source) (map[string]any, error) {
 	if len(s.EncryptedCredentials) == 0 {
 		return nil, nil
 	}
-	plain, err := crypto.Decrypt(s.EncryptedCredentials)
+	plain, err := crypto.DecryptFor(s.EncryptedCredentials, crypto.PurposeStateSourceCredentials)
 	if err != nil {
 		return nil, err
 	}
