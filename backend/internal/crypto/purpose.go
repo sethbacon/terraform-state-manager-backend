@@ -81,15 +81,24 @@ type Purpose string
 //
 // Versioned, so a later scheme (say purpose|row-id) is a new constant read
 // alongside these rather than a reinterpretation of them.
+// Each is an AAD LABEL -- a public, non-secret string describing what a
+// ciphertext is for. gosec's G101 matches on identifier names containing
+// "Secret", "Password", "PAT" or "PrivateKey", which these necessarily do:
+// naming the secret is the entire point, and a purpose that avoided the words
+// would be worse documentation for no security gain. The values are literals
+// baked into the binary and shipped in every release.
 const (
-	PurposeStateSourceCredentials Purpose = "tsm/v1:state-source-credentials"
-	PurposeCISourcePAT            Purpose = "tsm/v1:ci-source-pat"
-	PurposeCISourceClientSecret   Purpose = "tsm/v1:ci-source-client-secret"
-	PurposeCISourceAppPrivateKey  Purpose = "tsm/v1:ci-source-app-private-key"
-	PurposePipelineDispatchToken  Purpose = "tsm/v1:pipeline-dispatch-token"
-	PurposeOIDCClientSecret       Purpose = "tsm/v1:oidc-client-secret"
-	PurposeSMTPRelayPassword      Purpose = "tsm/v1:smtp-relay-password"
+	PurposeStateSourceCredentials Purpose = "tsm/v1:state-source-credentials"  // #nosec G101 -- AAD label, not a credential
+	PurposeCISourcePAT            Purpose = "tsm/v1:ci-source-pat"             // #nosec G101 -- AAD label, not a credential
+	PurposeCISourceClientSecret   Purpose = "tsm/v1:ci-source-client-secret"   // #nosec G101 -- AAD label, not a credential
+	PurposeCISourceAppPrivateKey  Purpose = "tsm/v1:ci-source-app-private-key" // #nosec G101 -- AAD label, not a credential
+	PurposePipelineDispatchToken  Purpose = "tsm/v1:pipeline-dispatch-token"   // #nosec G101 -- AAD label, not a credential
+	PurposeOIDCClientSecret       Purpose = "tsm/v1:oidc-client-secret"        // #nosec G101 -- AAD label, not a credential
+	PurposeSMTPRelayPassword      Purpose = "tsm/v1:smtp-relay-password"       // #nosec G101 -- AAD label, not a credential
 )
+
+// maxPurposeLen is what one length byte can express.
+const maxPurposeLen = 255
 
 // knownPurposes is every purpose this build recognises.
 //
@@ -144,8 +153,22 @@ func EncryptFor(plaintext []byte, p Purpose) ([]byte, error) {
 	}
 	sealed := gcm.Seal(nonce, nonce, plaintext, []byte(p))
 
+	// The length is one byte, so a purpose over maxPurposeLen would WRAP and
+	// parseFrame would split the frame at the wrong offset -- producing a value
+	// that neither opens nor reports why. Refused rather than truncated, and
+	// TestEveryPurposeFitsTheLengthByte proves no declared purpose can reach
+	// this.
+	if len(p) > maxPurposeLen {
+		return nil, fmt.Errorf("crypto: purpose %q is %d bytes, over the %d-byte frame limit",
+			p, len(p), maxPurposeLen)
+	}
 	out := make([]byte, 0, len(frameMagic)+1+len(p)+len(sealed))
 	out = append(out, frameMagic...)
+	// #nosec G115 -- bounded three lines above: len(p) > maxPurposeLen (255)
+	// returns an error before reaching here, so this conversion cannot wrap.
+	// TestEveryPurposeFitsTheLengthByte proves no declared purpose can even
+	// reach that check, and TestEncryptForRefusesAnOverlongPurpose proves the
+	// check refuses one that does.
 	out = append(out, byte(len(p)))
 	out = append(out, []byte(p)...)
 	out = append(out, sealed...)

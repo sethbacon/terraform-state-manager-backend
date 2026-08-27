@@ -326,3 +326,42 @@ func funcBodyOf(src, name string) (string, bool) {
 	}
 	return "", false
 }
+
+// TestEveryPurposeFitsTheLengthByte makes the int->byte conversion in the frame
+// header provably safe rather than suppressed.
+//
+// The header carries the purpose length in ONE byte. A longer purpose would
+// wrap, parseFrame would split at the wrong offset, and the result would be a
+// value that neither opens nor says why. EncryptFor refuses it; this proves no
+// declared purpose can reach that refusal, so the conversion is safe by
+// construction and not merely by convention.
+func TestEveryPurposeFitsTheLengthByte(t *testing.T) {
+	if len(knownPurposes) == 0 {
+		t.Fatal("no purposes declared; this check is vacuous")
+	}
+	for p := range knownPurposes {
+		if len(p) == 0 {
+			t.Errorf("purpose %q is empty; parseFrame treats a zero length as not-a-frame", p)
+		}
+		if len(p) > maxPurposeLen {
+			t.Errorf("purpose %q is %d bytes, over the %d-byte frame limit", p, len(p), maxPurposeLen)
+		}
+	}
+}
+
+// TestEncryptForRefusesAnOverlongPurpose falsifies the guard directly: no
+// declared purpose is long enough to trip it, so the only way to prove it does
+// anything is to construct one.
+func TestEncryptForRefusesAnOverlongPurpose(t *testing.T) {
+	withKey(t)
+	long := Purpose("tsm/v1:" + strings.Repeat("x", maxPurposeLen))
+	// Registered only for this test, so the length check is what refuses it
+	// rather than the unknown-purpose check.
+	knownPurposes[long] = true
+	t.Cleanup(func() { delete(knownPurposes, long) })
+
+	if _, err := EncryptFor([]byte("x"), long); err == nil {
+		t.Error("a purpose too long for the one-byte length header was accepted. It would wrap, " +
+			"and parseFrame would split the frame at the wrong offset.")
+	}
+}
