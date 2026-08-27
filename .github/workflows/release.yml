@@ -29,6 +29,23 @@ env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository_owner }}/terraform-state-manager-backend
 
+# Every `run:` step grades its WHOLE pipeline. GitHub's unspecified default is
+# `bash -e {0}`, which has NO pipefail: `check | tee log` then exits with tee's
+# status and the check's failure is discarded. That is not hypothetical -- it
+# kept a REQUIRED check green for two days over a package that did not compile
+# (#521).
+#
+# The bare `bash` keyword is documented as `bash --noprofile --norc -eo pipefail
+# {0}`. It is used here rather than ci.yml's explicit `bash -euo pipefail {0}`
+# because this file's steps have not been audited for nounset one by one, and
+# turning `-u` on is a behaviour change of a different kind that belongs in its
+# own commit. The pipefail guarantee -- the one #521 is about -- is identical.
+#
+# internal/ci enforces this across every workflow.
+defaults:
+  run:
+    shell: bash
+
 jobs:
   # ── Branch guard — releases must originate from main ─────────────────────
   # GitHub Actions has no native way to filter tags by branch.  This job

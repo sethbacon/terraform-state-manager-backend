@@ -18,6 +18,26 @@ concurrency:
   group: ci-${{ github.event_name }}-${{ github.head_ref || github.ref }}
   cancel-in-progress: true
 
+# EVERY `run:` STEP IN THIS FILE GRADES ITS WHOLE PIPELINE, not just the last
+# command in it.
+#
+# GitHub's default shell is `bash -e {0}`, which has NO pipefail. A step spelled
+# `some-check | tee log` therefore exits with tee's status, and tee always
+# succeeds -- so the check's failure is discarded and the step reports success.
+# That is not hypothetical here: the Postgres-backed tests were a REQUIRED check
+# reporting success for two days while internal/approles did not compile at all
+# (#521).
+#
+# Set once at the workflow level rather than per step, because the defect is that
+# a step can be written WITHOUT the guard. Steps that already spell
+# `set -euo pipefail` in their own body keep it; it is the same setting, and a
+# body that states its own contract still reads correctly if it is ever moved.
+#
+# internal/ci enforces this file-wide, so a new workflow cannot ship without it.
+defaults:
+  run:
+    shell: bash -euo pipefail {0}
+
 jobs:
   backend-test:
     name: Backend Tests & Quality
@@ -222,39 +242,27 @@ jobs:
         env:
           TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres?sslmode=disable
           TSM_TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres?sslmode=disable
-        # -tags integration for the three tagged files; the untagged fourth
-        # compiles either way and gates only on its own DSN variable.
+        # -tags integration selects the tagged files -- eleven of them, across
+        # six packages, as of this writing; the count is not restated in the
+        # backstop below because it DERIVES the set rather than listing it. The
+        # untagged DATABASE half of migration_conn_leak_test.go compiles either
+        # way and gates only on its own DSN variable.
+        #
+        # THE PIPELINE IS GRADED, not just tee: see this workflow's `defaults`.
+        # Without pipefail this step reported tee's exit status, and a package
+        # that would not compile was indistinguishable from one that passed
+        # (#521).
         run: go test ./internal/... -tags integration -v 2>&1 | tee /tmp/pg-tests.log
 
-      - name: Fail if the Postgres tests skipped
-        run: |
-          # The guard on the guard: a suite that skipped everything and a suite
-          # that passed share an exit code, so assert on the transcript.
-          if grep -qE '(TSM_)?TEST_DATABASE_URL not set' /tmp/pg-tests.log; then
-            echo "::error::Postgres tests SKIPPED on an unset DSN -- this job proved nothing."
-            grep -nE '(TSM_)?TEST_DATABASE_URL not set' /tmp/pg-tests.log | head -5
-            exit 1
-          fi
-          if grep -q 'is not reachable' /tmp/pg-tests.log; then
-            echo "::error::Postgres tests SKIPPED on an unreachable DSN -- this job proved nothing."
-            exit 1
-          fi
-          # Named explicitly, and named PRECISELY: a count alone would stay
-          # green if the tagged set stopped building. The last entry is the
-          # DATABASE half of migration_conn_leak_test.go, not
-          # TestMigrationHelpers_DoNotUseWithInstance -- that one is a
-          # source-scanning guard needing no database, so it passes even when
-          # the DSN is unset and would have made this check pass vacuously for
-          # the one file that gates on TSM_TEST_DATABASE_URL. It is the only
-          # live proof of #342, whose fix was closed on a test that had never
-          # executed.
-          for want in TestIntegration Bootstrap GetMigrationVersion_ReturnsItsConnectionToThePool; do
-            if ! grep -q -- "--- PASS: .*$want" /tmp/pg-tests.log; then
-              echo "::error::no passing test matching '$want' -- the tagged set may not have built."
-              exit 1
-            fi
-          done
-          echo "Postgres-backed tests passed: $(grep -c '^--- PASS' /tmp/pg-tests.log)"
+      - name: Assert the Postgres-backed suites actually ran
+        working-directory: backend
+        # The guard on the guard: a suite that skipped everything and a suite
+        # that passed share an exit code, so assert on the transcript -- and
+        # assert PER PACKAGE, on markers derived from each package's own tagged
+        # files. The previous version keyed on `TestIntegration`, which six
+        # packages emit, so internal/approles' siblings kept it green while
+        # internal/approles did not build at all.
+        run: bash scripts/assert_integration_tests_ran.sh /tmp/pg-tests.log ./internal
 
   gosec:
     name: Security Scan (gosec)
