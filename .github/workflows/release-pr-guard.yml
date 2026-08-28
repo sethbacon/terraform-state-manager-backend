@@ -11,12 +11,20 @@
 # release later, in a commit nobody reads line by line and attributed to a
 # release rather than to the change.
 #
-# IT HAS ALREADY FIRED HERE, once, unnoticed. Commit ca2e5b3 ends `Refs #459`.
+# IT HAS ALREADY FIRED HERE THREE TIMES. Commit ca2e5b3 ends `Refs #459`.
 # Release pull request #480 rendered that as a closing keyword. #480 merged at
 # 2026-08-25T00:09:46Z and #459 -- "Multi-organization readiness: the partition
 # is built but almost nothing enforces it" -- closed at 00:09:47Z with nothing
 # else in its timeline. One release later the same shape appeared on #393, the
 # nine-root partition tracker at 2 of 9 roots, and was caught by hand.
+#
+# The third was invisible to a body scan. Release pull request #243 carries NOT
+# ONE closing keyword in its 1205-byte body, merged at 2026-07-23T22:11:28Z, and
+# issue #245 closed at 22:11:29Z -- because #245 was attached through the
+# DEVELOPMENT PANEL, which writes a `connected` event and no body text. Its only
+# commit on the subject, 003d043, says `Refs #245` twice. That is why the
+# authoritative universe here is GitHub's own closingIssuesReferences and the
+# body scan is a secondary widening signal, not the other way round.
 #
 # HAND-PATCHING THE BODY IS NOT A FIX. release-please regenerates the body on
 # every push to main, so a `closes` edited to `refs` survives only until the
@@ -116,7 +124,12 @@ jobs:
           # catch, one level up.
           gh api "repos/$REPO/pulls/$PR_NUMBER" --jq '.body' > release-pr-body.md
 
-          node .github/release-pr-closing-keywords/verify.mjs release-pr-body.md
+          # The pull request NUMBER is passed too, because the body is only the
+          # secondary signal. The authoritative set of issues this merge closes
+          # is closingIssuesReferences, which the verifier reads over GraphQL --
+          # see the header of verify.mjs for why the body alone is the wrong
+          # universe.
+          node .github/release-pr-closing-keywords/verify.mjs release-pr-body.md "$PR_NUMBER"
 
   # The guard's own cases, run on every pull request. A checker whose tests only
   # run when someone remembers to run them is a checker that drifts from what it
@@ -172,4 +185,4 @@ jobs:
           fi
           echo "enumerated: $passed passing case(s), $failed failing."
           [ "$failed" -eq 0 ]
-          [ "$passed" -ge 28 ]
+          [ "$passed" -ge 52 ]
