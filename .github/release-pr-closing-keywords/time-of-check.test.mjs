@@ -221,8 +221,23 @@ test('WIRING: both publishers post under ONE context name, and it is enumerated'
   assert.equal(bindings.length, 2, `expected the PR job and the re-grade to bind CONTEXT, found ${bindings.length}`);
 
   for (const name of ['closing-keywords', 'link-regrade']) {
-    assert.match(JOBS.get(name), /statuses\/\$(\{)?(HEAD_SHA|sha)/, `${name} never posts a commit status`);
+    assert.match(
+      JOBS.get(name),
+      /-X POST "repos\/\$REPO\/statuses\/\$/,
+      `${name} never posts a commit status, so its verdict reaches nothing protection reads`
+    );
   }
+});
+
+// GitHub caps statuses at 1000 per SHA per context. A 5-minute tick that
+// re-posts an unchanged verdict reaches that in about three and a half days,
+// after which a long-lived pull request silently stops being gradeable -- a
+// guard that expires by running normally.
+test('WIRING: the scheduled re-grade reads the current status before posting', () => {
+  const j = JOBS.get('link-regrade');
+  assert.match(j, /commits\/\$_sha\/status/, 'never reads the existing status, so it re-posts every tick');
+  assert.match(j, /first\(\.statuses\[\]/, 'should select with jq first, not a pipe a closed reader can empty');
+  assert.doesNotMatch(j, /\.statuses\[\][^\n]*\|\s*head/, 'piping into head can truncate to a silent empty answer');
 });
 
 test('WIRING: the PR job publishes a status and still fails on a failed grade', () => {

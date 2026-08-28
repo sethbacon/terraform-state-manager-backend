@@ -300,6 +300,27 @@ jobs:
           rows="$(gh api "repos/$REPO/pulls?state=open&base=main&per_page=100" \
                     --jq '.[] | [.number, .head.sha, .head.ref] | @tsv')"
 
+          # Re-posting an unchanged verdict every tick would burn GitHub's limit
+          # of 1000 statuses per SHA per context: at a 5-minute tick that is
+          # reached in about three and a half days, and a pull request open
+          # longer than that would stop being gradeable at all. So the verdict is
+          # only POSTED when it differs from the one already on the SHA.
+          # `first(...)` rather than a pipe into `head`, so a closed pipe cannot
+          # turn into a silent empty answer.
+          post_if_changed() {
+            _sha="$1"; _state="$2"; _desc="$3"
+            _now="$(gh api "repos/$REPO/commits/$_sha/status" \
+                      | jq -r --arg c "$CONTEXT" 'first(.statuses[] | select(.context==$c) | .state) // ""')"
+            if [ "$_now" = "$_state" ]; then
+              echo "    unchanged ($_state), not re-posted"
+              return 0
+            fi
+            gh api -X POST "repos/$REPO/statuses/$_sha" \
+              -f state="$_state" -f context="$CONTEXT" -f description="$_desc" \
+              -f target_url="$RUN_URL" > /dev/null
+            echo "    posted $CONTEXT=$_state"
+          }
+
           considered=0
           release=0
           failing=0
@@ -312,9 +333,8 @@ jobs:
                 # Posted for NON-release pull requests too. A required context
                 # that only some pull requests ever receive blocks the rest
                 # forever -- the same trap the job above is shaped around.
-                gh api -X POST "repos/$REPO/statuses/$sha" \
-                  -f state=success -f context="$CONTEXT" \
-                  -f description="Not a release pull request." -f target_url="$RUN_URL" > /dev/null
+                echo "  #$num ($ref) -> not a release PR"
+                post_if_changed "$sha" success "Not a release pull request."
                 continue
                 ;;
             esac
@@ -329,10 +349,8 @@ jobs:
               desc="Closes an issue this release does not complete."
               failing=$((failing + 1))
             fi
-            gh api -X POST "repos/$REPO/statuses/$sha" \
-              -f state="$state" -f context="$CONTEXT" -f description="$desc" \
-              -f target_url="$RUN_URL" > /dev/null
             echo "  #$num ($ref) -> $state"
+            post_if_changed "$sha" "$state" "$desc"
           done <<< "$rows"
 
           echo "enumerated: $considered open pull request(s), $release release, $failing failing."
@@ -439,4 +457,4 @@ jobs:
           fi
           echo "enumerated: $passed passing case(s), $failed failing."
           [ "$failed" -eq 0 ]
-          [ "$passed" -ge 73 ]
+          [ "$passed" -ge 74 ]
