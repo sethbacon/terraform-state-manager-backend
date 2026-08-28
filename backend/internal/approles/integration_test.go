@@ -107,12 +107,62 @@ func newEnv(t *testing.T) *env {
 	}
 }
 
-// noSweepNeeded is the integration rig's credential sweep. These tests are about
-// ROWS in the two authorization tables; the sweep's own behaviour is the subject
-// of internal/api's #330 class test, which drives it end to end through the
-// routes. It returns nil rather than being nil, because a nil reducer is refused
-// (TestAMissingSweepIsRefused) — which is the point of making it mandatory.
-func noSweepNeeded(context.Context, string) error { return nil }
+// sweepOfARealReduction is the integration rig's credential sweep for the call
+// sites whose write genuinely moves authority.
+//
+// It returns nil rather than being nil, because a nil reducer is refused
+// (TestAMissingSweepIsRefused) — which is the point of making it mandatory. It
+// is NOT indifferent to its third argument: every site below performs a grant, a
+// reassignment to a role the principal does not hold, or the removal of a real
+// membership, so being told authority did not move is a regression in the
+// computation #491 added, and returning an error there surfaces it through the
+// site's own t.Fatalf instead of passing silently.
+//
+// The paths that legitimately report false get the recorder below, which asserts
+// on the flag directly. Nothing here uses a reducer that ignores it.
+func sweepOfARealReduction(_ context.Context, userID string, authorityChanged bool) error {
+	if !authorityChanged {
+		return fmt.Errorf("the sweep was told authority did not move for user %s, but this write reduces it", userID)
+	}
+	return nil
+}
+
+// sweepLog records what each mutation TOLD its mandatory credential sweep.
+//
+// A recorder rather than a no-op, for the reason members_test.go's `sweeps` is
+// one: "a reducer was supplied" is not the property. Which principal it ran for,
+// and whether it was told authority actually moved, is.
+type sweepLog struct {
+	users   []string
+	changed []bool
+}
+
+func (sl *sweepLog) reducer() AuthorityReducer {
+	return func(_ context.Context, userID string, authorityChanged bool) error {
+		sl.users = append(sl.users, userID)
+		sl.changed = append(sl.changed, authorityChanged)
+		return nil
+	}
+}
+
+// wants asserts the whole log: one sweep per expected entry, for that principal,
+// carrying that flag. Fails on a MISSING sweep as loudly as on a wrong flag,
+// because "the reducer was never called" is the other way this guard goes blind.
+func (sl *sweepLog) wants(t *testing.T, userID string, changed ...bool) {
+	t.Helper()
+	if len(sl.changed) != len(changed) {
+		t.Fatalf("the credential sweep ran %d time(s) with flags %v, want %d with %v",
+			len(sl.changed), sl.changed, len(changed), changed)
+	}
+	for i := range changed {
+		if sl.users[i] != userID {
+			t.Errorf("sweep %d ran for %q, want %q", i, sl.users[i], userID)
+		}
+		if sl.changed[i] != changed[i] {
+			t.Errorf("sweep %d was told authorityChanged=%v, want %v", i, sl.changed[i], changed[i])
+		}
+	}
+}
 
 func connect(t *testing.T, dsn, searchPath string) *sql.DB {
 	t.Helper()
@@ -350,7 +400,7 @@ func TestIntegrationReconcileSweepsWhatIdentityNoLongerHas(t *testing.T) {
 	e.newIdentityRole(t, "viewer", "state:read")
 	org := e.newOrg(t, "acme")
 	user := e.newUser(t, "carol@example.com")
-	if err := e.members.AddMemberWithParams(ctx, org, user, "viewer", idstore.OrgScopeAllOrganizations(), noSweepNeeded); err != nil {
+	if err := e.members.AddMemberWithParams(ctx, org, user, "viewer", idstore.OrgScopeAllOrganizations(), sweepOfARealReduction); err != nil {
 		t.Fatalf("AddMemberWithParams: %v", err)
 	}
 	if _, ok := e.mirroredRole(t, org, user); !ok {
@@ -385,7 +435,7 @@ func TestIntegrationReconcileSparesAConcurrentWrite(t *testing.T) {
 	e.newIdentityRole(t, "viewer", "state:read")
 	org := e.newOrg(t, "acme")
 	user := e.newUser(t, "dave@example.com")
-	if err := e.members.AddMemberWithParams(ctx, org, user, "viewer", idstore.OrgScopeAllOrganizations(), noSweepNeeded); err != nil {
+	if err := e.members.AddMemberWithParams(ctx, org, user, "viewer", idstore.OrgScopeAllOrganizations(), sweepOfARealReduction); err != nil {
 		t.Fatalf("AddMemberWithParams: %v", err)
 	}
 	if _, err := Reconcile(ctx, e.appDB, e.identityDB, ownTemplates); err != nil {
@@ -412,14 +462,14 @@ func TestIntegrationDualWriteEndToEnd(t *testing.T) {
 	user := e.newUser(t, "erin@example.com")
 	all := idstore.OrgScopeAllOrganizations()
 
-	if err := e.members.AddMemberWithParams(ctx, org, user, "editor", all, noSweepNeeded); err != nil {
+	if err := e.members.AddMemberWithParams(ctx, org, user, "editor", all, sweepOfARealReduction); err != nil {
 		t.Fatalf("AddMemberWithParams: %v", err)
 	}
 	if got, _ := e.mirroredRole(t, org, user); got != editorID {
 		t.Fatalf("after add, mirrored role = %q, want %q", got, editorID)
 	}
 
-	if err := e.members.UpdateMemberRoleTemplate(ctx, org, user, &viewerID, all, noSweepNeeded); err != nil {
+	if err := e.members.UpdateMemberRoleTemplate(ctx, org, user, &viewerID, all, sweepOfARealReduction); err != nil {
 		t.Fatalf("UpdateMemberRoleTemplate: %v", err)
 	}
 	if got, _ := e.mirroredRole(t, org, user); got != viewerID {
@@ -427,7 +477,7 @@ func TestIntegrationDualWriteEndToEnd(t *testing.T) {
 	}
 	assertNoDrift(t, e)
 
-	if err := e.members.RemoveMember(ctx, org, user, all, noSweepNeeded); err != nil {
+	if err := e.members.RemoveMember(ctx, org, user, all, sweepOfARealReduction); err != nil {
 		t.Fatalf("RemoveMember: %v", err)
 	}
 	if _, ok := e.mirroredRole(t, org, user); ok {
@@ -436,10 +486,10 @@ func TestIntegrationDualWriteEndToEnd(t *testing.T) {
 
 	// The organization delete, whose identity effect is a CASCADE this table has
 	// no foreign key to participate in.
-	if err := e.members.AddMemberWithParams(ctx, org, user, "editor", all, noSweepNeeded); err != nil {
+	if err := e.members.AddMemberWithParams(ctx, org, user, "editor", all, sweepOfARealReduction); err != nil {
 		t.Fatalf("re-add: %v", err)
 	}
-	if err := e.members.Delete(ctx, org, all, noSweepNeeded); err != nil {
+	if err := e.members.Delete(ctx, org, all, sweepOfARealReduction); err != nil {
 		t.Fatalf("Delete organization: %v", err)
 	}
 	if _, ok := e.mirroredRole(t, org, user); ok {
@@ -448,7 +498,7 @@ func TestIntegrationDualWriteEndToEnd(t *testing.T) {
 
 	// The user hard-delete, likewise a CASCADE, mirrored by PurgeUserRoles.
 	org2 := e.newOrg(t, "globex")
-	if err := e.members.AddMemberWithParams(ctx, org2, user, "viewer", all, noSweepNeeded); err != nil {
+	if err := e.members.AddMemberWithParams(ctx, org2, user, "viewer", all, sweepOfARealReduction); err != nil {
 		t.Fatalf("add to second org: %v", err)
 	}
 	if _, err := e.identityDB.Exec(`DELETE FROM identity.users WHERE id = $1`, user); err != nil {
@@ -476,7 +526,7 @@ func TestIntegrationDroppingATemplateNullsTheAssignment(t *testing.T) {
 	}
 	org := e.newOrg(t, "acme")
 	user := e.newUser(t, "frank@example.com")
-	if err := e.members.AddMemberWithParams(ctx, org, user, "viewer", idstore.OrgScopeAllOrganizations(), noSweepNeeded); err != nil {
+	if err := e.members.AddMemberWithParams(ctx, org, user, "viewer", idstore.OrgScopeAllOrganizations(), sweepOfARealReduction); err != nil {
 		t.Fatalf("AddMemberWithParams: %v", err)
 	}
 
@@ -508,7 +558,7 @@ func TestIntegrationMirrorAdoptsATemplateItHasNeverSeen(t *testing.T) {
 	org := e.newOrg(t, "acme")
 	user := e.newUser(t, "grace@example.com")
 
-	if err := e.members.AddMemberWithParams(ctx, org, user, "late_arrival", idstore.OrgScopeAllOrganizations(), noSweepNeeded); err != nil {
+	if err := e.members.AddMemberWithParams(ctx, org, user, "late_arrival", idstore.OrgScopeAllOrganizations(), sweepOfARealReduction); err != nil {
 		t.Fatalf("AddMemberWithParams: %v", err)
 	}
 	if got, ok := e.mirroredRole(t, org, user); !ok || got != lateID {
@@ -518,7 +568,7 @@ func TestIntegrationMirrorAdoptsATemplateItHasNeverSeen(t *testing.T) {
 	// By id, too: the same hazard reached through the admin route's uuid form.
 	user2 := e.newUser(t, "heidi@example.com")
 	byIDRole := e.newIdentityRole(t, "late_arrival_two", "state:read")
-	if err := e.members.AddMemberWithRoleTemplate(ctx, org, user2, &byIDRole, idstore.OrgScopeAllOrganizations(), noSweepNeeded); err != nil {
+	if err := e.members.AddMemberWithRoleTemplate(ctx, org, user2, &byIDRole, idstore.OrgScopeAllOrganizations(), sweepOfARealReduction); err != nil {
 		t.Fatalf("AddMemberWithRoleTemplate: %v", err)
 	}
 	if got, ok := e.mirroredRole(t, org, user2); !ok || got != byIDRole {
@@ -554,7 +604,7 @@ func TestIntegrationDriftQueryReportsAllThreeKinds(t *testing.T) {
 		t.Fatalf("seed stale: %v", err)
 	}
 	// mismatched: both, different roles.
-	if err := e.members.AddMemberWithParams(ctx, org, mismatched, "editor", all, noSweepNeeded); err != nil {
+	if err := e.members.AddMemberWithParams(ctx, org, mismatched, "editor", all, sweepOfARealReduction); err != nil {
 		t.Fatalf("seed mismatched: %v", err)
 	}
 	if err := e.store.SetRole(ctx, org, mismatched, &roleB, idstore.OrgScopeAllOrganizations()); err != nil {
@@ -749,7 +799,7 @@ func TestIntegrationMirrorIsTenantScoped(t *testing.T) {
 	victim := e.newOrg(t, "victim")
 	other := e.newOrg(t, "other")
 	user := e.newUser(t, "ivan@example.com")
-	if err := e.members.AddMemberWithParams(ctx, victim, user, "viewer", idstore.OrgScopeAllOrganizations(), noSweepNeeded); err != nil {
+	if err := e.members.AddMemberWithParams(ctx, victim, user, "viewer", idstore.OrgScopeAllOrganizations(), sweepOfARealReduction); err != nil {
 		t.Fatalf("seed membership: %v", err)
 	}
 	if _, ok := e.mirroredRole(t, victim, user); !ok {
@@ -757,12 +807,22 @@ func TestIntegrationMirrorIsTenantScoped(t *testing.T) {
 	}
 
 	// A caller whose tenancy is `other` acting on `victim`.
+	//
+	// THE SWEEP MUST BE TOLD NOTHING MOVED, and this is the one place the two
+	// defects meet: the removal matches no row, so reporting a real reduction
+	// here would move the victim's PLATFORM-WIDE token watermark and sign them
+	// out of every organization — from an organization the caller has no
+	// authority in at all (#491). The route absorbs the sentinel into a 204, so
+	// the flag is the only thing standing between an out-of-tenancy DELETE and a
+	// stranger's sessions everywhere.
 	outside := idstore.OrgScopeOrganizations(other)
-	_ = e.members.RemoveMember(ctx, victim, user, outside, noSweepNeeded)
+	var outOfTenancy sweepLog
+	_ = e.members.RemoveMember(ctx, victim, user, outside, outOfTenancy.reducer())
+	outOfTenancy.wants(t, user, false)
 	if _, ok := e.mirroredRole(t, victim, user); !ok {
 		t.Fatal("an out-of-tenancy RemoveMember deleted another organization's mirrored role")
 	}
-	_ = e.members.Delete(ctx, victim, outside, noSweepNeeded)
+	_ = e.members.Delete(ctx, victim, outside, sweepOfARealReduction)
 	if _, ok := e.mirroredRole(t, victim, user); !ok {
 		t.Fatal("an out-of-tenancy organization delete removed another organization's mirrored roles")
 	}
@@ -770,12 +830,157 @@ func TestIntegrationMirrorIsTenantScoped(t *testing.T) {
 	assertNoDrift(t, e)
 
 	// In tenancy, the same calls do apply.
-	if err := e.members.RemoveMember(ctx, victim, user, idstore.OrgScopeOrganizations(victim), noSweepNeeded); err != nil {
+	if err := e.members.RemoveMember(ctx, victim, user, idstore.OrgScopeOrganizations(victim), sweepOfARealReduction); err != nil {
 		t.Fatalf("in-tenancy RemoveMember: %v", err)
 	}
 	if _, ok := e.mirroredRole(t, victim, user); ok {
 		t.Fatal("an in-tenancy RemoveMember left the mirrored role behind")
 	}
+}
+
+// THE THIRD ARGUMENT IS A CLAIM ABOUT THE DATABASE, and only a database can
+// establish that the claim is read correctly.
+//
+// AuthorityReducer gained `authorityChanged` in #491 because the two halves of a
+// sweep are not equally safe on a write that moved nothing. The API-key half
+// re-derives what the principal retains, so it is harmless. The token half moves
+// a PLATFORM-WIDE per-user watermark and ends every session that principal holds,
+// in every organization — on a no-op, pure damage. Three ordinary requests were
+// reaching it, the worst being the IdP group-mapping reconcile on the LOGIN path,
+// which signed a user out everywhere each time they signed in anywhere.
+//
+// The three paths that can genuinely be no-ops compute the flag by reading
+// identity's CURRENT row before overwriting it. The sqlmock tests in
+// members_test.go pin the BRANCH — given a staged "before" row, the right flag
+// comes out — but they cannot pin the PREMISE, because the row they compare
+// against is one the test handed the mock. Everything that can actually go wrong
+// here is in that premise: reading the wrong axis (the id space rather than the
+// name the write is about to set), reading through the app mirror rather than
+// identity, or a scope that silently returns no row and so reports "changed" for
+// a write that changed nothing.
+//
+// So this runs the sequence against real rows, where each step's "before" is
+// whatever the previous statement actually left behind.
+func TestIntegrationTheSweepLearnsWhetherAuthorityActuallyMoved(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+
+	editorID := e.newIdentityRole(t, "editor", "state:read", "state:write")
+	viewerID := e.newIdentityRole(t, "viewer", "state:read")
+	if _, err := Reconcile(ctx, e.appDB, e.identityDB, ownTemplates); err != nil {
+		t.Fatalf("initial Reconcile: %v", err)
+	}
+	org := e.newOrg(t, "acme")
+	user := e.newUser(t, "nadia@example.com")
+	all := idstore.OrgScopeAllOrganizations()
+
+	// Ordered, not table-driven-and-shuffled: each case's premise is the row the
+	// previous case left in identity, which is the whole point of running this
+	// against Postgres rather than a mock.
+	steps := []struct {
+		name    string
+		run     func(AuthorityReducer) error
+		want    bool
+		wantErr error
+		// role the mirror must hold afterwards; "" means no row at all.
+		mirrored string
+	}{
+		{
+			name:     "a grant",
+			run:      func(r AuthorityReducer) error { return e.members.AddMemberWithParams(ctx, org, user, "editor", all, r) },
+			want:     true,
+			mirrored: editorID,
+		},
+		{
+			// THE LOGIN PATH. UpdateMemberRole by name is what the IdP
+			// group-mapping reconcile calls on every sign-in.
+			name:     "reassigned by name to the role already held",
+			run:      func(r AuthorityReducer) error { return e.members.UpdateMemberRole(ctx, org, user, "editor", all, r) },
+			want:     false,
+			mirrored: editorID,
+		},
+		{
+			name:     "reassigned by name to a different role",
+			run:      func(r AuthorityReducer) error { return e.members.UpdateMemberRole(ctx, org, user, "viewer", all, r) },
+			want:     true,
+			mirrored: viewerID,
+		},
+		{
+			name: "reassigned by id to the template already held",
+			run: func(r AuthorityReducer) error {
+				return e.members.UpdateMemberRoleTemplate(ctx, org, user, &viewerID, all, r)
+			},
+			want:     false,
+			mirrored: viewerID,
+		},
+		{
+			name: "reassigned by id to a different template",
+			run: func(r AuthorityReducer) error {
+				return e.members.UpdateMemberRoleTemplate(ctx, org, user, &editorID, all, r)
+			},
+			want:     true,
+			mirrored: editorID,
+		},
+		{
+			name:     "a membership removed",
+			run:      func(r AuthorityReducer) error { return e.members.RemoveMember(ctx, org, user, all, r) },
+			want:     true,
+			mirrored: "",
+		},
+		{
+			// DELETE naming a principal who is not a member. The route absorbs
+			// the sentinel into a 204, so before #491 this was a way to end a
+			// stranger's sessions everywhere.
+			name:     "a removal that removed nothing",
+			run:      func(r AuthorityReducer) error { return e.members.RemoveMember(ctx, org, user, all, r) },
+			want:     false,
+			wantErr:  idstore.ErrNotFound,
+			mirrored: "",
+		},
+	}
+
+	// FLOOR. A table that lost its false cases would be a test asserting the
+	// unconditional sweep this parameter exists to stop, and it would pass on
+	// the pre-#491 build. Require both answers to be exercised, so shrinking the
+	// table is a failure rather than a quiet weakening.
+	var sawChanged, sawUnchanged int
+	for _, s := range steps {
+		if s.want {
+			sawChanged++
+		} else {
+			sawUnchanged++
+		}
+	}
+	if sawChanged == 0 || sawUnchanged == 0 {
+		t.Fatalf("this test exercises authorityChanged=true %d time(s) and =false %d time(s); "+
+			"it must exercise both, or it cannot tell the flag from a constant", sawChanged, sawUnchanged)
+	}
+
+	for _, s := range steps {
+		t.Run(s.name, func(t *testing.T) {
+			var log sweepLog
+			err := s.run(log.reducer())
+			switch {
+			case s.wantErr != nil && !errors.Is(err, s.wantErr):
+				t.Fatalf("%s: error %v, want one wrapping %v", s.name, err, s.wantErr)
+			case s.wantErr == nil && err != nil:
+				t.Fatalf("%s: %v", s.name, err)
+			}
+			log.wants(t, user, s.want)
+
+			got, present := e.mirroredRole(t, org, user)
+			if s.mirrored == "" {
+				if present {
+					t.Fatalf("%s: the mirror still records a role (%q)", s.name, got)
+				}
+				return
+			}
+			if !present || got != s.mirrored {
+				t.Fatalf("%s: mirrored role = %q (present=%v), want %q", s.name, got, present, s.mirrored)
+			}
+		})
+	}
+	assertNoDrift(t, e)
 }
 
 // ownTemplates is the app-side seed the server runs.
@@ -1167,12 +1372,12 @@ func TestIntegrationRollbackToIdentityStillSeesPostFlipWrites(t *testing.T) {
 
 	// A grant made by a deployment running the FLIPPED build.
 	flipped := NewMembers(e.identityDB, e.appDB, RoleSourceApp)
-	if err := flipped.AddMemberWithParams(ctx, org, user, "editor", idstore.OrgScopeAllOrganizations(), noSweepNeeded); err != nil {
+	if err := flipped.AddMemberWithParams(ctx, org, user, "editor", idstore.OrgScopeAllOrganizations(), sweepOfARealReduction); err != nil {
 		t.Fatalf("AddMemberWithParams: %v", err)
 	}
 	// ...then narrowed, which is the direction that matters: a rollback must not
 	// restore authority the flipped build had already withdrawn.
-	if err := flipped.UpdateMemberRole(ctx, org, user, "viewer", idstore.OrgScopeAllOrganizations(), noSweepNeeded); err != nil {
+	if err := flipped.UpdateMemberRole(ctx, org, user, "viewer", idstore.OrgScopeAllOrganizations(), sweepOfARealReduction); err != nil {
 		t.Fatalf("UpdateMemberRole: %v", err)
 	}
 
