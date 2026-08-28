@@ -1,0 +1,175 @@
+---
+# ── The release PR closes only what the release completes ────
+#
+# release-please renders EVERY issue reference a commit carries as
+# `closes [#N]` in the changelog, including a `Refs #N` trailer written
+# deliberately to link an issue WITHOUT closing it. That changelog is the
+# release pull request body; this repository squash-merges with
+# squash_merge_commit_message=COMMIT_MESSAGES, so the body becomes the merge
+# commit message; and GitHub reads a merge commit message for linked-issue
+# keywords. A non-closing trailer therefore closes its issue anyway, one
+# release later, in a commit nobody reads line by line and attributed to a
+# release rather than to the change.
+#
+# IT HAS ALREADY FIRED HERE, once, unnoticed. Commit ca2e5b3 ends `Refs #459`.
+# Release pull request #480 rendered that as a closing keyword. #480 merged at
+# 2026-08-25T00:09:46Z and #459 -- "Multi-organization readiness: the partition
+# is built but almost nothing enforces it" -- closed at 00:09:47Z with nothing
+# else in its timeline. One release later the same shape appeared on #393, the
+# nine-root partition tracker at 2 of 9 roots, and was caught by hand.
+#
+# HAND-PATCHING THE BODY IS NOT A FIX. release-please regenerates the body on
+# every push to main, so a `closes` edited to `refs` survives only until the
+# next merge. It has to be re-checked at the moment the release is merged,
+# which is why this runs on `edited` as well as `synchronize`.
+#
+# WHY THERE IS NO CONFIG CHANGE BESIDE THIS GUARD. The verb is hardcoded in the
+# commit partial of conventional-changelog-conventionalcommits.
+# release-please's config schema exposes changelog-sections, changelog-type,
+# changelog-path and changelog-host and nothing that reaches commitPartial --
+# it is a constructor option on DefaultChangelogNotes that no manifest key is
+# wired to, and the only registered changelog types are `default` and `github`.
+# Upstream fixed it IN THE LIBRARY in release-please 17.10.4 by rewriting the
+# verb unconditionally, but release-please-action v5.0.0 bundles release-please
+# 17.6.0 and the action's own main branch is still on 17.6.1, so no reachable
+# action pin carries the fix. A config change here would be a change that does
+# nothing while looking like a fix, which is the failure this whole cluster of
+# work exists to remove.
+#
+# THIS IS A SEPARATE FILE FROM pr-checks.yml ON PURPOSE, so it can be added,
+# reviewed and rolled back without touching a file the rest of the estate is
+# also editing.
+name: Release PR Guard
+
+"on":
+  pull_request:
+    branches: [main]
+    types:
+      - opened
+      - edited
+      - synchronize
+      - reopened
+
+permissions:
+  contents: read
+
+concurrency:
+  # An `edited` event fires on every body rewrite, and release-please rewrites
+  # the body on every merge to main. Only the latest body can be merged, so
+  # only the latest body is worth checking.
+  group: release-pr-guard-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  # Runs on EVERY pull request, not only release ones. A required context that
+  # reports on some pull requests and not others blocks the ones it skips
+  # forever, so this job is always present and short-circuits on a head branch
+  # release-please did not create.
+  closing-keywords:
+    name: Release PR closes only what it completes
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: read
+      issues: read
+    steps:
+      # hardening-exception: egress-audit — this job reaches only api.github.com
+      #   through the gh CLI and mints no long-lived credential, but this repository
+      #   has no recorded endpoint baseline yet and a block policy written without one
+      #   fails closed on its first run
+      - name: Harden the runner
+        uses: step-security/harden-runner@05e31511f85b41b11d1cf0ef85d0992719546e2c # v2.21.0
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # The body and the head branch are read back through the API rather than
+      # taken from the event payload. Two reasons, and both matter: an event
+      # payload interpolated into a shell script is arbitrary text from a pull
+      # request body executing on the runner, and the payload of an `edited`
+      # event is a snapshot that release-please may already have replaced.
+      - name: Check whether the body would close an issue this release leaves open
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+
+          head_ref="$(gh api "repos/$REPO/pulls/$PR_NUMBER" --jq '.head.ref')"
+          case "$head_ref" in
+            release-please--branches--*) ;;
+            *)
+              echo "Head branch '$head_ref' was not created by release-please; nothing to check."
+              exit 0
+              ;;
+          esac
+
+          # No `|| true` and no default. An API failure must not produce an
+          # empty body that parses to zero closing references and reports clean
+          # -- that is the same shape of vacuous green this guard exists to
+          # catch, one level up.
+          gh api "repos/$REPO/pulls/$PR_NUMBER" --jq '.body' > release-pr-body.md
+
+          node .github/release-pr-closing-keywords/verify.mjs release-pr-body.md
+
+  # The guard's own cases, run on every pull request. A checker whose tests only
+  # run when someone remembers to run them is a checker that drifts from what it
+  # claims to prove; that is the defect one level up from the one it catches.
+  closing-keywords-self-test:
+    name: Release-PR guard self-test
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      # hardening-exception: egress-audit — runs node against the checkout with no
+      #   network access of its own and holds no credential, but audit stays until
+      #   this repository has a baseline to write a block policy from
+      - name: Harden the runner
+        uses: step-security/harden-runner@05e31511f85b41b11d1cf0ef85d0992719546e2c # v2.21.0
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # No dependencies, so no install step and nothing to run --ignore-scripts
+      # against. node:test is built in.
+      #
+      # THE COUNT IS NOT DECORATION. `node --test` over a directory containing
+      # no test files exits 0 -- verified on node 24, which prints "tests 0 ...
+      # pass 0 ... fail 0" and returns success. A renamed file, a wrong working
+      # directory or a bad glob would therefore report exactly like a passing
+      # suite, which is the same vacuous green the guard beside it exists to
+      # catch. The floor is what makes this job mean anything, and it moves only
+      # up.
+      - name: Run the guard's cases
+        working-directory: .github/release-pr-closing-keywords
+        run: |
+          set -euo pipefail
+
+          if ! out="$(node --test --test-reporter=tap)"; then
+            printf '%s\n' "$out"
+            echo "The guard's own cases failed."
+            exit 1
+          fi
+          printf '%s\n' "$out"
+
+          passed="$(printf '%s\n' "$out" | sed -n 's/^# pass \([0-9][0-9]*\)$/\1/p' | tail -1)"
+          failed="$(printf '%s\n' "$out" | sed -n 's/^# fail \([0-9][0-9]*\)$/\1/p' | tail -1)"
+
+          if [ -z "$passed" ] || [ -z "$failed" ]; then
+            echo "Could not read a case count out of the TAP summary; refusing to report a pass."
+            exit 1
+          fi
+          echo "enumerated: $passed passing case(s), $failed failing."
+          [ "$failed" -eq 0 ]
+          [ "$passed" -ge 28 ]
