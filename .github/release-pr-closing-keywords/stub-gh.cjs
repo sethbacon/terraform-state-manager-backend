@@ -59,7 +59,8 @@ const postedStatuses = () => {
 function emit(obj) {
   const json = JSON.stringify(obj);
   if (!jqFilter) { process.stdout.write(json + '\n'); return; }
-  const r = spawnSync('jq', ['-r', jqFilter], { input: json, encoding: 'utf8' });
+  // -r for raw strings, -c for compact one-line objects: what real gh emits when piped.
+  const r = spawnSync('jq', ['-rc', jqFilter], { input: json, encoding: 'utf8' });
   if (r.status !== 0) { process.stderr.write(r.stderr); process.exit(1); }
   process.stdout.write(r.stdout);
 }

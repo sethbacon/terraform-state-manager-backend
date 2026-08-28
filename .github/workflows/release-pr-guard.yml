@@ -401,4 +401,4 @@ jobs:
           fi
           echo "enumerated: $passed passing case(s), $failed failing."
           [ "$failed" -eq 0 ]
-          [ "$passed" -ge 104 ]
+          [ "$passed" -ge 107 ]
