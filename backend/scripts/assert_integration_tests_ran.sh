@@ -40,6 +40,27 @@
 #      removes it from both. Dropping a suite is still possible -- it just has to
 #      be spelled out in a diff rather than fall out of a build-tag edit.
 #
+#   3. THE TOOLCHAIN, asked at FILE granularity. Both derivations above read the
+#      source and match TEXT against the constraint, so a constraint can gain a
+#      second, never-set term instead of losing the word:
+#
+#          //go:build integration    ->    //go:build integration && postgres
+#
+#      Nothing in this repository sets `postgres`, so the file leaves the build
+#      under `-tags integration`. Derivation A still matches `integration` as a
+#      whole word; derivation B still reads the unchanged filename. The two
+#      agree file-for-file, the package still supplies its other tagged files,
+#      the manifest is still satisfied, and the guard exits 0 with
+#      internal/tenancy/isolation_integration_test.go -- the cross-tenant leak
+#      proof for #393 -- silently out of the build.
+#
+#      The loss is FILE-granular and the manifest floor is PACKAGE-granular, so
+#      no amount of manifest care can see it. `go list` can: it EVALUATES the
+#      constraint rather than matching text against it, and reports the files it
+#      actually puts in each test binary. `&& postgres`, the older
+#      `// +build integration,postgres`, `integration && !integration`, and a
+#      term under some other name all read alike to it.
+#
 # Usage:
 #   assert_integration_tests_ran.sh <go test -v transcript> [source root] [manifest]
 #   assert_integration_tests_ran.sh --check-manifest [source root] [manifest]
@@ -187,10 +208,130 @@ if [[ -n "$missing_pkgs" || -n "$extra_pkgs" ]]; then
   exit 1
 fi
 
+# ── DERIVATION C -- THE TOOLCHAIN ────────────────────────────────────────────
+#
+# `go list` answers the only question that matters here: which files does the
+# compiler actually put in the test binary? Asked twice -- once with the tag CI
+# passes, once with the tags CI passes by default -- it yields both the set of
+# files that are gated behind `integration` and the set that compiles at all.
+#
+# Failing to ask is a FAILURE, never a skip. A guard whose evidence cannot be
+# gathered has not found nothing wrong; it has found nothing.
+if ! command -v go >/dev/null 2>&1; then
+  echo "::error::the Go toolchain is not on PATH, so the compiler could not be asked which files it"
+  echo "::error::builds under -tags integration. Without that answer a file dropped from the"
+  echo "::error::integration build is invisible here, so this is a failure rather than a skip."
+  exit 1
+fi
+
+mod_dir=$(go list -m -f '{{.Dir}}' 2>/dev/null || true)
+mod_phys=$([[ -n $mod_dir ]] && cd -- "$mod_dir" 2>/dev/null && pwd -P || true)
+if [[ -z $mod_phys ]]; then
+  echo "::error::could not locate the Go module root from $(pwd) -- \`go list -m\` reported nothing."
+  exit 1
+fi
+# The two derivations above emit paths relative to the working directory and the
+# manifest is module-relative, so they only line up when those are the same
+# place. That was always true of this script; it is asserted here rather than
+# assumed, because a silent mismatch would make every comparison below compare
+# two disjoint sets and report them all as broken for the wrong reason.
+if [[ $(pwd -P) != "$mod_phys" ]]; then
+  echo "::error::run this from the Go module root (${mod_phys}), not $(pwd -P) -- the derived paths"
+  echo "::error::and ${manifest} are module-relative and would not line up from anywhere else."
+  exit 1
+fi
+
+# One entry per test file the named build compiles, module-relative, sorted so
+# `comm` can be used against the derivations above.
+golist_fmt='{{$d := .Dir}}{{range .TestGoFiles}}{{$d}}/{{.}}{{"\n"}}{{end}}{{range .XTestGoFiles}}{{$d}}/{{.}}{{"\n"}}{{end}}'
+
+# Writes to $1; remaining arguments are passed to `go list`. Deliberately NOT a
+# command substitution: `exit` inside `$(...)` leaves only the subshell, and this
+# function has to be able to abort the script.
+compiled_test_files() {
+  local dest=$1
+  shift
+  if ! go list "$@" -f "$golist_fmt" "${root%/}/..." > "$work/golist.out" 2> "$work/golist.err"; then
+    echo "::error::\`go list $* ${root%/}/...\` failed, so the compiler could not be asked which files"
+    echo "::error::it builds. Without that answer a file dropped from a build is invisible here."
+    while IFS= read -r line; do
+      [[ -n "$line" ]] && echo "::error::    ${line}"
+    done < "$work/golist.err"
+    exit 1
+  fi
+  # Prefix-stripped with a bash expansion, not `sed`, so a module path holding a
+  # regex metacharacter cannot quietly fail to strip and desynchronise the sets.
+  while IFS= read -r p; do
+    [[ -n "$p" ]] && printf '%s\n' "${p#"$mod_phys"/}"
+  done < "$work/golist.out" | sort -u > "$dest"
+}
+
+# Exactly the two builds .github/workflows/ci.yml runs over this root: the
+# default one under `go test ./internal/...` and the tagged one under
+# `go test ./internal/... -tags integration`.
+compiled_test_files "$work/compiled_tagged" -tags integration
+compiled_test_files "$work/compiled_default"
+
+if [[ ! -s "$work/compiled_tagged" ]]; then
+  echo "::error::\`go list -tags integration ${root%/}/...\` reported NO test files -- the toolchain"
+  echo "::error::floor would pass vacuously, which is the exact shape of the bug it exists to stop."
+  exit 1
+fi
+
+# The integration-gated set, straight from the compiler: in the tagged build and
+# not in the default one.
+comm -23 "$work/compiled_tagged" "$work/compiled_default" > "$work/gated"
+
+# FLOOR FOUR. The compiler's gated set and the by-name set must agree, FILE for
+# FILE. This is the floor the package manifest cannot supply: it fails for ONE
+# file even when its package's siblings still report a PASS.
+not_built=$(comm -13 "$work/gated" "$work/named")
+not_named=$(comm -23 "$work/gated" "$work/named")
+if [[ -n "$not_built" || -n "$not_named" ]]; then
+  echo "::error::the compiler and the by-name enumeration of the integration suites DISAGREE."
+  if [[ -n "$not_built" ]]; then
+    echo "::error::  reads as an integration test but is NOT in the build under -tags integration:"
+    indent_list "$not_built"
+    echo "::error::  Its build constraint no longer selects it -- most often because a second term"
+    echo "::error::  was added that nothing in CI sets, as in \`integration && postgres\`. The word"
+    echo "::error::  'integration' is still there, so the text-matching floors above see nothing"
+    echo "::error::  wrong, and its package keeps passing on its other files. Restore a constraint"
+    echo "::error::  that -tags integration satisfies, or rename the file and its tests if the suite"
+    echo "::error::  really is meant to stop being an integration suite."
+  fi
+  if [[ -n "$not_named" ]]; then
+    echo "::error::  built only under -tags integration but does not read as an integration test:"
+    indent_list "$not_named"
+    echo "::error::  Name the file '*integration_test.go' or a test 'TestIntegration...', so the"
+    echo "::error::  by-name floor can see it too."
+  fi
+  exit 1
+fi
+
+# FLOOR FIVE. No test file may sit outside BOTH builds. A constraint that no job
+# satisfies -- `integration && !integration`, or a term under a name nothing
+# sets -- compiles nowhere, and a file that compiles nowhere proves nothing while
+# still reading in the diff as a test that exists.
+find "$root" -type f -name '*_test.go' \
+  -not -path '*/testdata/*' -not -name '_*' -not -name '.*' 2>/dev/null |
+  sed 's|^\./||' | sort -u > "$work/on_disk" || true
+cat "$work/compiled_tagged" "$work/compiled_default" | sort -u > "$work/compiled_any"
+uncompiled=$(comm -23 "$work/on_disk" "$work/compiled_any")
+if [[ -n "$uncompiled" ]]; then
+  echo "::error::these test files are in NEITHER build this repository runs -- not the default one"
+  echo "::error::and not -tags integration -- so nothing they assert is ever executed:"
+  indent_list "$uncompiled"
+  echo "::error::  A build constraint naming a term no job sets excludes a file everywhere while"
+  echo "::error::  leaving it looking present. Give each a constraint one of the two builds"
+  echo "::error::  satisfies, or delete it and say so in the commit."
+  exit 1
+fi
+
 expected_count=$(wc -l < "$work/expected_pkgs" | tr -d "[:space:]")
 
 if [[ $mode == manifest ]]; then
-  echo "ok  ${expected_count} integration package(s) match ${manifest}, by build tag and by name."
+  echo "ok  ${expected_count} integration package(s) match ${manifest}, by build tag and by name;"
+  echo "ok  $(wc -l < "$work/gated" | tr -d "[:space:]") file(s) confirmed in the -tags integration build by the compiler."
   exit 0
 fi
 
