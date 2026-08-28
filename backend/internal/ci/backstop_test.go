@@ -120,6 +120,11 @@ func tree(t *testing.T, dir string, pkgs ...string) string {
 		t.Fatalf("write: %v", err)
 	}
 	transcript.WriteString("--- PASS: " + marker + " (0.02s)\nPASS\n")
+
+	// A hermetic, empty allowlist. Passing it explicitly keeps these trees
+	// independent of the repository's real integration_ignored_files.txt: an
+	// entry added there for the real tree must not leak into synthetic ones.
+	writeFile(t, filepath.Join(dir, "allowlist.txt"), "# no exceptions\n")
 	return transcript.String()
 }
 
@@ -273,7 +278,8 @@ func TestTheBackstopFailsWhenAPackageStopsContributing(t *testing.T) {
 			logPath := filepath.Join(dir, "pg-tests.log")
 			writeFile(t, logPath, transcript)
 
-			out, code := runBackstop(t, dir, logPath, "./internal", filepath.Join(dir, "manifest.txt"))
+			out, code := runBackstop(t, dir, logPath, "./internal",
+				filepath.Join(dir, "manifest.txt"), filepath.Join(dir, "allowlist.txt"))
 			if code != c.wantExit {
 				t.Fatalf("exit=%d, want %d — the backstop did not notice.\n%s", code, c.wantExit, out)
 			}
@@ -429,7 +435,8 @@ func TestTheBackstopSeesOneFileLeaveTheIntegrationBuild(t *testing.T) {
 
 			c.mutate(t, dir)
 
-			out, code := runBackstop(t, dir, logPath, "./internal", filepath.Join(dir, "manifest.txt"))
+			out, code := runBackstop(t, dir, logPath, "./internal",
+				filepath.Join(dir, "manifest.txt"), filepath.Join(dir, "allowlist.txt"))
 			if code != c.wantExit {
 				t.Fatalf("exit=%d, want %d — the backstop did not notice.\n%s", code, c.wantExit, out)
 			}
@@ -505,12 +512,348 @@ func TestTheToolchainFloorRefusesAnEmptyUniverse(t *testing.T) {
 	writeFile(t, filepath.Join(dir, "internal", "testdata", "tenancy", "isolation_integration_test.go"),
 		"//go:build integration\n\npackage p\n\nimport \"testing\"\n\nfunc TestIntegrationIsolation(t *testing.T) {}\n")
 	writeFile(t, filepath.Join(dir, "manifest.txt"), "internal/testdata/tenancy\n")
+	writeFile(t, filepath.Join(dir, "allowlist.txt"), "# no exceptions\n")
 
-	out, code := runBackstop(t, dir, "--check-manifest", "./internal", filepath.Join(dir, "manifest.txt"))
+	out, code := runBackstop(t, dir, "--check-manifest", "./internal",
+		filepath.Join(dir, "manifest.txt"), filepath.Join(dir, "allowlist.txt"))
 	if code == 0 {
 		t.Fatalf("the backstop passed with an empty compiled set, so the toolchain floor is vacuous:\n%s", out)
 	}
 	if !strings.Contains(out, "reported NO test files") {
 		t.Fatalf("output does not say the compiled set was empty:\n%s", out)
 	}
+}
+
+// A PROOF CAN BE NEUTERED WITHOUT TOUCHING A TEST FILE AT ALL.
+//
+// Every floor above floor six inspects TEST files: the tag derivation, the name
+// derivation, the manifest, the compiler's gated set and the neither-build
+// sweep all ask about *_test.go. So the never-set second term did not have to
+// live in a test file. Relocate the load-bearing implementation into a NON-test
+// pair —
+//
+//	//go:build postgres     (the real implementation)
+//	//go:build !postgres    (a no-op stub)
+//
+// — and the test file keeps its tag, its name, its compiled membership and its
+// PASS marker, while the thing it exercises has been swapped for the stub.
+// Demonstrated against this script before floor six existed: the guard exited
+// 0 on exactly the trees below.
+//
+// The fix is again the compiler, not another pattern: `go list -tags
+// integration` reports the files it EXCLUDED per package as IgnoredGoFiles,
+// and a filesystem sweep catches the directory `./...` silently drops when ALL
+// of its files are excluded — that variant was demonstrated against the first
+// draft of the fix. Anything excluded is either named, with a reason, in the
+// committed allowlist, or a failure naming the file. Platform-gated files are
+// deliberately NOT auto-tolerated: `windows` with a `!windows` stub is the
+// same relocation wearing a GOOS name, so a legitimate platform file is
+// admitted the same way — one allowlist line a reviewer can weigh.
+func TestTheBackstopSeesARelocatedImplementationLeaveTheBuild(t *testing.T) {
+	const realImpl = "//go:build postgres\n\npackage p\n\n// Real is the load-bearing implementation.\nfunc Real() int { return 42 }\n"
+	const stubImpl = "//go:build !postgres\n\npackage p\n\n// Real is a no-op stand-in; nothing sets `postgres`, so THIS is what CI builds.\nfunc Real() int { return 0 }\n"
+
+	cases := []struct {
+		name     string
+		mutate   func(t *testing.T, dir string)
+		wantExit int
+		wantText []string
+	}{
+		{
+			// THE REPRODUCED AXIS. Both files sit in a package that still has
+			// compiling files, so the exclusion shows up as IgnoredGoFiles.
+			name: "a stub pair parks the real implementation behind a term nothing sets",
+			mutate: func(t *testing.T, dir string) {
+				writeFile(t, filepath.Join(dir, "internal", "tenancy", "probe_postgres.go"), realImpl)
+				writeFile(t, filepath.Join(dir, "internal", "tenancy", "probe_stub.go"), stubImpl)
+				// PROVE THE MUTATION DID WHAT IT CLAIMS: the compiler must be
+				// building the stub and excluding the real file, or this case
+				// is not exercising the defect.
+				if !containsFile(goListField(t, dir, "./internal/tenancy", "GoFiles"), "probe_stub.go") {
+					t.Fatal("probe_stub.go is not in the -tags integration build — the stub is not standing in")
+				}
+				if !containsFile(goListField(t, dir, "./internal/tenancy", "IgnoredGoFiles"), "probe_postgres.go") {
+					t.Fatal("probe_postgres.go is not ignored under -tags integration — the real implementation never left the build")
+				}
+			},
+			wantExit: 1,
+			wantText: []string{"EXCLUDED from the build", "internal/tenancy/probe_postgres.go"},
+		},
+		{
+			// THE VANISHED DIRECTORY. `go list ./...` silently skips a
+			// directory whose files are ALL excluded — no package, no
+			// IgnoredGoFiles, no error — so IgnoredGoFiles alone missed this.
+			name: "the same relocation parked alone in a directory the compiler drops",
+			mutate: func(t *testing.T, dir string) {
+				writeFile(t, filepath.Join(dir, "internal", "pgonly", "probe.go"), realImpl)
+				writeFile(t, filepath.Join(dir, "internal", "tenancy", "probe_stub.go"), stubImpl)
+				// PROVE the directory really is invisible to the compiler.
+				for _, ip := range goListImportPaths(t, dir) {
+					if strings.HasSuffix(ip, "internal/pgonly") {
+						t.Fatalf("%s is still reported by go list — this case is not exercising the blind spot", ip)
+					}
+				}
+			},
+			wantExit: 1,
+			wantText: []string{"internal/pgonly/probe.go", "NO package for"},
+		},
+		{
+			// GOOS files land in the floor deliberately: unaccounted, they fail.
+			name: "a platform-named file is not auto-tolerated",
+			mutate: func(t *testing.T, dir string) {
+				writeFile(t, filepath.Join(dir, "internal", "tenancy", "conn_windows.go"),
+					"package p\n\nfunc winProbe() int { return 7 }\n")
+				if !containsFile(goListField(t, dir, "./internal/tenancy", "IgnoredGoFiles"), "conn_windows.go") {
+					t.Fatal("conn_windows.go is not ignored under the pinned linux build — premise broken")
+				}
+			},
+			wantExit: 1,
+			wantText: []string{"internal/tenancy/conn_windows.go", "GOOS/GOARCH"},
+		},
+		{
+			// ...and admitted by ONE reviewable line with a reason, so a
+			// legitimate platform file does not leave the guard crying wolf.
+			name: "a justified platform file is admitted by the allowlist",
+			mutate: func(t *testing.T, dir string) {
+				writeFile(t, filepath.Join(dir, "internal", "tenancy", "conn_windows.go"),
+					"package p\n\nfunc winProbe() int { return 7 }\n")
+				writeFile(t, filepath.Join(dir, "allowlist.txt"),
+					"internal/tenancy/conn_windows.go  # windows-only shim; CI's linux build never runs it\n")
+			},
+			wantExit: 0,
+			wantText: []string{"matching"},
+		},
+		{
+			// The reason is the reviewable half of the contract, not decoration.
+			name: "an allowlist entry without a reason is refused",
+			mutate: func(t *testing.T, dir string) {
+				writeFile(t, filepath.Join(dir, "internal", "tenancy", "conn_windows.go"),
+					"package p\n\nfunc winProbe() int { return 7 }\n")
+				writeFile(t, filepath.Join(dir, "allowlist.txt"),
+					"internal/tenancy/conn_windows.go\n")
+			},
+			wantExit: 1,
+			wantText: []string{"carries no reason"},
+		},
+		{
+			// The comparison is BOTH ways: an entry naming a file that is not
+			// excluded is a door left propped open for a future hole.
+			name: "a stale allowlist entry is refused",
+			mutate: func(t *testing.T, dir string) {
+				writeFile(t, filepath.Join(dir, "allowlist.txt"),
+					"internal/tenancy/integration_test.go  # pre-planted excuse for a file that is in the build\n")
+			},
+			wantExit: 1,
+			wantText: []string{"NOT excluded", "internal/tenancy/integration_test.go"},
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			dir := t.TempDir()
+			// The transcript is the FULLY GREEN one: every tagged test still
+			// compiles, runs and passes — against the stub. Only floor six can
+			// tell this tree from an honest one.
+			withIsolation, _ := twoFileTree(t, dir)
+			logPath := filepath.Join(dir, "pg-tests.log")
+			writeFile(t, logPath, withIsolation)
+
+			c.mutate(t, dir)
+
+			out, code := runBackstop(t, dir, logPath, "./internal",
+				filepath.Join(dir, "manifest.txt"), filepath.Join(dir, "allowlist.txt"))
+			if code != c.wantExit {
+				t.Fatalf("exit=%d, want %d — the backstop did not notice.\n%s", code, c.wantExit, out)
+			}
+			for _, want := range c.wantText {
+				if !strings.Contains(out, want) {
+					t.Fatalf("output does not mention %q:\n%s", want, out)
+				}
+			}
+		})
+	}
+}
+
+// ONE PASS PER FILE, NOT PER PACKAGE — AND PROVED AGAINST REAL TRANSCRIPTS.
+//
+// A package's tagged files share a test binary, so under the per-package marker
+// a sibling file's PASS covered a file whose tests were skipped or filtered
+// away: the reported marker silently swapped, and the guard exited 0 on both
+// transcripts below. Now every integration-gated file must contribute a
+// top-level PASS from a function it declares.
+//
+// These cases do not hand-write the failing transcripts: they run the REAL
+// `go test -tags integration` in the synthetic module and grade its actual
+// output, so the grading is proved against what the toolchain really prints —
+// a hand-written transcript could drift from that format and these tests would
+// never know.
+func TestEachIntegrationGatedFileMustContributeItsOwnPass(t *testing.T) {
+	cases := []struct {
+		name string
+		// prepare edits the tree and returns the `go test` arguments beyond
+		// the standard ones.
+		prepare      func(t *testing.T, dir string) []string
+		wantExit     int
+		wantText     []string
+		requireInLog string
+	}{
+		{
+			name:     "a real full run passes",
+			prepare:  func(t *testing.T, dir string) []string { return nil },
+			wantExit: 0,
+			wantText: []string{"matching"},
+		},
+		{
+			// FALSIFICATION (b): every test in the isolation file skips. The
+			// file still compiles — floors 1-7 are all satisfied — and its
+			// sibling in the SAME package still passes, which used to be the
+			// whole package's marker.
+			name: "a file whose tests all skip no longer hides behind its sibling",
+			prepare: func(t *testing.T, dir string) []string {
+				writeFile(t, filepath.Join(dir, "internal", "tenancy", "isolation_integration_test.go"),
+					"//go:build integration\n\npackage p\n\nimport \"testing\"\n\n"+
+						"func TestIntegrationIsolation(t *testing.T) { t.Skip(\"silenced\") }\n")
+				return nil
+			},
+			wantExit:     1,
+			wantText:     []string{"internal/tenancy/isolation_integration_test.go", "did not build or did not run"},
+			requireInLog: "--- SKIP: TestIntegrationIsolation",
+		},
+		{
+			// A -run filter that silences the whole file: nothing is skipped,
+			// nothing fails, the file's tests simply never appear.
+			name: "a -run filter that silences a whole file is caught",
+			prepare: func(t *testing.T, dir string) []string {
+				return []string{"-run", "^TestIntegrationapproles$|^TestIntegrationtenancy$|^TestGetMigrationVersion_ReturnsItsConnectionToThePool$"}
+			},
+			wantExit: 1,
+			wantText: []string{"internal/tenancy/isolation_integration_test.go", "did not build or did not run"},
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			dir := t.TempDir()
+			twoFileTree(t, dir)
+			extraArgs := c.prepare(t, dir)
+
+			transcript := goTestTranscript(t, dir, extraArgs...)
+			if c.requireInLog != "" && !strings.Contains(transcript, c.requireInLog) {
+				t.Fatalf("the real `go test` transcript does not contain %q — the premise of this case did not hold:\n%s",
+					c.requireInLog, transcript)
+			}
+			logPath := filepath.Join(dir, "pg-tests.log")
+			writeFile(t, logPath, transcript)
+
+			out, code := runBackstop(t, dir, logPath, "./internal",
+				filepath.Join(dir, "manifest.txt"), filepath.Join(dir, "allowlist.txt"))
+			if code != c.wantExit {
+				t.Fatalf("exit=%d, want %d — the backstop did not notice.\n%s", code, c.wantExit, out)
+			}
+			for _, want := range c.wantText {
+				if !strings.Contains(out, want) {
+					t.Fatalf("output does not mention %q:\n%s", want, out)
+				}
+			}
+		})
+	}
+}
+
+// The per-file grading keys on test-function names in a transcript that never
+// says which package printed a line. A marker name declared twice anywhere in
+// the same `go test` run is therefore ambiguous evidence — one file's PASS
+// could stand in for the other's silence — so it is refused outright.
+func TestAMarkerNameDeclaredTwiceInTheTaggedBuildIsRefused(t *testing.T) {
+	dir := t.TempDir()
+	twoFileTree(t, dir)
+	// The gated file's marker keeps the integration NAME convention via its
+	// filename; the duplicate lives in a plain unit-test file of another
+	// package, which no earlier floor has any reason to look at.
+	writeFile(t, filepath.Join(dir, "internal", "tenancy", "isolation_integration_test.go"),
+		"//go:build integration\n\npackage p\n\nimport \"testing\"\n\nfunc TestCrossTenantIsolation(t *testing.T) {}\n")
+	writeFile(t, filepath.Join(dir, "internal", "approles", "extra_test.go"),
+		"package p\n\nimport \"testing\"\n\nfunc TestCrossTenantIsolation(t *testing.T) {}\n")
+
+	out, code := runBackstop(t, dir, "--check-manifest", "./internal",
+		filepath.Join(dir, "manifest.txt"), filepath.Join(dir, "allowlist.txt"))
+	if code == 0 {
+		t.Fatalf("the backstop accepted a duplicated marker name, so a PASS line cannot be attributed:\n%s", out)
+	}
+	for _, want := range []string{
+		"declared more than once",
+		"internal/tenancy/isolation_integration_test.go",
+		"internal/approles/extra_test.go",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("output does not mention %q:\n%s", want, out)
+		}
+	}
+}
+
+// goListField asks the toolchain for one file-list field of one package in the
+// synthetic tree, pinned to the platform the backstop pins (linux/amd64), so a
+// case can prove its mutation did what it claims independently of the script
+// under test.
+func goListField(t *testing.T, dir, pkg, field string) []string {
+	t.Helper()
+	cmd := exec.Command("go", "list", "-tags", "integration",
+		"-f", "{{range ."+field+"}}{{.}}\n{{end}}", pkg)
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(), "GOOS=linux", "GOARCH=amd64")
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("go list %s in the synthetic tree: %v", pkg, err)
+	}
+	var files []string
+	for _, line := range strings.Split(string(out), "\n") {
+		if f := strings.TrimSpace(line); f != "" {
+			files = append(files, f)
+		}
+	}
+	return files
+}
+
+func goListImportPaths(t *testing.T, dir string) []string {
+	t.Helper()
+	cmd := exec.Command("go", "list", "-tags", "integration", "-f", "{{.ImportPath}}", "./...")
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(), "GOOS=linux", "GOARCH=amd64")
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("go list ./... in the synthetic tree: %v", err)
+	}
+	var paths []string
+	for _, line := range strings.Split(string(out), "\n") {
+		if p := strings.TrimSpace(line); p != "" {
+			paths = append(paths, p)
+		}
+	}
+	return paths
+}
+
+func containsFile(files []string, want string) bool {
+	for _, f := range files {
+		if f == want {
+			return true
+		}
+	}
+	return false
+}
+
+// goTestTranscript runs the REAL `go test -tags integration -v` over the
+// synthetic module and returns its combined output — the same thing ci.yml
+// tees into pg-tests.log. A non-zero exit is not fatal by itself: a skipped
+// suite exits 0 and a failing one is a legitimate transcript to grade; only a
+// run that produced no `--- ` lines at all is treated as broken scaffolding.
+func goTestTranscript(t *testing.T, dir string, extraArgs ...string) string {
+	t.Helper()
+	args := append([]string{"test", "-tags", "integration", "-v", "-count=1"}, extraArgs...)
+	args = append(args, "./internal/...")
+	cmd := exec.Command("go", args...)
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	if err != nil && !strings.Contains(string(out), "--- ") {
+		t.Fatalf("go test in the synthetic tree produced no gradable output: %v\n%s", err, out)
+	}
+	return string(out)
 }

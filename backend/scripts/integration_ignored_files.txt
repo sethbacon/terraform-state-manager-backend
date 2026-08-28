@@ -1,0 +1,41 @@
+# THE IGNORED-FILE ALLOWLIST for floor six of assert_integration_tests_ran.sh.
+#
+# Under `-tags integration` this module expects the compiler to ignore NOTHING:
+# default files carry no constraint, integration files carry a constraint the
+# tag satisfies. A file `go list -tags integration` reports as IgnoredGoFiles is
+# excluded from the very build CI runs, and the pattern that motivates this
+# floor is a proof relocated into a non-test pair -- the real implementation
+# behind `//go:build postgres`, a no-op stub behind `//go:build !postgres` --
+# which every test-file floor waves through while the test passes against the
+# stub.
+#
+# Exclusion has a second shape: a directory whose files are ALL
+# constraint-excluded is silently dropped from `go list ./...` -- no package,
+# no IgnoredGoFiles, no error -- so the guard also sweeps the filesystem and
+# treats any .go file the compiler cannot account for exactly like an ignored
+# one. Both shapes answer to this list.
+#
+# So an excluded file is accounted for HERE, per file, with a reason -- or the
+# guard fails naming it. The comparison is BOTH ways: an entry naming a file
+# that is not actually excluded, or that no longer exists, also fails, so a
+# stale or pre-planted entry cannot sit here waiting to excuse a future hole.
+#
+# GOOS/GOARCH files are NOT auto-tolerated, on purpose. A `windows`
+# implementation with a `!windows` stub neuters a proof on the Linux CI runner
+# exactly the way `postgres` does; the platform name does not change the shape.
+# A genuine platform-specific file fails once, loudly, and is then admitted by
+# one line here whose reason a reviewer can weigh. The platform of record is
+# CI's linux/amd64 -- the guard pins its `go list` calls to that, so this list
+# means the same thing on every workstation.
+#
+# Format: one entry per line,
+#
+#   <module-relative path>  # <reason>
+#
+# The reason is mandatory; an entry without one is refused. `#`-led lines and
+# blank lines are ignored.
+#
+# This module currently has NO ignored files under -tags integration, so there
+# are no entries. That is the good state; adding a line here is a deliberate,
+# reviewable act that says "this file is legitimately outside the build CI
+# grades, and here is why."
