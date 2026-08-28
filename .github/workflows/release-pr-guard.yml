@@ -250,6 +250,7 @@ jobs:
       - name: Fail the job if the grade failed
         if: steps.grade.outcome != 'success'
         run: |
+          set -euo pipefail
           echo "The closing-keyword grade failed; see 'Check whether the body...' above."
           exit 1
 
