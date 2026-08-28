@@ -15,6 +15,9 @@ backend/vendor/
 .DS_Store
 
 # CI / test artifacts
+# The release-PR guard writes the body it is grading into the workspace,
+# one file per open pull request when the scheduled re-grade runs.
+release-pr-body*.md
 backend/coverage.out
 backend/coverage.html
 backend/gosec-results.json

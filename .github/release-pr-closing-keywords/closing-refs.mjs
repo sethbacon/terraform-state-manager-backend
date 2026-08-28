@@ -63,7 +63,7 @@ const REFERENCE_RE = new RegExp(
 const LINK_TAIL_RE = /^\][ \t]*\([^)]*\)/;
 const SEPARATOR_RE = /^[ \t]*,?[ \t]*/;
 
-function matchReference(text, at, defaultOwner, defaultRepo) {
+export function matchReference(text, at, defaultOwner, defaultRepo) {
   const m = REFERENCE_RE.exec(text.slice(at));
   if (!m) return null;
   const g = m.groups;
