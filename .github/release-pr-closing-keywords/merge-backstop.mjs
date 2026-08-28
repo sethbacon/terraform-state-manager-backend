@@ -157,7 +157,17 @@ async function main() {
 
   // No `|| true` anywhere below. A push that cannot be resolved to a pull
   // request must not read as a push that resolved to nothing to check.
-  const pulls = api(`repos/${owner}/${repo}/commits/${sha}/pulls`);
+  //
+  // The associated-pulls listing is read through --paginate with a per-object
+  // jq projection: gh emits one compact JSON object per line across ALL
+  // pages, so a merge commit associated with more than one page of pull
+  // requests still yields its release PR. Plain JSON.parse over --paginate
+  // output would break on the second page -- gh concatenates arrays -- which
+  // is why the lines are parsed one by one.
+  const pulls = gh(['api', '--paginate', `repos/${owner}/${repo}/commits/${sha}/pulls?per_page=100`, '--jq', '.[]'])
+    .split('\n')
+    .filter(Boolean)
+    .map((l) => JSON.parse(l));
   const pr = pulls.find((p) => p.merge_commit_sha === sha) || pulls[0];
   if (!pr) {
     line(`Commit ${sha} is not associated with any pull request; nothing to grade.`);

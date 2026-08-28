@@ -283,6 +283,17 @@ jobs:
         with:
           persist-credentials: false
 
+      # The mechanism lives in link-regrade.sh, deliberately NOT inline. An
+      # inline run block can only be tested by parsing its text, and four
+      # mutations of the previous inline version -- narrowing per_page,
+      # deleting the count floor, retargeting the base branch, and skipping
+      # release pull requests outright -- ran inert against a 74-case suite
+      # that parsed but never executed it. The extracted script is run by
+      # link-regrade.test.mjs against a stub `gh`, and those mutations now
+      # fail tests. The script also carries the pagination fix: the old
+      # unpaginated listing went blind past 100 open pull requests, and its
+      # "two independent derivations" were two jq filters over the same
+      # truncated page.
       - name: Re-grade every open pull request and republish the verdict
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -291,75 +302,7 @@ jobs:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -euo pipefail
-
-          # Two independent derivations of the same set. `open_count` is a plain
-          # length; `rows` is the projection the loop actually walks. A broken
-          # jq filter would empty `rows` while `open_count` stayed right, and an
-          # empty universe is indistinguishable from a clean one -- so the two
-          # are compared at the end and disagreement fails the job.
-          open_count="$(gh api "repos/$REPO/pulls?state=open&base=main&per_page=100" --jq 'length')"
-          rows="$(gh api "repos/$REPO/pulls?state=open&base=main&per_page=100" \
-                    --jq '.[] | [.number, .head.sha, .head.ref] | @tsv')"
-
-          # Re-posting an unchanged verdict every tick would burn GitHub's limit
-          # of 1000 statuses per SHA per context: at a 5-minute tick that is
-          # reached in about three and a half days, and a pull request open
-          # longer than that would stop being gradeable at all. So the verdict is
-          # only POSTED when it differs from the one already on the SHA.
-          # `first(...)` rather than a pipe into `head`, so a closed pipe cannot
-          # turn into a silent empty answer.
-          post_if_changed() {
-            _sha="$1"; _state="$2"; _desc="$3"
-            _now="$(gh api "repos/$REPO/commits/$_sha/status" \
-                      | jq -r --arg c "$CONTEXT" 'first(.statuses[] | select(.context==$c) | .state) // ""')"
-            if [ "$_now" = "$_state" ]; then
-              echo "    unchanged ($_state), not re-posted"
-              return 0
-            fi
-            gh api -X POST "repos/$REPO/statuses/$_sha" \
-              -f state="$_state" -f context="$CONTEXT" -f description="$_desc" \
-              -f target_url="$RUN_URL" > /dev/null
-            echo "    posted $CONTEXT=$_state"
-          }
-
-          considered=0
-          release=0
-          failing=0
-          while IFS="$(printf '\t')" read -r num sha ref; do
-            [ -n "$num" ] || continue
-            considered=$((considered + 1))
-            case "$ref" in
-              release-please--branches--*) ;;
-              *)
-                # Posted for NON-release pull requests too. A required context
-                # that only some pull requests ever receive blocks the rest
-                # forever -- the same trap the job above is shaped around.
-                echo "  #$num ($ref) -> not a release PR"
-                post_if_changed "$sha" success "Not a release pull request."
-                continue
-                ;;
-            esac
-            release=$((release + 1))
-
-            gh api "repos/$REPO/pulls/$num" --jq '.body' > "release-pr-body-$num.md"
-            if node .github/release-pr-closing-keywords/verify.mjs "release-pr-body-$num.md" "$num"; then
-              state=success
-              desc="Re-graded against the live link graph."
-            else
-              state=failure
-              desc="Closes an issue this release does not complete."
-              failing=$((failing + 1))
-            fi
-            echo "  #$num ($ref) -> $state"
-            post_if_changed "$sha" "$state" "$desc"
-          done <<< "$rows"
-
-          echo "enumerated: $considered open pull request(s), $release release, $failing failing."
-          if [ "$considered" -ne "$open_count" ]; then
-            echo "Walked $considered pull request(s) but the API reports $open_count open." >&2
-            echo "The projection dropped rows, so a re-grade was silently skipped. Refusing to pass." >&2
-            exit 1
-          fi
+          bash .github/release-pr-closing-keywords/link-regrade.sh
 
   # ── The after-the-fact half ──────────────────────────────────────────────
   #
@@ -458,4 +401,4 @@ jobs:
           fi
           echo "enumerated: $passed passing case(s), $failed failing."
           [ "$failed" -eq 0 ]
-          [ "$passed" -ge 74 ]
+          [ "$passed" -ge 104 ]
