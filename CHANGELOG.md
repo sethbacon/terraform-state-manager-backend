@@ -1,5 +1,13 @@
 # Changelog
 
+## [3.16.1](https://github.com/sethbacon/terraform-state-manager-backend/compare/v3.16.0...v3.16.1) (2026-08-28)
+
+
+### Bug Fixes
+
+* **ci:** ask the compiler which files are in the integration build ([#532](https://github.com/sethbacon/terraform-state-manager-backend/issues/532)) ([208c9d8](https://github.com/sethbacon/terraform-state-manager-backend/commit/208c9d8ad4bf7f3a992f4d8b2296debbd021731d)), closes [#529](https://github.com/sethbacon/terraform-state-manager-backend/issues/529)
+* **scripts:** grep -m 5 instead of piping into head, so the skip diagnostic survives ([#530](https://github.com/sethbacon/terraform-state-manager-backend/issues/530)) ([e0ac7b9](https://github.com/sethbacon/terraform-state-manager-backend/commit/e0ac7b93aa8c83ba67e9f64a1d4df775c1640fc2))
+
 ## [3.16.0](https://github.com/sethbacon/terraform-state-manager-backend/compare/v3.15.0...v3.16.0) (2026-08-28)
 
 
