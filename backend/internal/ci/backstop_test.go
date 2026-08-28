@@ -85,6 +85,14 @@ func runBackstop(t *testing.T, dir string, args ...string) (string, int) {
 // returns the transcript that a fully successful run would have produced.
 func tree(t *testing.T, dir string, pkgs ...string) string {
 	t.Helper()
+
+	// The synthetic root is a REAL module. The backstop asks the compiler which
+	// files each build actually contains, and outside a module that question
+	// has no answer — `go list -m` reports nothing and the script fails closed,
+	// as it should. Writing a go.mod is not scaffolding placed around the
+	// check; it is what makes the check reachable in these trees at all.
+	writeFile(t, filepath.Join(dir, "go.mod"), "module synthetic\n\n"+goDirective(t)+"\n")
+
 	var transcript strings.Builder
 	for _, pkg := range pkgs {
 		p := filepath.Join(dir, filepath.FromSlash(pkg))
@@ -113,6 +121,25 @@ func tree(t *testing.T, dir string, pkgs ...string) string {
 	}
 	transcript.WriteString("--- PASS: " + marker + " (0.02s)\nPASS\n")
 	return transcript.String()
+}
+
+// goDirective returns the `go` line of the module under test, so the synthetic
+// modules below are accepted by exactly the toolchain that builds this
+// repository. A hard-coded version would go stale at the next bump, and omitting
+// the directive would leave the module at go1.16 semantics.
+func goDirective(t *testing.T) string {
+	t.Helper()
+	body, err := os.ReadFile(filepath.Join(moduleRoot(t), "go.mod"))
+	if err != nil {
+		t.Fatalf("read go.mod: %v", err)
+	}
+	for _, line := range strings.Split(string(body), "\n") {
+		if strings.HasPrefix(line, "go ") {
+			return strings.TrimSpace(line)
+		}
+	}
+	t.Fatal("the module under test has no `go` directive")
+	return ""
 }
 
 func writeFile(t *testing.T, path, content string) {
@@ -281,4 +308,209 @@ func TestTheIntegrationPackageManifestMatchesThisTree(t *testing.T) {
 			"(exit %d):\n%s", code, out)
 	}
 	t.Log(strings.TrimSpace(out))
+}
+
+// A FILE CAN LEAVE THE BUILD WITHOUT LEAVING THE SOURCE.
+//
+// Both derivations above read the source and match TEXT against the build
+// constraint, so the constraint never has to lose the word `integration` in
+// order to stop selecting the file. It only has to GAIN a second term that
+// nothing sets:
+//
+//	//go:build integration    ->    //go:build integration && postgres
+//
+// Derivation A still matches `integration` as a whole word. Derivation B still
+// reads the unchanged filename. The two agree file-for-file, so FLOOR TWO is
+// satisfied. The package keeps its other tagged files, so it still reports a
+// top-level PASS and the grading loop is satisfied. And integration_packages.txt
+// is PACKAGE-granular while the loss is FILE-granular, so FLOOR THREE cannot see
+// it at any level of manifest care. The guard exited 0 with
+// internal/tenancy/isolation_integration_test.go — the cross-tenant leak proof
+// for #393 — silently out of the build.
+//
+// So every tree here gives internal/tenancy TWO tagged files and mutates only
+// one of them, and grades a transcript in which the surviving sibling still
+// passes. A check that merely re-derives the package set cannot pass these by
+// accident; only asking the compiler, per file, can.
+func TestTheBackstopSeesOneFileLeaveTheIntegrationBuild(t *testing.T) {
+	const isolation = "isolation_integration_test.go"
+
+	// reconstrain rewrites the first line of the second tenancy file, leaving
+	// every other byte — and every other file — exactly as it was.
+	reconstrain := func(constraint string) func(*testing.T, string) {
+		return func(t *testing.T, dir string) {
+			path := filepath.Join(dir, "internal", "tenancy", isolation)
+			body, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("read: %v", err)
+			}
+			lines := strings.Split(string(body), "\n")
+			lines[0] = constraint
+			writeFile(t, path, strings.Join(lines, "\n"))
+
+			// PROVE THE MUTATION APPLIED, AND THAT IT DID WHAT IT CLAIMS. A
+			// rewrite that silently missed, or a spelling the toolchain happens
+			// to accept anyway, would leave the assertion below testing nothing.
+			if got := firstLine(t, path); got != constraint {
+				t.Fatalf("the constraint rewrite did not apply: first line is %q, want %q", got, constraint)
+			}
+			if compiledUnderIntegrationTag(t, dir, "./internal/tenancy", isolation) {
+				t.Fatalf("%s is STILL in the -tags integration build under %q — "+
+					"this case is not exercising the defect", isolation, constraint)
+			}
+		}
+	}
+
+	cases := []struct {
+		name     string
+		mutate   func(t *testing.T, dir string)
+		wantExit int
+		wantText string
+	}{
+		{
+			// The floor must not be satisfied by failing on everything.
+			name:     "the two-file tree passes untouched",
+			mutate:   func(t *testing.T, dir string) {},
+			wantExit: 0,
+			wantText: "matching",
+		},
+		{
+			name:     "a second term that nothing in CI sets",
+			mutate:   reconstrain("//go:build integration && postgres"),
+			wantExit: 1,
+			wantText: "NOT in the build under -tags integration",
+		},
+		{
+			name:     "the older +build spelling of the same idea",
+			mutate:   reconstrain("// +build integration,postgres"),
+			wantExit: 1,
+			wantText: "NOT in the build under -tags integration",
+		},
+		{
+			name:     "a negated term that can never be true",
+			mutate:   reconstrain("//go:build integration && !integration"),
+			wantExit: 1,
+			wantText: "NOT in the build under -tags integration",
+		},
+		{
+			name:     "a term under a name nothing anywhere sets",
+			mutate:   reconstrain("//go:build integration && requiresrealpostgres"),
+			wantExit: 1,
+			wantText: "NOT in the build under -tags integration",
+		},
+		{
+			// FLOOR FIVE. The same trick on a file that reads as an ordinary
+			// unit test: it is in neither build, so nothing it asserts ever
+			// runs, and neither text derivation has any reason to look at it.
+			name: "a test file gated behind a term no build passes",
+			mutate: func(t *testing.T, dir string) {
+				writeFile(t, filepath.Join(dir, "internal", "tenancy", "slow_test.go"),
+					"//go:build slowdb\n\npackage p\n\nimport \"testing\"\n\nfunc TestSlow(t *testing.T) {}\n")
+			},
+			wantExit: 1,
+			wantText: "in NEITHER build",
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			dir := t.TempDir()
+			withIsolation, withoutIsolation := twoFileTree(t, dir)
+
+			transcript := withIsolation
+			if c.wantExit != 0 {
+				// What CI would really have captured: the mutated file did not
+				// compile, so its test never reported — and its sibling did, so
+				// the PACKAGE still reports and grading still passes.
+				transcript = withoutIsolation
+			}
+			logPath := filepath.Join(dir, "pg-tests.log")
+			writeFile(t, logPath, transcript)
+
+			c.mutate(t, dir)
+
+			out, code := runBackstop(t, dir, logPath, "./internal", filepath.Join(dir, "manifest.txt"))
+			if code != c.wantExit {
+				t.Fatalf("exit=%d, want %d — the backstop did not notice.\n%s", code, c.wantExit, out)
+			}
+			if !strings.Contains(out, c.wantText) {
+				t.Fatalf("output does not mention %q:\n%s", c.wantText, out)
+			}
+			if c.wantExit != 0 && !strings.Contains(out, "internal/tenancy/") {
+				t.Fatalf("the failure does not NAME the file that left the build, "+
+					"which is the whole point of a file-granular floor:\n%s", out)
+			}
+		})
+	}
+}
+
+// twoFileTree writes the clean tree and gives internal/tenancy a SECOND tagged
+// file, mirroring internal/tenancy, which has six. It returns the transcript of
+// a run in which both tenancy files reported, and the transcript of one in which
+// only the sibling did.
+func twoFileTree(t *testing.T, dir string) (withIsolation, withoutIsolation string) {
+	t.Helper()
+	pkgs := []string{"internal/approles", "internal/tenancy"}
+	base := tree(t, dir, pkgs...)
+	writeFile(t, filepath.Join(dir, "internal", "tenancy", "isolation_integration_test.go"),
+		"//go:build integration\n\npackage p\n\nimport \"testing\"\n\nfunc TestIntegrationIsolation(t *testing.T) {}\n")
+	writeFile(t, filepath.Join(dir, "manifest.txt"), strings.Join(pkgs, "\n")+"\n")
+	return base + "--- PASS: TestIntegrationIsolation (0.01s)\n", base
+}
+
+func firstLine(t *testing.T, path string) string {
+	t.Helper()
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	return strings.SplitN(string(body), "\n", 2)[0]
+}
+
+// compiledUnderIntegrationTag asks the toolchain the same question the backstop
+// asks, independently of the backstop, so a case cannot claim to have removed a
+// file from the build without that having actually happened.
+func compiledUnderIntegrationTag(t *testing.T, dir, pkg, file string) bool {
+	t.Helper()
+	cmd := exec.Command("go", "list", "-tags", "integration",
+		"-f", "{{range .TestGoFiles}}{{.}}\n{{end}}", pkg)
+	cmd.Dir = dir
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("go list in the synthetic tree: %v\n%s", err, out)
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		if strings.TrimSpace(line) == file {
+			return true
+		}
+	}
+	return false
+}
+
+// THE TOOLCHAIN FLOOR MUST NOT PASS ON AN EMPTY UNIVERSE.
+//
+// `go list ./internal/...` matching nothing is a WARNING on stderr and an exit
+// status of zero, so a root the toolchain cannot see produces empty file sets
+// and no error at all. That is the shape of every bug in this file: nothing
+// found reads exactly like nothing wrong. Here the source root holds a properly
+// tagged, properly named suite that matches the manifest — so floors one, two
+// and three are all satisfied — but it sits under a directory the `...` pattern
+// skips, so the compiler reports no packages whatsoever.
+func TestTheToolchainFloorRefusesAnEmptyUniverse(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "go.mod"), "module synthetic\n\n"+goDirective(t)+"\n")
+
+	// `testdata` is skipped by the `...` pattern, which is precisely why grep
+	// can see this file and the compiler cannot.
+	writeFile(t, filepath.Join(dir, "internal", "testdata", "tenancy", "isolation_integration_test.go"),
+		"//go:build integration\n\npackage p\n\nimport \"testing\"\n\nfunc TestIntegrationIsolation(t *testing.T) {}\n")
+	writeFile(t, filepath.Join(dir, "manifest.txt"), "internal/testdata/tenancy\n")
+
+	out, code := runBackstop(t, dir, "--check-manifest", "./internal", filepath.Join(dir, "manifest.txt"))
+	if code == 0 {
+		t.Fatalf("the backstop passed with an empty compiled set, so the toolchain floor is vacuous:\n%s", out)
+	}
+	if !strings.Contains(out, "reported NO test files") {
+		t.Fatalf("output does not say the compiled set was empty:\n%s", out)
+	}
 }
