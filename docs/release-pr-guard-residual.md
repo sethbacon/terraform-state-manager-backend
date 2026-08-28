@@ -74,8 +74,12 @@ and **reopens** any issue the merge closed that no commit in the release asked t
 close, with a comment saying why. It cannot prevent the close. It removes the
 part that did the damage: that the close was silent.
 
-Verified against live artifacts: it fails #243 (→ #245) and #480 (→ #459), the
-two known incidents, and passes releases #490, #494, #498, #506 and #515.
+Verified against live artifacts across the FULL history — all 70 merged
+release pull requests, enumerated with pagination (an earlier sweep claimed
+"all 22"; 22 was the reach of one unpaginated listing page, the same blind
+axis the re-grade itself had). The sweep grades #243 (→ #245) and #480
+(→ #459) as FAIL — the two known incidents — and the remaining 68 as clean,
+with zero false positives.
 
 > The post-merge grade reads the **pull request body**, never the merge commit
 > message. `squash_merge_commit_message=COMMIT_MESSAGES` means the *branch's*
@@ -88,17 +92,40 @@ two known incidents, and passes releases #490, #494, #498, #506 and #515.
 
 ## THE RESIDUAL — what an operator still has to do
 
-**R1. Two contexts are not required, so today the guard blocks nothing.**
-`main`'s required contexts do not include `Release PR closes only what it
-completes`, `Release-PR guard self-test`, or the new
-`release-guard/link-regrade`. All three run and report; none gates. **Add
-`release-guard/link-regrade` to the required contexts** or the bounded window is
-decorative.
+**R1. PARTIALLY CLOSED, 2026-08-28: the pull-request-time context is now
+required; the re-grade context still is not.** `Release PR closes only what it
+completes` **is** in `main`'s required status checks as of today — verified by
+re-reading the protection API after the write:
 
-**R2. `enforce_admins` is false.** An `--admin` merge bypasses every required
-context, whatever it says. Release pull requests in this estate are merged that
-way. Until admins are enforced, **item 1 does not bind the person who merges
-releases**, and only the post-merge backstop applies.
+```
+gh api repos/sethbacon/terraform-state-manager-backend/branches/main/protection/required_status_checks
+```
+
+lists it among the ten required contexts, with `strict: true`. What is **still
+not required**: `release-guard/link-regrade` (the commit status the cron
+overwrites) and `Release-PR guard self-test`. Until `release-guard/link-regrade`
+is required, the bounded window is decorative at merge time: the cron can turn
+the status red and nothing forces anyone to look before merging. The
+pull-request-time context alone grades the world as it stood at the last
+`pull_request` event — which is exactly the moment this whole file exists to
+distrust. **Add `release-guard/link-regrade` to the required contexts** to
+finish R1.
+
+**R2. `enforce_admins` is false — by DELIBERATE decision, and the guard binds
+nobody until it flips.** An `--admin` merge bypasses every required context,
+whatever it says, and release pull requests in this estate are merged that way.
+So even with R1 finished, **no required context binds the person who merges
+releases**; only the post-merge backstop applies to them. This is a considered
+decision recorded on issue #529, not an oversight: turning `enforce_admins` on
+would end `--admin` merges, which is currently the only way releases get merged
+with a single maintainer. **The plan recorded there is to flip it when the
+project gains a second reviewer**, at which point every guard in this file
+engages with no further work. Anyone auditing before then: treat every required
+context in this repository as advisory, and verify the current state with
+
+```
+gh api repos/sethbacon/terraform-state-manager-backend/branches/main/protection/enforce_admins --jq .enabled
+```
 
 **R3. One cron tick is still exploitable.** A link made and merged inside the
 same 5-minute window merges green. GitHub does not guarantee cron punctuality
