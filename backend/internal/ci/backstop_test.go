@@ -729,6 +729,32 @@ func TestEachIntegrationGatedFileMustContributeItsOwnPass(t *testing.T) {
 			wantExit: 1,
 			wantText: []string{"internal/tenancy/isolation_integration_test.go", "did not build or did not run"},
 		},
+		{
+			// THE ROUND-2 FORGERY, run for real rather than synthesised: every
+			// test in the gated file skips, and a sibling test in the same
+			// package prints the file's marker to os.Stdout at column 0 as a
+			// top-level PASS line. Before the contradiction check, go test
+			// exited 0 and the guard graded the forged line as the file's
+			// proof. The transcript necessarily carries BOTH the forged PASS
+			// and the real SKIP for the same name -- go test emits exactly one
+			// top-level verdict per function -- and that contradiction is what
+			// the guard now refuses.
+			name: "a forged PASS printed beside the real SKIP is refused",
+			prepare: func(t *testing.T, dir string) []string {
+				writeFile(t, filepath.Join(dir, "internal", "tenancy", "isolation_integration_test.go"),
+					"//go:build integration\n\npackage p\n\nimport \"testing\"\n\n"+
+						"func TestIntegrationIsolation(t *testing.T) { t.Skip(\"silenced\") }\n")
+				writeFile(t, filepath.Join(dir, "internal", "tenancy", "integration_test.go"),
+					"//go:build integration\n\npackage p\n\nimport (\n\t\"fmt\"\n\t\"testing\"\n)\n\n"+
+						"func TestIntegrationtenancy(t *testing.T) {\n"+
+						"\tfmt.Print(\"--- PASS: TestIntegrationIsolation (0.00s)\\n\")\n"+
+						"}\n")
+				return nil
+			},
+			wantExit:     1,
+			wantText:     []string{"BOTH a PASS and a SKIP or FAIL", "TestIntegrationIsolation"},
+			requireInLog: "--- SKIP: TestIntegrationIsolation",
+		},
 	}
 
 	for _, c := range cases {

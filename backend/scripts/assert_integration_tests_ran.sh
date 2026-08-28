@@ -152,7 +152,15 @@
 #   - THE TRANSCRIPT IS TRUSTED. Grading believes the file it is handed. A step
 #     that substitutes or edits the transcript before this script runs defeats
 #     every floor here; that is the workflow's integrity problem, not this
-#     script's, and it is not claimed as covered.
+#     script's, and it is not claimed as covered. AND NOT ONLY THE WORKFLOW:
+#     review proved the transcript forgeable from INSIDE the repo, no workflow
+#     access needed -- a test anywhere in the run printing a gated file's
+#     marker as a top-level PASS line to os.Stdout at column 0. The
+#     PASS-beside-SKIP contradiction check now refuses that specific forgery,
+#     because the real verdict is still emitted beside the forged one. What it
+#     does NOT refuse: forging a marker for a test that was DELETED rather
+#     than skipped -- no real verdict then contradicts the forgery. That is a
+#     deletion-equivalent, diff-visible only, same as the rest of this bullet.
 #
 # Usage:
 #   assert_integration_tests_ran.sh <go test -v transcript> [source root] [manifest] [ignored-allowlist]
@@ -616,10 +624,30 @@ while IFS= read -r file; do
     # Anchored, and matching the top-level form only: a subtest prints indented
     # as `    --- PASS: Parent/child`, which must not stand in for its parent.
     if grep -qE "^--- PASS: ${name} \(" "$log"; then
+      # A PASS AND A SKIP/FAIL FOR THE SAME NAME IS A FORGERY, NOT A RESULT.
+      # go test prints exactly one top-level verdict per test function, so a
+      # transcript carrying both "--- PASS: X" and "--- SKIP: X" was not
+      # written by go test alone -- proven in review by t.Skip'ing a gated
+      # file and having a sibling test print the PASS line to stdout, which
+      # this guard then graded as ok. The forged transcript necessarily holds
+      # the contradiction, because the real verdict is still emitted; refusing
+      # it pushes the attacker into deleting the real test, which is
+      # diff-visible and already stated residual. A test runner will never
+      # trip this: one function, one verdict.
+      if grep -qE "^--- (SKIP|FAIL): ${name} \(" "$log"; then
+        echo "::error::${file}: transcript carries BOTH a PASS and a SKIP or FAIL for ${name}."
+        echo "::error::  go test emits one top-level verdict per function, so this transcript was"
+        echo "::error::  not written by go test alone. A forged PASS printed beside the real"
+        echo "::error::  verdict is refused rather than graded."
+        status=1
+        found="__contradiction__"
+        break
+      fi
       found="$name"
       break
     fi
   done
+  [[ "$found" == "__contradiction__" ]] && continue
   if [[ -z "$found" ]]; then
     echo "::error::${file}: none of its test functions reported a top-level PASS -- that file did not build or did not run."
     echo "::error::  A sibling file's PASS no longer covers it: every integration-gated file must"
