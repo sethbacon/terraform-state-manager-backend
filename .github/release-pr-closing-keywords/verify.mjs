@@ -58,12 +58,21 @@
 // not on the changelog's rendering of it, so `Refs` and `Closes` stop being the
 // same thing the moment they reach this file.
 //
+// INTENT IS READ FROM TRAILERS ONLY, with `git interpret-trailers` as the
+// parser. An earlier version scanned the whole commit message, and text that
+// merely QUOTED a keyword -- a git-revert subject quoting "closes #245", a
+// fenced code block, quoted review text -- counted as the author's ask, each
+// spelling proven to flip the #243 incident from FAIL to PASS. A `Closes #N`
+// in the trailer block is intent; the same words anywhere else are prose. The
+// details and the pinned git behaviour live in trailer-intents.mjs.
+//
 // FAIL-CLOSED. Every floor below turns a guard that cannot see into a guard
 // that fails, because a body it could not parse and a body with nothing wrong
 // in it produce the same silence otherwise.
 import fs from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { findClosingReferences, key } from './closing-refs.mjs';
+import { closingIntentsFromTrailers } from './trailer-intents.mjs';
 
 const COMMIT_LINK_RE = /\/commit\/([0-9a-f]{7,40})(?![0-9a-f])/g;
 
@@ -205,7 +214,21 @@ export async function evaluate({
     if (typeof message !== 'string' || message.trim() === '') {
       throw new Blind(`Empty commit message returned for ${sha}; cannot read its trailers.`);
     }
-    for (const ref of findClosingReferences(message, owner, repo).closing) {
+    // Intent comes from TRAILER-POSITION lines only, parsed by git itself.
+    // Running the keyword scan over the raw message minted intent from text
+    // that merely QUOTES a keyword -- a git-revert subject quoting
+    // 'closes #245', a fenced code block, quoted review text -- and each of
+    // those flipped the #243 incident from FAIL to PASS. A revert is by
+    // definition not completing the issue. See trailer-intents.mjs.
+    let intentRefs;
+    try {
+      intentRefs = closingIntentsFromTrailers(message, owner, repo);
+    } catch (err) {
+      throw new Blind(
+        `Could not read the trailers of ${sha}: ${err && err.message ? err.message : err}`
+      );
+    }
+    for (const ref of intentRefs) {
       intents.add(key(ref));
     }
   }
