@@ -78,15 +78,30 @@ closes its issue anyway, one release later.
 That is not hypothetical: `ca2e5b3` ends `Refs #459`, release PR #480 rendered it as a
 closing keyword, and #459 closed one second after #480 merged.
 
-The guard fails the release PR when its body would close an issue that is **open** and
-that **no commit in the release asked to close**. When it is red:
+The body is not the only way an issue gets closed, and it is not the universe the guard
+reads. GitHub's own `closingIssuesReferences` is, because an issue attached through the
+**Development panel** closes on merge while writing *nothing at all* into the body. That
+has also already happened here: release PR #243 carries not one closing keyword in its
+1205-byte body, merged at `2026-07-23T22:11:28Z`, and #245 closed at `22:11:29Z` — while
+the only commit on the subject, `003d043`, says `Refs #245` twice.
 
-1. Read the job log. It names each issue and why.
-2. Edit the release PR body: change `closes` to `refs` on those lines only. Leave the
-   genuine ones alone.
+The guard fails the release PR when an issue it would close is **open** and **no commit in
+the release asked to close it**. Each finding is labelled with where it came from:
+
+| label | what it means | how to fix it |
+|---|---|---|
+| `github-linked + body` | the changelog rendered a `Refs` trailer as a closing keyword | edit the body: `closes` → `refs` on those lines only |
+| `github-linked` | the issue is attached through the Development panel; no body text mentions it | open the PR's **Development** panel and remove the link |
+| `body-only` | the body closes it but GitHub has not linked it | edit the body: `closes` → `refs` |
+
+When it is red:
+
+1. Read the job log. It names each issue, its source label, and why.
+2. Apply the fix for that label. Leave the genuine ones alone.
 3. Merge promptly. release-please regenerates the body on the next push to `main`, which
-   undoes the edit and turns the check red again — the check re-runs on `edited` and
+   undoes a body edit and turns the check red again — the check re-runs on `edited` and
    `synchronize` precisely so the body that actually merges is the body that was checked.
+   A Development-panel detach is not regenerated and stays fixed.
 
 There is no configuration that removes the hazard at the source today. The verb is
 hardcoded in `conventional-changelog-conventionalcommits`' commit partial, and
