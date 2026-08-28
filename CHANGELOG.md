@@ -1,5 +1,12 @@
 # Changelog
 
+## [3.16.2](https://github.com/sethbacon/terraform-state-manager-backend/compare/v3.16.1...v3.16.2) (2026-08-28)
+
+
+### Bug Fixes
+
+* **ci:** re-grade the release link graph on a schedule and after the merge ([#533](https://github.com/sethbacon/terraform-state-manager-backend/issues/533)) ([401ba03](https://github.com/sethbacon/terraform-state-manager-backend/commit/401ba0373dcf80959dc18b3adf73a6f07f53b604))
+
 ## [3.16.1](https://github.com/sethbacon/terraform-state-manager-backend/compare/v3.16.0...v3.16.1) (2026-08-28)
 
 
