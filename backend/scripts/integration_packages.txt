@@ -1,0 +1,25 @@
+# THE INTEGRATION PACKAGE FLOOR.
+#
+# Every package listed here MUST contribute at least one passing, top-level,
+# integration-tagged test to the Postgres job's transcript. The list is checked
+# BOTH ways by assert_integration_tests_ran.sh: a package here that the tree no
+# longer supplies is a failure, and a package the tree supplies that is not here
+# is also a failure.
+#
+# Why a committed list at all, when the script derives the packages from the
+# tree? Because the derivation reads the build tag, and the edit this file
+# exists to catch is the removal of that build tag. A derived set shrinks
+# silently; a set checked against a committed one cannot. Deleting the tagged
+# file has the same shape and is caught the same way.
+#
+# Removing an entry is therefore a deliberate, reviewable act that says in the
+# diff: "this package no longer proves anything against a real database."
+# Adding a suite means adding its package here in the same commit.
+#
+# Paths are module-relative, one per line. `#` comments and blank lines ignored.
+internal/approles
+internal/bootstrap
+internal/db/repositories
+internal/maintenance
+internal/platformadmin
+internal/tenancy

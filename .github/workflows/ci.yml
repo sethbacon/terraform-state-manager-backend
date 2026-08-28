@@ -242,11 +242,13 @@ jobs:
         env:
           TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres?sslmode=disable
           TSM_TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres?sslmode=disable
-        # -tags integration selects the tagged files -- eleven of them, across
-        # six packages, as of this writing; the count is not restated in the
-        # backstop below because it DERIVES the set rather than listing it. The
-        # untagged DATABASE half of migration_conn_leak_test.go compiles either
-        # way and gates only on its own DSN variable.
+        # -tags integration selects the tagged files. WHICH packages must
+        # report is not restated here: backend/scripts/integration_packages.txt
+        # is the one catalog, and the backstop below checks it against the tree
+        # both ways. A count copied into a comment goes stale silently, which is
+        # the failure mode this whole area is about. The untagged DATABASE half
+        # of migration_conn_leak_test.go compiles either way and gates only on
+        # its own DSN variable.
         #
         # THE PIPELINE IS GRADED, not just tee: see this workflow's `defaults`.
         # Without pipefail this step reported tee's exit status, and a package
@@ -262,6 +264,14 @@ jobs:
         # files. The previous version keyed on `TestIntegration`, which six
         # packages emit, so internal/approles' siblings kept it green while
         # internal/approles did not build at all.
+        #
+        # And the derivation itself has a floor now. Deriving from the build tag
+        # meant that editing the tag removed a package from the expected set,
+        # from the transcript and from the check at once -- the same defect one
+        # level up, and it exited 0. So the tag-derived set is cross-checked
+        # against a by-name derivation the tag edit does not touch, and both are
+        # checked against integration_packages.txt. Dropping a suite is still
+        # allowed; it just has to appear in a diff.
         run: bash scripts/assert_integration_tests_ran.sh /tmp/pg-tests.log ./internal
 
   gosec:
