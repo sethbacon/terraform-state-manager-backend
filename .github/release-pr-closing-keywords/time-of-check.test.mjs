@@ -153,10 +153,13 @@ test('TOC: a reader returning no refs array is refused rather than read as nothi
 // itself, because a deleted `schedule:` block and a `schedule:` block that
 // never fired produce identical evidence: nothing.
 
-const WF = fs.readFileSync(
-  path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'workflows', 'release-pr-guard.yml'),
-  'utf8'
-);
+const HERE = path.dirname(fileURLToPath(import.meta.url));
+const WF = fs.readFileSync(path.join(HERE, '..', 'workflows', 'release-pr-guard.yml'), 'utf8');
+// The re-grade MECHANISM lives in link-regrade.sh so link-regrade.test.mjs can
+// EXECUTE it against a stub gh -- outcomes are asserted there. The pins below
+// against the script's text are secondary: they catch a rename or a rewiring
+// of the workflow around the script, which the harness cannot see.
+const REGRADE_SH = fs.readFileSync(path.join(HERE, 'link-regrade.sh'), 'utf8');
 
 // The job bodies, split on a two-space-indented job key at column 0 of the
 // jobs map. Used so a permission can be asserted against the RIGHT job.
@@ -202,10 +205,15 @@ test('WIRING: the merge backstop is on push, may write issues, and invokes the b
   assert.match(j, /merge-backstop\.mjs/);
 });
 
-test('WIRING: the scheduled re-grade runs the SAME verifier the PR job runs', () => {
+test('WIRING: the scheduled re-grade job invokes the extracted script, which runs the SAME verifier', () => {
   const j = JOBS.get('link-regrade');
   assert.ok(j, 'the link-regrade job is gone: the window is unbounded again');
-  assert.match(j, /verify\.mjs/, 're-grading with different code than the PR job is a second guard to drift');
+  assert.match(
+    j,
+    /bash \.github\/release-pr-closing-keywords\/link-regrade\.sh/,
+    'the job no longer runs link-regrade.sh, so everything the harness proves about the script proves nothing about CI'
+  );
+  assert.match(REGRADE_SH, /verify\.mjs/, 're-grading with different code than the PR job is a second guard to drift');
   assert.match(j, /statuses: write/);
 });
 
@@ -220,24 +228,33 @@ test('WIRING: both publishers post under ONE context name, and it is enumerated'
   assert.ok(bindings.length > 0, 'enumerated zero CONTEXT bindings -- the matcher is blind, not the file clean');
   assert.equal(bindings.length, 2, `expected the PR job and the re-grade to bind CONTEXT, found ${bindings.length}`);
 
-  for (const name of ['closing-keywords', 'link-regrade']) {
-    assert.match(
-      JOBS.get(name),
-      /-X POST "repos\/\$REPO\/statuses\/\$/,
-      `${name} never posts a commit status, so its verdict reaches nothing protection reads`
-    );
-  }
+  assert.match(
+    JOBS.get('closing-keywords'),
+    /-X POST "repos\/\$REPO\/statuses\/\$/,
+    'closing-keywords never posts a commit status, so its verdict reaches nothing protection reads'
+  );
+  assert.match(
+    REGRADE_SH,
+    /-X POST "repos\/\$REPO\/statuses\/\$/,
+    'the re-grade script never posts a commit status, so the cron overwrites nothing'
+  );
+  assert.match(
+    JOBS.get('link-regrade'),
+    /CONTEXT: \$\{\{ env\.REGRADE_CONTEXT \}\}/,
+    'the re-grade job does not hand the script the shared context name'
+  );
 });
 
 // GitHub caps statuses at 1000 per SHA per context. A 5-minute tick that
 // re-posts an unchanged verdict reaches that in about three and a half days,
 // after which a long-lived pull request silently stops being gradeable -- a
 // guard that expires by running normally.
-test('WIRING: the scheduled re-grade reads the current status before posting', () => {
-  const j = JOBS.get('link-regrade');
-  assert.match(j, /commits\/\$_sha\/status/, 'never reads the existing status, so it re-posts every tick');
-  assert.match(j, /first\(\.statuses\[\]/, 'should select with jq first, not a pipe a closed reader can empty');
-  assert.doesNotMatch(j, /\.statuses\[\][^\n]*\|\s*head/, 'piping into head can truncate to a silent empty answer');
+test('WIRING: the re-grade script reads the current status, paginated, before posting', () => {
+  // The unchanged-verdict skip itself is EXECUTED and asserted in
+  // link-regrade.test.mjs; these pins only catch the mechanism moving.
+  assert.match(REGRADE_SH, /commits\/\$_sha\/status\?per_page=100/, 'never reads the existing status, so it re-posts every tick');
+  assert.match(REGRADE_SH, /first\(/, 'should select with jq first, not a pipe a closed reader can empty');
+  assert.doesNotMatch(REGRADE_SH, /statuses\[\][^\n]*\|\s*head/, 'piping into head can truncate to a silent empty answer');
 });
 
 test('WIRING: the PR job publishes a status and still fails on a failed grade', () => {
