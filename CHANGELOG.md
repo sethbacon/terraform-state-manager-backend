@@ -1,5 +1,30 @@
 # Changelog
 
+## [3.16.0](https://github.com/sethbacon/terraform-state-manager-backend/compare/v3.15.0...v3.16.0) (2026-08-28)
+
+
+### Features
+
+* **audit:** bound audit_logs with a retention sweep, disabled by default ([#518](https://github.com/sethbacon/terraform-state-manager-backend/issues/518)) ([550c4f4](https://github.com/sethbacon/terraform-state-manager-backend/commit/550c4f473fd9ace0fc64f6adc55de887ef552dc9)), closes [#373](https://github.com/sethbacon/terraform-state-manager-backend/issues/373)
+* **audit:** legal holds, so evidence can be preserved before anything deletes it ([#517](https://github.com/sethbacon/terraform-state-manager-backend/issues/517)) ([74095a9](https://github.com/sethbacon/terraform-state-manager-backend/commit/74095a9c55008fe9eccf3b7df666748cebac04de)), closes [#373](https://github.com/sethbacon/terraform-state-manager-backend/issues/373)
+* **crypto:** bind secrets to a purpose — R1, readers only ([#513](https://github.com/sethbacon/terraform-state-manager-backend/issues/513)) ([1f9f423](https://github.com/sethbacon/terraform-state-manager-backend/commit/1f9f423651cb8d21a7ac7d6279e36688e3eb6366))
+* **crypto:** bind secrets to a purpose — R2, writers ([#516](https://github.com/sethbacon/terraform-state-manager-backend/issues/516)) ([3c96334](https://github.com/sethbacon/terraform-state-manager-backend/commit/3c963348f613d1d66f76e9c28ef2007724dc5108)), closes [#277](https://github.com/sethbacon/terraform-state-manager-backend/issues/277)
+* **tenancy:** scope the schedules reads by organization ([#519](https://github.com/sethbacon/terraform-state-manager-backend/issues/519)) ([d6b568c](https://github.com/sethbacon/terraform-state-manager-backend/commit/d6b568ce672288c0123f13c9e7ce8b05eee0a728)), closes [#393](https://github.com/sethbacon/terraform-state-manager-backend/issues/393)
+
+
+### Bug Fixes
+
+* **ci:** close three blind axes in the integration backstop and pipefail guard ([#526](https://github.com/sethbacon/terraform-state-manager-backend/issues/526)) ([945af85](https://github.com/sethbacon/terraform-state-manager-backend/commit/945af85592bd190e4b0347a4c92f3cd9610689cc)), closes [#521](https://github.com/sethbacon/terraform-state-manager-backend/issues/521)
+* **ci:** grade the whole pipeline, and repair the approles integration tests ([#524](https://github.com/sethbacon/terraform-state-manager-backend/issues/524)) ([331ee4f](https://github.com/sethbacon/terraform-state-manager-backend/commit/331ee4f8a63724fe0398b1539e2bb0df167cdd03)), closes [#521](https://github.com/sethbacon/terraform-state-manager-backend/issues/521)
+* **release:** a release PR can no longer close an issue the release leaves open ([#525](https://github.com/sethbacon/terraform-state-manager-backend/issues/525)) ([b7c767f](https://github.com/sethbacon/terraform-state-manager-backend/commit/b7c767f505c84b55f22378d814d600fe04218717)), closes [#522](https://github.com/sethbacon/terraform-state-manager-backend/issues/522)
+* **release:** grade the release PR against GitHub's closing set, not its body ([#527](https://github.com/sethbacon/terraform-state-manager-backend/issues/527)) ([d40bcd2](https://github.com/sethbacon/terraform-state-manager-backend/commit/d40bcd23b3fb61a17f3020dfbbff1907bbf8b4c0)), closes [#522](https://github.com/sethbacon/terraform-state-manager-backend/issues/522)
+* **test:** the partition-root INSERT guard could not see a quoted table name ([#523](https://github.com/sethbacon/terraform-state-manager-backend/issues/523)) ([13e2efd](https://github.com/sethbacon/terraform-state-manager-backend/commit/13e2efd7757bbbd166a2f5998e0d0543a14c506d)), closes [#393](https://github.com/sethbacon/terraform-state-manager-backend/issues/393)
+
+
+### Documentation
+
+* **ci:** re-measure the OSV toolchain abort at the pin actually in use ([#520](https://github.com/sethbacon/terraform-state-manager-backend/issues/520)) ([b7e34fa](https://github.com/sethbacon/terraform-state-manager-backend/commit/b7e34fa3134bc4320ce5013c5475b08f2e55e621))
+
 ## [3.15.0](https://github.com/sethbacon/terraform-state-manager-backend/compare/v3.14.0...v3.15.0) (2026-08-27)
 
 
