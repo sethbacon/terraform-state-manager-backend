@@ -4,12 +4,23 @@
 # release-please renders EVERY issue reference a commit carries as
 # `closes [#N]` in the changelog, including a `Refs #N` trailer written
 # deliberately to link an issue WITHOUT closing it. That changelog is the
-# release pull request body; this repository squash-merges with
-# squash_merge_commit_message=COMMIT_MESSAGES, so the body becomes the merge
-# commit message; and GitHub reads a merge commit message for linked-issue
-# keywords. A non-closing trailer therefore closes its issue anyway, one
-# release later, in a commit nobody reads line by line and attributed to a
+# release pull request body, GitHub parses the body into its LINKED-ISSUE GRAPH,
+# and merging the pull request closes everything in that graph. A non-closing
+# trailer therefore closes its issue anyway, one release later, attributed to a
 # release rather than to the change.
+#
+# CORRECTION, measured 2026-08-28. An earlier version of this header said the
+# body becomes the merge commit message via
+# squash_merge_commit_message=COMMIT_MESSAGES. It does not. COMMIT_MESSAGES means
+# the BRANCH's commit messages, and a release-please branch carries exactly one
+# commit. The real merge commits of both incidents are
+#     chore(main): release 2.6.0 (#243)
+#     chore(main): release 3.13.0 (#480)
+# plus a Co-authored-by trailer -- no changelog, no compare link, no keyword.
+# Both #245 and #459 were closed by the LINK GRAPH alone. The distinction is
+# load-bearing: a guard aimed at the merge commit message would grade an empty
+# universe and report clean on both. The body scan stays only as a secondary
+# widening signal, because the body is what GitHub parses to BUILD the graph.
 #
 # IT HAS ALREADY FIRED HERE THREE TIMES. Commit ca2e5b3 ends `Refs #459`.
 # Release pull request #480 rendered that as a closing keyword. #480 merged at
@@ -44,6 +55,50 @@
 # nothing while looking like a fix, which is the failure this whole cluster of
 # work exists to remove.
 #
+# THE TIME-OF-CHECK HOLE, AND WHY THIS FILE NOW HAS THREE TRIGGERS.
+# `closingIssuesReferences` is the right universe, but the four `pull_request`
+# activity types above are the wrong MOMENTS to read it. An issue attached
+# through the Development panel writes a `connected` timeline event, and
+# `connected` is not an activity type on ANY webhook -- not `pull_request`, not
+# `issues` -- so a link made after the last push fires nothing at all.
+#
+# Re-proven on incident #243 while fixing it:
+#   22:01:36  last force-push        22:02:09  `connected`, NO run follows
+#   22:01:39  last `pull_request` runs   22:11:28  merge, 22:11:29 #245 closes
+# Replaying the guard in the state that held at 22:01:39 prints `linked=0
+# graded=0` and exits 0.
+#
+# WHAT WAS REJECTED, WITH THE REASON:
+#   * the `issues` event -- IMPOSSIBLE, not merely awkward. GitHub's `issues`
+#     activity types are assigned, closed, deleted, demilestoned, edited,
+#     field_added, field_removed, labeled, locked, milestoned, opened, pinned,
+#     reopened, transferred, typed, unassigned, unlabeled, unlocked, unpinned,
+#     untyped. There is no `connected` and no `linked` on either side.
+#   * "a required context that is re-evaluated rather than cached" -- no such
+#     mechanism exists. Branch protection grades the latest check-run or status
+#     ON THE HEAD SHA and never re-evaluates at merge time. The only way a
+#     verdict changes is for something to POST a new one, which is a trigger
+#     problem again.
+#   * `merge_group` -- the ONLY complete answer, and unavailable here. It grades
+#     at merge time, after dequeue, when the answer is final. But this
+#     repository has no merge queue configured, enabling one is a repository
+#     setting no pull request can make, and `enforce_admins` is false while
+#     release pull requests here are merged with `--admin`, which bypasses a
+#     queue outright. It would gate everyone except the actor who actually
+#     merges releases.
+#
+# SO THIS FILE DOES THE TWO THINGS A WORKFLOW CAN DO, AND CLAIMS NOTHING MORE:
+#   `schedule` BOUNDS the window from forever to one cron tick, and publishes
+#   its verdict as a commit status on the head SHA -- the only place protection
+#   looks. A 5-minute tick would have fired twice inside #243's 9m19s gap.
+#   `push` to main runs the SAME grade AFTER the merge, with the clock wound
+#   back to the merge instant, and reopens whatever was closed by mistake. It
+#   cannot prevent the close. It removes the part that did the damage: silence.
+#
+# THE RESIDUAL IS REAL AND IS NOT CLOSED. A link made and merged inside one
+# cron tick still merges green, and an `--admin` merge bypasses every required
+# context regardless. See `docs/release-pr-guard-residual.md`.
+#
 # THIS IS A SEPARATE FILE FROM pr-checks.yml ON PURPOSE, so it can be added,
 # reviewed and rolled back without touching a file the rest of the estate is
 # also editing.
@@ -57,16 +112,38 @@ name: Release PR Guard
       - edited
       - synchronize
       - reopened
+  # Bounds the time-of-check window. GitHub's floor is 5 minutes and it does
+  # not guarantee punctuality, so this shortens the exposure rather than
+  # removing it -- which is exactly what it is documented to do.
+  schedule:
+    - cron: "*/5 * * * *"
+  # Fires after the merge, the one moment the answer is final.
+  push:
+    branches: [main]
+  # So an operator can force a re-grade without waiting for the tick.
+  workflow_dispatch: {}
 
 permissions:
   contents: read
+
+env:
+  # One name, used by the pull-request job and the scheduled re-grade alike.
+  # It is deliberately NOT the check-run name of the job below: a check run and
+  # a commit status sharing one context is ambiguous to branch protection, and
+  # ambiguity in a guard is the failure this work exists to remove.
+  REGRADE_CONTEXT: release-guard/link-regrade
 
 concurrency:
   # An `edited` event fires on every body rewrite, and release-please rewrites
   # the body on every merge to main. Only the latest body can be merged, so
   # only the latest body is worth checking.
-  group: release-pr-guard-${{ github.event.pull_request.number }}
-  cancel-in-progress: true
+  #
+  # The event name is in the key because the old key collapsed to
+  # `release-pr-guard-` for every non-pull_request event, which would let a
+  # scheduled tick CANCEL the post-merge backstop -- a silent miss in the one
+  # job that cannot be re-run by pushing again.
+  group: release-pr-guard-${{ github.event_name }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   # Runs on EVERY pull request, not only release ones. A required context that
@@ -75,12 +152,17 @@ jobs:
   # release-please did not create.
   closing-keywords:
     name: Release PR closes only what it completes
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
       contents: read
       pull-requests: read
       issues: read
+      # To publish the same verdict as a commit status on the head SHA, so the
+      # scheduled re-grade below has something to overwrite and a pull request
+      # is never left waiting on a context only the cron can post.
+      statuses: write
     steps:
       # hardening-exception: egress-audit — this job reaches only api.github.com
       #   through the gh CLI and mints no long-lived credential, but this repository
@@ -102,6 +184,10 @@ jobs:
       # request body executing on the runner, and the payload of an `edited`
       # event is a snapshot that release-please may already have replaced.
       - name: Check whether the body would close an issue this release leaves open
+        id: grade
+        # The verdict has to be PUBLISHED before the job dies, so the failure is
+        # carried by the next step rather than by this one.
+        continue-on-error: true
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
@@ -131,11 +217,179 @@ jobs:
           # universe.
           node .github/release-pr-closing-keywords/verify.mjs release-pr-body.md "$PR_NUMBER"
 
+      # Branch protection grades a CONTEXT ON THE HEAD SHA and nothing else, so
+      # a verdict that is not attached there cannot block anything. This posts
+      # the pull-request-time answer under the SAME context the scheduled
+      # re-grade uses, which is what lets the cron overwrite it later: the last
+      # status posted for a context is the one protection reads.
+      - name: Publish the verdict as a commit status on the head SHA
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          OUTCOME: ${{ steps.grade.outcome }}
+          CONTEXT: ${{ env.REGRADE_CONTEXT }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          if [ "$OUTCOME" = "success" ]; then
+            state=success
+            desc="Graded at this push. Re-graded on a schedule until merge."
+          else
+            state=failure
+            desc="This release would close an issue it does not complete."
+          fi
+          gh api -X POST "repos/$REPO/statuses/$HEAD_SHA" \
+            -f state="$state" -f context="$CONTEXT" -f description="$desc" \
+            -f target_url="$RUN_URL" > /dev/null
+          echo "posted $CONTEXT=$state on $HEAD_SHA"
+
+      # `continue-on-error` above rewrites the step's CONCLUSION to success, and
+      # the truth is only in `outcome`. A green job here with a failed grade is
+      # exactly the vacuous pass this whole file exists to remove.
+      - name: Fail the job if the grade failed
+        if: steps.grade.outcome != 'success'
+        run: |
+          echo "The closing-keyword grade failed; see 'Check whether the body...' above."
+          exit 1
+
+  # ── The time-of-check half ───────────────────────────────────────────────
+  #
+  # Nothing fires when an issue is attached through the Development panel, so
+  # the only way to observe the link is to LOOK AGAIN on a clock. This bounds
+  # the exposure to one tick; it does not remove it, and the file header says so.
+  link-regrade:
+    name: Re-grade open release PRs against the live link graph
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      pull-requests: read
+      issues: read
+      statuses: write
+    steps:
+      # hardening-exception: egress-audit — same shape as the job above: gh CLI
+      #   to api.github.com only, no long-lived credential, and no endpoint
+      #   baseline exists yet for this repository to write a block policy from
+      - name: Harden the runner
+        uses: step-security/harden-runner@05e31511f85b41b11d1cf0ef85d0992719546e2c # v2.21.0
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Re-grade every open pull request and republish the verdict
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          CONTEXT: ${{ env.REGRADE_CONTEXT }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+
+          # Two independent derivations of the same set. `open_count` is a plain
+          # length; `rows` is the projection the loop actually walks. A broken
+          # jq filter would empty `rows` while `open_count` stayed right, and an
+          # empty universe is indistinguishable from a clean one -- so the two
+          # are compared at the end and disagreement fails the job.
+          open_count="$(gh api "repos/$REPO/pulls?state=open&base=main&per_page=100" --jq 'length')"
+          rows="$(gh api "repos/$REPO/pulls?state=open&base=main&per_page=100" \
+                    --jq '.[] | [.number, .head.sha, .head.ref] | @tsv')"
+
+          considered=0
+          release=0
+          failing=0
+          while IFS="$(printf '\t')" read -r num sha ref; do
+            [ -n "$num" ] || continue
+            considered=$((considered + 1))
+            case "$ref" in
+              release-please--branches--*) ;;
+              *)
+                # Posted for NON-release pull requests too. A required context
+                # that only some pull requests ever receive blocks the rest
+                # forever -- the same trap the job above is shaped around.
+                gh api -X POST "repos/$REPO/statuses/$sha" \
+                  -f state=success -f context="$CONTEXT" \
+                  -f description="Not a release pull request." -f target_url="$RUN_URL" > /dev/null
+                continue
+                ;;
+            esac
+            release=$((release + 1))
+
+            gh api "repos/$REPO/pulls/$num" --jq '.body' > "release-pr-body-$num.md"
+            if node .github/release-pr-closing-keywords/verify.mjs "release-pr-body-$num.md" "$num"; then
+              state=success
+              desc="Re-graded against the live link graph."
+            else
+              state=failure
+              desc="Closes an issue this release does not complete."
+              failing=$((failing + 1))
+            fi
+            gh api -X POST "repos/$REPO/statuses/$sha" \
+              -f state="$state" -f context="$CONTEXT" -f description="$desc" \
+              -f target_url="$RUN_URL" > /dev/null
+            echo "  #$num ($ref) -> $state"
+          done <<< "$rows"
+
+          echo "enumerated: $considered open pull request(s), $release release, $failing failing."
+          if [ "$considered" -ne "$open_count" ]; then
+            echo "Walked $considered pull request(s) but the API reports $open_count open." >&2
+            echo "The projection dropped rows, so a re-grade was silently skipped. Refusing to pass." >&2
+            exit 1
+          fi
+
+  # ── The after-the-fact half ──────────────────────────────────────────────
+  #
+  # Runs once the merge has happened, which is the only moment no link timing,
+  # no cancelled run and no admin bypass can dodge. It cannot prevent the close.
+  # It makes the close LOUD and puts the issue back.
+  merge-backstop:
+    name: A merged release closed only what it completes
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: read
+      # To reopen an issue the merge closed that no commit in the release asked
+      # to close. This is the repair, and it is the reason the job exists.
+      issues: write
+    steps:
+      # hardening-exception: egress-audit — same shape again: gh CLI to
+      #   api.github.com only, no long-lived credential, and no endpoint baseline
+      #   exists yet for this repository to write a block policy from
+      - name: Harden the runner
+        uses: step-security/harden-runner@05e31511f85b41b11d1cf0ef85d0992719546e2c # v2.21.0
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Grade the merge and reopen anything it closed by mistake
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          MERGE_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          node .github/release-pr-closing-keywords/merge-backstop.mjs "$MERGE_SHA"
+
   # The guard's own cases, run on every pull request. A checker whose tests only
   # run when someone remembers to run them is a checker that drifts from what it
   # claims to prove; that is the defect one level up from the one it catches.
   closing-keywords-self-test:
     name: Release-PR guard self-test
+    # Everything except the 5-minute tick. The cases prove the CHECKER, which
+    # cannot change between two ticks of a cron; running them 288 times a day
+    # would buy nothing and bury the re-grade output.
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -185,4 +439,4 @@ jobs:
           fi
           echo "enumerated: $passed passing case(s), $failed failing."
           [ "$failed" -eq 0 ]
-          [ "$passed" -ge 52 ]
+          [ "$passed" -ge 73 ]
