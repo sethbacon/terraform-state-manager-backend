@@ -114,6 +114,15 @@ workflow has recent scheduled runs when auditing.
 `push` run the issue is genuinely closed. Anything watching issue-closed events
 in that window sees the wrong state.
 
+**R6. The backstop grades `github.sha` only — the head of the push.** If a
+release merge ever landed in the *middle* of a multi-commit push to `main`, the
+commits behind the head would not be graded. This is deliberate rather than
+overlooked: with squash merges onto a protected branch each merge is its own
+push, so the head *is* the merge commit; and the alternatives — walking
+`github.event.commits`, which is capped at 20 entries and is empty on a
+force-push — add failure modes worth more than the case they cover. If direct or
+batched pushes to `main` are ever allowed, this needs revisiting.
+
 ### The only way to close R3 completely
 
 Enable a merge queue on `main`, require `release-guard/link-regrade` in it, and
