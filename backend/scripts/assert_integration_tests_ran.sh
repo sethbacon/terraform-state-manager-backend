@@ -77,7 +77,11 @@ if [[ $mode == grade ]]; then
   dsn_skip='(TSM_)?TEST_DATABASE_URL (not set|is not reachable|unreachable)|not reachable at (TSM_)?TEST_DATABASE_URL'
   if grep -qE "$dsn_skip" "$log"; then
     echo "::error::Postgres tests SKIPPED on an unset or unreachable DSN -- this job proved nothing."
-    grep -nE "$dsn_skip" "$log" | head -5
+    # grep -m 5, not `| head -5`: under the pipefail above, head closing the
+    # pipe SIGPIPEs grep once its output exceeds the pipe buffer, and the 141
+    # aborts before the sample prints -- losing the diagnostic that names which
+    # tests skipped, in the run where they did. -m 5 stops grep, so no pipe.
+    grep -nE -m 5 "$dsn_skip" "$log"
     exit 1
   fi
 fi
