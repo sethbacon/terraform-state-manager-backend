@@ -1762,7 +1762,7 @@
     },
     {
       "id": "serialize/integers-past-2-53-collapse",
-      "why": "PINNED and NOT a divergence: JSON parsing maps every number to an IEEE-754 double in BOTH implementations, so two distinct 20-digit serials become the same value and the attribute is dropped. Contract issue #18 reported this as a TypeScript-vs-reference divergence; it is not one — the implementations agree, and changing it is a parse-boundary decision in every consumer, not an edit inside summarize(). This vector exists so that agreement is asserted rather than assumed.",
+      "why": "PINNED and NOT a divergence: JSON parsing maps every number to an IEEE-754 double in BOTH implementations, so two distinct 20-digit serials become the same value and the attribute is dropped. Contract issue #18 reported this as a TypeScript-vs-reference divergence; it is not one — the implementations agree, and changing it is a parse-boundary decision in every consumer, not an edit inside summarize(). This vector exists so that agreement is asserted rather than assumed. The two serials here are textually DISTINCT in this file and must stay that way: each runner's own parse is what collapses them, which is the behaviour under test. An earlier revision stored both sides as 12345678901234567000 -- the already-collapsed value, produced by round-tripping the authored literals through a JSON writer -- so the vector asserted only that an update with no attribute change emits no attrs, and would have passed just as happily if the collapse were fixed.",
       "plan": {
         "resource_changes": [
           {
@@ -1772,10 +1772,10 @@
                 "update"
               ],
               "before": {
-                "serial": 12345678901234567000
+                "serial": 12345678901234567890
               },
               "after": {
-                "serial": 12345678901234567000
+                "serial": 12345678901234567891
               }
             }
           }

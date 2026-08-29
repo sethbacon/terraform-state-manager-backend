@@ -41,7 +41,7 @@ import (
 // repositories, in the same batch.
 const (
 	corpusPath   = "testdata/conformance/vectors.json"
-	corpusSHA256 = "84bb23be80a420e7ff77ea0bd7808a8daeaef745f0190f896a917e387a929316"
+	corpusSHA256 = "668a292a169dedfad131e98d44f7768159635112a7fbf2cf11a201ffb02e8daa"
 	// Same literal as RECONCILED_DIGEST in the contract's __tests__/conformance.test.ts.
 	reconciledDigest = "4f0002731219d9491636de981cde760688f720971d9a3882a2d6f55e13b6a173"
 )
