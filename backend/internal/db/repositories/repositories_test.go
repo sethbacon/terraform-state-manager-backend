@@ -412,7 +412,8 @@ func TestTransferRepository(t *testing.T) {
 
 func TestSSOSettingsRepository(t *testing.T) {
 	db, mock := newMock(t)
-	r := NewSSOSettingsRepository(db)
+	appDB, appMock := newMock(t)
+	r := NewSSOSettingsRepository(db, appDB)
 
 	mock.ExpectQuery("SELECT oidc_group_claim_name").
 		WillReturnRows(sqlmock.NewRows([]string{"oidc_group_claim_name", "oidc_default_role", "oidc_group_mappings", "updated_at"}).
@@ -434,8 +435,18 @@ func TestSSOSettingsRepository(t *testing.T) {
 	mock.ExpectExec("INSERT INTO sso_settings").
 		WithArgs("groups", "viewer", []byte(`[]`)).
 		WillReturnResult(sqlmock.NewResult(0, 1))
+	// The dual-write's mirror leg runs on the APP connection after the
+	// authoritative upsert (terraform-suite-identity#206 phase 2): an empty
+	// list clears the mirror. Pinned in depth in group_mapping_dual_write_test.go;
+	// expected here so this test keeps modelling the repository's real traffic.
+	appMock.ExpectBegin()
+	appMock.ExpectExec("DELETE FROM group_mappings").WillReturnResult(sqlmock.NewResult(0, 0))
+	appMock.ExpectCommit()
 	if err := r.Upsert(ctx, &SSOSettings{OIDCGroupClaimName: "groups", OIDCDefaultRole: "viewer", OIDCGroupMappings: []SSOGroupMapping{}}); err != nil {
 		t.Errorf("Upsert: %v", err)
+	}
+	if err := appMock.ExpectationsWereMet(); err != nil {
+		t.Errorf("mirror leg missing: %v", err)
 	}
 }
 

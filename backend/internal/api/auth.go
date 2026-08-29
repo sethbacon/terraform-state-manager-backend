@@ -50,6 +50,8 @@ type AuthHandlers struct {
 	stateStore    auth.StateStore
 	// ssoSettings reads the admin-editable OIDC group-mapping overlay. The table
 	// lives in the app schema; the identity connection's search_path resolves it.
+	// Its Upsert dual-writes the mapping list into TSM's own group_mappings
+	// table on the app connection (terraform-suite-identity#206 phase 2).
 	ssoSettings *repositories.SSOSettingsRepository
 	audit       auditor
 	// creds invalidates credentials the IdP group-mapping reconciliation has
@@ -91,7 +93,7 @@ func NewAuthHandlers(cfg *config.Config, identityDB, appDB *sql.DB, opts ...Auth
 		tokenRepo:   idstore.NewTokenRepository(identityDB),
 		apiKeyRepo:  idstore.NewAPIKeyRepository(identityDB),
 		stateStore:  stateStore,
-		ssoSettings: repositories.NewSSOSettingsRepository(identityDB),
+		ssoSettings: repositories.NewSSOSettingsRepository(identityDB, appDB),
 		audit:       newAuditor(identityDB),
 	}
 	for _, opt := range opts {

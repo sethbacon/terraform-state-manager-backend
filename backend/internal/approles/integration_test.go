@@ -272,7 +272,7 @@ func TestIntegrationMigrationRoundTrips(t *testing.T) {
 		t.Fatalf("manual pre-drop: %v", err)
 	}
 	if err := stepDown(e.appDB); err != nil {
-		t.Fatalf("rolling back 000032: %v", err)
+		t.Fatalf("rolling back 000036 + 000032: %v", err)
 	}
 	if _, _, err := e.store.Verify(ctx); err == nil {
 		t.Fatal("Verify succeeded after the tables were rolled back")
@@ -288,21 +288,34 @@ func TestIntegrationMigrationRoundTrips(t *testing.T) {
 	}
 }
 
-// stepDown rolls the app schema back by exactly one migration.
+// stepDown rolls the app schema back past this phase's migrations.
 //
 // appdb.RunMigrations(db, "down") would unwind the WHOLE schema, which proves
-// nothing about 000032 in particular and takes several seconds; this runs the
-// down file itself, which is the artefact an operator would apply.
+// nothing about this phase in particular and takes several seconds; this runs
+// the down files themselves, which are the artefacts an operator would apply.
+//
+// 000036's down runs FIRST, because that is the only order that works:
+// group_mappings (the phase-2 group-mapping mirror, terraform-suite-identity
+// issue 206) carries a real foreign key to role_templates, so 000032's
+// `DROP TABLE role_templates` refuses -- loudly, with 2BP01 -- while the
+// dependent table still stands. That refusal is the desired behaviour for an
+// operator who tries the drops out of order, and this test applying both files
+// in order is the evidence the in-order rollback works.
 func stepDown(db *sql.DB) error {
-	src, err := os.ReadFile("../db/migrations/000032_app_role_authorization.down.sql")
-	if err != nil {
-		return err
+	for _, downFile := range []string{
+		"../db/migrations/000036_group_mappings.down.sql",
+		"../db/migrations/000032_app_role_authorization.down.sql",
+	} {
+		src, err := os.ReadFile(downFile)
+		if err != nil {
+			return err
+		}
+		if _, err := db.Exec(string(src)); err != nil {
+			return fmt.Errorf("%s: %w", downFile, err)
+		}
 	}
-	if _, err := db.Exec(string(src)); err != nil {
-		return err
-	}
-	// golang-migrate's bookkeeping, so the re-apply runs the up file again.
-	_, err = db.Exec(`UPDATE schema_migrations SET version = 30, dirty = false`)
+	// golang-migrate's bookkeeping, so the re-apply runs the up files again.
+	_, err := db.Exec(`UPDATE schema_migrations SET version = 30, dirty = false`)
 	return err
 }
 
