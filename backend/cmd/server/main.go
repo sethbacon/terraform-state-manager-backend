@@ -298,6 +298,28 @@ func serve(cfg *config.Config) error {
 	}
 	slog.Info("identity schema ready (role templates + default org seeded)")
 
+	// RECONCILE this application's own group_mappings table from the
+	// sso_settings overlay (terraform-suite-identity#206 phase 2, migration
+	// 000036) -- AFTER bootstrap.Run, because each mirrored row's
+	// role_template_id is resolved against role_templates, which bootstrap's
+	// reconcile and seed have just brought current. Same standing-reconcile
+	// reasoning as that reconcile: 000036 ships no SQL backfill (a migration on
+	// the app connection cannot see which connection resolves the live overlay
+	// row), a re-derivation is a no-op when nothing changed, and it repairs
+	// whatever a transient dual-write failure left behind. The identity pool is
+	// the source side because it is the connection the auth handlers hand
+	// NewSSOSettingsRepository. NOTHING READS THE TABLE YET, so a failure here
+	// is logged, not fatal: requests are unaffected, only the backfill for the
+	// eventual read cutover is stale.
+	if report, gmErr := repositories.ReconcileGroupMappings(context.Background(), identityDB, database); gmErr != nil {
+		slog.Error("could not reconcile this application's group_mappings from the sso_settings overlay; "+
+			"nothing reads the table yet, so requests are unaffected, but the phase-2 backfill is stale "+
+			"and mapping changes made while the live dual-write was failing are NOT repaired. Run `authz-drift`",
+			"error", gmErr)
+	} else {
+		slog.Info("group mappings reconciled", "report", report)
+	}
+
 	// WHICH TABLES DECIDE AUTHORIZATION, IN THE STARTUP LOG.
 	//
 	// This is the same reasoning approles.Store.Verify applies to the resolved
@@ -781,15 +803,37 @@ func runAuthzDrift(cfg *config.Config) error {
 	if err != nil {
 		return fmt.Errorf("authz-drift: %w", err)
 	}
-	if res.Clean() {
-		slog.Info("authz-drift clean", "result", res.String())
+
+	// The group-mapping half (terraform-suite-identity#206 phase 2, migration
+	// 000036) rides the same verb: it compares the same two connections, it
+	// gates the same program's next step, and a deployment that would run one
+	// check and not the other is exactly how half a dual-write ships. Both
+	// halves run before either is judged, so one dirty half never hides the
+	// other's report.
+	gmRes, err := repositories.CheckGroupMappingDrift(context.Background(), identityDB, database)
+	if err != nil {
+		return fmt.Errorf("authz-drift: could not compare the group-mapping copies: %w", err)
+	}
+
+	if res.Clean() && gmRes.Clean() {
+		slog.Info("authz-drift clean", "roles", res.String(), "group_mappings", gmRes.String())
 		return nil
 	}
-	slog.Error("authz-drift found this application's role tables and the shared identity schema in disagreement",
-		"result", res.String())
-	return fmt.Errorf("authz-drift: %d role records disagree; "+
-		"do not switch authorization onto this application's tables until this reports zero",
-		res.AssignmentDrift())
+	if !res.Clean() {
+		slog.Error("authz-drift found this application's role tables and the shared identity schema in disagreement",
+			"result", res.String())
+	}
+	if !gmRes.Clean() {
+		for _, row := range gmRes.Rows {
+			slog.Error("group-mapping drift", "row", row.String())
+		}
+		slog.Error("authz-drift found this application's group_mappings table and the sso_settings overlay in disagreement",
+			"result", gmRes.String(),
+			"repair", "restarting the backend re-derives group_mappings from the overlay; drift that survives a restart means the reconcile is failing and the startup log says why")
+	}
+	return fmt.Errorf("authz-drift: %d role record(s) and %d group mapping(s) disagree; "+
+		"do not switch authorization or group-mapping reads onto this application's tables until this reports zero",
+		res.AssignmentDrift(), len(gmRes.Rows))
 }
 
 func runBindTargets(cfg *config.Config, verify bool) error {
