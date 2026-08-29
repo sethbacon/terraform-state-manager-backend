@@ -240,55 +240,22 @@ func (s *Store) UpsertTemplate(ctx context.Context, t Template) error {
 	return nil
 }
 
-// AdoptTemplate records a role definition identity has and this application does
-// not, WITHOUT overwriting one it already holds.
-//
-// THE DIFFERENCE FROM UpsertTemplate IS THE WHOLE OF PHASE 3B'S TEMPLATE STORY.
-// In Phase 3a the reconcile upserted identity's rows over this table on every
-// boot, because identity's rows WERE the effective mapping and the mirror had to
-// equal them. Now this table is the effective mapping, and an upsert would mean
-// identity — in a coupled deployment, the sibling registry — silently redefining
-// what a TSM role grants, on a table that decides authorization, once per
-// restart. So identity may still SUPPLY a definition this deployment has never
-// seen (without one, an assignment pointing at it would violate the foreign key
-// and the principal would lose their role), but it may no longer REDEFINE one.
-//
-// Pairs with RepointTemplateName, which must run first: a name held here under a
-// different id has to be released before this insert, or the unique index on name
-// rejects it.
-func (s *Store) AdoptTemplate(ctx context.Context, t Template) error {
-	scopes, err := json.Marshal(nonNilScopes(t.Scopes))
-	if err != nil {
-		return fmt.Errorf("approles: encoding scopes for role template %q: %w", t.Name, err)
-	}
-	const q = `
-		INSERT INTO role_templates (id, name, display_name, description, scopes, is_system, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, $5::jsonb, $6, now(), now())
-		ON CONFLICT (id) DO NOTHING`
-	if _, err := s.db.ExecContext(ctx, q, t.ID, t.Name, t.DisplayName, t.Description, string(scopes), t.IsSystem); err != nil {
-		return fmt.Errorf("approles: adopting role template %q: %w", t.Name, err)
-	}
-	return nil
-}
-
 // DefineTemplate writes THIS BUILD's definition of a role, keyed by NAME.
 //
 // This is the app-side seed (bootstrap.seedRoleTemplates), and it is keyed by
-// name rather than id on purpose: the id is a value carried over from identity so
-// that an assignment restated from identity resolves here, while the NAME is what
-// this build actually claims to define. Conflicting on name therefore REPLACES
-// the definition and PRESERVES the id — id is deliberately absent from the update
-// list — so seeding cannot orphan an assignment, and cannot mint a second row for
-// a role that already exists under identity's uuid.
+// name rather than id on purpose: the NAME is what this build claims to define,
+// while the id is whatever uuid this deployment already carries for it — on a
+// deployment upgraded through Phase 3a/3b, the uuid the old adopt pass copied
+// from identity, which existing assignments still reference. Conflicting on name
+// therefore REPLACES the definition and PRESERVES the id — id is deliberately
+// absent from the update list — so seeding cannot orphan an assignment, and
+// cannot mint a second row for a role that already exists under an older uuid.
 //
-// A name this deployment has never seen gets a fresh uuid. That is safe precisely
-// because no assignment can reference a name identity does not have: assignments
-// are restated from identity, carrying identity's ids.
-//
-// MUST RUN AFTER THE ADOPT PASS. Reversed, a fresh install would mint its own
-// uuid for `editor`, the adopt pass would then find identity's `editor` under a
-// different uuid, RepointTemplateName would delete the row just seeded, and this
-// build's scopes would be replaced by identity's. Reconcile owns that ordering.
+// A name this deployment has never seen gets a fresh uuid. Since the reads of
+// identity.role_templates were retired, THIS TABLE'S uuids are the id space every
+// role assignment in this application is expressed in; identity's copy of the
+// definitions is written FROM here (bootstrap.seedSharedRoleTemplates) rather
+// than the other way around.
 func (s *Store) DefineTemplate(ctx context.Context, t Template) error {
 	scopes, err := json.Marshal(nonNilScopes(t.Scopes))
 	if err != nil {
@@ -314,7 +281,8 @@ func (s *Store) DefineTemplate(ctx context.Context, t Template) error {
 }
 
 // ListTemplates returns every role definition this application holds, keyed by
-// name, for the drift comparison and the reconcile's adopted-template report.
+// name, for the role picker, the identity-side seed, and the reconcile's
+// foreign-template report.
 func (s *Store) ListTemplates(ctx context.Context) (map[string]Template, error) {
 	const q = `SELECT id, name, COALESCE(display_name, ''), description, COALESCE(scopes, '[]'::jsonb), is_system, created_at, updated_at FROM role_templates`
 	rows, err := s.db.QueryContext(ctx, q)
@@ -341,23 +309,6 @@ func (s *Store) ListTemplates(ctx context.Context) (map[string]Template, error) 
 	return out, nil
 }
 
-// RepointTemplateName moves a name onto a new id, for the case UpsertTemplate's
-// id conflict cannot cover: identity dropped a template and recreated it under
-// the same name with a fresh uuid, so the app table holds the old id and the
-// unique index on name rejects the insert.
-//
-// The old row's assignments are NOT rewritten here. The reconcile's own
-// assignment pass restates every (organization_id, user_id) from identity
-// afterwards, which re-points them at the new id as a side effect of restating
-// them; doing it twice would be two answers to one question.
-func (s *Store) RepointTemplateName(ctx context.Context, name, newID string) error {
-	const q = `DELETE FROM role_templates WHERE name = $1 AND id <> $2`
-	if _, err := s.db.ExecContext(ctx, q, name, newID); err != nil {
-		return fmt.Errorf("approles: repointing role template %q: %w", name, err)
-	}
-	return nil
-}
-
 // TemplateIDByName resolves a role name to TSM's own template id.
 //
 // Returns ErrNoTemplate when the name does not resolve. The mirror's callers
@@ -377,17 +328,40 @@ func (s *Store) TemplateIDByName(ctx context.Context, name string) (string, erro
 	return id, nil
 }
 
-// TemplateExists reports whether an id is present in TSM's own role_templates.
-func (s *Store) TemplateExists(ctx context.Context, id string) (bool, error) {
-	var one int
-	err := s.db.QueryRowContext(ctx, `SELECT 1 FROM role_templates WHERE id = $1`, id).Scan(&one)
+// TemplateByID returns one role definition this application holds, by id.
+//
+// Returns ErrNoTemplate (wrapped) when the id does not resolve. This is what the
+// role-assignment ceiling check reads since the identity-schema lookup was
+// retired: an id that is not in THIS table names no role this application
+// defines, whatever the shared identity schema may hold for it.
+func (s *Store) TemplateByID(ctx context.Context, id string) (Template, error) {
+	const q = `SELECT id, name, COALESCE(display_name, ''), description, COALESCE(scopes, '[]'::jsonb), is_system, created_at, updated_at FROM role_templates WHERE id = $1`
+	return s.templateRow(ctx, q, id)
+}
+
+// TemplateByName is TemplateByID keyed by name, for the group-mapping guard and
+// the mirror's name resolution.
+func (s *Store) TemplateByName(ctx context.Context, name string) (Template, error) {
+	const q = `SELECT id, name, COALESCE(display_name, ''), description, COALESCE(scopes, '[]'::jsonb), is_system, created_at, updated_at FROM role_templates WHERE name = $1`
+	return s.templateRow(ctx, q, name)
+}
+
+// templateRow runs one of the two single-template reads.
+func (s *Store) templateRow(ctx context.Context, query, key string) (Template, error) {
+	var t Template
+	var scopes []byte
+	err := s.db.QueryRowContext(ctx, query, key).
+		Scan(&t.ID, &t.Name, &t.DisplayName, &t.Description, &scopes, &t.IsSystem, &t.CreatedAt, &t.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
-		return false, nil
+		return Template{}, fmt.Errorf("%w: %q", ErrNoTemplate, key)
 	}
 	if err != nil {
-		return false, fmt.Errorf("approles: checking role template %s: %w", id, err)
+		return Template{}, fmt.Errorf("approles: reading role template %q: %w", key, err)
 	}
-	return true, nil
+	if err := json.Unmarshal(scopes, &t.Scopes); err != nil {
+		return Template{}, fmt.Errorf("approles: decoding scopes for role template %q: %w", key, err)
+	}
+	return t, nil
 }
 
 // andScope splices the caller's tenancy into a statement over
@@ -451,6 +425,41 @@ func (s *Store) SetRole(ctx context.Context, orgID, userID string, roleTemplateI
 		       mirrored_at      = now()`
 	if _, err := s.db.ExecContext(ctx, query, args...); err != nil {
 		return fmt.Errorf("approles: recording role for org=%s user=%s: %w", orgID, userID, err)
+	}
+	return nil
+}
+
+// ConfirmMembership marks one identity membership as still current, WITHOUT
+// touching the role this application records for it.
+//
+// This is the reconcile's restatement since the reads of identity's role
+// templates were retired. Identity owns exactly one fact this table depends on —
+// that the (organization, user) pair is a member — so that fact is what the
+// reconcile carries across: a pair this application has never seen is inserted
+// as a member with NO role (the fail-closed direction reads.go documents, loud
+// for the principal and grantable by an administrator), and a pair it already
+// records keeps ITS OWN role, because which role a member holds HERE is this
+// application's answer and identity no longer gets to restate it.
+//
+// Either way mirrored_at is refreshed, which is what spares the row from the
+// sweep that follows the reconcile's scan — the sweep is how a membership that
+// vanished from identity by CASCADE stops granting anything here.
+//
+// role_template_id is deliberately ABSENT from the update list, the same way id
+// is absent from DefineTemplate's: presence is confirmed, policy is not touched.
+func (s *Store) ConfirmMembership(ctx context.Context, orgID, userID string, scope idstore.OrgScope) error {
+	query := `
+		INSERT INTO organization_member_roles (organization_id, user_id, role_template_id, created_at, updated_at, mirrored_at)
+		SELECT v.organization_id, v.user_id, NULL, now(), now(), now()
+		FROM (VALUES ($1::uuid, $2::uuid)) AS v(organization_id, user_id)
+		WHERE TRUE`
+	args := []interface{}{orgID, userID}
+	query, args = andScope(query, scope, "v.organization_id", args)
+	query += `
+		ON CONFLICT (organization_id, user_id) DO UPDATE
+		   SET mirrored_at = now()`
+	if _, err := s.db.ExecContext(ctx, query, args...); err != nil {
+		return fmt.Errorf("approles: confirming membership for org=%s user=%s: %w", orgID, userID, err)
 	}
 	return nil
 }

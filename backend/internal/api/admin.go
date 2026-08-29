@@ -29,7 +29,6 @@ type AdminHandlers struct {
 	// library's, and every write is dual-written into this application's own
 	// organization_member_roles. See approles.Members.
 	orgRepo   *approles.Members
-	roleRepo  *idstore.RoleTemplateRepository
 	auditRepo *idstore.AuditRepository
 	// creds invalidates the credential families that snapshot a principal's
 	// derived authority whenever an admin action reduces it (#330). May be nil
@@ -69,16 +68,10 @@ func WithAdminCredentialSweeper(s *credlifecycle.Sweeper) AdminOption {
 // identity and nothing else — silently, and only on the deployment that forgot
 // it. A nil appDB is legitimate ONLY in a rig with no application database; it
 // yields a Members that performs the identity leg alone.
-//
-// It takes a *sql.DB, like every other handler constructor here: identity
-// v0.25.0 made NewRoleTemplateRepository take one too, so the sqlx handle this
-// signature used to demand — and the sqlx.NewDb wrapper every caller built to
-// satisfy it — existed only to feed that one constructor.
 func NewAdminHandlers(identityDB, appDB *sql.DB, source approles.RoleSource, opts ...AdminOption) *AdminHandlers {
 	h := &AdminHandlers{
 		userRepo:  idstore.NewUserRepository(identityDB),
 		orgRepo:   approles.NewMembers(identityDB, appDB, source),
-		roleRepo:  idstore.NewRoleTemplateRepository(identityDB),
 		auditRepo: idstore.NewAuditRepository(identityDB),
 	}
 	for _, opt := range opts {
@@ -252,28 +245,16 @@ func (h *AdminHandlers) ListRoles() gin.HandlerFunc {
 // appRoles reads this application's own role definitions, sorted by name for a
 // stable picker.
 //
-// Falls back to the shared identity schema ONLY when there is no application
-// connection to read — the nil-appDB test rigs. A server always has one, and
-// approles.Store.Verify aborts its boot if the tables are absent.
+// There is NO identity-schema fallback: the residual reads of
+// identity.role_templates were retired with the rest of the
+// sethbacon/terraform-suite-identity#206 Phase 3 work, so a rig with no
+// application connection gets an error rather than the shared schema's roles. A
+// server always has the connection, and approles.Store.Verify aborts its boot if
+// the tables are absent.
 func (h *AdminHandlers) appRoles(ctx context.Context) ([]approles.Template, error) {
 	store := h.orgRepo.Store()
 	if store == nil {
-		shared, err := h.roleRepo.ListRoleTemplates(ctx)
-		if err != nil {
-			return nil, err
-		}
-		out := make([]approles.Template, 0, len(shared))
-		for _, rt := range shared {
-			if rt == nil {
-				continue
-			}
-			out = append(out, approles.Template{
-				ID: rt.ID.String(), Name: rt.Name, DisplayName: rt.DisplayName,
-				Description: rt.Description, Scopes: rt.Scopes, IsSystem: rt.IsSystem,
-			})
-		}
-		sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
-		return out, nil
+		return nil, approles.ErrNoAppStore
 	}
 	byName, err := store.ListTemplates(ctx)
 	if err != nil {

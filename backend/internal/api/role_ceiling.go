@@ -6,7 +6,8 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
-	idstore "github.com/sethbacon/terraform-suite-identity/identity/store"
+
+	"github.com/terraform-state-manager/terraform-state-manager/internal/approles"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/auth"
 )
 
@@ -43,12 +44,17 @@ func (h *AdminHandlers) checkRoleAssignment(c *gin.Context, roleTemplateID *stri
 		return roleAssignmentCheck{allowed: false, status: http.StatusBadRequest}
 	}
 
-	// A well-formed UUID that names no role template is a BAD REQUEST, not a
-	// server fault — the same answer uuid.Parse gives for a malformed one above.
-	// Before identity v0.24.0 a miss arrived as (nil, nil) and this branch was
-	// unreachable; the sentinel is what makes it reachable.
-	tmpl, err := h.roleRepo.GetRoleTemplate(c.Request.Context(), id)
-	if errors.Is(err, idstore.ErrNotFound) || (err == nil && tmpl == nil) {
+	// Resolved against THIS APPLICATION's own role_templates, which is the whole
+	// point of the ceiling: the scopes being checked are the scopes assigning
+	// this role would grant HERE, and since the residual identity.role_templates
+	// reads were retired the app table is also the only place the id could name
+	// anything. A well-formed UUID that names no role template here is a BAD
+	// REQUEST, not a server fault — the same answer uuid.Parse gives for a
+	// malformed one above. A rig with no application connection fails CLOSED as
+	// a server fault: a ceiling that cannot read the definitions must not wave
+	// the assignment through.
+	tmpl, err := h.orgRepo.TemplateByID(c.Request.Context(), id.String())
+	if errors.Is(err, approles.ErrNoTemplate) {
 		return roleAssignmentCheck{allowed: false, status: http.StatusBadRequest}
 	}
 	if err != nil {

@@ -341,21 +341,24 @@ func TestIntegrationVerifyRefusesAnIdentityRoutedConnection(t *testing.T) {
 	}
 }
 
-// TestIntegrationBackfillReproducesIdentity is the backfill itself: memberships
-// that exist ONLY in identity — as they do on every deployment upgrading into
-// this phase — must appear in TSM's own tables with the same role, keyed by the
-// same template id.
-func TestIntegrationBackfillReproducesIdentity(t *testing.T) {
+// TestIntegrationMembershipFactsConfirmWithoutIdentitysRoles is the successor
+// to the backfill test, stating what the reconcile carries across since the
+// identity.role_templates reads were retired: THE MEMBERSHIP FACT, and nothing
+// else. A membership that exists only in identity — a sibling-created one, or a
+// lost mirror write — arrives as a member with NO role (the fail-closed
+// direction reads.go documents), the drift comparison names the divergence
+// rather than the reconcile repairing it from identity's opinion, and a grant
+// made THROUGH the application is what closes it.
+func TestIntegrationMembershipFactsConfirmWithoutIdentitysRoles(t *testing.T) {
 	e := newEnv(t)
 	ctx := context.Background()
 
-	editorID := e.newIdentityRole(t, "editor", "state:read", "state:write")
-	e.newIdentityRole(t, "viewer", "state:read")
+	e.alignedRoles(t)
 	orgA, orgB := e.newOrg(t, "acme"), e.newOrg(t, "globex")
 	alice, bob := e.newUser(t, "alice@example.com"), e.newUser(t, "bob@example.com")
 
-	// Written through the RAW repository, not the mirror: this is the
-	// pre-upgrade state, where nothing had ever written the app tables.
+	// Written through the RAW repository: memberships this application's
+	// dual-write never saw.
 	raw := idstore.NewOrganizationRepository(e.identityDB)
 	if err := raw.AddMemberWithParams(ctx, orgA, alice, "editor", idstore.OrgScopeAllOrganizations()); err != nil {
 		t.Fatalf("seed membership: %v", err)
@@ -368,25 +371,48 @@ func TestIntegrationBackfillReproducesIdentity(t *testing.T) {
 		t.Fatalf("seed role-less membership: %v", err)
 	}
 	if e.mirroredCount(t) != 0 {
-		t.Fatal("the app tables are not empty before the backfill; the test is not testing a backfill")
+		t.Fatal("the app tables are not empty before the reconcile; the test is not testing the confirmation pass")
 	}
 
 	rep, err := Reconcile(ctx, e.appDB, e.identityDB, ownTemplates)
 	if err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}
-	if rep.AssignmentsRestated != 3 {
-		t.Fatalf("AssignmentsRestated = %d, want 3", rep.AssignmentsRestated)
+	if rep.MembershipsConfirmed != 3 {
+		t.Fatalf("MembershipsConfirmed = %d, want 3", rep.MembershipsConfirmed)
 	}
 
-	if got, ok := e.mirroredRole(t, orgA, alice); !ok || got != editorID {
-		t.Fatalf("alice@acme mirrored as (%q, present=%v), want identity's editor id %q", got, ok, editorID)
+	// Every pair is present, and EVERY one holds no role here: identity's role
+	// opinion is not restated over this application's tables any more.
+	for _, pair := range [][2]string{{orgA, alice}, {orgB, bob}, {orgB, alice}} {
+		if got, ok := e.mirroredRole(t, pair[0], pair[1]); !ok || got != "" {
+			t.Fatalf("pair (%s, %s) mirrored as (%q, present=%v), want a present row with a NULL role",
+				pair[0], pair[1], got, ok)
+		}
 	}
-	if got, ok := e.mirroredRole(t, orgB, alice); !ok || got != "" {
-		t.Fatalf("alice@globex mirrored as (%q, present=%v), want a present row with a NULL role", got, ok)
+
+	// The divergence is REPORTED, not hidden: identity still records roles for
+	// two of the pairs.
+	drift, err := CheckDrift(ctx, e.appDB, e.identityDB)
+	if err != nil {
+		t.Fatalf("CheckDrift: %v", err)
 	}
-	// The ids are identity's, so the two tables can be compared by primary key.
-	assertNoDrift(t, e)
+	if drift.Missing != 0 || drift.Stale != 0 || drift.Mismatched != 2 {
+		t.Fatalf("drift = %s, want exactly the two role-carrying pairs as mismatched", drift.String())
+	}
+
+	// A grant through the application is the remedy, and it converges both
+	// sides because the dual write still writes both.
+	if err := e.members.UpdateMemberRole(ctx, orgA, alice, "editor", idstore.OrgScopeAllOrganizations(), sweepOfARealReduction); err != nil {
+		t.Fatalf("re-granting through the application: %v", err)
+	}
+	drift, err = CheckDrift(ctx, e.appDB, e.identityDB)
+	if err != nil {
+		t.Fatalf("CheckDrift after the grant: %v", err)
+	}
+	if drift.Mismatched != 1 {
+		t.Fatalf("drift after granting alice's role through the application = %s, want one remaining mismatch", drift.String())
+	}
 }
 
 // TestIntegrationReconcileSweepsWhatIdentityNoLongerHas covers the reason
@@ -397,7 +423,7 @@ func TestIntegrationReconcileSweepsWhatIdentityNoLongerHas(t *testing.T) {
 	e := newEnv(t)
 	ctx := context.Background()
 
-	e.newIdentityRole(t, "viewer", "state:read")
+	e.alignedRoles(t)
 	org := e.newOrg(t, "acme")
 	user := e.newUser(t, "carol@example.com")
 	if err := e.members.AddMemberWithParams(ctx, org, user, "viewer", idstore.OrgScopeAllOrganizations(), sweepOfARealReduction); err != nil {
@@ -432,7 +458,7 @@ func TestIntegrationReconcileSparesAConcurrentWrite(t *testing.T) {
 	e := newEnv(t)
 	ctx := context.Background()
 
-	e.newIdentityRole(t, "viewer", "state:read")
+	e.alignedRoles(t)
 	org := e.newOrg(t, "acme")
 	user := e.newUser(t, "dave@example.com")
 	if err := e.members.AddMemberWithParams(ctx, org, user, "viewer", idstore.OrgScopeAllOrganizations(), sweepOfARealReduction); err != nil {
@@ -453,11 +479,8 @@ func TestIntegrationDualWriteEndToEnd(t *testing.T) {
 	e := newEnv(t)
 	ctx := context.Background()
 
-	editorID := e.newIdentityRole(t, "editor", "state:read", "state:write")
-	viewerID := e.newIdentityRole(t, "viewer", "state:read")
-	if _, err := Reconcile(ctx, e.appDB, e.identityDB, ownTemplates); err != nil {
-		t.Fatalf("initial Reconcile: %v", err)
-	}
+	ids := e.alignedRoles(t)
+	editorID, viewerID := ids["editor"], ids["viewer"]
 	org := e.newOrg(t, "acme")
 	user := e.newUser(t, "erin@example.com")
 	all := idstore.OrgScopeAllOrganizations()
@@ -520,10 +543,7 @@ func TestIntegrationDroppingATemplateNullsTheAssignment(t *testing.T) {
 	e := newEnv(t)
 	ctx := context.Background()
 
-	e.newIdentityRole(t, "viewer", "state:read")
-	if _, err := Reconcile(ctx, e.appDB, e.identityDB, ownTemplates); err != nil {
-		t.Fatalf("Reconcile: %v", err)
-	}
+	e.alignedRoles(t)
 	org := e.newOrg(t, "acme")
 	user := e.newUser(t, "frank@example.com")
 	if err := e.members.AddMemberWithParams(ctx, org, user, "viewer", idstore.OrgScopeAllOrganizations(), sweepOfARealReduction); err != nil {
@@ -542,37 +562,47 @@ func TestIntegrationDroppingATemplateNullsTheAssignment(t *testing.T) {
 	}
 }
 
-// TestIntegrationMirrorAdoptsATemplateItHasNeverSeen covers the shared-identity
-// case: the sibling registry creates a role after this deployment's last
-// reconcile, an administrator assigns it, and the foreign key would otherwise
-// reject the mirror write and lose a grant that did happen.
-func TestIntegrationMirrorAdoptsATemplateItHasNeverSeen(t *testing.T) {
+// TestIntegrationARoleThisBuildDoesNotDefineIsNotGrantable inverts the old
+// adopt-on-first-use behaviour: the sibling registry creates a role in the
+// shared schema after this deployment booted, and an attempt to grant it HERE
+// is refused before either side is written — under per-app authorization a
+// role this application does not define means nothing in this application, and
+// the old adoption was the last way the sibling's scopes could come to be
+// granted here.
+func TestIntegrationARoleThisBuildDoesNotDefineIsNotGrantable(t *testing.T) {
 	e := newEnv(t)
 	ctx := context.Background()
 
-	if _, err := Reconcile(ctx, e.appDB, e.identityDB, ownTemplates); err != nil {
-		t.Fatalf("Reconcile: %v", err)
-	}
-	// Created AFTER the reconcile, so TSM's own table has never seen it.
+	e.alignedRoles(t)
+	// Created AFTER the reconcile, in the shared schema only.
 	lateID := e.newIdentityRole(t, "late_arrival", "state:read")
 	org := e.newOrg(t, "acme")
 	user := e.newUser(t, "grace@example.com")
+	all := idstore.OrgScopeAllOrganizations()
 
-	if err := e.members.AddMemberWithParams(ctx, org, user, "late_arrival", idstore.OrgScopeAllOrganizations(), sweepOfARealReduction); err != nil {
-		t.Fatalf("AddMemberWithParams: %v", err)
+	if err := e.members.AddMemberWithParams(ctx, org, user, "late_arrival", all, sweepOfARealReduction); !errors.Is(err, ErrNoTemplate) {
+		t.Fatalf("granting a role this build does not define by name: err = %v, want ErrNoTemplate", err)
 	}
-	if got, ok := e.mirroredRole(t, org, user); !ok || got != lateID {
-		t.Fatalf("mirrored role = (%q, present=%v), want the adopted template %q", got, ok, lateID)
+	if err := e.members.AddMemberWithRoleTemplate(ctx, org, user, &lateID, all, sweepOfARealReduction); !errors.Is(err, ErrNoTemplate) {
+		t.Fatalf("granting a role this build does not define by id: err = %v, want ErrNoTemplate", err)
 	}
 
-	// By id, too: the same hazard reached through the admin route's uuid form.
-	user2 := e.newUser(t, "heidi@example.com")
-	byIDRole := e.newIdentityRole(t, "late_arrival_two", "state:read")
-	if err := e.members.AddMemberWithRoleTemplate(ctx, org, user2, &byIDRole, idstore.OrgScopeAllOrganizations(), sweepOfARealReduction); err != nil {
-		t.Fatalf("AddMemberWithRoleTemplate: %v", err)
+	// NOTHING was written on either side: the refusal precedes both legs.
+	var n int
+	if err := e.identityDB.QueryRow(
+		`SELECT count(*) FROM identity.organization_members WHERE organization_id = $1 AND user_id = $2`,
+		org, user).Scan(&n); err != nil {
+		t.Fatalf("count identity memberships: %v", err)
 	}
-	if got, ok := e.mirroredRole(t, org, user2); !ok || got != byIDRole {
-		t.Fatalf("mirrored role = (%q, present=%v), want the adopted template %q", got, ok, byIDRole)
+	if n != 0 {
+		t.Fatal("the refused grant still wrote identity")
+	}
+	if _, ok := e.mirroredRole(t, org, user); ok {
+		t.Fatal("the refused grant still wrote the mirror")
+	}
+	// And the foreign template did not slip into this application's table.
+	if _, err := e.store.TemplateByName(ctx, "late_arrival"); !errors.Is(err, ErrNoTemplate) {
+		t.Fatalf("late_arrival in the app table: err = %v, want ErrNoTemplate — the adopt path is retired", err)
 	}
 }
 
@@ -583,11 +613,8 @@ func TestIntegrationDriftQueryReportsAllThreeKinds(t *testing.T) {
 	e := newEnv(t)
 	ctx := context.Background()
 
-	roleA := e.newIdentityRole(t, "editor", "state:read", "state:write")
-	roleB := e.newIdentityRole(t, "viewer", "state:read")
-	if _, err := Reconcile(ctx, e.appDB, e.identityDB, ownTemplates); err != nil {
-		t.Fatalf("Reconcile: %v", err)
-	}
+	ids := e.alignedRoles(t)
+	roleA, roleB := ids["editor"], ids["viewer"]
 	org := e.newOrg(t, "acme")
 	missing := e.newUser(t, "missing@example.com")
 	stale := e.newUser(t, "stale@example.com")
@@ -618,9 +645,26 @@ func TestIntegrationDriftQueryReportsAllThreeKinds(t *testing.T) {
 		}
 	}
 
-	// And the standing repair: a restart clears every kind.
+	// The restart repairs PRESENCE and only presence: the stale row is swept,
+	// the missing pair is confirmed as a member with NO role — so identity's
+	// recorded role for it now reads as mismatched — and the mismatched pair
+	// keeps THIS application's role, because identity's opinion is no longer
+	// restated over these tables.
 	if _, err := Reconcile(ctx, e.appDB, e.identityDB, ownTemplates); err != nil {
 		t.Fatalf("repairing Reconcile: %v", err)
+	}
+	kinds = driftKinds(t, e)
+	if kinds["missing"] != 0 || kinds["stale"] != 0 || kinds["mismatched"] != 2 {
+		t.Fatalf("after the reconcile, DriftQuery reports %v; want presence repaired (no missing, no stale) "+
+			"and both role divergences still named as mismatched", kinds)
+	}
+	// The remedy for a mismatch is a role decision made THROUGH this
+	// application, which converges both sides.
+	if err := e.members.UpdateMemberRole(ctx, org, mismatched, "editor", all, sweepOfARealReduction); err != nil {
+		t.Fatalf("re-granting the mismatched pair: %v", err)
+	}
+	if err := e.members.UpdateMemberRole(ctx, org, missing, "editor", all, sweepOfARealReduction); err != nil {
+		t.Fatalf("granting the confirmed pair: %v", err)
 	}
 	assertNoDrift(t, e)
 }
@@ -632,7 +676,7 @@ func TestIntegrationKeysetScanPagesBeyondOneBatch(t *testing.T) {
 	e := newEnv(t)
 	ctx := context.Background()
 
-	roleID := e.newIdentityRole(t, "viewer", "state:read")
+	e.alignedRoles(t)
 	org := e.newOrg(t, "acme")
 	const n = membershipPage + 7
 	for i := 0; i < n; i++ {
@@ -643,9 +687,11 @@ func TestIntegrationKeysetScanPagesBeyondOneBatch(t *testing.T) {
 			fmt.Sprintf("bulk-%d@example.com", i)).Scan(&userID); err != nil {
 			t.Fatalf("bulk user %d: %v", i, err)
 		}
+		// Fact-only rows: the scan carries (organization_id, user_id) and the
+		// role column is exactly what it no longer reads.
 		if _, err := e.identityDB.Exec(
 			`INSERT INTO identity.organization_members (organization_id, user_id, role_template_id, created_at, updated_at)
-			 VALUES ($1, $2, $3, now(), now())`, org, userID, roleID); err != nil {
+			 VALUES ($1, $2, NULL, now(), now())`, org, userID); err != nil {
 			t.Fatalf("bulk membership %d: %v", i, err)
 		}
 	}
@@ -654,8 +700,8 @@ func TestIntegrationKeysetScanPagesBeyondOneBatch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}
-	if rep.AssignmentsRestated != n {
-		t.Fatalf("AssignmentsRestated = %d, want %d: the keyset scan stopped short of the last page", rep.AssignmentsRestated, n)
+	if rep.MembershipsConfirmed != n {
+		t.Fatalf("MembershipsConfirmed = %d, want %d: the keyset scan stopped short of the last page", rep.MembershipsConfirmed, n)
 	}
 	if got := e.mirroredCount(t); got != n {
 		t.Fatalf("mirrored rows = %d, want %d", got, n)
@@ -703,40 +749,40 @@ func TestIntegrationThisBuildsScopesReplaceTheSiblings(t *testing.T) {
 	}
 }
 
-// A role only the sibling defines is adopted AS IT IS — an assignment pointing at
-// it must keep resolving — and reported, because this application does not own
-// what it means.
-func TestIntegrationAForeignRoleIsAdoptedAndNamed(t *testing.T) {
+// A role only the sibling defines NO LONGER ARRIVES in this application's
+// tables at all — the adopt pass is retired — while a row an EARLIER build
+// adopted is left standing (dropping it would SET NULL every assignment using
+// it) and is named in the report.
+func TestIntegrationAForeignRoleNoLongerArrives(t *testing.T) {
 	e := newEnv(t)
 	ctx := context.Background()
 
-	foreignID := e.newIdentityRole(t, "registry_publisher", "modules:write")
+	e.newIdentityRole(t, "registry_publisher", "modules:write")
 	rep, err := Reconcile(ctx, e.appDB, e.identityDB, ownTemplates)
 	if err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}
-	found := false
-	for _, name := range rep.ForeignTemplates {
-		if name == "registry_publisher" {
-			found = true
-		}
+	if len(rep.ForeignTemplates) != 0 {
+		t.Fatalf("ForeignTemplates = %v, want none: the shared schema's roles no longer enter this table", rep.ForeignTemplates)
 	}
-	if !found {
-		t.Fatalf("ForeignTemplates = %v, want it to name registry_publisher", rep.ForeignTemplates)
+	if _, err := e.store.TemplateByName(ctx, "registry_publisher"); !errors.Is(err, ErrNoTemplate) {
+		t.Fatalf("registry_publisher in the app table after the reconcile: err = %v, want ErrNoTemplate", err)
 	}
-	var id, scopes string
-	if err := e.appDB.QueryRow(
-		`SELECT id::text, scopes::text FROM role_templates WHERE name = 'registry_publisher'`).Scan(&id, &scopes); err != nil {
-		t.Fatalf("read the adopted template: %v", err)
+
+	// A legacy adoption from an earlier build is left standing and reported.
+	if _, err := e.appDB.Exec(`
+		INSERT INTO role_templates (id, name, display_name, description, scopes, is_system, created_at, updated_at)
+		VALUES (gen_random_uuid(), 'registry_publisher', 'Publisher', NULL, '["modules:write"]'::jsonb, true, now(), now())`); err != nil {
+		t.Fatalf("simulating a legacy adopted row: %v", err)
 	}
-	if id != foreignID {
-		t.Fatalf("adopted id = %s, want identity's %s: an assignment restated from identity would not resolve", id, foreignID)
+	rep, err = Reconcile(ctx, e.appDB, e.identityDB, ownTemplates)
+	if err != nil {
+		t.Fatalf("second Reconcile: %v", err)
 	}
-	if !strings.Contains(scopes, "modules:write") {
-		t.Fatalf("the adopted scopes were rewritten: %s", scopes)
+	if len(rep.ForeignTemplates) != 1 || rep.ForeignTemplates[0] != "registry_publisher" {
+		t.Fatalf("ForeignTemplates = %v, want [registry_publisher]", rep.ForeignTemplates)
 	}
-	// A role this build DOES define is not foreign, even though it was adopted
-	// from the same table.
+	// A role this build DOES define is never foreign.
 	for _, name := range rep.ForeignTemplates {
 		if name == "editor" {
 			t.Error("ForeignTemplates names `editor`, a role this build defines")
@@ -792,10 +838,7 @@ func TestIntegrationMirrorIsTenantScoped(t *testing.T) {
 	e := newEnv(t)
 	ctx := context.Background()
 
-	e.newIdentityRole(t, "viewer", "state:read")
-	if _, err := Reconcile(ctx, e.appDB, e.identityDB, ownTemplates); err != nil {
-		t.Fatalf("Reconcile: %v", err)
-	}
+	e.alignedRoles(t)
 	victim := e.newOrg(t, "victim")
 	other := e.newOrg(t, "other")
 	user := e.newUser(t, "ivan@example.com")
@@ -865,11 +908,8 @@ func TestIntegrationTheSweepLearnsWhetherAuthorityActuallyMoved(t *testing.T) {
 	e := newEnv(t)
 	ctx := context.Background()
 
-	editorID := e.newIdentityRole(t, "editor", "state:read", "state:write")
-	viewerID := e.newIdentityRole(t, "viewer", "state:read")
-	if _, err := Reconcile(ctx, e.appDB, e.identityDB, ownTemplates); err != nil {
-		t.Fatalf("initial Reconcile: %v", err)
-	}
+	ids := e.alignedRoles(t)
+	editorID, viewerID := ids["editor"], ids["viewer"]
 	org := e.newOrg(t, "acme")
 	user := e.newUser(t, "nadia@example.com")
 	all := idstore.OrgScopeAllOrganizations()
@@ -1008,13 +1048,65 @@ func ownTemplates(ctx context.Context, s *Store) error {
 // seedIdentityWithThisBuildsRoles puts this build's own role -> scope mapping in
 // the SHARED schema, which is the standalone deployment (suite.role_seed_owner =
 // "self") — the topology the flip is required to be invisible on.
-func (e *env) seedIdentityWithThisBuildsRoles(t *testing.T) map[string]string {
+// alignedRoles establishes the PRODUCTION id topology, the way bootstrap.Run
+// does since the seed direction reversed: the reconcile defines this build's
+// roles in the APP table (minting uuids on a fresh schema), and the
+// identity-side seed then restates THOSE rows — ids included — into
+// identity.role_templates. Nothing reads identity.role_templates to get there;
+// the alignment flows app -> identity. Returns the app ids by name.
+func (e *env) alignedRoles(t *testing.T) map[string]string {
 	t.Helper()
-	ids := make(map[string]string)
-	for _, rt := range auth.AppRoleTemplates() {
-		ids[rt.Name] = e.newIdentityRole(t, rt.Name, rt.Scopes...)
+	ctx := context.Background()
+	if _, err := Reconcile(ctx, e.appDB, e.identityDB, ownTemplates); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	held, err := e.store.ListTemplates(ctx)
+	if err != nil {
+		t.Fatalf("ListTemplates: %v", err)
+	}
+	ids := make(map[string]string, len(held))
+	for name, tmpl := range held {
+		quoted := make([]string, 0, len(tmpl.Scopes))
+		for _, sc := range tmpl.Scopes {
+			quoted = append(quoted, `"`+sc+`"`)
+		}
+		if _, err := e.identityDB.Exec(`
+			INSERT INTO identity.role_templates (id, name, display_name, description, scopes, is_system, created_at, updated_at)
+			VALUES ($1, $2, $2, NULL, $3::jsonb, true, now(), now())
+			ON CONFLICT (name) DO UPDATE SET scopes = EXCLUDED.scopes`,
+			tmpl.ID, name, "["+strings.Join(quoted, ",")+"]"); err != nil {
+			t.Fatalf("seed identity from the app definition of %s: %v", name, err)
+		}
+		// Identity's own migration 000001 pre-seeds this table, so on a fresh
+		// database the upsert above takes the conflict path and identity keeps
+		// its self-minted id -- the exact divergence bootstrap.Run now repairs.
+		// Restate the alignment here the way production does: move the id while
+		// nothing references it, then verify it landed, so this helper cannot
+		// silently hand tests a diverged topology and call it aligned.
+		if _, err := e.identityDB.Exec(`
+			UPDATE identity.role_templates SET id = $1::uuid, updated_at = now()
+			 WHERE name = $2 AND id <> $1::uuid
+			   AND NOT EXISTS (SELECT 1 FROM identity.organization_members m WHERE m.role_template_id = identity.role_templates.id)`,
+			tmpl.ID, name); err != nil {
+			t.Fatalf("align identity id for %s: %v", name, err)
+		}
+		var got string
+		if err := e.identityDB.QueryRow(`SELECT id FROM identity.role_templates WHERE name = $1`, name).Scan(&got); err != nil {
+			t.Fatalf("read back identity id for %s: %v", name, err)
+		}
+		if got != tmpl.ID {
+			t.Fatalf("identity id for %s is %s, want %s: the fixture could not align a referenced row", name, got, tmpl.ID)
+		}
+		ids[name] = tmpl.ID
 	}
 	return ids
+}
+
+// sortedCopy returns a sorted copy for stable comparisons.
+func sortedCopy(in []string) []string {
+	out := append([]string(nil), in...)
+	sort.Strings(out)
+	return out
 }
 
 // principal is one subject of the equivalence proof.
@@ -1051,21 +1143,21 @@ func resolveWith(t *testing.T, m *Members, p principal, orgIDs []string) resolut
 	if err != nil {
 		t.Fatalf("%s: GetUserCombinedScopes: %v", p.name, err)
 	}
-	out.combined = sorted(combined)
+	out.combined = sortedCopy(combined)
 
 	for _, orgID := range orgIDs {
 		scopes, serr := m.GetUserScopesForOrg(ctx, p.userID, orgID)
 		if serr != nil {
 			t.Fatalf("%s: GetUserScopesForOrg(%s): %v", p.name, orgID, serr)
 		}
-		out.perOrg[orgID] = sorted(scopes)
+		out.perOrg[orgID] = sortedCopy(scopes)
 	}
 
 	scope, err := m.OrgScopeForUser(ctx, p.userID, "state:write", nil)
 	if err != nil {
 		t.Fatalf("%s: OrgScopeForUser: %v", p.name, err)
 	}
-	out.orgScope = sorted(scope.OrganizationIDs())
+	out.orgScope = sortedCopy(scope.OrganizationIDs())
 
 	memberships, err := m.GetUserMemberships(ctx, p.userID)
 	if err != nil {
@@ -1153,7 +1245,7 @@ func TestIntegrationEffectiveScopesAreEquivalentBothWays(t *testing.T) {
 	e := newEnv(t)
 	ctx := context.Background()
 
-	roleIDs := e.seedIdentityWithThisBuildsRoles(t)
+	roleIDs := e.alignedRoles(t)
 	acme, globex, initech := e.newOrg(t, "acme"), e.newOrg(t, "globex"), e.newOrg(t, "initech")
 	orgIDs := []string{acme, globex, initech}
 
@@ -1165,17 +1257,20 @@ func TestIntegrationEffectiveScopesAreEquivalentBothWays(t *testing.T) {
 		{name: "erin-unaffiliated", orgs: map[string]string{}},
 	}
 
-	// Seeded through the RAW repository: this is the pre-upgrade state, where
-	// only identity had ever been written.
-	raw := idstore.NewOrganizationRepository(e.identityDB)
+	// Seeded through THE DUAL WRITE, which since the reads of
+	// identity.role_templates were retired is the only path that records a role
+	// in this application — the reconcile confirms membership facts and refuses
+	// to copy identity's role opinion. (The old seeding through the raw
+	// repository modelled the Phase 3a upgrade, whose one-time backfill has
+	// already happened on every deployment this build can land on.)
 	for i := range principals {
 		principals[i].userID = e.newUser(t, principals[i].name+"@example.com")
 		for orgID, role := range principals[i].orgs {
 			var err error
 			if role == "" {
-				err = raw.AddMemberWithRoleTemplate(ctx, orgID, principals[i].userID, nil, idstore.OrgScopeAllOrganizations())
+				err = e.members.AddMemberWithRoleTemplate(ctx, orgID, principals[i].userID, nil, idstore.OrgScopeAllOrganizations(), sweepOfARealReduction)
 			} else {
-				err = raw.AddMemberWithParams(ctx, orgID, principals[i].userID, role, idstore.OrgScopeAllOrganizations())
+				err = e.members.AddMemberWithParams(ctx, orgID, principals[i].userID, role, idstore.OrgScopeAllOrganizations(), sweepOfARealReduction)
 			}
 			if err != nil {
 				t.Fatalf("seed %s in %s: %v", principals[i].name, orgID, err)
@@ -1183,6 +1278,7 @@ func TestIntegrationEffectiveScopesAreEquivalentBothWays(t *testing.T) {
 		}
 	}
 
+	// The boot-time reconcile runs over it, and must change nothing.
 	if _, err := Reconcile(ctx, e.appDB, e.identityDB, ownTemplates); err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}
@@ -1291,67 +1387,6 @@ func TestIntegrationEffectiveScopesAreEquivalentBothWays(t *testing.T) {
 	}
 }
 
-// A ROLE DEFINITION THAT DIVERGES UNDER AN IDENTICAL ID is the case Phase 3a's
-// DriftQuery cannot see, and the one that after the flip means the right role
-// name granting the wrong permissions. Asserted against real Postgres because the
-// claim is about two tables in two schemas, not about a comparison in Go.
-func TestIntegrationDriftSeesScopeDivergenceThatDriftQueryCannot(t *testing.T) {
-	e := newEnv(t)
-	ctx := context.Background()
-
-	e.seedIdentityWithThisBuildsRoles(t)
-	org := e.newOrg(t, "acme")
-	user := e.newUser(t, "frank@example.com")
-	raw := idstore.NewOrganizationRepository(e.identityDB)
-	if err := raw.AddMemberWithParams(ctx, org, user, "editor", idstore.OrgScopeAllOrganizations()); err != nil {
-		t.Fatalf("seed membership: %v", err)
-	}
-	if _, err := Reconcile(ctx, e.appDB, e.identityDB, ownTemplates); err != nil {
-		t.Fatalf("Reconcile: %v", err)
-	}
-	assertNoDrift(t, e)
-
-	// The shared schema's `editor` is widened behind this application's back, as
-	// the sibling registry's own seed would do on ITS restart.
-	if _, err := e.identityDB.Exec(
-		`UPDATE identity.role_templates SET scopes = '["admin"]'::jsonb WHERE name = 'editor'`); err != nil {
-		t.Fatalf("widening identity's editor: %v", err)
-	}
-
-	// DriftQuery still reports nothing: the ids agree.
-	if kinds := driftKinds(t, e); len(kinds) != 0 {
-		t.Fatalf("DriftQuery unexpectedly reported %v; this test's premise is that it cannot see this", kinds)
-	}
-
-	res, err := CheckDrift(ctx, e.appDB, e.identityDB)
-	if err != nil {
-		t.Fatalf("CheckDrift: %v", err)
-	}
-	if res.AssignmentDrift() != 0 {
-		t.Fatalf("AssignmentDrift() = %d, want 0: no assignment changed", res.AssignmentDrift())
-	}
-	if res.ScopeDivergent != 1 {
-		t.Fatalf("ScopeDivergent = %d, want 1: one principal's effective permissions now differ by source\n%s",
-			res.ScopeDivergent, res.String())
-	}
-	if res.Clean() {
-		t.Fatal("Clean() = true: the gate would pass a deployment on which the flip changes what a role grants")
-	}
-
-	// And it is REAL: the two readers now disagree about what this principal may do.
-	identityScopes, err := NewMembers(e.identityDB, e.appDB, RoleSourceIdentity).GetUserCombinedScopes(ctx, user)
-	if err != nil {
-		t.Fatalf("identity scopes: %v", err)
-	}
-	appScopes, err := NewMembers(e.identityDB, e.appDB, RoleSourceApp).GetUserCombinedScopes(ctx, user)
-	if err != nil {
-		t.Fatalf("app scopes: %v", err)
-	}
-	if equalStrings(sorted(identityScopes), sorted(appScopes)) {
-		t.Fatalf("the two readers agree (%v) even though the two schemas define `editor` differently", sorted(appScopes))
-	}
-}
-
 // THE ROLLBACK IS REAL, asserted as a behaviour rather than as a paragraph.
 //
 // An operator who finds the flip wrong sets TSM_AUTHZ_ROLE_SOURCE=identity and
@@ -1363,12 +1398,9 @@ func TestIntegrationRollbackToIdentityStillSeesPostFlipWrites(t *testing.T) {
 	e := newEnv(t)
 	ctx := context.Background()
 
-	e.seedIdentityWithThisBuildsRoles(t)
+	e.alignedRoles(t)
 	org := e.newOrg(t, "acme")
-	user := e.newUser(t, "grace@example.com")
-	if _, err := Reconcile(ctx, e.appDB, e.identityDB, ownTemplates); err != nil {
-		t.Fatalf("Reconcile: %v", err)
-	}
+	user := e.newUser(t, "rollback@example.com")
 
 	// A grant made by a deployment running the FLIPPED build.
 	flipped := NewMembers(e.identityDB, e.appDB, RoleSourceApp)
@@ -1386,66 +1418,10 @@ func TestIntegrationRollbackToIdentityStillSeesPostFlipWrites(t *testing.T) {
 	if err != nil {
 		t.Fatalf("rolled-back read: %v", err)
 	}
-	got := sorted(scopes)
+	got := sortedCopy(scopes)
 	if len(got) != 1 || got[0] != "state:read" {
 		t.Fatalf("after rollback the principal resolves to %v, want this build's viewer scopes [state:read]. "+
 			"The shared schema went stale, so TSM_AUTHZ_ROLE_SOURCE=identity is not a rollback.", got)
 	}
 	assertNoDrift(t, e)
-}
-
-// A MISROUTED APP CONNECTION PRODUCES A FALSE CLEAN, AND Verify IS WHAT STOPS IT.
-//
-// Both sides of CheckDrift name their tables UNQUALIFIED, placed by each
-// connection's search_path. On an "app" connection carrying
-// `search_path=identity,public` — the misconfiguration migration 000032's
-// pre-check and Store.Verify exist to refuse — `role_templates` resolves to
-// IDENTITY's copy while `organization_member_roles` falls through to the
-// application's. The comparison then reads identity's role definitions on both
-// sides and reports `template_drift=0` and `scope_divergent=0` no matter how far
-// apart the two schemas actually are.
-//
-// That is a false clean on exactly the check this phase added, on exactly the
-// deployment least ready for the flip. This test establishes the premise the
-// guards rest on: the same estate reports divergence when routed correctly and
-// reports none when misrouted, and Verify refuses the misrouted connection before
-// either the gate or the periodic detector reaches the comparison.
-func TestIntegrationAMisroutedConnectionHidesTemplateDivergence(t *testing.T) {
-	e := newEnv(t)
-	ctx := context.Background()
-
-	// The sibling's `editor` in the shared schema; this build's in ours.
-	e.newIdentityRole(t, "editor", "modules:read", "providers:read")
-	if _, err := Reconcile(ctx, e.appDB, e.identityDB, ownTemplates); err != nil {
-		t.Fatalf("Reconcile: %v", err)
-	}
-
-	correct, err := CheckDrift(ctx, e.appDB, e.identityDB)
-	if err != nil {
-		t.Fatalf("CheckDrift on the correct topology: %v", err)
-	}
-	if len(correct.TemplateDrift) == 0 {
-		t.Fatalf("the correctly-routed comparison reports no template drift, so this test's premise is gone: %s",
-			correct.String())
-	}
-
-	// The same comparison, over an app connection routed into identity.
-	misrouted := connect(t, os.Getenv("TEST_DATABASE_URL"), "identity,public")
-
-	if _, _, err := NewStore(misrouted).Verify(ctx); !errors.Is(err, ErrMisrouted) {
-		t.Fatalf("Verify on a misrouted connection: got %v, want ErrMisrouted — that refusal is the ONLY thing "+
-			"standing between the gate and the false clean below", err)
-	}
-
-	deceived, err := CheckDrift(ctx, misrouted, e.identityDB)
-	if err != nil {
-		t.Fatalf("CheckDrift on the misrouted topology: %v", err)
-	}
-	if len(deceived.TemplateDrift) != 0 || deceived.ScopeDivergent != 0 {
-		t.Skipf("this topology does not reproduce the false clean (%s); the Verify refusal above is asserted "+
-			"regardless, which is the property the gate depends on", deceived.String())
-	}
-	t.Logf("confirmed: correctly routed reports %d divergent templates, misrouted reports 0 — "+
-		"`server authz-drift` would have exited zero on a deployment whose authorization was never separated",
-		len(correct.TemplateDrift))
 }

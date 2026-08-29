@@ -615,13 +615,11 @@ func startAuthzDriftWatch(appDB, identityDB *sql.DB, interval time.Duration) fun
 
 // reportAuthzDrift runs one comparison and records it.
 //
-// The two families are logged at DIFFERENT LEVELS because they mean different
-// things once the flip has happened. An assignment disagreement is always a
-// fault. A role-DEFINITION disagreement is the intended end state of
-// sethbacon/terraform-suite-identity#206 on a coupled deployment — this
-// application defines its own `editor` and the shared schema still holds the
-// sibling's — so reporting it at ERROR would train an operator to ignore the
-// series that also carries the real one.
+// Role DEFINITIONS are no longer compared at all: per-app definitions diverging
+// from identity's copy is the intended end state of
+// sethbacon/terraform-suite-identity#206, and the reads that fed that half of
+// the report are retired. What remains is the membership comparison, and a
+// disagreement there is always worth the ERROR line.
 func reportAuthzDrift(ctx context.Context, appDB, identityDB *sql.DB) {
 	// See runAuthzDrift: an app connection routed into identity compares that
 	// schema against itself and reports agreement forever, so the detector would
@@ -643,16 +641,10 @@ func reportAuthzDrift(ctx context.Context, appDB, identityDB *sql.DB) {
 		slog.Error("role-drift comparison failed", "error", err)
 		return
 	}
-	telemetry.AuthzDriftObserved(res.Compared, res.Missing, res.Stale, res.Mismatched,
-		res.ScopeDivergent, len(res.TemplateDrift))
+	telemetry.AuthzDriftObserved(res.Compared, res.Missing, res.Stale, res.Mismatched)
 	if res.AssignmentDrift() > 0 {
-		slog.Error("role assignments disagree between this application's tables and the shared identity schema",
+		slog.Error("role records disagree between this application's tables and the shared identity schema",
 			"missing", res.Missing, "stale", res.Stale, "mismatched", res.Mismatched,
-			"detail", res.String())
-	}
-	if res.ScopeDivergent > 0 || len(res.TemplateDrift) > 0 {
-		slog.Warn("role definitions differ between this application and the shared identity schema",
-			"affected_memberships", res.ScopeDivergent, "templates", len(res.TemplateDrift),
 			"detail", res.String())
 	}
 }
@@ -795,9 +787,9 @@ func runAuthzDrift(cfg *config.Config) error {
 	}
 	slog.Error("authz-drift found this application's role tables and the shared identity schema in disagreement",
 		"result", res.String())
-	return fmt.Errorf("authz-drift: %d role assignments and %d role definitions disagree; "+
+	return fmt.Errorf("authz-drift: %d role records disagree; "+
 		"do not switch authorization onto this application's tables until this reports zero",
-		res.AssignmentDrift()+res.ScopeDivergent, len(res.TemplateDrift))
+		res.AssignmentDrift())
 }
 
 func runBindTargets(cfg *config.Config, verify bool) error {

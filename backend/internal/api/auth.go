@@ -42,7 +42,6 @@ type AuthHandlers struct {
 	// below is the highest-volume role writer in this application, and every one
 	// of its grants, reassignments and revocations is dual-written through it.
 	orgRepo       *approles.Members
-	roleRepo      *idstore.RoleTemplateRepository
 	tokenRepo     *idstore.TokenRepository
 	apiKeyRepo    *idstore.APIKeyRepository
 	oidcProvider  atomic.Pointer[auth.OIDCProvider]
@@ -89,7 +88,6 @@ func NewAuthHandlers(cfg *config.Config, identityDB, appDB *sql.DB, opts ...Auth
 		cfg:         cfg,
 		userRepo:    idstore.NewUserRepository(identityDB),
 		orgRepo:     approles.NewMembers(identityDB, appDB, approles.RoleSource(cfg.Authz.RoleSource)),
-		roleRepo:    idstore.NewRoleTemplateRepository(identityDB),
 		tokenRepo:   idstore.NewTokenRepository(identityDB),
 		apiKeyRepo:  idstore.NewAPIKeyRepository(identityDB),
 		stateStore:  stateStore,

@@ -21,7 +21,13 @@ const (
 )
 
 // reconcileEnv is the two-connection rig Reconcile runs against: the app
-// connection it writes and the identity connection it reads.
+// connection it writes and the identity connection it reads memberships from.
+//
+// BOTH MOCKS ARE ORDERED AND STRICT, and that strictness is itself an
+// assertion: since the adopt pass was retired, the ONLY identity statements a
+// reconcile may issue are the drift probe's two reads and the membership scan.
+// A reconcile that reached for identity.role_templates again would issue a
+// query no test stages, and every test here would fail on it.
 type reconcileEnv struct {
 	appDB, identityDB *sql.DB
 	app, identity     sqlmock.Sqlmock
@@ -64,24 +70,13 @@ func appTemplateRows() *sqlmock.Rows {
 	return sqlmock.NewRows([]string{"id", "name", "display_name", "description", "scopes", "is_system", "created_at", "updated_at"})
 }
 
-// identityTemplateProbeRows is the shape CheckDrift's IDENTITY-side template read
-// scans — six columns, no timestamps: that side exists only to be compared.
-func identityTemplateProbeRows() *sqlmock.Rows {
-	return sqlmock.NewRows([]string{"id", "name", "display_name", "description", "scopes", "is_system"})
-}
-
-// expectDriftProbe stages the comparison Reconcile now runs BEFORE it writes
+// expectDriftProbe stages the comparison Reconcile runs BEFORE it writes
 // anything, with both sides empty (no pending repairs).
 //
-// Staged as a helper rather than inline because it is four queries across two
-// connections that say nothing about the case under test — and because a test
-// that forgot one would fail with a sqlmock message about the NEXT query, which
-// is how a suite becomes unreadable.
+// TWO queries, one per connection, and none of the template reads the probe
+// used to issue: CheckDrift stopped comparing role definitions when the
+// identity.role_templates reads were retired.
 func expectDriftProbe(env *reconcileEnv) {
-	env.identity.ExpectQuery(regexp.QuoteMeta(`SELECT id::text, name`)).
-		WillReturnRows(identityTemplateProbeRows())
-	env.app.ExpectQuery(regexp.QuoteMeta(`SELECT id, name, COALESCE(display_name`)).
-		WillReturnRows(appTemplateRows())
 	env.identity.ExpectQuery(`FROM organization_members ORDER BY`).
 		WillReturnRows(sqlmock.NewRows([]string{"organization_id", "user_id", "role_template_id"}))
 	env.app.ExpectQuery(`FROM organization_member_roles ORDER BY`).
@@ -95,22 +90,32 @@ func expectForeignTemplateReadback(env *reconcileEnv, rows *sqlmock.Rows) {
 	env.app.ExpectQuery(regexp.QuoteMeta(`SELECT id, name, COALESCE(display_name`)).WillReturnRows(rows)
 }
 
-func identityTemplateRows(adminScopes, editorScopes string) *sqlmock.Rows {
-	now := time.Now()
-	return sqlmock.NewRows([]string{"id", "name", "display_name", "description", "scopes", "is_system", "created_at", "updated_at"}).
-		AddRow(adminTemplateID, "admin", "Administrator", nil, []byte(adminScopes), true, now, now).
-		AddRow(editorTemplateID, "editor", "Editor", nil, []byte(editorScopes), true, now, now)
+// expectMembershipScan stages the identity keyset scan, which since the Phase 3
+// close-out reads (organization_id, user_id) ONLY: the membership fact is the
+// one thing identity still supplies to these tables.
+func expectMembershipScan(env *reconcileEnv, rows *sqlmock.Rows) {
+	env.identity.ExpectQuery(`SELECT organization_id, user_id\s+FROM organization_members\s+WHERE`).
+		WillReturnRows(rows)
 }
 
-// expectTemplateAdoption stages the two statements the adopt pass issues per
-// identity template: release the name if another id holds it, then insert IF
-// ABSENT.
-func expectTemplateAdoption(m sqlmock.Sqlmock, id, name, displayName string) {
-	m.ExpectExec(regexp.QuoteMeta(`DELETE FROM role_templates WHERE name = $1 AND id <> $2`)).
-		WithArgs(name, id).
-		WillReturnResult(sqlmock.NewResult(0, 0))
-	m.ExpectExec(`ON CONFLICT \(id\) DO NOTHING`).
-		WithArgs(id, name, displayName, nil, sqlmock.AnyArg(), true).
+func membershipScanRows(pairs ...[2]string) *sqlmock.Rows {
+	rows := sqlmock.NewRows([]string{"organization_id", "user_id"})
+	for _, p := range pairs {
+		rows.AddRow(p[0], p[1])
+	}
+	return rows
+}
+
+// expectConfirmMembership stages the presence-confirming upsert for one pair.
+//
+// THE STATEMENT SHAPE IS THE ASSERTION: the conflict arm may refresh
+// mirrored_at and NOTHING ELSE. A reconcile whose upsert touched
+// role_template_id would be identity restating this application's role policy
+// again, which is exactly what this phase removed — so the regex pins the SET
+// list to the end of the statement.
+func expectConfirmMembership(env *reconcileEnv, orgID, userID string) {
+	env.app.ExpectExec(`INSERT INTO organization_member_roles[\s\S]*DO UPDATE\s+SET mirrored_at = now\(\)\s*$`).
+		WithArgs(orgID, userID).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 }
 
@@ -123,30 +128,12 @@ func recordingDefiner(ran *bool) TemplateDefiner {
 	}
 }
 
-// scopesJSON renders a seeded role's own scopes as the JSON the identity column
-// holds, so a case built from this build's own roles cannot drift from
-// auth.AppRoleTemplates() by hand-copying.
-func scopesJSON(t *testing.T, name string) string {
-	t.Helper()
-	for _, rt := range auth.AppRoleTemplates() {
-		if rt.Name != name {
-			continue
-		}
-		quoted := make([]string, 0, len(rt.Scopes))
-		for _, s := range rt.Scopes {
-			quoted = append(quoted, `"`+s+`"`)
-		}
-		return "[" + strings.Join(quoted, ",") + "]"
-	}
-	t.Fatalf("no seeded role template named %q", name)
-	return ""
-}
-
-// THE ADOPT PASS COPIES IDENTITY'S IDS. Minting fresh ids would make
-// organization_member_roles.role_template_id a different value from the one
-// identity.organization_members holds for the same assignment, and the assignment
-// pass — which copies that column straight across — would point at nothing.
-func TestReconcile_AdoptsIdentityTemplatesPreservingTheirIDs(t *testing.T) {
+// THE RECONCILE READS NOTHING FROM identity.role_templates. Both mocks are
+// strict and ordered, so the proof is the sequence itself: define this build's
+// own roles, read back what the table holds, confirm the membership facts, and
+// sweep — with the identity connection asked for exactly the drift probe and
+// the membership scan.
+func TestReconcile_DefinesOwnRolesAndConfirmsMemberships(t *testing.T) {
 	env := newReconcileEnv(t)
 	var defined bool
 
@@ -154,12 +141,8 @@ func TestReconcile_AdoptsIdentityTemplatesPreservingTheirIDs(t *testing.T) {
 	expectDriftProbe(env)
 	env.app.ExpectQuery(regexp.QuoteMeta(`SELECT now()`)).
 		WillReturnRows(sqlmock.NewRows([]string{"now"}).AddRow(time.Now()))
-	env.identity.ExpectQuery("SELECT id, name, display_name, description, scopes, is_system, created_at, updated_at").
-		WillReturnRows(identityTemplateRows(scopesJSON(t, "admin"), scopesJSON(t, "editor")))
-	expectTemplateAdoption(env.app, adminTemplateID, "admin", "Administrator")
-	expectTemplateAdoption(env.app, editorTemplateID, "editor", "Editor")
 	// The readback the report is built from. It carries every role this build
-	// defines, because TemplatesDefined is now counted from the ROWS rather than
+	// defines, because TemplatesDefined is counted from the ROWS rather than
 	// from len(auth.AppRoleTemplates()) — the constant would read the same on a
 	// boot whose definer wrote nothing.
 	definedRows := appTemplateRows()
@@ -169,12 +152,8 @@ func TestReconcile_AdoptsIdentityTemplatesPreservingTheirIDs(t *testing.T) {
 	expectForeignTemplateReadback(env, definedRows)
 
 	// One short page of memberships ends the keyset scan.
-	env.identity.ExpectQuery("SELECT organization_id, user_id, role_template_id").
-		WillReturnRows(sqlmock.NewRows([]string{"organization_id", "user_id", "role_template_id"}).
-			AddRow("org-1", "user-1", adminTemplateID))
-	env.app.ExpectExec("INSERT INTO organization_member_roles").
-		WithArgs("org-1", "user-1", adminTemplateID).
-		WillReturnResult(sqlmock.NewResult(0, 1))
+	expectMembershipScan(env, membershipScanRows([2]string{"org-1", "user-1"}))
+	expectConfirmMembership(env, "org-1", "user-1")
 	env.app.ExpectExec(regexp.QuoteMeta(`DELETE FROM organization_member_roles WHERE mirrored_at < $1`)).
 		WillReturnResult(sqlmock.NewResult(0, 4))
 
@@ -183,22 +162,19 @@ func TestReconcile_AdoptsIdentityTemplatesPreservingTheirIDs(t *testing.T) {
 		t.Fatalf("Reconcile: %v", err)
 	}
 	if !defined {
-		t.Error("the app-side seed never ran: the mirror would carry identity's role scopes, not this build's")
-	}
-	if rep.TemplatesAdopted != 2 {
-		t.Errorf("TemplatesAdopted = %d, want 2", rep.TemplatesAdopted)
+		t.Error("the app-side seed never ran: the mirror would carry stale role scopes, not this build's")
 	}
 	if rep.TemplatesDefined != len(auth.AppRoleTemplates()) {
 		t.Errorf("TemplatesDefined = %d, want %d", rep.TemplatesDefined, len(auth.AppRoleTemplates()))
 	}
-	if rep.AssignmentsRestated != 1 {
-		t.Errorf("AssignmentsRestated = %d, want 1", rep.AssignmentsRestated)
+	if rep.MembershipsConfirmed != 1 {
+		t.Errorf("MembershipsConfirmed = %d, want 1", rep.MembershipsConfirmed)
 	}
 	if rep.StaleRemoved != 4 {
 		t.Errorf("StaleRemoved = %d, want 4", rep.StaleRemoved)
 	}
 	if len(rep.ForeignTemplates) != 0 {
-		t.Errorf("ForeignTemplates = %v, want none: `admin` is a role this build defines", rep.ForeignTemplates)
+		t.Errorf("ForeignTemplates = %v, want none: every row in the readback is a role this build defines", rep.ForeignTemplates)
 	}
 	if rep.Templates != "public.role_templates" || rep.Assignments != "public.organization_member_roles" {
 		t.Errorf("resolved names = %q/%q, want the public ones", rep.Templates, rep.Assignments)
@@ -211,96 +187,34 @@ func TestReconcile_AdoptsIdentityTemplatesPreservingTheirIDs(t *testing.T) {
 	}
 }
 
-// IDENTITY MAY SUPPLY A DEFINITION, AND MAY NOT REDEFINE ONE. This is the
-// difference between Phase 3a and Phase 3b for role templates, and it is one word
-// of SQL: an upsert here lets the shared schema — in a coupled deployment, the
-// sibling registry — rewrite what a TSM role grants, once per restart, on the
-// table that now decides authorization.
-//
-// Asserted on the STATEMENT, because the two spellings are behaviourally
-// identical on a fresh database and differ only on the deployment that has been
-// running for months.
-func TestReconcile_AdoptsWithoutOverwritingAnExistingDefinition(t *testing.T) {
-	env := newReconcileEnv(t)
-	var defined bool
-
-	expectVerifyOK(env.app)
-	expectDriftProbe(env)
-	env.app.ExpectQuery(regexp.QuoteMeta(`SELECT now()`)).
-		WillReturnRows(sqlmock.NewRows([]string{"now"}).AddRow(time.Now()))
-	// editor carries the SIBLING's scopes in the shared schema.
-	const siblingEditorScopes = `["modules:read","providers:read"]`
-	env.identity.ExpectQuery("SELECT id, name").
-		WillReturnRows(identityTemplateRows(scopesJSON(t, "admin"), siblingEditorScopes))
-	env.app.ExpectExec(regexp.QuoteMeta(`DELETE FROM role_templates WHERE name = $1 AND id <> $2`)).
-		WithArgs("admin", adminTemplateID).
-		WillReturnResult(sqlmock.NewResult(0, 0))
-	env.app.ExpectExec(`ON CONFLICT \(id\) DO NOTHING`).
-		WithArgs(adminTemplateID, "admin", "Administrator", nil, sqlmock.AnyArg(), true).
-		WillReturnResult(sqlmock.NewResult(0, 1))
-	env.app.ExpectExec(regexp.QuoteMeta(`DELETE FROM role_templates WHERE name = $1 AND id <> $2`)).
-		WithArgs("editor", editorTemplateID).
-		WillReturnResult(sqlmock.NewResult(0, 0))
-	// DO NOTHING, not DO UPDATE: this deployment's `editor` keeps whatever it
-	// already grants, and the definition pass below is what sets it.
-	env.app.ExpectExec(`ON CONFLICT \(id\) DO NOTHING`).
-		WithArgs(editorTemplateID, "editor", "Editor", nil, siblingEditorScopes, true).
-		WillReturnResult(sqlmock.NewResult(0, 1))
-	expectForeignTemplateReadback(env, appTemplateRows())
-	env.identity.ExpectQuery("SELECT organization_id, user_id, role_template_id").
-		WillReturnRows(sqlmock.NewRows([]string{"organization_id", "user_id", "role_template_id"}))
-	env.app.ExpectExec("DELETE FROM organization_member_roles WHERE mirrored_at").
-		WillReturnResult(sqlmock.NewResult(0, 0))
-
-	if _, err := Reconcile(context.Background(), env.appDB, env.identityDB, recordingDefiner(&defined)); err != nil {
-		t.Fatalf("Reconcile: %v", err)
-	}
-	if err := env.app.ExpectationsWereMet(); err != nil {
-		t.Errorf("app leg: %v", err)
-	}
-}
-
-// THE DEFINITION PASS RUNS AFTER THE ADOPT PASS AND BEFORE THE ASSIGNMENTS, and
-// the order is not cosmetic: adopting after defining would let
-// RepointTemplateName delete the row the seed had just written, replacing this
-// build's scopes with identity's on every fresh install.
-//
-// Asserted by having the definer record what the app connection had already been
-// asked for when it ran.
-func TestReconcile_DefinesOwnTemplatesAfterAdoptingAndBeforeAssignments(t *testing.T) {
+// THE DEFINITION PASS RUNS BEFORE THE MEMBERSHIP SCAN. Templates first because
+// organization_member_roles.role_template_id has a real foreign key to them;
+// asserted by having the definer observe that no membership work had been
+// staged-and-consumed when it ran (sqlmock is ordered, so pending expectations
+// are exactly "what has not happened yet").
+func TestReconcile_DefinesOwnTemplatesBeforeMemberships(t *testing.T) {
 	env := newReconcileEnv(t)
 
 	expectVerifyOK(env.app)
 	expectDriftProbe(env)
 	env.app.ExpectQuery(regexp.QuoteMeta(`SELECT now()`)).
 		WillReturnRows(sqlmock.NewRows([]string{"now"}).AddRow(time.Now()))
-	env.identity.ExpectQuery("SELECT id, name").
-		WillReturnRows(identityTemplateRows(scopesJSON(t, "admin"), scopesJSON(t, "editor")))
-	expectTemplateAdoption(env.app, adminTemplateID, "admin", "Administrator")
-	expectTemplateAdoption(env.app, editorTemplateID, "editor", "Editor")
 	expectForeignTemplateReadback(env, appTemplateRows())
-	env.identity.ExpectQuery("SELECT organization_id, user_id, role_template_id").
-		WillReturnRows(sqlmock.NewRows([]string{"organization_id", "user_id", "role_template_id"}))
+	expectMembershipScan(env, membershipScanRows())
 	env.app.ExpectExec("DELETE FROM organization_member_roles WHERE mirrored_at").
 		WillReturnResult(sqlmock.NewResult(0, 0))
 
-	var adoptionsDone, assignmentsStarted bool
+	var definerSawPendingWork bool
 	definer := func(ctx context.Context, _ *Store) error {
-		// Both adoptions must already have been consumed, and no assignment may
-		// have been written yet. sqlmock is ordered, so "the next expectation is
-		// the readback" is exactly that statement.
-		adoptionsDone = env.app.ExpectationsWereMet() != nil // still pending: the readback and beyond
-		assignmentsStarted = false
+		// The readback, the scan and the sweep must all still be pending.
+		definerSawPendingWork = env.app.ExpectationsWereMet() != nil
 		return nil
 	}
 	if _, err := Reconcile(context.Background(), env.appDB, env.identityDB, definer); err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}
-	if !adoptionsDone {
+	if !definerSawPendingWork {
 		t.Error("the definer ran with no pending app expectations at all, so the sequence under test did not happen")
-	}
-	if assignmentsStarted {
-		t.Error("assignments were written before this build's role definitions")
 	}
 	if err := env.app.ExpectationsWereMet(); err != nil {
 		t.Errorf("app leg: %v", err)
@@ -308,8 +222,8 @@ func TestReconcile_DefinesOwnTemplatesAfterAdoptingAndBeforeAssignments(t *testi
 }
 
 // A RECONCILE WITH NO DEFINER IS REFUSED. Skipping the seed would leave this
-// application's role_templates carrying identity's scopes, which is the Phase 3a
-// meaning of those rows and the wrong answer for a build that reads them.
+// application's role_templates carrying whatever an earlier build wrote, which
+// is the wrong answer for a build that reads them.
 func TestReconcile_RefusesWithoutATemplateDefiner(t *testing.T) {
 	env := newReconcileEnv(t)
 	_, err := Reconcile(context.Background(), env.appDB, env.identityDB, nil)
@@ -321,11 +235,12 @@ func TestReconcile_RefusesWithoutATemplateDefiner(t *testing.T) {
 	}
 }
 
-// A NULL role_template_id in identity is a member with no role. It must be
-// mirrored as NULL, not skipped: skipping it would leave a stale row from a
-// previous reconcile standing, and the sweep would not collect it because the
-// membership still exists.
-func TestReconcile_MirrorsARoleLessMembershipAsNull(t *testing.T) {
+// CONFIRMING A MEMBERSHIP DOES NOT TOUCH ITS ROLE. The scan reads only
+// (organization_id, user_id) from identity — role_template_id is deliberately
+// absent from the SELECT — and the upsert's conflict arm refreshes mirrored_at
+// alone, so a role this application granted survives every boot and identity's
+// opinion of the role is never restated over it.
+func TestReconcile_ConfirmsPresenceWithoutRestatingTheRole(t *testing.T) {
 	env := newReconcileEnv(t)
 	var defined bool
 
@@ -333,15 +248,11 @@ func TestReconcile_MirrorsARoleLessMembershipAsNull(t *testing.T) {
 	expectDriftProbe(env)
 	env.app.ExpectQuery(regexp.QuoteMeta(`SELECT now()`)).
 		WillReturnRows(sqlmock.NewRows([]string{"now"}).AddRow(time.Now()))
-	env.identity.ExpectQuery("SELECT id, name").
-		WillReturnRows(sqlmock.NewRows([]string{"id", "name", "display_name", "description", "scopes", "is_system", "created_at", "updated_at"}))
 	expectForeignTemplateReadback(env, appTemplateRows())
-	env.identity.ExpectQuery("SELECT organization_id, user_id, role_template_id").
-		WillReturnRows(sqlmock.NewRows([]string{"organization_id", "user_id", "role_template_id"}).
-			AddRow("org-1", "user-1", nil))
-	env.app.ExpectExec("INSERT INTO organization_member_roles").
-		WithArgs("org-1", "user-1", nil).
-		WillReturnResult(sqlmock.NewResult(0, 1))
+	expectMembershipScan(env, membershipScanRows([2]string{"org-1", "user-1"}))
+	// expectConfirmMembership pins the statement shape: WithArgs carries NO
+	// role value at all, and the DO UPDATE arm ends at mirrored_at.
+	expectConfirmMembership(env, "org-1", "user-1")
 	env.app.ExpectExec("DELETE FROM organization_member_roles WHERE mirrored_at").
 		WillReturnResult(sqlmock.NewResult(0, 0))
 
@@ -351,11 +262,14 @@ func TestReconcile_MirrorsARoleLessMembershipAsNull(t *testing.T) {
 	if err := env.app.ExpectationsWereMet(); err != nil {
 		t.Errorf("app leg: %v", err)
 	}
+	if err := env.identity.ExpectationsWereMet(); err != nil {
+		t.Errorf("identity leg: %v", err)
+	}
 }
 
 // THE PENDING-REPAIR REPORT IS TAKEN BEFORE ANYTHING IS WRITTEN, and it is what
-// makes a boot that rewrote four hundred principals' authority distinguishable
-// from one that rewrote nothing.
+// makes a boot that changed principals' records distinguishable from one that
+// changed nothing.
 //
 // Asserted on the exact counts and the exact record, not on "the field is
 // non-empty": a comparison taken AFTER the passes would always report zero, and
@@ -369,10 +283,6 @@ func TestReconcile_ReportsWhatItIsAboutToRepair(t *testing.T) {
 	expectVerifyOK(env.app)
 	// Identity has a membership this application records no role for: a principal
 	// who has LOST access they should have.
-	env.identity.ExpectQuery(regexp.QuoteMeta(`SELECT id::text, name`)).
-		WillReturnRows(identityTemplateProbeRows())
-	env.app.ExpectQuery(regexp.QuoteMeta(`SELECT id, name, COALESCE(display_name`)).
-		WillReturnRows(appTemplateRows())
 	env.identity.ExpectQuery(`FROM organization_members ORDER BY`).
 		WillReturnRows(sqlmock.NewRows([]string{"organization_id", "user_id", "role_template_id"}).
 			AddRow(orgID, userID, adminTemplateID))
@@ -381,15 +291,9 @@ func TestReconcile_ReportsWhatItIsAboutToRepair(t *testing.T) {
 
 	env.app.ExpectQuery(regexp.QuoteMeta(`SELECT now()`)).
 		WillReturnRows(sqlmock.NewRows([]string{"now"}).AddRow(time.Now()))
-	env.identity.ExpectQuery("SELECT id, name").
-		WillReturnRows(sqlmock.NewRows([]string{"id", "name", "display_name", "description", "scopes", "is_system", "created_at", "updated_at"}))
 	expectForeignTemplateReadback(env, appTemplateRows())
-	env.identity.ExpectQuery("SELECT organization_id, user_id, role_template_id").
-		WillReturnRows(sqlmock.NewRows([]string{"organization_id", "user_id", "role_template_id"}).
-			AddRow(orgID, userID, adminTemplateID))
-	env.app.ExpectExec("INSERT INTO organization_member_roles").
-		WithArgs(orgID, userID, adminTemplateID).
-		WillReturnResult(sqlmock.NewResult(0, 1))
+	expectMembershipScan(env, membershipScanRows([2]string{orgID, userID}))
+	expectConfirmMembership(env, orgID, userID)
 	env.app.ExpectExec("DELETE FROM organization_member_roles WHERE mirrored_at").
 		WillReturnResult(sqlmock.NewResult(0, 0))
 
@@ -416,7 +320,7 @@ func TestReconcile_ReportsWhatItIsAboutToRepair(t *testing.T) {
 }
 
 // THE SWEEP MUST NOT RUN ON A PARTIAL PASS. A membership scan that failed
-// part-way leaves the remainder un-restated, and sweeping then would delete
+// part-way leaves the remainder unconfirmed, and sweeping then would delete
 // every assignment the scan did not reach — turning a transient identity fault
 // into a wiped mirror.
 func TestReconcile_DoesNotSweepWhenTheMembershipScanFails(t *testing.T) {
@@ -427,10 +331,8 @@ func TestReconcile_DoesNotSweepWhenTheMembershipScanFails(t *testing.T) {
 	expectDriftProbe(env)
 	env.app.ExpectQuery(regexp.QuoteMeta(`SELECT now()`)).
 		WillReturnRows(sqlmock.NewRows([]string{"now"}).AddRow(time.Now()))
-	env.identity.ExpectQuery("SELECT id, name").
-		WillReturnRows(sqlmock.NewRows([]string{"id", "name", "display_name", "description", "scopes", "is_system", "created_at", "updated_at"}))
 	expectForeignTemplateReadback(env, appTemplateRows())
-	env.identity.ExpectQuery("SELECT organization_id, user_id, role_template_id").
+	env.identity.ExpectQuery(`SELECT organization_id, user_id\s+FROM organization_members\s+WHERE`).
 		WillReturnError(errors.New("identity is unreachable"))
 	// The app mock has NO sweep expectation: issuing one fails this test.
 
@@ -460,13 +362,9 @@ func TestReconcile_DoesNotSweepWhenTheMembershipStreamBreaksMidway(t *testing.T)
 	expectDriftProbe(env)
 	env.app.ExpectQuery(regexp.QuoteMeta(`SELECT now()`)).
 		WillReturnRows(sqlmock.NewRows([]string{"now"}).AddRow(time.Now()))
-	env.identity.ExpectQuery("SELECT id, name").
-		WillReturnRows(sqlmock.NewRows([]string{"id", "name", "display_name", "description", "scopes", "is_system", "created_at", "updated_at"}))
 	expectForeignTemplateReadback(env, appTemplateRows())
-	env.identity.ExpectQuery("SELECT organization_id, user_id, role_template_id").
-		WillReturnRows(sqlmock.NewRows([]string{"organization_id", "user_id", "role_template_id"}).
-			AddRow("org-1", "user-1", nil).
-			RowError(0, errors.New("connection reset mid-stream")))
+	expectMembershipScan(env, membershipScanRows([2]string{"org-1", "user-1"}).
+		RowError(0, errors.New("connection reset mid-stream")))
 
 	_, err := Reconcile(context.Background(), env.appDB, env.identityDB, recordingDefiner(&defined))
 	if err == nil {
@@ -532,9 +430,9 @@ func TestReconcile_RefusesWhenTheMigrationHasNotRun(t *testing.T) {
 
 // A role name this application holds and does NOT define is reported, because it
 // means here whatever the application that seeded it into the shared schema
-// decided. That is the successor to Phase 3a's divergence warning, and it names
-// the opposite set: then, every role could carry the sibling's meaning; now, only
-// the ones this build never claimed.
+// decided when an earlier build adopted it. No NEW foreign role can arrive —
+// the adopt pass is retired — so the set can only shrink, and this report is
+// how an operator watches it do so.
 func TestReconcile_ReportsRolesThisBuildDoesNotDefine(t *testing.T) {
 	env := newReconcileEnv(t)
 	var defined bool
@@ -543,16 +441,12 @@ func TestReconcile_ReportsRolesThisBuildDoesNotDefine(t *testing.T) {
 	expectDriftProbe(env)
 	env.app.ExpectQuery(regexp.QuoteMeta(`SELECT now()`)).
 		WillReturnRows(sqlmock.NewRows([]string{"now"}).AddRow(time.Now()))
-	now := time.Now()
-	env.identity.ExpectQuery("SELECT id, name").
-		WillReturnRows(sqlmock.NewRows([]string{"id", "name", "display_name", "description", "scopes", "is_system", "created_at", "updated_at"}).
-			AddRow(adminTemplateID, "registry_publisher", "Publisher", nil, []byte(`["modules:write"]`), true, now, now))
-	expectTemplateAdoption(env.app, adminTemplateID, "registry_publisher", "Publisher")
+	// The table already holds a row an earlier build adopted from the shared
+	// schema, alongside one role this build defines.
 	expectForeignTemplateReadback(env, appTemplateRows().
 		AddRow(adminTemplateID, "registry_publisher", "Publisher", nil, []byte(`["modules:write"]`), true, time.Now(), time.Now()).
 		AddRow(editorTemplateID, "editor", "Editor", nil, []byte(`["state:read"]`), true, time.Now(), time.Now()))
-	env.identity.ExpectQuery("SELECT organization_id, user_id, role_template_id").
-		WillReturnRows(sqlmock.NewRows([]string{"organization_id", "user_id", "role_template_id"}))
+	expectMembershipScan(env, membershipScanRows())
 	env.app.ExpectExec("DELETE FROM organization_member_roles WHERE mirrored_at").
 		WillReturnResult(sqlmock.NewResult(0, 0))
 
@@ -574,33 +468,6 @@ func TestReconcile_ReportsRolesThisBuildDoesNotDefine(t *testing.T) {
 	}
 }
 
-// Scope comparison is a SET comparison. Order and duplicates carry no meaning in
-// a role template's scopes, so comparing them as sequences would report every
-// re-ordered seed as divergence and train operators to ignore the warning.
-func TestSameScopeSet(t *testing.T) {
-	cases := []struct {
-		name string
-		a, b []string
-		want bool
-	}{
-		{"identical", []string{"state:read", "state:write"}, []string{"state:read", "state:write"}, true},
-		{"reordered", []string{"state:read", "state:write"}, []string{"state:write", "state:read"}, true},
-		{"duplicated", []string{"state:read", "state:read"}, []string{"state:read"}, true},
-		{"missing one", []string{"state:read", "state:write"}, []string{"state:read"}, false},
-		{"extra one", []string{"state:read"}, []string{"state:read", "admin"}, false},
-		{"disjoint same size", []string{"state:read"}, []string{"admin"}, false},
-		{"both empty", nil, nil, true},
-		{"one empty", nil, []string{"admin"}, false},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			if got := sameScopeSet(c.a, c.b); got != c.want {
-				t.Fatalf("sameScopeSet(%v, %v) = %v, want %v", c.a, c.b, got, c.want)
-			}
-		})
-	}
-}
-
 // Reconcile without an identity connection must refuse rather than treat "no
 // memberships readable" as "no memberships exist" and sweep the mirror clean.
 func TestReconcile_RefusesWithoutAnIdentityConnection(t *testing.T) {
@@ -616,17 +483,16 @@ func TestReconcile_RefusesWithoutAnIdentityConnection(t *testing.T) {
 
 // LogReport is the startup line an operator reads. It is exercised here so a nil
 // slice or a missing field cannot panic the boot it is supposed to describe, and
-// so the two warnings that now carry an authorization change keep their remedy.
+// so the warning that carries an authorization decision keeps its remedy.
 func TestLogReport_HandlesEveryShape(t *testing.T) {
 	LogReport(Report{Templates: "public.role_templates", Assignments: "public.organization_member_roles"})
 	LogReport(Report{
 		Templates: "public.role_templates", Assignments: "public.organization_member_roles",
-		TemplatesAdopted: 6, TemplatesDefined: 6, AssignmentsRestated: 12, StaleRemoved: 1,
+		TemplatesDefined: 6, MembershipsConfirmed: 12, StaleRemoved: 1,
 		ForeignTemplates: []string{"registry_publisher"},
 		PendingRepairs: DriftResult{
-			Compared: 12, Missing: 1, Stale: 2, Mismatched: 3, ScopeDivergent: 1,
-			TemplateDrift: []TemplateDrift{{Name: "editor", IdentityScopes: []string{"modules:read"}, AppScopes: []string{"state:read"}}},
-			Sample:        []DriftRecord{{Kind: DriftMissing, OrganizationID: "org", UserID: "user"}},
+			Compared: 12, Missing: 1, Stale: 2, Mismatched: 3,
+			Sample: []DriftRecord{{Kind: DriftMissing, OrganizationID: "org", UserID: "user"}},
 		},
 	})
 	if ForeignTemplateRemedy == "" {

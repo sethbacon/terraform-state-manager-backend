@@ -9,10 +9,17 @@ import (
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
 	"github.com/google/uuid"
 
+	"github.com/terraform-state-manager/terraform-state-manager/internal/approles"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/config"
 )
 
 // newReconcileEnv returns AuthHandlers over sqlmock for direct method tests.
+//
+// ONE database serves BOTH connections, so the app-side statements the role
+// paths issue since the identity.role_templates reads were retired (template
+// resolution, the mirror upsert/delete) land on the same ordered mock as the
+// identity leg's, in call order. RoleSource stays identity in these rigs, so
+// the role-carrying READS are byte-for-byte what they were.
 func newReconcileEnv(t *testing.T, mutate func(*config.Config)) (*AuthHandlers, sqlmock.Sqlmock) {
 	t.Helper()
 	db, mock, err := newSQLMock()
@@ -21,10 +28,14 @@ func newReconcileEnv(t *testing.T, mutate func(*config.Config)) (*AuthHandlers, 
 	}
 	t.Cleanup(func() { db.Close() })
 	cfg := &config.Config{}
+	// The rollback source, stated: these rigs stage identity-shaped rows for
+	// every role-carrying read, which is exactly what RoleSource=identity
+	// serves. The app tables still take every WRITE under either source.
+	cfg.Authz.RoleSource = string(approles.RoleSourceIdentity)
 	if mutate != nil {
 		mutate(cfg)
 	}
-	h, err := NewAuthHandlers(cfg, db, nil)
+	h, err := NewAuthHandlers(cfg, db, db)
 	if err != nil {
 		t.Fatalf("NewAuthHandlers: %v", err)
 	}
@@ -42,29 +53,60 @@ func expectOrgByName(mock sqlmock.Sqlmock, id, name string) {
 
 var roleTemplateCols = []string{"id", "name", "display_name", "description", "scopes", "is_system", "created_at", "updated_at"}
 
-// expectRoleScopesLookup queues the guardProvisionableRole scopes lookup
-// (idstore.RoleTemplateRepository.GetRoleTemplateByName) that now runs before
-// every "wanted" (add/update) branch of reconcileManagedMemberships.
+// expectRoleScopesLookup queues the guardProvisionableRole scopes lookup that
+// runs before every "wanted" (add/update) branch of reconcileManagedMemberships.
+// Since the identity.role_templates reads were retired it resolves from THIS
+// application's own role_templates (approles.Store.TemplateByName), whose
+// statement spells its COALESCEs — which is also what keeps it distinguishable
+// from the identity leg's own name lookup on this shared mock.
 func expectRoleScopesLookup(mock sqlmock.Sqlmock, roleName string, scopes []string) {
 	scopesJSON, _ := json.Marshal(scopes)
 	now := time.Now()
-	mock.ExpectQuery("SELECT id, name, display_name, description, scopes").WithArgs(roleName).
+	mock.ExpectQuery(`SELECT id, name, COALESCE\(display_name`).WithArgs(roleName).
 		WillReturnRows(sqlmock.NewRows(roleTemplateCols).
 			AddRow(uuid.New(), roleName, roleName, nil, scopesJSON, false, now, now))
+}
+
+// expectMirrorRoleResolution queues the app-side name resolution the mirror leg
+// performs (approles.Store.TemplateIDByName), which precedes the identity leg.
+func expectMirrorRoleResolution(mock sqlmock.Sqlmock, roleName, id string) {
+	mock.ExpectQuery("SELECT id FROM role_templates WHERE name").WithArgs(roleName).
+		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(id))
+}
+
+// expectMirrorPriorRole queues the mirror's pre-write read of the role it
+// currently records, which is what the no-op session-sweep detection compares
+// against (#491). Absent row: uncertainty, which costs a sweep, never a missed
+// reduction.
+func expectMirrorPriorRoleAbsent(mock sqlmock.Sqlmock) {
+	mock.ExpectQuery(`SELECT r\.role_template_id`).
+		WillReturnRows(sqlmock.NewRows([]string{"role_template_id", "name", "display_name", "scopes"}))
+}
+
+// expectMirrorUpsert queues the mirror leg's write into this application's own
+// organization_member_roles.
+func expectMirrorUpsert(mock sqlmock.Sqlmock) {
+	mock.ExpectExec("INSERT INTO organization_member_roles").
+		WillReturnResult(sqlmock.NewResult(0, 1))
 }
 
 func TestReconcile_UpsertExistingMember(t *testing.T) {
 	h, mock := newReconcileEnv(t, nil)
 
 	expectOrgByName(mock, "o1", "platform")
-	// Already a member → role update (guard scopes lookup + template id lookup + UPDATE).
+	// Already a member → role update: guard scopes lookup, the mirror's own
+	// name resolution and prior-role read, then the identity leg's lookup and
+	// UPDATE, then the mirror upsert.
 	mock.ExpectQuery("FROM organization_members").WithArgs("o1", "u1", []string{"o1"}).
 		WillReturnRows(sqlmock.NewRows(memberRowCols).AddRow("o1", "u1", nil, time.Now()))
 	expectRoleScopesLookup(mock, "editor", []string{"state:read", "state:write"})
+	expectMirrorRoleResolution(mock, "editor", "rt-editor")
+	expectMirrorPriorRoleAbsent(mock)
 	mock.ExpectQuery("SELECT id FROM role_templates WHERE name").WithArgs("editor").
 		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("rt-editor"))
 	mock.ExpectExec("UPDATE organization_members").
 		WillReturnResult(sqlmock.NewResult(0, 1))
+	expectMirrorUpsert(mock)
 
 	err := h.reconcileManagedMemberships(context.Background(), "u1",
 		map[string]string{"platform": "editor"}, map[string]struct{}{"platform": {}}, nil, "")
@@ -83,10 +125,12 @@ func TestReconcile_AddsNewMember(t *testing.T) {
 	mock.ExpectQuery("FROM organization_members").WithArgs("o1", "u1", []string{"o1"}).
 		WillReturnRows(sqlmock.NewRows(memberRowCols)) // not a member
 	expectRoleScopesLookup(mock, "viewer", []string{"state:read"})
+	expectMirrorRoleResolution(mock, "viewer", "rt-viewer")
 	mock.ExpectQuery("SELECT id FROM role_templates WHERE name").WithArgs("viewer").
 		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("rt-viewer"))
 	mock.ExpectExec("INSERT INTO organization_members").
 		WillReturnResult(sqlmock.NewResult(0, 1))
+	expectMirrorUpsert(mock)
 
 	err := h.reconcileManagedMemberships(context.Background(), "u1",
 		map[string]string{"platform": "viewer"}, map[string]struct{}{"platform": {}}, nil, "")
@@ -105,6 +149,9 @@ func TestReconcile_DeprovisionsOnGroupLoss(t *testing.T) {
 	expectOrgByName(mock, "o1", "platform")
 	mock.ExpectQuery("FROM organization_members").WithArgs("o1", "u1", []string{"o1"}).
 		WillReturnRows(sqlmock.NewRows(memberRowCols).AddRow("o1", "u1", "rt-editor", time.Now()))
+	// REVOCATION: the mirror's delete goes FIRST (see approles.Members).
+	mock.ExpectExec("DELETE FROM organization_member_roles").
+		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec("DELETE FROM organization_members").WithArgs("o1", "u1", []string{"o1"}).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 
@@ -140,10 +187,12 @@ func TestReconcile_DefaultRoleFirstLoginOnly(t *testing.T) {
 	expectOrgByName(mock, "o-def", "default") // GetDefaultOrganization → GetByName("default")
 	mock.ExpectQuery("FROM organization_members").WithArgs("o-def", "u1", []string{"o-def"}).
 		WillReturnRows(sqlmock.NewRows(memberRowCols))
+	expectMirrorRoleResolution(mock, "viewer", "rt-viewer")
 	mock.ExpectQuery("SELECT id FROM role_templates WHERE name").WithArgs("viewer").
 		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("rt-viewer"))
 	mock.ExpectExec("INSERT INTO organization_members").
 		WillReturnResult(sqlmock.NewResult(0, 1))
+	expectMirrorUpsert(mock)
 
 	if err := h.reconcileManagedMemberships(context.Background(), "u1", nil, nil, nil, "viewer"); err != nil {
 		t.Fatalf("first login: %v", err)
@@ -250,16 +299,18 @@ func TestReconcile_GuardProvisionableRole_UnknownRoleTemplate_DefersToRealLookup
 	mock.ExpectQuery("FROM organization_members").WithArgs("o1", "u1", []string{"o1"}).
 		WillReturnRows(sqlmock.NewRows(memberRowCols)) // not a member
 	// guardProvisionableRole's own scopes lookup finds no such role template.
-	mock.ExpectQuery("SELECT id, name, display_name, description, scopes").WithArgs("ghost-role").
+	mock.ExpectQuery(`SELECT id, name, COALESCE\(display_name`).WithArgs("ghost-role").
 		WillReturnRows(sqlmock.NewRows(roleTemplateCols))
-	// AddMemberWithParams's lookup is reached and fails with its own clear error.
+	// AddMemberWithParams's own resolution — against THIS application's
+	// role_templates, before any leg writes — is reached and fails with its own
+	// clear error. Identity is never asked.
 	mock.ExpectQuery("SELECT id FROM role_templates WHERE name").WithArgs("ghost-role").
 		WillReturnRows(sqlmock.NewRows([]string{"id"}))
 
 	err := h.reconcileManagedMemberships(context.Background(), "u1",
 		map[string]string{"platform": "ghost-role"}, map[string]struct{}{"platform": {}}, nil, "")
 	if err == nil {
-		t.Fatal("expected error from AddMemberWithParams' role-template lookup, got nil")
+		t.Fatal("expected error from AddMemberWithParams' role-template resolution, got nil")
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Errorf("unmet expectations: %v", err)
@@ -280,10 +331,12 @@ func TestApplyGroupMappings_EndToEnd(t *testing.T) {
 	mock.ExpectQuery("FROM organization_members").WithArgs("o-def", "u1", []string{"o-def"}).
 		WillReturnRows(sqlmock.NewRows(memberRowCols))
 	expectRoleScopesLookup(mock, "editor", []string{"state:read", "state:write"})
+	expectMirrorRoleResolution(mock, "editor", "rt-editor")
 	mock.ExpectQuery("SELECT id FROM role_templates WHERE name").WithArgs("editor").
 		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("rt-editor"))
 	mock.ExpectExec("INSERT INTO organization_members").
 		WillReturnResult(sqlmock.NewResult(0, 1))
+	expectMirrorUpsert(mock)
 
 	if err := h.applyGroupMappings(context.Background(), "u1", []string{"platform"}); err != nil {
 		t.Fatalf("applyGroupMappings: %v", err)

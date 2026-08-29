@@ -174,9 +174,15 @@ func equal(a, b []string) bool {
 // suite.role_seed_owner names the sibling, so this application does not seed the
 // shared schema and identity's `editor` carries the REGISTRY's scopes. Phase 3a
 // mirrored that verbatim and authorized against it. After this phase, this
-// application's own `editor` must grant what THIS build defines — while carrying
-// identity's uuid, so the assignment restated from identity still resolves, and
-// while leaving the shared schema untouched for the sibling and the rollback.
+// application's own `editor` must grant what THIS build defines, while leaving
+// the shared schema untouched for the sibling and the rollback.
+//
+// THE IDS ARE ALLOWED TO DIFFER HERE NOW. The adopt pass that used to copy
+// identity's uuid across was the boot-time read of identity.role_templates,
+// and it is retired: on a fresh install beside a sibling-owned identity seed
+// the two schemas keep separate uuids for the same name, the write paths
+// bridge by NAME, and the drift comparison's `mismatched` kind documents the
+// standing divergence until Phase 4 drops identity's role column.
 func TestIntegrationRunSeedsThisApplicationsOwnScopes(t *testing.T) {
 	e := newEnv(t)
 	ctx := context.Background()
@@ -188,7 +194,6 @@ func TestIntegrationRunSeedsThisApplicationsOwnScopes(t *testing.T) {
 	); err != nil {
 		t.Fatalf("seed the sibling's editor: %v", err)
 	}
-	identityEditorID := e.identityTemplateID(t, "editor")
 
 	// seedRoles=false: coupled, the sibling owns the shared seed.
 	if err := Run(ctx, e.identityDB, e.appDB, false); err != nil {
@@ -196,12 +201,8 @@ func TestIntegrationRunSeedsThisApplicationsOwnScopes(t *testing.T) {
 	}
 
 	if got, want := e.appScopes(t, "editor"), buildScopes(t, "editor"); !equal(got, want) {
-		t.Fatalf("this application's `editor` grants %v, want this build's %v. The seed either did not run, "+
-			"or ran BEFORE the adopt pass and had its row replaced by identity's.", got, want)
-	}
-	if got := e.appTemplateID(t, "editor"); got != identityEditorID {
-		t.Fatalf("this application's `editor` carries id %s, want identity's %s. An assignment restated from "+
-			"identity would reference a template id this table does not have.", got, identityEditorID)
+		t.Fatalf("this application's `editor` grants %v, want this build's %v. The seed did not run, or "+
+			"identity's definition was copied over it.", got, want)
 	}
 
 	// THE SHARED SCHEMA IS UNTOUCHED. seedRoles=false means this application must
@@ -225,11 +226,13 @@ func TestIntegrationRunSeedsThisApplicationsOwnScopes(t *testing.T) {
 	}
 }
 
-// A FRESH STANDALONE INSTALL, where the shared seed runs too. The two seeds write
-// the same scopes, so nothing here should differ — but the ids must still agree,
-// which is the thing the ordering buys and which a scope comparison alone would
-// not notice.
-func TestIntegrationRunKeepsIdentitysIDsOnAFreshInstall(t *testing.T) {
+// A FRESH STANDALONE INSTALL, where the shared seed runs too. The ids must
+// agree — and since the adopt pass was retired, the agreement flows the OTHER
+// WAY: the app defines its roles first (minting the uuids), and the
+// identity-side seed restates those uuids into identity.role_templates. That
+// alignment is what keeps the drift comparison's id check quiet on the default
+// topology, without this application ever reading identity's copy.
+func TestIntegrationRunSeedsIdentityWithTheAppsIDsOnAFreshInstall(t *testing.T) {
 	e := newEnv(t)
 	ctx := context.Background()
 
@@ -243,11 +246,10 @@ func TestIntegrationRunKeepsIdentitysIDsOnAFreshInstall(t *testing.T) {
 		}
 	}
 
-	// And a membership seeded into identity resolves through this application's
-	// tables after a second boot, which is what "the ids agree" is FOR: the
-	// assignment pass copies identity's role_template_id straight across, so a
-	// mismatch would be a foreign-key violation or a NULL role rather than a
-	// number nobody looks at.
+	// A membership seeded into identity behind this application's back arrives
+	// at the second boot as a membership FACT with no role: the reconcile no
+	// longer copies identity's role_template_id, so the role a member holds
+	// here is only ever what this application granted.
 	var orgID string
 	if err := e.identityDB.QueryRow(
 		`SELECT id::text FROM identity.organizations WHERE name = 'default'`).Scan(&orgID); err != nil {
@@ -265,15 +267,15 @@ func TestIntegrationRunKeepsIdentitysIDsOnAFreshInstall(t *testing.T) {
 		t.Fatalf("second bootstrap.Run: %v", err)
 	}
 
-	var mirrored string
+	var mirrored sql.NullString
 	if err := e.appDB.QueryRow(
 		`SELECT role_template_id::text FROM organization_member_roles WHERE organization_id = $1 AND user_id = $2`,
 		orgID, user.ID).Scan(&mirrored); err != nil {
 		t.Fatalf("read this application's role record: %v", err)
 	}
-	if mirrored != e.appTemplateID(t, "editor") {
-		t.Fatalf("the restated assignment points at %s, which is not this application's editor (%s)",
-			mirrored, e.appTemplateID(t, "editor"))
+	if mirrored.Valid {
+		t.Fatalf("the confirmed membership carries role %s: identity's role opinion was restated over "+
+			"this application's tables, which is exactly the read this phase retired", mirrored.String)
 	}
 }
 

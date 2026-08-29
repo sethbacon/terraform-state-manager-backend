@@ -27,16 +27,14 @@ const membershipPage = 1000
 
 // Report is what one reconcile did, for the startup line and for tests.
 type Report struct {
-	// TemplatesAdopted is the number of identity role templates this application
-	// did not already hold and has taken a copy of. Adopted, not overwritten —
-	// see reconcileTemplates.
-	TemplatesAdopted int
 	// TemplatesDefined is the number of role definitions this build wrote as its
 	// own (the app-side seed).
 	TemplatesDefined int
-	// AssignmentsRestated is the number of (organization_id, user_id) rows read
-	// from identity and written to TSM's own organization_member_roles.
-	AssignmentsRestated int
+	// MembershipsConfirmed is the number of (organization_id, user_id) membership
+	// facts read from identity and confirmed in TSM's own
+	// organization_member_roles — presence only; the role each row carries is
+	// this application's and is not touched. See Store.ConfirmMembership.
+	MembershipsConfirmed int
 	// StaleRemoved is the number of mirrored assignments deleted because
 	// identity no longer has them.
 	StaleRemoved int64
@@ -45,8 +43,10 @@ type Report struct {
 	// application that seeded them there decided. See ForeignTemplateRemedy.
 	ForeignTemplates []string
 	// PendingRepairs is what the two sides disagreed about BEFORE this reconcile
-	// changed anything. In Phase 3a that was a curiosity. Now it is the list of
-	// authorization records this run is about to rewrite — see Reconcile.
+	// changed anything. `missing` rows are about to be confirmed as members with
+	// no role and `stale` rows are about to be swept; `mismatched` rows are
+	// REPORTED and left standing, because the role this application records is
+	// the authority now — see Reconcile.
 	PendingRepairs DriftResult
 	// Templates and Assignments are where the two unqualified names actually
 	// resolved on the app connection.
@@ -66,42 +66,42 @@ type Report struct {
 //
 // # Where the effective role -> scope mapping comes from now
 //
-// From auth.AppRoleTemplates(), written by defineOwn — and that is the change
-// Phase 3b makes here. In Phase 3a the mapping was whatever identity.role_templates
-// HELD, because that was the table GetUserCombinedScopes joined; copying it
-// verbatim was the only way to change nothing. A coupled deployment
-// (TSM_SUITE_ROLE_SEED_OWNER=registry) has been authorizing against the SIBLING's
-// definition of every role name, and Phase 3a's report named those roles so an
-// operator could see it "before the phase that makes it permanent". This is that
-// phase, in the other direction: this application now defines its own roles, and a
-// coupled deployment's `editor` becomes TSM's `editor` at the first boot on this
-// build. That is the intended correction, it is the only authorization change this
-// phase makes on purpose, and it affects ONLY deployments that set
-// suite.role_seed_owner away from its default.
+// From auth.AppRoleTemplates(), written by defineOwn, AND FROM NOWHERE ELSE.
+// The Phase 3b reconcile still ADOPTED identity's role templates first — ids and
+// scopes — so that assignments restated from identity resolved here, which kept
+// identity.role_templates a read this application depended on at every boot.
+// That read is retired: the reconcile no longer lists identity's templates at
+// all, a role this build does not define no longer enters this table, and what a
+// role name grants HERE is decided by this build alone on every topology.
 //
-// Roles this build does not define are still adopted as they are, and named:
-// ForeignTemplates lists every role whose meaning this application does not own.
-// See ForeignTemplateRemedy.
+// Roles adopted by EARLIER builds are left standing, and named: ForeignTemplates
+// lists every role this application holds but does not define. See
+// ForeignTemplateRemedy.
+//
+// # Identity's role opinion is no longer restated either
+//
+// Phase 3b's assignment pass copied identity.organization_members.role_template_id
+// over this application's rows every boot. That treated identity's record of the
+// ROLE as repair data, which was right while the two id spaces were kept aligned
+// by the adopt pass and wrong the moment they are not — and, more fundamentally,
+// identity owns the membership FACT, not the role. So the scan now reads only
+// (organization_id, user_id) and confirms presence (Store.ConfirmMembership):
+// a membership this application has never seen arrives as a member with NO role
+// (fail-closed, loud, grantable by an administrator), one it already records
+// keeps this application's role, and one identity no longer has is swept. A
+// role divergence between the two sides is REPORTED by CheckDrift rather than
+// repaired — this application's record is the authority now.
 //
 // # Ordering
 //
-// Verify, then the pending-repair report, then ADOPT identity's templates, then
-// DEFINE this build's own, then assignments, then the sweep.
+// Verify, then the pending-repair report, then DEFINE this build's own
+// templates, then confirm memberships, then the sweep.
 //
-// Templates before assignments because organization_member_roles.role_template_id
-// has a real foreign key to them. Adopt before define because the two answer
-// different questions and only one order works: adopting brings identity's uuid
-// across so an assignment restated from identity resolves here, and defining then
-// replaces that row's SCOPES by name while leaving its id alone. Reversed, a
-// fresh install would mint its own uuid for `editor`, adoption would then find
-// identity's `editor` under a different uuid, RepointTemplateName would delete
-// the row just seeded, and this build's scopes would be silently replaced by
-// identity's — which is the failure this phase exists to end, reintroduced by an
-// ordering nobody would look at twice.
-//
-// The sweep is last because it deletes everything the assignment pass did not
-// restate, and a pass that did not COMPLETE must not be allowed to conclude that
-// the rest is stale. Any error before the sweep returns without sweeping.
+// Templates before memberships because organization_member_roles.role_template_id
+// has a real foreign key to them. The sweep is last because it deletes everything
+// the membership pass did not confirm, and a pass that did not COMPLETE must not
+// be allowed to conclude that the rest is stale. Any error before the sweep
+// returns without sweeping.
 //
 // # What changed now that reads depend on this
 //
@@ -110,11 +110,8 @@ type Report struct {
 //
 //   - IT OVERWROTE ROLE DEFINITIONS from identity, every boot. That was correct
 //     while identity's definitions WERE the effective ones. Now they are not, and
-//     an overwrite would let identity — in a coupled deployment, the sibling
-//     registry — silently redefine what a TSM role grants, once per restart, on
-//     the table that decides authorization. So identity may still SUPPLY a
-//     definition this deployment has never seen (Store.AdoptTemplate) and may no
-//     longer REDEFINE one.
+//     identity no longer supplies definitions here at all — the adopt pass is
+//     retired along with every other read of identity.role_templates.
 //
 //   - IT REPAIRED ASSIGNMENTS SILENTLY. Restating a membership was a no-op nobody
 //     could observe. Now every repair is an authorization change made by a batch
@@ -175,10 +172,10 @@ func Reconcile(ctx context.Context, appDB, identityDB *sql.DB, defineOwn Templat
 		return rep, err
 	}
 
-	if err := reconcileTemplates(ctx, store, identityDB, defineOwn, &rep); err != nil {
+	if err := reconcileTemplates(ctx, store, defineOwn, &rep); err != nil {
 		return rep, err
 	}
-	if err := reconcileAssignments(ctx, store, identityDB, &rep); err != nil {
+	if err := reconcileMemberships(ctx, store, identityDB, &rep); err != nil {
 		return rep, err
 	}
 
@@ -216,52 +213,19 @@ func reconcileScope() idstore.OrgScope { return idstore.OrgScopeAllOrganizations
 // reconcileTemplates makes this application's role definitions complete, and its
 // own.
 //
-// TWO PASSES, IN THIS ORDER, AND THEY MEAN DIFFERENT THINGS.
+// ONE PASS: DEFINE writes this build's own role -> scope mapping by NAME
+// (Store.DefineTemplate), replacing the definition and preserving whatever uuid
+// this deployment already carries for the name — so existing assignments keep
+// resolving — and minting a fresh uuid for a name it has never held.
 //
-// ADOPT brings across every identity role template this deployment does not
-// already hold, preserving identity's uuid so organization_member_roles can store
-// the same role_template_id identity's membership row stores. It is an
-// insert-if-absent (Store.AdoptTemplate), not the upsert Phase 3a used: identity
-// may still supply a definition this deployment has never seen — without one, an
-// assignment restated from identity would violate the foreign key and the
-// principal would lose their role — but it may no longer redefine one that is
-// already here, now that these rows decide authorization.
-//
-// DEFINE then writes this build's own role -> scope mapping by NAME, over the top
-// of whatever was adopted for those names, keeping the adopted uuid. That is the
-// app-side seed, and it is why the two apps no longer overwrite each other: the
-// name is unique PER APPLICATION here, so TSM's `editor` is TSM's.
-//
-// There is no delete pass. A template that disappeared from identity is left
-// standing rather than dropped, because dropping it would SET NULL the
-// assignments referencing it — turning a template somebody removed upstream into
-// a silent loss of every role that used it. It is inert (nothing points at it once
-// the assignment pass runs) and visible to the operator in the table.
-func reconcileTemplates(ctx context.Context, store *Store, identityDB *sql.DB, defineOwn TemplateDefiner, rep *Report) error {
-	templates, err := idstore.NewRoleTemplateRepository(identityDB).ListRoleTemplates(ctx)
-	if err != nil {
-		return fmt.Errorf("approles: reading identity role templates: %w", err)
-	}
-
-	for _, rt := range templates {
-		if rt == nil {
-			continue
-		}
-		t := templateFromIdentity(rt.ID.String(), rt.Name, rt.DisplayName, rt.Description, rt.Scopes, rt.IsSystem)
-		// A name this deployment already has under a DIFFERENT id: identity
-		// dropped the template and recreated it. Release the name before the
-		// insert, or the unique index rejects it and the reconcile wedges on a
-		// row nobody can reach. The definition pass below rewrites the scopes
-		// afterwards, so releasing the name does not cost this build its own.
-		if err := store.RepointTemplateName(ctx, t.Name, t.ID); err != nil {
-			return err
-		}
-		if err := store.AdoptTemplate(ctx, t); err != nil {
-			return err
-		}
-		rep.TemplatesAdopted++
-	}
-
+// The ADOPT pass that used to precede it is retired: it was the boot-time read
+// of identity.role_templates, and per-app authorization has no use for the
+// sibling's definitions. A template adopted by an earlier build is left standing
+// rather than dropped, because dropping it would SET NULL the assignments
+// referencing it — turning old adoptions into a silent loss of every role that
+// used them. It is inert once no assignment points at it, it is visible to the
+// operator in the table, and it is reported below (ForeignTemplates).
+func reconcileTemplates(ctx context.Context, store *Store, defineOwn TemplateDefiner, rep *Report) error {
 	if err := defineOwn(ctx, store); err != nil {
 		return fmt.Errorf("approles: defining this application's own role templates: %w", err)
 	}
@@ -291,17 +255,21 @@ func reconcileTemplates(ctx context.Context, store *Store, identityDB *sql.DB, d
 	return nil
 }
 
-// reconcileAssignments restates every identity membership as a row of TSM's own
-// organization_member_roles.
+// reconcileMemberships confirms every identity membership FACT in TSM's own
+// organization_member_roles — presence only. See Store.ConfirmMembership for
+// what confirming does and deliberately does not do to the role each row
+// carries.
 //
 // The read is raw SQL against the identity connection because the shared store
 // has no "every membership" accessor — GetUserMemberships is per principal, and
 // calling it once per user would be a query per user to answer a question that
 // is one scan. It is a READ of a table this application already reads through
-// that store on every login; nothing here writes identity.
-func reconcileAssignments(ctx context.Context, store *Store, identityDB *sql.DB, rep *Report) error {
+// that store on every login; nothing here writes identity, and — deliberately —
+// the SELECT no longer carries role_template_id: the membership fact is the only
+// thing identity still supplies to these tables.
+func reconcileMemberships(ctx context.Context, store *Store, identityDB *sql.DB, rep *Report) error {
 	const q = `
-		SELECT organization_id, user_id, role_template_id
+		SELECT organization_id, user_id
 		FROM organization_members
 		WHERE (organization_id, user_id) > ($1, $2)
 		ORDER BY organization_id, user_id
@@ -317,28 +285,22 @@ func reconcileAssignments(ctx context.Context, store *Store, identityDB *sql.DB,
 		page := 0
 		for rows.Next() {
 			var orgID, userID string
-			var roleTemplateID sql.NullString
-			if err := rows.Scan(&orgID, &userID, &roleTemplateID); err != nil {
+			if err := rows.Scan(&orgID, &userID); err != nil {
 				_ = rows.Close()
 				return fmt.Errorf("approles: reading an identity membership: %w", err)
 			}
-			var role *string
-			if roleTemplateID.Valid {
-				v := roleTemplateID.String
-				role = &v
-			}
-			if err := store.SetRole(ctx, orgID, userID, role, reconcileScope()); err != nil {
+			if err := store.ConfirmMembership(ctx, orgID, userID, reconcileScope()); err != nil {
 				_ = rows.Close()
 				return err
 			}
 			lastOrg, lastUser = orgID, userID
 			page++
-			rep.AssignmentsRestated++
+			rep.MembershipsConfirmed++
 		}
 		if err := rows.Err(); err != nil {
 			_ = rows.Close()
 			// Returned, NOT swallowed. The caller must not reach the sweep on a
-			// partial pass: everything this scan did not restate would look
+			// partial pass: everything this scan did not confirm would look
 			// stale, and a transient identity fault would empty the mirror.
 			return fmt.Errorf("approles: reading identity memberships: %w", err)
 		}
@@ -362,29 +324,6 @@ func expectedScopes() map[string][]string {
 	return out
 }
 
-// sameScopeSet compares two scope lists as SETS. Order and duplicates are not
-// meaningful in a role template's scopes — HasScope iterates — so comparing them
-// as sequences would report divergence for two identical roles.
-func sameScopeSet(a, b []string) bool {
-	seen := make(map[string]struct{}, len(a))
-	for _, s := range a {
-		seen[s] = struct{}{}
-	}
-	other := make(map[string]struct{}, len(b))
-	for _, s := range b {
-		other[s] = struct{}{}
-	}
-	if len(seen) != len(other) {
-		return false
-	}
-	for s := range seen {
-		if _, ok := other[s]; !ok {
-			return false
-		}
-	}
-	return true
-}
-
 // ForeignTemplateRemedy is what an operator does about Report.ForeignTemplates.
 //
 // It is a WARNING and not a startup failure, on purpose. A foreign template is
@@ -397,10 +336,11 @@ func sameScopeSet(a, b []string) bool {
 // The Phase 3a warning this replaces said the opposite thing, and the difference
 // is the phase: then, EVERY role's scopes came from whichever app seeded the
 // shared table last, and the remedy was "you may want to own them". Now this
-// application defines its own, so the only roles left with somebody else's
-// meaning are the ones it never defined at all.
-const ForeignTemplateRemedy = "these role names exist in this application's role_templates but are not defined by this build — they were adopted " +
-	"from the shared identity schema so that assignments referencing them keep resolving. Their scopes are whatever the application that seeded them " +
+// application defines its own, NO new foreign template can arrive (the adopt
+// pass and the mirror's adopt-on-first-use are both retired), so the only roles
+// left with somebody else's meaning are ones an EARLIER build adopted.
+const ForeignTemplateRemedy = "these role names exist in this application's role_templates but are not defined by this build — an earlier build adopted " +
+	"them from the shared identity schema so that assignments referencing them kept resolving. Their scopes are whatever the application that seeded them " +
 	"there decided. Either define them in auth.AppRoleTemplates() so this build owns their meaning, or confirm no principal here should hold them and " +
 	"remove the assignments that do."
 
@@ -414,23 +354,21 @@ const ForeignTemplateRemedy = "these role names exist in this application's role
 //
 //   - It names both schemas in ONE statement, so it does not run at all when
 //     identity is a separate database (TSM_IDENTITY_DATABASE_*).
-//   - It compares role_template_id and nothing else, so two rows agreeing on the
-//     id while the two schemas define that id with DIFFERENT SCOPES read as
-//     clean. After the flip that is a principal holding the wrong permissions
-//     under the right role name.
 //
 // Three kinds of row come back:
 //
 //	missing    — identity has the membership, this application records no role
 //	stale      — this application records a role identity no longer has
-//	mismatched — both have it, with different roles
+//	mismatched — both have it, recording different role template ids
 //
 // WHAT AN OPERATOR DOES, NOW THAT THIS IS READ: a `missing` row is a principal
 // who has lost access they should have; a `stale` row is one who has kept access
-// they should not. Restarting the backend runs Reconcile, which restates every
-// assignment and sweeps what identity no longer has — and now says what it
-// changed. Drift that SURVIVES a restart means the reconcile is failing rather
-// than that a single write slipped, and the startup log will say why.
+// they should not. Restarting the backend runs Reconcile, which confirms every
+// membership identity still has and sweeps the ones it no longer does — and says
+// what it changed. A `mismatched` row is NOT repaired by a restart: this
+// application's role record is the authority, and identity's role column is
+// vestigial until Phase 4 removes it — see DriftMismatched for the one topology
+// where mismatches are standing rather than a lost write.
 const DriftQuery = `
 SELECT 'missing' AS kind, m.organization_id, m.user_id, m.role_template_id AS identity_role, NULL::uuid AS app_role
   FROM identity.organization_members m
@@ -461,30 +399,26 @@ ORDER BY 1, 2, 3`
 func LogReport(rep Report) {
 	slog.Info("per-app authorization tables reconciled",
 		"role_templates", rep.Templates, "organization_member_roles", rep.Assignments,
-		"templates_adopted", rep.TemplatesAdopted,
 		"templates_defined", rep.TemplatesDefined,
-		"assignments_restated", rep.AssignmentsRestated,
+		"memberships_confirmed", rep.MembershipsConfirmed,
 		"stale_removed", rep.StaleRemoved)
 	if len(rep.ForeignTemplates) > 0 {
 		slog.Warn("this application holds role templates it does not define",
 			"roles", rep.ForeignTemplates, "remedy", ForeignTemplateRemedy)
 	}
-	// AT WARN, WITH THE PAIRS, AND ONLY WHEN THERE WERE ANY. Every repair listed
-	// here is an authorization change this boot made on somebody's behalf: a
-	// `missing` row it filled in granted access, a `stale` row it swept withdrew
-	// it. A reconcile that repaired nothing is the normal case and says nothing,
-	// so a line at all is the signal.
+	// AT WARN, WITH THE PAIRS, AND ONLY WHEN THERE WERE ANY. Every record listed
+	// here is a disagreement this boot acted on or chose to leave standing: a
+	// `missing` row was confirmed as a member with NO role (an administrator
+	// grants from there), a `stale` row was swept, and a `mismatched` row KEEPS
+	// this application's role — reported so the divergence with identity's
+	// vestigial role column is visible, never repaired from it. A reconcile with
+	// nothing to say is the normal case and says nothing, so a line at all is
+	// the signal.
 	if rep.PendingRepairs.AssignmentDrift() > 0 {
-		slog.Warn("the reconcile repaired role assignments that disagreed with identity",
+		slog.Warn("this application's role records and identity's membership table disagreed at boot",
 			"missing", rep.PendingRepairs.Missing,
 			"stale", rep.PendingRepairs.Stale,
 			"mismatched", rep.PendingRepairs.Mismatched,
-			"detail", rep.PendingRepairs.String())
-	}
-	if rep.PendingRepairs.ScopeDivergent > 0 || len(rep.PendingRepairs.TemplateDrift) > 0 {
-		slog.Warn("this application and the shared identity schema define role scopes differently",
-			"affected_memberships", rep.PendingRepairs.ScopeDivergent,
-			"templates", len(rep.PendingRepairs.TemplateDrift),
 			"detail", rep.PendingRepairs.String())
 	}
 }
