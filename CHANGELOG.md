@@ -1,5 +1,13 @@
 # Changelog
 
+## [3.17.0](https://github.com/sethbacon/terraform-state-manager-backend/compare/v3.16.2...v3.17.0) (2026-08-29)
+
+
+### Features
+
+* **approles:** read role templates from the app's own tables only ([#536](https://github.com/sethbacon/terraform-state-manager-backend/issues/536)) ([b96cbe4](https://github.com/sethbacon/terraform-state-manager-backend/commit/b96cbe47f584641260e8171fc17c98b68c3e0956))
+* **authz:** dual-write the OIDC group-mapping overlay into the app's own group_mappings table ([#538](https://github.com/sethbacon/terraform-state-manager-backend/issues/538)) ([d09973d](https://github.com/sethbacon/terraform-state-manager-backend/commit/d09973de0e0f9b3a180769b1f488c7c6f7312cfe))
+
 ## [3.16.2](https://github.com/sethbacon/terraform-state-manager-backend/compare/v3.16.1...v3.16.2) (2026-08-28)
 
 
