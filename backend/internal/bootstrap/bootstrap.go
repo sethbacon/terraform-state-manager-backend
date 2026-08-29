@@ -257,6 +257,38 @@ func seedSharedRoleTemplates(ctx context.Context, db *sql.DB, ids map[string]str
 		       description  = EXCLUDED.description,
 		       scopes       = EXCLUDED.scopes,
 		       updated_at   = now()`
+	// ALIGNING THE ID ON CONFLICT IS THE POINT, NOT AN EDGE CASE. Identity's
+	// own migration 000001 seeds role_templates with gen_random_uuid ids, so on
+	// EVERY fresh install the row already exists under a different uuid by the
+	// time this runs, the upsert takes the conflict path, and without the
+	// alignment below the app and identity hold different ids for the same
+	// role forever -- an assignment copied from identity would not resolve
+	// here. That is not hypothetical: the fresh-install equivalence tests
+	// failed exactly this way until this pass existed.
+	//
+	// The id can only move while NOTHING references it:
+	// organization_members.role_template_id is a real FK with no ON UPDATE
+	// action, so updating a referenced parent id is refused by Postgres. The
+	// two cases are therefore distinguishable and both are handled honestly:
+	//
+	//   unreferenced + diverged  -> align (the fresh-install case; identity's
+	//                               self-seeded row has no members yet)
+	//   referenced   + diverged  -> ERROR naming both ids. This is a real
+	//                               collision -- most plausibly another
+	//                               application seeded this shared name and
+	//                               members were assigned under its id --
+	//                               and silently keeping the divergence is
+	//                               how a wrong authorization resolves.
+	// The align statement is UNCONDITIONAL on references, on purpose: when the
+	// diverged row IS referenced, Postgres itself refuses the id change -- the
+	// FK on organization_members.role_template_id has no ON UPDATE action --
+	// and that refusal is the collision signal, caught and named below. No
+	// SELECT, no read-back, no window between checking and changing: the class
+	// guard in internal/approles forbids reading identity.role_templates from
+	// anywhere but the app-side store, and this path never needs to.
+	const align = `
+		UPDATE role_templates SET id = $1::uuid, updated_at = now()
+		 WHERE name = $2 AND id <> $1::uuid`
 	for _, rt := range auth.AppRoleTemplates() {
 		scopesJSON, err := json.Marshal(rt.Scopes)
 		if err != nil {
@@ -268,6 +300,16 @@ func seedSharedRoleTemplates(ctx context.Context, db *sql.DB, ids map[string]str
 		}
 		if _, err := db.ExecContext(ctx, q, id, rt.Name, rt.DisplayName, rt.Description, string(scopesJSON)); err != nil {
 			return err
+		}
+		want, ok := ids[rt.Name]
+		if !ok || want == "" {
+			continue
+		}
+		if _, err := db.ExecContext(ctx, align, want, rt.Name); err != nil {
+			return fmt.Errorf("role %q: this application holds id %s but identity's row is referenced "+
+				"by members and cannot be re-identified. Another application most likely seeded this "+
+				"shared name and assignments exist under its id; resolve the seed ownership before "+
+				"starting this one: %w", rt.Name, want, err)
 		}
 	}
 	return nil

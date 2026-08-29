@@ -1077,6 +1077,26 @@ func (e *env) alignedRoles(t *testing.T) map[string]string {
 			tmpl.ID, name, "["+strings.Join(quoted, ",")+"]"); err != nil {
 			t.Fatalf("seed identity from the app definition of %s: %v", name, err)
 		}
+		// Identity's own migration 000001 pre-seeds this table, so on a fresh
+		// database the upsert above takes the conflict path and identity keeps
+		// its self-minted id -- the exact divergence bootstrap.Run now repairs.
+		// Restate the alignment here the way production does: move the id while
+		// nothing references it, then verify it landed, so this helper cannot
+		// silently hand tests a diverged topology and call it aligned.
+		if _, err := e.identityDB.Exec(`
+			UPDATE identity.role_templates SET id = $1::uuid, updated_at = now()
+			 WHERE name = $2 AND id <> $1::uuid
+			   AND NOT EXISTS (SELECT 1 FROM identity.organization_members m WHERE m.role_template_id = identity.role_templates.id)`,
+			tmpl.ID, name); err != nil {
+			t.Fatalf("align identity id for %s: %v", name, err)
+		}
+		var got string
+		if err := e.identityDB.QueryRow(`SELECT id FROM identity.role_templates WHERE name = $1`, name).Scan(&got); err != nil {
+			t.Fatalf("read back identity id for %s: %v", name, err)
+		}
+		if got != tmpl.ID {
+			t.Fatalf("identity id for %s is %s, want %s: the fixture could not align a referenced row", name, got, tmpl.ID)
+		}
 		ids[name] = tmpl.ID
 	}
 	return ids
