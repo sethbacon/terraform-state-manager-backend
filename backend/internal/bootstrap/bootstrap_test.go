@@ -17,14 +17,18 @@ func TestRun_SeedsAllRoleTemplatesAndDefaultOrg(t *testing.T) {
 	}
 	defer db.Close()
 
-	// One upsert per app role template, in declaration order.
-	for _, rt := range auth.AppRoleTemplates() {
-		mock.ExpectExec("INSERT INTO role_templates").
-			WithArgs(rt.Name, rt.DisplayName, rt.Description, sqlmock.AnyArg()).
-			WillReturnResult(sqlmock.NewResult(0, 1))
-	}
+	// The default organization first: the identity-side seed moved AFTER the
+	// reconcile when it started restating the app table's ids into identity.
 	mock.ExpectExec("INSERT INTO organizations").
 		WillReturnResult(sqlmock.NewResult(0, 1))
+	// One upsert per app role template, in declaration order. With no app
+	// connection there is no app id space to restate, so the id argument is
+	// nil and identity mints one (COALESCE with gen_random_uuid).
+	for _, rt := range auth.AppRoleTemplates() {
+		mock.ExpectExec("INSERT INTO role_templates").
+			WithArgs(nil, rt.Name, rt.DisplayName, rt.Description, sqlmock.AnyArg()).
+			WillReturnResult(sqlmock.NewResult(0, 1))
+	}
 
 	if err := Run(context.Background(), db, nil, true); err != nil {
 		t.Fatalf("Run() error: %v", err)
@@ -41,6 +45,8 @@ func TestRun_RoleTemplateSeedFailure(t *testing.T) {
 	}
 	defer db.Close()
 
+	mock.ExpectExec("INSERT INTO organizations").
+		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec("INSERT INTO role_templates").
 		WillReturnError(errors.New("boom"))
 
@@ -57,12 +63,10 @@ func TestRun_DefaultOrgFailure(t *testing.T) {
 	}
 	defer db.Close()
 
-	for range auth.AppRoleTemplates() {
-		mock.ExpectExec("INSERT INTO role_templates").
-			WillReturnResult(sqlmock.NewResult(0, 1))
-	}
 	mock.ExpectExec("INSERT INTO organizations").
 		WillReturnError(errors.New("boom"))
+	// The identity-side seed never runs: ensuring the default organization
+	// failed first. sqlmock fails the test on any unexpected Exec.
 
 	err = Run(context.Background(), db, nil, true)
 	if err == nil {

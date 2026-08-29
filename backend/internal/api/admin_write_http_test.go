@@ -61,6 +61,35 @@ func newAdminWriteEnv(t *testing.T) *sourcesEnv {
 	return &sourcesEnv{r: r, mock: mock}
 }
 
+// newAdminWriteEnvWithApp is newAdminWriteEnv with the APP connection wired to
+// the SAME sqlmock, for the member-role routes: the ceiling check and the
+// write's template resolution read this application's own role_templates now,
+// and the mirror legs write organization_member_roles — all of which land on
+// the one ordered mock in call order.
+func newAdminWriteEnvWithApp(t *testing.T) *sourcesEnv {
+	t.Helper()
+	db, mock, err := newSQLMock()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+
+	h := NewAdminHandlers(db, db, approles.RoleSourceIdentity, WithAdminCredentialSweeper(
+		credlifecycle.NewSweeper(
+			repositories.NewUserTokenRevocationRepository(db),
+			idstore.NewAPIKeyRepository(db),
+			approles.NewMembers(db, nil, approles.RoleSourceIdentity),
+			credlifecycle.NoPlatformAdminCarrier{},
+		)))
+	r := gin.New()
+	admin := r.Group("/api/v1/admin")
+	admin.GET("/organizations/:id/members", h.ListOrganizationMembers())
+	admin.POST("/organizations/:id/members", h.AddOrganizationMember())
+	admin.PUT("/organizations/:id/members/:user_id", h.UpdateOrganizationMember())
+	admin.DELETE("/organizations/:id/members/:user_id", h.RemoveOrganizationMember())
+	return &sourcesEnv{r: r, mock: mock}
+}
+
 var idUserCols = []string{"id", "email", "name", "oidc_sub", "created_at", "updated_at"}
 
 func idUserRow(id string) *sqlmock.Rows {
@@ -292,7 +321,7 @@ func TestAdminOrganizationCRUD(t *testing.T) {
 }
 
 func TestAdminOrganizationMembers(t *testing.T) {
-	e := newAdminWriteEnv(t)
+	e := newAdminWriteEnvWithApp(t)
 
 	memberWithUserCols := []string{"organization_id", "user_id", "role_template_id", "created_at",
 		"user_name", "user_email", "role_template_name", "role_template_display_name", "role_template_scopes"}
@@ -312,12 +341,21 @@ func TestAdminOrganizationMembers(t *testing.T) {
 		t.Errorf("bad role id: status = %d, want 400", w.Code)
 	}
 
+	// ADD: the ceiling check and the write's own resolution both read the APP
+	// store's row; the identity leg is expressed by name; the mirror upsert
+	// lands last.
 	roleTemplateCols := []string{"id", "name", "display_name", "description", "scopes", "is_system", "created_at", "updated_at"}
-	e.mock.ExpectQuery("FROM role_templates WHERE").
-		WithArgs("6e9a2b62-0e58-4b34-8f4b-2a6f9d3c1ab0").
-		WillReturnRows(sqlmock.NewRows(roleTemplateCols).
-			AddRow("6e9a2b62-0e58-4b34-8f4b-2a6f9d3c1ab0", "viewer", "Viewer", "read-only", []byte(`[]`), false, time.Now(), time.Now()))
+	for range 2 {
+		e.mock.ExpectQuery("FROM role_templates WHERE").
+			WithArgs("6e9a2b62-0e58-4b34-8f4b-2a6f9d3c1ab0").
+			WillReturnRows(sqlmock.NewRows(roleTemplateCols).
+				AddRow("6e9a2b62-0e58-4b34-8f4b-2a6f9d3c1ab0", "viewer", "Viewer", "read-only", []byte(`[]`), false, time.Now(), time.Now()))
+	}
+	e.mock.ExpectQuery("SELECT id FROM role_templates WHERE name").WithArgs("viewer").
+		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("6e9a2b62-0e58-4b34-8f4b-2a6f9d3c1ab0"))
 	e.mock.ExpectExec("INSERT INTO organization_members").
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	e.mock.ExpectExec("INSERT INTO organization_member_roles").
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	w = e.do(http.MethodPost, "/api/v1/admin/organizations/o1/members",
 		`{"user_id":"u1","role_template_id":"6e9a2b62-0e58-4b34-8f4b-2a6f9d3c1ab0"}`)
@@ -325,17 +363,29 @@ func TestAdminOrganizationMembers(t *testing.T) {
 		t.Fatalf("add member: status = %d (%s)", w.Code, w.Body.String())
 	}
 
-	e.mock.ExpectQuery("FROM role_templates WHERE").
-		WithArgs("6e9a2b62-0e58-4b34-8f4b-2a6f9d3c1ab0").
-		WillReturnRows(sqlmock.NewRows(roleTemplateCols).
-			AddRow("6e9a2b62-0e58-4b34-8f4b-2a6f9d3c1ab0", "viewer", "Viewer", "read-only", []byte(`[]`), false, time.Now(), time.Now()))
+	// UPDATE: same shape, plus the mirror's prior-role read for the no-op
+	// session-sweep detection.
+	for range 2 {
+		e.mock.ExpectQuery("FROM role_templates WHERE").
+			WithArgs("6e9a2b62-0e58-4b34-8f4b-2a6f9d3c1ab0").
+			WillReturnRows(sqlmock.NewRows(roleTemplateCols).
+				AddRow("6e9a2b62-0e58-4b34-8f4b-2a6f9d3c1ab0", "viewer", "Viewer", "read-only", []byte(`[]`), false, time.Now(), time.Now()))
+	}
+	expectMirrorPriorRoleAbsent(e.mock)
+	e.mock.ExpectQuery("SELECT id FROM role_templates WHERE name").WithArgs("viewer").
+		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("6e9a2b62-0e58-4b34-8f4b-2a6f9d3c1ab0"))
 	e.mock.ExpectExec("UPDATE organization_members").WillReturnResult(sqlmock.NewResult(0, 1))
+	e.mock.ExpectExec("INSERT INTO organization_member_roles").
+		WillReturnResult(sqlmock.NewResult(0, 1))
 	w = e.do(http.MethodPut, "/api/v1/admin/organizations/o1/members/u1",
 		`{"role_template_id":"6e9a2b62-0e58-4b34-8f4b-2a6f9d3c1ab0"}`)
 	if w.Code != http.StatusOK {
 		t.Fatalf("update member: status = %d (%s)", w.Code, w.Body.String())
 	}
 
+	// REMOVE: the mirror's delete goes first.
+	e.mock.ExpectExec("DELETE FROM organization_member_roles").WithArgs("o1", "u1", []string{"o1"}).
+		WillReturnResult(sqlmock.NewResult(0, 1))
 	e.mock.ExpectExec("DELETE FROM organization_members").WithArgs("o1", "u1", []string{"o1"}).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	if w := e.do(http.MethodDelete, "/api/v1/admin/organizations/o1/members/u1", ""); w.Code != http.StatusNoContent {

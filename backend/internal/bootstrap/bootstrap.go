@@ -8,6 +8,11 @@
 // per-app table has no sibling to collide with. The identity-side seed is still
 // performed, still gated by suite.role_seed_owner, and is no longer what TSM
 // authorizes against — see seedSharedRoleTemplates for the two reasons it stays.
+// Since the Phase 3 close-out it also runs AFTER the reconcile and carries the
+// app table's uuids INTO identity, because the direction of truth reversed: the
+// old adopt pass that copied identity's uuids app-side is retired, so id
+// alignment between the two schemas is now maintained by seeding identity from
+// the app rather than the app from identity.
 //
 // The identity statements run against the identity-schema connection
 // (search_path = identity,public) so unqualified table names resolve there.
@@ -27,34 +32,41 @@ import (
 	"github.com/terraform-state-manager/terraform-state-manager/internal/tenancy"
 )
 
-// Run ensures the default organization exists, seeds the shared identity schema's
-// role templates when this app owns that seed, and reconciles TSM's own per-app
-// authorization tables. Idempotent; safe to call on every startup.
+// Run ensures the default organization exists, reconciles TSM's own per-app
+// authorization tables, and then seeds the shared identity schema's role
+// templates when this app owns that seed. Idempotent; safe to call on every
+// startup.
 //
 // THE RECONCILE IS PART OF THIS FUNCTION, NOT A SECOND CALL BESIDE IT, and
-// seedRoleTemplates is a step INSIDE the reconcile rather than a call before it.
-// approles.Reconcile has to adopt identity's role templates — and therefore
-// identity's uuids, so a restated assignment resolves — BEFORE this build's own
-// definitions are written over those rows by name. Calling the seed here, either
-// side of Reconcile, would be the wrong order in one of the two directions and
-// would silently cost a fresh install either its own role scopes or its
-// assignments. Handing the seed to Reconcile makes that ordering structural, the
-// same way folding the reconcile into this function makes its ordering after the
-// identity seed structural.
+// seedRoleTemplates is a step INSIDE the reconcile rather than a call before it,
+// so the app-side definitions land before the membership scan that depends on
+// the tables being coherent.
+//
+// THE IDENTITY-SIDE SEED RUNS LAST, AFTER THE RECONCILE, and that ordering is
+// the Phase 3 close-out. It used to run FIRST so the reconcile's adopt pass
+// could copy identity's uuids app-side; the adopt pass is retired with the rest
+// of the identity.role_templates reads, so the id flow reversed: the app defines
+// its roles (minting uuids on a fresh install), and the identity-side seed then
+// writes THOSE uuids into identity.role_templates. On every topology where this
+// application owns the identity seed, the two schemas therefore keep speaking
+// one uuid dialect — which is what keeps the drift comparison's `mismatched`
+// kind quiet — without identity ever being read for it.
 //
 // appDB is the APPLICATION connection, where the per-app tables live. A nil appDB
 // skips the reconcile AND this application's own role seed, for callers with no
-// app connection to offer; the server always passes one.
+// app connection to offer; the server always passes one. With no app table to
+// take uuids from, the identity-side seed then mints them identity-side, as it
+// always did.
 func Run(ctx context.Context, identityDB, appDB *sql.DB, seedRoles bool) error {
-	if seedRoles {
-		if err := seedSharedRoleTemplates(ctx, identityDB); err != nil {
-			return fmt.Errorf("seed shared role templates: %w", err)
-		}
-	}
 	if err := ensureDefaultOrg(ctx, identityDB); err != nil {
 		return fmt.Errorf("ensure default organization: %w", err)
 	}
 	if appDB == nil {
+		if seedRoles {
+			if err := seedSharedRoleTemplates(ctx, identityDB, nil); err != nil {
+				return fmt.Errorf("seed shared role templates: %w", err)
+			}
+		}
 		return nil
 	}
 
@@ -90,6 +102,16 @@ func Run(ctx context.Context, identityDB, appDB *sql.DB, seedRoles bool) error {
 		return fmt.Errorf("reconcile per-app authorization tables: %w", err)
 	}
 	approles.LogReport(rep)
+
+	if seedRoles {
+		ids, err := appTemplateIDs(ctx, appDB)
+		if err != nil {
+			return fmt.Errorf("read this application's role template ids: %w", err)
+		}
+		if err := seedSharedRoleTemplates(ctx, identityDB, ids); err != nil {
+			return fmt.Errorf("seed shared role templates: %w", err)
+		}
+	}
 
 	// Phase 1 of #393: give the app connection the default organization's id, and
 	// stamp the rows that predate migration 000033's organization_id column.
@@ -169,16 +191,39 @@ func seedRoleTemplates(ctx context.Context, store *approles.Store) error {
 	return nil
 }
 
+// appTemplateIDs reads the uuid this application's own role_templates holds for
+// each role name, so the identity-side seed can restate the SAME ids.
+//
+// Read back from the table rather than taken from AppRoleTemplates(), because
+// the seed's names carry no ids at all: on an upgraded deployment the table
+// holds the uuids the old adopt pass copied from identity years of restarts ago,
+// and on a fresh install it holds whatever DefineTemplate just minted. Either
+// way, the table is the id space every assignment here is expressed in, and the
+// identity copy should speak it too.
+func appTemplateIDs(ctx context.Context, appDB *sql.DB) (map[string]string, error) {
+	held, err := approles.NewStore(appDB).ListTemplates(ctx)
+	if err != nil {
+		return nil, err
+	}
+	ids := make(map[string]string, len(held))
+	for name, t := range held {
+		ids[name] = t.ID
+	}
+	return ids, nil
+}
+
 // seedSharedRoleTemplates upserts the role -> scope mapping into the SHARED
 // identity schema, as it always has, gated by suite.role_seed_owner.
 //
-// # Why this did not go away with Phase 3b
+// # Why this did not go away when the reads did
 //
-// TSM no longer reads these rows, so it is fair to ask why it still writes them.
-// Two reasons, and both expire in Phase 4 when identity.role_templates is dropped:
+// TSM no longer reads these rows — not on the primary path since Phase 3b, and
+// not anywhere since the Phase 3 close-out retired the residual lookups. It is
+// fair to ask why it still writes them. Two reasons, and both expire in Phase 4
+// when identity.role_templates is dropped:
 //
 //	THE ROLLBACK PATH READS THEM. TSM_AUTHZ_ROLE_SOURCE=identity is this phase's
-//	rollback, and it puts every authorization decision back onto this table. A
+//	rollback, and it puts every role-assignment read back onto this table. A
 //	build that stopped seeding it would leave a FRESH standalone deployment with
 //	an empty identity.role_templates, so the rollback would resolve every
 //	membership to no role and lock everybody out — a rollback lever that works on
@@ -188,13 +233,25 @@ func seedRoleTemplates(ctx context.Context, store *approles.Store) error {
 //	from this table, and suite.role_seed_owner is still what stops the two apps
 //	overwriting each other in it.
 //
-// Direct SQL rather than the identity RoleTemplateRepository because that repo
+// # The ids are the app's now
+//
+// ids maps role name -> the uuid this application's own table holds for it
+// (appTemplateIDs); a name with no entry — or a nil map, from the no-app-DB
+// caller — is minted identity-side as before. The id is used only on FIRST
+// insert of a name: ON CONFLICT (name) cannot rewrite a primary key other rows
+// reference, and on the deployments this build upgrades the two ids already
+// agree because the old adopt pass copied identity's uuids app-side. This is
+// what keeps identity's vestigial organization_members.role_template_id column
+// comparable against the app's records (CheckDrift's `mismatched`) without this
+// application ever reading identity.role_templates to align anything.
+//
+// Direct SQL rather than the identity module's repository because that repo
 // guards updates to system rows, whereas this seed intentionally owns these
 // mappings. scopes is JSONB in the identity schema.
-func seedSharedRoleTemplates(ctx context.Context, db *sql.DB) error {
+func seedSharedRoleTemplates(ctx context.Context, db *sql.DB, ids map[string]string) error {
 	const q = `
 		INSERT INTO role_templates (id, name, display_name, description, scopes, is_system, created_at, updated_at)
-		VALUES (gen_random_uuid(), $1, $2, $3, $4::jsonb, true, now(), now())
+		VALUES (COALESCE($1::uuid, gen_random_uuid()), $2, $3, $4, $5::jsonb, true, now(), now())
 		ON CONFLICT (name) DO UPDATE
 		   SET display_name = EXCLUDED.display_name,
 		       description  = EXCLUDED.description,
@@ -205,7 +262,11 @@ func seedSharedRoleTemplates(ctx context.Context, db *sql.DB) error {
 		if err != nil {
 			return err
 		}
-		if _, err := db.ExecContext(ctx, q, rt.Name, rt.DisplayName, rt.Description, string(scopesJSON)); err != nil {
+		var id interface{}
+		if v, ok := ids[rt.Name]; ok && v != "" {
+			id = v
+		}
+		if _, err := db.ExecContext(ctx, q, id, rt.Name, rt.DisplayName, rt.Description, string(scopesJSON)); err != nil {
 			return err
 		}
 	}

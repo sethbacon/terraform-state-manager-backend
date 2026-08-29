@@ -159,14 +159,19 @@ func TestOnlyUniqueViolationsBecomeConflicts(t *testing.T) {
 // isUniqueViolation cannot see, which is the way a funnel fix silently fails to
 // reach the site that motivated it.
 func TestAddExistingOrganizationMemberIsAConflict(t *testing.T) {
-	e := newAdminWriteEnv(t)
+	e := newAdminWriteEnvWithApp(t)
 
 	const roleID = "6e9a2b62-0e58-4b34-8f4b-2a6f9d3c1ab0"
 	roleTemplateCols := []string{"id", "name", "display_name", "description", "scopes", "is_system", "created_at", "updated_at"}
-	e.mock.ExpectQuery("FROM role_templates WHERE").
-		WithArgs(roleID).
-		WillReturnRows(sqlmock.NewRows(roleTemplateCols).
-			AddRow(roleID, "viewer", "Viewer", "read-only", []byte(`[]`), false, time.Now(), time.Now()))
+	// The ceiling check and the write's own resolution both read the app row.
+	for range 2 {
+		e.mock.ExpectQuery("FROM role_templates WHERE").
+			WithArgs(roleID).
+			WillReturnRows(sqlmock.NewRows(roleTemplateCols).
+				AddRow(roleID, "viewer", "Viewer", "read-only", []byte(`[]`), false, time.Now(), time.Now()))
+	}
+	e.mock.ExpectQuery("SELECT id FROM role_templates WHERE name").WithArgs("viewer").
+		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(roleID))
 	// The database answers exactly as the issue's log line shows.
 	e.mock.ExpectExec("INSERT INTO organization_members").WillReturnError(theReportedError())
 

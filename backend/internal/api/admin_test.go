@@ -23,6 +23,20 @@ func newAdminHandlers(t *testing.T) (*AdminHandlers, sqlmock.Sqlmock) {
 	return NewAdminHandlers(db, nil, approles.RoleSourceIdentity), mock
 }
 
+// newAdminHandlersWithApp wires the APP connection to the same sqlmock: the
+// role picker and the stats' role count read this application's own
+// role_templates now, and there is no identity fallback to serve a rig that
+// omits the connection.
+func newAdminHandlersWithApp(t *testing.T) (*AdminHandlers, sqlmock.Sqlmock) {
+	t.Helper()
+	db, mock, err := newSQLMock()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+	return NewAdminHandlers(db, db, approles.RoleSourceIdentity), mock
+}
+
 // serveAdmin runs handler with NO caller in the context. Since identity
 // v0.25.0 that is not a neutral rig: callerOrgScope resolves to the empty
 // OrgScope, which on audit_logs still admits the org-less platform rows (the
@@ -126,7 +140,7 @@ func TestAuditLogsJSON_EmptyIsNotNull(t *testing.T) {
 }
 
 func TestAdminStats(t *testing.T) {
-	h, mock := newAdminHandlers(t)
+	h, mock := newAdminHandlersWithApp(t)
 	now := time.Now()
 
 	// Two membership lookups: the user count and the organization count are
@@ -138,7 +152,8 @@ func TestAdminStats(t *testing.T) {
 	mock.ExpectQuery("SELECT id, name, display_name, idp_type, idp_name, created_at, updated_at").
 		WillReturnRows(sqlmock.NewRows([]string{"id", "name", "display_name", "idp_type", "idp_name", "created_at", "updated_at"}).
 			AddRow("org-1", "default", "Default", nil, nil, now, now))
-	mock.ExpectQuery("SELECT id, name, display_name, description, scopes, is_system, created_at, updated_at").
+	// The role count reads THIS APPLICATION's own role_templates.
+	mock.ExpectQuery(`SELECT id, name, COALESCE\(display_name`).
 		WillReturnRows(sqlmock.NewRows([]string{"id", "name", "display_name", "description", "scopes", "is_system", "created_at", "updated_at"}).
 			AddRow("11111111-1111-1111-1111-111111111111", "admin", "Administrator", "Full access", []byte(`["admin"]`), true, now, now).
 			AddRow("22222222-2222-2222-2222-222222222222", "viewer", "Viewer", "Read-only", []byte(`["state:read"]`), true, now, now))
@@ -161,9 +176,9 @@ func TestAdminStats(t *testing.T) {
 }
 
 func TestAdminListRoles(t *testing.T) {
-	h, mock := newAdminHandlers(t)
+	h, mock := newAdminHandlersWithApp(t)
 	now := time.Now()
-	mock.ExpectQuery("SELECT id, name, display_name, description, scopes, is_system, created_at, updated_at").
+	mock.ExpectQuery(`SELECT id, name, COALESCE\(display_name`).
 		WillReturnRows(sqlmock.NewRows([]string{"id", "name", "display_name", "description", "scopes", "is_system", "created_at", "updated_at"}).
 			AddRow("11111111-1111-1111-1111-111111111111", "admin", "Administrator", "Full access", []byte(`["admin"]`), true, now, now))
 
@@ -178,9 +193,19 @@ func TestAdminListRoles(t *testing.T) {
 
 func TestAdminListRoles_DBError(t *testing.T) {
 	// No expectations queued: any query errors, and the handler must 500.
-	h, _ := newAdminHandlers(t)
+	h, _ := newAdminHandlersWithApp(t)
 	if w := serveAdmin(h.ListRoles(), "/x"); w.Code != http.StatusInternalServerError {
 		t.Errorf("status = %d, want 500 on repository failure", w.Code)
+	}
+}
+
+func TestAdminListRoles_NoAppConnectionFailsClosed(t *testing.T) {
+	// A rig with no application connection gets an error, not the shared
+	// identity schema's roles: the fallback was retired with the rest of the
+	// identity.role_templates reads.
+	h, _ := newAdminHandlers(t)
+	if w := serveAdmin(h.ListRoles(), "/x"); w.Code != http.StatusInternalServerError {
+		t.Errorf("status = %d, want 500 with no application connection", w.Code)
 	}
 }
 
@@ -270,12 +295,11 @@ func TestBuildAuditLog_OrgTagging(t *testing.T) {
 // The frontend's RoleTemplate interface (frontend/src/services/api.ts) is the
 // contract; these are its keys.
 func TestListRolesWireShapeIsUnchanged(t *testing.T) {
-	h, mock := newAdminHandlers(t)
-	// No app connection in this rig, so the handler falls back to the shared
-	// repository — which is the point: BOTH sources must serialise identically,
-	// and this asserts the fallback leg. The app leg is asserted by
-	// TestAppRoleTemplateJSONMatchesTheIdentityShape below, on the type itself.
-	mock.ExpectQuery("SELECT id, name, display_name, description, scopes, is_system").
+	h, mock := newAdminHandlersWithApp(t)
+	// The picker serves this application's own tables — the only source since
+	// the identity fallback was retired; the type-level twin below pins the
+	// serialised shape against the identity model it replaced.
+	mock.ExpectQuery(`SELECT id, name, COALESCE\(display_name`).
 		WillReturnRows(sqlmock.NewRows([]string{"id", "name", "display_name", "description", "scopes", "is_system", "created_at", "updated_at"}).
 			AddRow("11111111-0000-0000-0000-000000000001", "editor", "Editor", nil, []byte(`["state:read"]`), true, time.Now(), time.Now()))
 

@@ -150,6 +150,32 @@ func expectIdentityRoleLookup(mock sqlmock.Sqlmock, name string) {
 		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(templateID))
 }
 
+// expectAppTemplateByID stages the pre-write resolution the by-id writes now
+// perform against THIS application's own role_templates: the caller's id is the
+// app's, and the name it resolves to is what the identity leg is expressed in.
+func expectAppTemplateByID(mock sqlmock.Sqlmock, id, name string) {
+	now := time.Now()
+	mock.ExpectQuery(regexp.QuoteMeta(`FROM role_templates WHERE id = $1`)).
+		WithArgs(id).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "name", "display_name", "description", "scopes", "is_system", "created_at", "updated_at"}).
+			AddRow(id, name, name, nil, []byte(`["state:read"]`), true, now, now))
+}
+
+// expectAppPriorRole stages the pre-write read of the role THE MIRROR currently
+// records (#491's no-op detection, which moved onto the app tables when the
+// identity-schema template reads were retired). Pass nil for "row with no
+// role"; use expectAppPriorRoleAbsent for "no row at all".
+func expectAppPriorRole(mock sqlmock.Sqlmock, roleID interface{}) {
+	mock.ExpectQuery(`(?s)SELECT r\.role_template_id.*FROM organization_member_roles`).
+		WillReturnRows(sqlmock.NewRows([]string{"role_template_id", "name", "display_name", "scopes"}).
+			AddRow(roleID, nil, nil, []byte(`[]`)))
+}
+
+func expectAppPriorRoleAbsent(mock sqlmock.Sqlmock) {
+	mock.ExpectQuery(`(?s)SELECT r\.role_template_id.*FROM organization_member_roles`).
+		WillReturnRows(sqlmock.NewRows([]string{"role_template_id", "name", "display_name", "scopes"}))
+}
+
 func TestAddMemberWithParams_WritesIdentityThenTheMirror(t *testing.T) {
 	m, identityMock, appMock, done := twoConnections(t)
 	defer done()
@@ -190,10 +216,16 @@ func TestAddMemberWithParams_IdentityFailureLeavesTheMirrorUntouched(t *testing.
 	defer done()
 	var sw sweeps
 
+	// The app store resolves the name FIRST (the grant is refused before any
+	// write if this application does not define the role)...
+	appMock.ExpectQuery(regexp.QuoteMeta(`SELECT id FROM role_templates WHERE name = $1`)).
+		WithArgs("editor").
+		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(templateID))
+	// ...then the identity leg fails. The app mock has NO write expectations:
+	// any mirror statement at all fails the test.
 	expectIdentityRoleLookup(identityMock, "editor")
 	identityMock.ExpectExec("INSERT INTO organization_members").
 		WillReturnError(errors.New("insert failed"))
-	// appMock has NO expectations: any statement at all fails the test.
 
 	err := m.AddMemberWithParams(context.Background(), "org-1", "user-1", "editor", idstore.OrgScopeOrganizations("org-1"), sw.reducer())
 	if err == nil {
@@ -207,25 +239,35 @@ func TestAddMemberWithParams_IdentityFailureLeavesTheMirrorUntouched(t *testing.
 	}
 }
 
-func TestAddMemberWithRoleTemplate_MirrorsTheSameTemplateID(t *testing.T) {
+// THE TWO ID SPACES OWE EACH OTHER NOTHING. The caller's id is THIS
+// application's role_templates uuid; the identity leg is expressed by the NAME
+// it resolves to, identity resolves ITS OWN id for that name, and the mirror
+// records the caller's. Asserted with two different uuids so an implementation
+// that pushed the app id into identity — or identity's id into the mirror —
+// fails on the argument it wrote.
+func TestAddMemberWithRoleTemplate_EachLegRecordsItsOwnID(t *testing.T) {
 	m, identityMock, appMock, done := twoConnections(t)
 	defer done()
 	var sw sweeps
 
 	roleID := templateID
+	const identityID = "99999999-0000-0000-0000-000000000009"
+	expectAppTemplateByID(appMock, roleID, "editor")
+	identityMock.ExpectQuery(regexp.QuoteMeta(`SELECT id FROM role_templates WHERE name = $1`)).
+		WithArgs("editor").
+		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(identityID))
 	identityMock.ExpectExec("INSERT INTO organization_members").
+		WithArgs("org-1", "user-1", identityID, sqlmock.AnyArg()).
 		WillReturnResult(sqlmock.NewResult(0, 1))
-	// The id carried over from identity is already in TSM's own table, so no
-	// template fetch is needed.
-	appMock.ExpectQuery(regexp.QuoteMeta(`SELECT 1 FROM role_templates WHERE id = $1`)).
-		WithArgs(roleID).
-		WillReturnRows(sqlmock.NewRows([]string{"?column?"}).AddRow(1))
 	appMock.ExpectExec("INSERT INTO organization_member_roles").
 		WithArgs("org-1", "user-1", roleID, sqlmock.AnyArg()).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 
 	if err := m.AddMemberWithRoleTemplate(context.Background(), "org-1", "user-1", &roleID, idstore.OrgScopeOrganizations("org-1"), sw.reducer()); err != nil {
 		t.Fatalf("AddMemberWithRoleTemplate: %v", err)
+	}
+	if err := identityMock.ExpectationsWereMet(); err != nil {
+		t.Errorf("identity leg: %v", err)
 	}
 	if err := appMock.ExpectationsWereMet(); err != nil {
 		t.Errorf("mirror leg: %v", err)
@@ -585,12 +627,14 @@ func TestUpdateMemberRoleTemplate_WritesBothSides(t *testing.T) {
 
 	roleID := templateID
 	var tp tape
+	expectAppTemplateByID(appMock, roleID, "editor")
+	expectAppPriorRoleAbsent(appMock)
+	// The identity leg is expressed by the resolved NAME: identity looks the
+	// name up on its own connection and updates its own record.
+	expectIdentityRoleLookup(identityMock, "editor")
 	identityMock.ExpectExec("UPDATE organization_members").
-		WithArgs(tp.at("identity"), "user-1", roleID, sqlmock.AnyArg()).
+		WithArgs(tp.at("identity"), "user-1", templateID, sqlmock.AnyArg()).
 		WillReturnResult(sqlmock.NewResult(0, 1))
-	appMock.ExpectQuery(regexp.QuoteMeta(`SELECT 1 FROM role_templates WHERE id = $1`)).
-		WithArgs(roleID).
-		WillReturnRows(sqlmock.NewRows([]string{"?column?"}).AddRow(1))
 	appMock.ExpectExec("INSERT INTO organization_member_roles").
 		WithArgs(tp.at("mirror"), "user-1", roleID, sqlmock.AnyArg()).
 		WillReturnResult(sqlmock.NewResult(0, 1))
@@ -604,48 +648,34 @@ func TestUpdateMemberRoleTemplate_WritesBothSides(t *testing.T) {
 	}
 }
 
-// A template id the mirror has never seen must be COPIED from identity before
-// the assignment is written. Without this the foreign key rejects the insert and
-// the mirror silently loses a grant that did happen — the shared-identity case
-// where the sibling app created the role.
-func TestMirrorSetByID_AdoptsATemplateItHasNotSeen(t *testing.T) {
+// A ROLE THIS APPLICATION DOES NOT DEFINE IS NOT GRANTABLE HERE. The old
+// behaviour — fetching the unknown template from identity and adopting it,
+// scopes and all — was the last way a role this build never defined could come
+// to grant the sibling's scopes in this application. The resolution now runs
+// against the app store alone, BEFORE either leg writes: identity is never
+// asked, nothing is written anywhere, and no sweep runs because no authority
+// moved.
+func TestAddMemberWithRoleTemplate_RefusesARoleThisAppDoesNotDefine(t *testing.T) {
 	m, identityMock, appMock, done := twoConnections(t)
 	defer done()
 	var sw sweeps
 
 	roleID := templateID
-	identityMock.ExpectExec("INSERT INTO organization_members").
-		WillReturnResult(sqlmock.NewResult(0, 1))
-	appMock.ExpectQuery(regexp.QuoteMeta(`SELECT 1 FROM role_templates WHERE id = $1`)).
+	appMock.ExpectQuery(regexp.QuoteMeta(`FROM role_templates WHERE id = $1`)).
 		WithArgs(roleID).
-		WillReturnRows(sqlmock.NewRows([]string{"?column?"}))
-	identityMock.ExpectQuery("SELECT id, name, display_name, description, scopes, is_system").
-		WillReturnRows(sqlmock.NewRows([]string{"id", "name", "display_name", "description", "scopes", "is_system", "created_at", "updated_at"}).
-			AddRow(roleID, "late", "Late", nil, []byte(`["state:read"]`), true, time.Now(), time.Now()))
-	// THE NAME IS LOOKED UP, NOT RELEASED. An earlier version of this deleted the
-	// row holding the name under another id — which, through ON DELETE SET NULL,
-	// silently withdrew that role from every OTHER principal holding it, on a
-	// request that was granting a role to one (security-orchestration#732). The
-	// resolution is a read: if the name is already defined here, its LOCAL id is
-	// what this application records.
-	appMock.ExpectQuery(regexp.QuoteMeta(`SELECT id FROM role_templates WHERE name = $1`)).
-		WithArgs("late").
-		WillReturnError(sql.ErrNoRows)
-	appMock.ExpectExec("INSERT INTO role_templates").
-		WithArgs(roleID, "late", "Late", nil, sqlmock.AnyArg(), true).
-		WillReturnResult(sqlmock.NewResult(0, 1))
-	appMock.ExpectExec("INSERT INTO organization_member_roles").
-		WithArgs("org-1", "user-1", roleID, sqlmock.AnyArg()).
-		WillReturnResult(sqlmock.NewResult(0, 1))
+		WillReturnRows(sqlmock.NewRows([]string{"id", "name", "display_name", "description", "scopes", "is_system", "created_at", "updated_at"}))
+	// identityMock has NO expectations: asking identity anything fails the test.
 
-	if err := m.AddMemberWithRoleTemplate(context.Background(), "org-1", "user-1", &roleID, idstore.OrgScopeOrganizations("org-1"), sw.reducer()); err != nil {
-		t.Fatalf("AddMemberWithRoleTemplate: %v", err)
+	err := m.AddMemberWithRoleTemplate(context.Background(), "org-1", "user-1", &roleID, idstore.OrgScopeOrganizations("org-1"), sw.reducer())
+	if !errors.Is(err, ErrNoTemplate) {
+		t.Fatalf("granting an undefined role must wrap ErrNoTemplate, got %v", err)
+	}
+	sw.wants(t) // nothing moved, nothing to sweep
+	if err := identityMock.ExpectationsWereMet(); err != nil {
+		t.Errorf("identity leg: %v", err)
 	}
 	if err := appMock.ExpectationsWereMet(); err != nil {
 		t.Errorf("mirror leg: %v", err)
-	}
-	if err := identityMock.ExpectationsWereMet(); err != nil {
-		t.Errorf("identity leg: %v", err)
 	}
 }
 
@@ -780,9 +810,10 @@ func TestEveryReducingPathSweepsItsSubject(t *testing.T) {
 		{
 			name: "role reassigned by id",
 			stage: func(identity, app sqlmock.Sqlmock) {
+				expectAppTemplateByID(app, roleID, "viewer")
+				expectAppPriorRoleAbsent(app)
+				expectIdentityRoleLookup(identity, "viewer")
 				identity.ExpectExec("UPDATE organization_members").WillReturnResult(sqlmock.NewResult(0, 1))
-				app.ExpectQuery(regexp.QuoteMeta(`SELECT 1 FROM role_templates WHERE id = $1`)).
-					WillReturnRows(sqlmock.NewRows([]string{"?column?"}).AddRow(1))
 				app.ExpectExec("INSERT INTO organization_member_roles").WillReturnResult(sqlmock.NewResult(0, 1))
 			},
 			run: func(m *Members, r AuthorityReducer) error {
@@ -792,10 +823,11 @@ func TestEveryReducingPathSweepsItsSubject(t *testing.T) {
 		{
 			name: "role reassigned by name",
 			stage: func(identity, app sqlmock.Sqlmock) {
-				expectIdentityRoleLookup(identity, "viewer")
-				identity.ExpectExec("UPDATE organization_members").WillReturnResult(sqlmock.NewResult(0, 1))
 				app.ExpectQuery(regexp.QuoteMeta(`SELECT id FROM role_templates WHERE name = $1`)).
 					WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(templateID))
+				expectAppPriorRoleAbsent(app)
+				expectIdentityRoleLookup(identity, "viewer")
+				identity.ExpectExec("UPDATE organization_members").WillReturnResult(sqlmock.NewResult(0, 1))
 				app.ExpectExec("INSERT INTO organization_member_roles").WillReturnResult(sqlmock.NewResult(0, 1))
 			},
 			run: func(m *Members, r AuthorityReducer) error {
@@ -831,57 +863,6 @@ func TestEveryReducingPathSweepsItsSubject(t *testing.T) {
 	}
 }
 
-// A ROLE NAME THIS APPLICATION ALREADY DEFINES RESOLVES TO ITS OWN ID, and no
-// row is deleted to make room for identity's.
-//
-// This is the case Phase 3b created and security-orchestration#732 caught. The
-// app-side seed mints a LOCAL uuid for a role name identity does not have, so
-// `operator` can exist here under uuid Y while the sibling later seeds
-// `operator` into identity under uuid Z. Releasing the name — which is what the
-// startup reconcile does, where the assignment pass restates everything
-// microseconds later — would SET NULL every assignment referencing Y: a silent
-// mass authority reduction, with no credential sweep, on a request that was
-// granting a role to ONE principal.
-//
-// Asserted on the id that reaches organization_member_roles, and on the DELETE
-// never being issued: the app mock has no expectation for one.
-func TestMirrorSetByID_UsesTheLocalIDForAnAlreadyDefinedName(t *testing.T) {
-	m, identityMock, appMock, done := twoConnections(t)
-	defer done()
-	var sw sweeps
-
-	const identityID = "eeeeeeee-0000-0000-0000-000000000001"
-	const localID = "ffffffff-0000-0000-0000-000000000002"
-	roleID := identityID
-
-	identityMock.ExpectExec("INSERT INTO organization_members").
-		WillReturnResult(sqlmock.NewResult(0, 1))
-	// Identity's id is unknown here...
-	appMock.ExpectQuery(regexp.QuoteMeta(`SELECT 1 FROM role_templates WHERE id = $1`)).
-		WithArgs(identityID).
-		WillReturnRows(sqlmock.NewRows([]string{"?column?"}))
-	identityMock.ExpectQuery("SELECT id, name, display_name, description, scopes, is_system").
-		WillReturnRows(sqlmock.NewRows([]string{"id", "name", "display_name", "description", "scopes", "is_system", "created_at", "updated_at"}).
-			AddRow(identityID, "operator", "Operator", nil, []byte(`["state:read"]`), true, time.Now(), time.Now()))
-	// ...but its NAME is, under a locally-minted id.
-	appMock.ExpectQuery(regexp.QuoteMeta(`SELECT id FROM role_templates WHERE name = $1`)).
-		WithArgs("operator").
-		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(localID))
-	// THE LOCAL ID IS WHAT IS RECORDED. Any DELETE or INSERT on role_templates
-	// here is an unexpected statement and fails this test.
-	appMock.ExpectExec("INSERT INTO organization_member_roles").
-		WithArgs("org-1", "user-1", localID, sqlmock.AnyArg()).
-		WillReturnResult(sqlmock.NewResult(0, 1))
-
-	if err := m.AddMemberWithRoleTemplate(context.Background(), "org-1", "user-1", &roleID,
-		idstore.OrgScopeOrganizations("org-1"), sw.reducer()); err != nil {
-		t.Fatalf("AddMemberWithRoleTemplate: %v", err)
-	}
-	if err := appMock.ExpectationsWereMet(); err != nil {
-		t.Errorf("mirror leg: %v", err)
-	}
-}
-
 // THE ADD PATHS SWEEP. Their mirror leg is an upsert on the table that now
 // decides authorization, so adding a principal to an organization identity has
 // no membership for can move a STALE record downward — a reduction performed by
@@ -911,19 +892,15 @@ func TestTheAddPathsRunTheCallersSweep(t *testing.T) {
 			var sw sweeps
 
 			if c.name == "by name" {
-				expectIdentityRoleLookup(identityMock, "editor")
-			}
-			identityMock.ExpectExec("INSERT INTO organization_members").
-				WillReturnResult(sqlmock.NewResult(0, 1))
-			if c.name == "by name" {
 				appMock.ExpectQuery(regexp.QuoteMeta(`SELECT id FROM role_templates WHERE name = $1`)).
 					WithArgs("editor").
 					WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(templateID))
 			} else {
-				appMock.ExpectQuery(regexp.QuoteMeta(`SELECT 1 FROM role_templates WHERE id = $1`)).
-					WithArgs(templateID).
-					WillReturnRows(sqlmock.NewRows([]string{"?column?"}).AddRow(1))
+				expectAppTemplateByID(appMock, templateID, "editor")
 			}
+			expectIdentityRoleLookup(identityMock, "editor")
+			identityMock.ExpectExec("INSERT INTO organization_members").
+				WillReturnResult(sqlmock.NewResult(0, 1))
 			appMock.ExpectExec("INSERT INTO organization_member_roles").
 				WillReturnResult(sqlmock.NewResult(0, 1))
 
@@ -941,12 +918,12 @@ func TestTheAddPathsRefuseAMissingSweep(t *testing.T) {
 	m, identityMock, appMock, done := twoConnections(t)
 	defer done()
 
-	expectIdentityRoleLookup(identityMock, "editor")
-	identityMock.ExpectExec("INSERT INTO organization_members").
-		WillReturnResult(sqlmock.NewResult(0, 1))
 	appMock.ExpectQuery(regexp.QuoteMeta(`SELECT id FROM role_templates WHERE name = $1`)).
 		WithArgs("editor").
 		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(templateID))
+	expectIdentityRoleLookup(identityMock, "editor")
+	identityMock.ExpectExec("INSERT INTO organization_members").
+		WillReturnResult(sqlmock.NewResult(0, 1))
 	appMock.ExpectExec("INSERT INTO organization_member_roles").
 		WillReturnResult(sqlmock.NewResult(0, 1))
 
@@ -971,25 +948,17 @@ func TestTheAddPathsRefuseAMissingSweep(t *testing.T) {
 // absorb "not a member" into a success status.
 // ---------------------------------------------------------------------------
 
-// expectPriorRole stages the pre-write read of the role currently recorded.
-func expectPriorRole(mock sqlmock.Sqlmock, roleID interface{}) {
-	mock.ExpectQuery("(?s)SELECT organization_id, user_id, role_template_id, created_at.*FROM organization_members").
-		WillReturnRows(sqlmock.NewRows([]string{"organization_id", "user_id", "role_template_id", "created_at"}).
-			AddRow("org-1", "user-1", roleID, time.Now()))
-}
-
 func TestUpdateMemberRoleTemplate_SameRoleDoesNotEndSessions(t *testing.T) {
 	m, identityMock, appMock, done := twoConnections(t)
 	defer done()
 	var sw sweeps
 
 	roleID := templateID
-	expectPriorRole(identityMock, roleID) // already holds it
+	expectAppTemplateByID(appMock, roleID, "editor")
+	expectAppPriorRole(appMock, roleID) // the mirror already records it
+	expectIdentityRoleLookup(identityMock, "editor")
 	identityMock.ExpectExec("UPDATE organization_members").
 		WillReturnResult(sqlmock.NewResult(0, 1))
-	appMock.ExpectQuery(regexp.QuoteMeta(`SELECT 1 FROM role_templates WHERE id = $1`)).
-		WithArgs(roleID).
-		WillReturnRows(sqlmock.NewRows([]string{"?column?"}).AddRow(1))
 	appMock.ExpectExec("INSERT INTO organization_member_roles").
 		WillReturnResult(sqlmock.NewResult(0, 1))
 
@@ -1009,12 +978,11 @@ func TestUpdateMemberRoleTemplate_DifferentRoleEndsSessions(t *testing.T) {
 	var sw sweeps
 
 	roleID := templateID
-	expectPriorRole(identityMock, "00000000-0000-0000-0000-0000000000ff") // a different role
+	expectAppTemplateByID(appMock, roleID, "editor")
+	expectAppPriorRole(appMock, "00000000-0000-0000-0000-0000000000ff") // a different role
+	expectIdentityRoleLookup(identityMock, "editor")
 	identityMock.ExpectExec("UPDATE organization_members").
 		WillReturnResult(sqlmock.NewResult(0, 1))
-	appMock.ExpectQuery(regexp.QuoteMeta(`SELECT 1 FROM role_templates WHERE id = $1`)).
-		WithArgs(roleID).
-		WillReturnRows(sqlmock.NewRows([]string{"?column?"}).AddRow(1))
 	appMock.ExpectExec("INSERT INTO organization_member_roles").
 		WillReturnResult(sqlmock.NewResult(0, 1))
 
@@ -1032,13 +1000,12 @@ func TestUpdateMemberRoleTemplate_UnreadablePriorRoleEndsSessions(t *testing.T) 
 	var sw sweeps
 
 	roleID := templateID
-	identityMock.ExpectQuery("(?s)SELECT organization_id, user_id, role_template_id, created_at.*FROM organization_members").
-		WillReturnError(errors.New("identity database unavailable"))
+	expectAppTemplateByID(appMock, roleID, "editor")
+	appMock.ExpectQuery(`(?s)SELECT r\.role_template_id.*FROM organization_member_roles`).
+		WillReturnError(errors.New("application database hiccup"))
+	expectIdentityRoleLookup(identityMock, "editor")
 	identityMock.ExpectExec("UPDATE organization_members").
 		WillReturnResult(sqlmock.NewResult(0, 1))
-	appMock.ExpectQuery(regexp.QuoteMeta(`SELECT 1 FROM role_templates WHERE id = $1`)).
-		WithArgs(roleID).
-		WillReturnRows(sqlmock.NewRows([]string{"?column?"}).AddRow(1))
 	appMock.ExpectExec("INSERT INTO organization_member_roles").
 		WillReturnResult(sqlmock.NewResult(0, 1))
 
@@ -1097,8 +1064,8 @@ func TestUpdateMemberRoleTemplate_ClearingRoleWithUnreadablePriorEndsSessions(t 
 	defer done()
 	var sw sweeps
 
-	identityMock.ExpectQuery("(?s)SELECT organization_id, user_id, role_template_id, created_at.*FROM organization_members").
-		WillReturnError(errors.New("identity database unavailable"))
+	appMock.ExpectQuery(`(?s)SELECT r\.role_template_id.*FROM organization_member_roles`).
+		WillReturnError(errors.New("application database hiccup"))
 	identityMock.ExpectExec("UPDATE organization_members").
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	appMock.ExpectExec("INSERT INTO organization_member_roles").
@@ -1120,24 +1087,18 @@ func TestUpdateMemberRole_SameRoleNameDoesNotEndSessions(t *testing.T) {
 	defer done()
 	var sw sweeps
 
-	identityMock.ExpectQuery("(?s)FROM organization_members").
-		WillReturnRows(sqlmock.NewRows([]string{
-			"organization_id", "user_id", "role_template_id", "created_at",
-			"user_name", "user_email",
-			"role_template_name", "role_template_display_name", "role_template_scopes",
-		}).AddRow("org-1", "user-1", templateID, time.Now(),
-			"Alice", "alice@example.com",
-			"editor", "Editor", []byte(`["states:read"]`)))
+	// The app store resolves the mapped name, and the MIRROR's current record
+	// is what the no-op detection compares against: same id, nothing moved.
+	appMock.ExpectQuery(regexp.QuoteMeta(`SELECT id FROM role_templates WHERE name = $1`)).
+		WithArgs("editor").
+		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(templateID))
+	expectAppPriorRole(appMock, templateID)
 	// identity resolves the NAME to an id on its own connection, then updates.
 	identityMock.ExpectQuery(regexp.QuoteMeta(`SELECT id FROM role_templates WHERE name = $1`)).
 		WithArgs("editor").
 		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(templateID))
 	identityMock.ExpectExec("UPDATE organization_members").
 		WillReturnResult(sqlmock.NewResult(0, 1))
-	// then the mirror, on the app connection.
-	appMock.ExpectQuery(regexp.QuoteMeta(`SELECT id FROM role_templates WHERE name = $1`)).
-		WithArgs("editor").
-		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(templateID))
 	appMock.ExpectExec("INSERT INTO organization_member_roles").
 		WillReturnResult(sqlmock.NewResult(0, 1))
 
@@ -1154,24 +1115,18 @@ func TestUpdateMemberRole_DifferentRoleNameEndsSessions(t *testing.T) {
 	defer done()
 	var sw sweeps
 
-	identityMock.ExpectQuery("(?s)FROM organization_members").
-		WillReturnRows(sqlmock.NewRows([]string{
-			"organization_id", "user_id", "role_template_id", "created_at",
-			"user_name", "user_email",
-			"role_template_name", "role_template_display_name", "role_template_scopes",
-		}).AddRow("org-1", "user-1", templateID, time.Now(),
-			"Alice", "alice@example.com",
-			"viewer", "Viewer", []byte(`["states:read"]`)))
+	// The mirror currently records a DIFFERENT role than the mapped name
+	// resolves to: a genuine reassignment.
+	appMock.ExpectQuery(regexp.QuoteMeta(`SELECT id FROM role_templates WHERE name = $1`)).
+		WithArgs("editor").
+		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(templateID))
+	expectAppPriorRole(appMock, "00000000-0000-0000-0000-0000000000ff")
 	// identity resolves the NAME to an id on its own connection, then updates.
 	identityMock.ExpectQuery(regexp.QuoteMeta(`SELECT id FROM role_templates WHERE name = $1`)).
 		WithArgs("editor").
 		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(templateID))
 	identityMock.ExpectExec("UPDATE organization_members").
 		WillReturnResult(sqlmock.NewResult(0, 1))
-	// then the mirror, on the app connection.
-	appMock.ExpectQuery(regexp.QuoteMeta(`SELECT id FROM role_templates WHERE name = $1`)).
-		WithArgs("editor").
-		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(templateID))
 	appMock.ExpectExec("INSERT INTO organization_member_roles").
 		WillReturnResult(sqlmock.NewResult(0, 1))
 

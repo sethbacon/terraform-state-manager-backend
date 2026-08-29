@@ -120,28 +120,58 @@ func TestTemplateIDByName_SentinelVersusFault(t *testing.T) {
 	}
 }
 
-// TemplateExists must report absence as (false, nil) and a fault as an error:
-// the mirror uses the boolean to decide whether to fetch the template from
-// identity, and a fault reported as "absent" would send it fetching on every
-// write while the database is down.
-func TestTemplateExists_AbsenceIsNotAFault(t *testing.T) {
+// TemplateByID / TemplateByName are the single-template reads the ceiling check
+// and the group-mapping guard resolve from since the identity-schema lookups
+// were retired. Absence must arrive as ErrNoTemplate — the handlers answer 400
+// or defer on it — and a fault must NOT, or a database outage would read as
+// "no such role" and be waved into a client error.
+func TestTemplateReads_SentinelVersusFault(t *testing.T) {
 	s, mock := newStore(t)
-	mock.ExpectQuery(regexp.QuoteMeta(`SELECT 1 FROM role_templates WHERE id = $1`)).
+	templateCols := []string{"id", "name", "display_name", "description", "scopes", "is_system", "created_at", "updated_at"}
+
+	mock.ExpectQuery(regexp.QuoteMeta(`FROM role_templates WHERE id = $1`)).
 		WithArgs(templateID).
-		WillReturnRows(sqlmock.NewRows([]string{"?column?"}))
-	present, err := s.TemplateExists(context.Background(), templateID)
-	if err != nil {
-		t.Fatalf("TemplateExists: %v", err)
-	}
-	if present {
-		t.Fatal("an empty result reported the template as present")
+		WillReturnRows(sqlmock.NewRows(templateCols))
+	if _, err := s.TemplateByID(context.Background(), templateID); !errors.Is(err, ErrNoTemplate) {
+		t.Fatalf("an absent id must wrap ErrNoTemplate, got %v", err)
 	}
 
-	mock.ExpectQuery(regexp.QuoteMeta(`SELECT 1 FROM role_templates WHERE id = $1`)).
+	mock.ExpectQuery(regexp.QuoteMeta(`FROM role_templates WHERE id = $1`)).
 		WithArgs(templateID).
 		WillReturnError(errors.New("connection refused"))
-	if _, err := s.TemplateExists(context.Background(), templateID); err == nil {
-		t.Fatal("a database fault was reported as a clean 'not present'")
+	if _, err := s.TemplateByID(context.Background(), templateID); errors.Is(err, ErrNoTemplate) {
+		t.Fatal("a database fault was reported as 'no such role template': the ceiling check would answer 400 for an outage")
+	}
+
+	now := time.Now()
+	mock.ExpectQuery(regexp.QuoteMeta(`FROM role_templates WHERE name = $1`)).
+		WithArgs("editor").
+		WillReturnRows(sqlmock.NewRows(templateCols).
+			AddRow(templateID, "editor", "Editor", nil, []byte(`["state:read","state:write"]`), true, now, now))
+	got, err := s.TemplateByName(context.Background(), "editor")
+	if err != nil {
+		t.Fatalf("TemplateByName: %v", err)
+	}
+	if got.ID != templateID || got.Name != "editor" || len(got.Scopes) != 2 {
+		t.Fatalf("TemplateByName = %+v, want the decoded row with both scopes", got)
+	}
+}
+
+// ConfirmMembership is the reconcile's presence upsert. Its statement must bind
+// the caller's scope like every other tenant-owned statement (the class guard's
+// axis 4 covers that), and its conflict arm must touch mirrored_at ALONE — a
+// SET list that reached role_template_id would be identity restating this
+// application's role policy again.
+func TestConfirmMembership_RefreshesPresenceOnly(t *testing.T) {
+	s, mock := newStore(t)
+	mock.ExpectExec(`INSERT INTO organization_member_roles[\s\S]*DO UPDATE\s+SET mirrored_at = now\(\)\s*$`).
+		WithArgs("org-1", "user-1").
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	if err := s.ConfirmMembership(context.Background(), "org-1", "user-1", idstore.OrgScopeAllOrganizations()); err != nil {
+		t.Fatalf("ConfirmMembership: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("unmet: %v", err)
 	}
 }
 

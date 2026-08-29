@@ -4,10 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"regexp"
 	"strings"
 	"testing"
-	"time"
 
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
 )
@@ -19,21 +17,16 @@ type driftEnv struct {
 
 func newDriftEnv(t *testing.T) *driftEnv { return &driftEnv{env: newReconcileEnv(t)} }
 
-// stage sets up one comparison: the two template tables, then the two assignment
-// streams, in the order CheckDrift reads them.
+// stage sets up one comparison: the two assignment streams, in the order
+// CheckDrift reads them.
+//
+// EXACTLY TWO QUERIES, and the mocks are strict: since the template comparison
+// was retired with the identity.role_templates reads, a CheckDrift that loaded
+// either side's role definitions again would issue a query no test here stages,
+// and every test in this file would fail on it.
 type assignment struct{ org, user, role string }
 
-func (d *driftEnv) stage(identityTemplates, appTemplates []Template, identityRows, appRows []assignment) {
-	identityTemplateRows := identityTemplateProbeRows()
-	for _, t := range identityTemplates {
-		identityTemplateRows.AddRow(t.ID, t.Name, t.DisplayName, t.Description, []byte(scopeJSON(t.Scopes)), t.IsSystem)
-	}
-	appTemplateRows := appTemplateRows()
-	for _, t := range appTemplates {
-		appTemplateRows.AddRow(t.ID, t.Name, t.DisplayName, t.Description, []byte(scopeJSON(t.Scopes)), t.IsSystem, time.Now(), time.Now())
-	}
-	d.env.identity.ExpectQuery(regexp.QuoteMeta(`SELECT id::text, name`)).WillReturnRows(identityTemplateRows)
-	d.env.app.ExpectQuery(regexp.QuoteMeta(`SELECT id, name, COALESCE(display_name`)).WillReturnRows(appTemplateRows)
+func (d *driftEnv) stage(identityRows, appRows []assignment) {
 	d.env.identity.ExpectQuery(`FROM organization_members ORDER BY`).WillReturnRows(assignmentRows(identityRows))
 	d.env.app.ExpectQuery(`FROM organization_member_roles ORDER BY`).WillReturnRows(assignmentRows(appRows))
 }
@@ -46,14 +39,6 @@ func assignmentRows(rows []assignment) *sqlmock.Rows {
 	return out
 }
 
-func scopeJSON(scopes []string) string {
-	quoted := make([]string, 0, len(scopes))
-	for _, s := range scopes {
-		quoted = append(quoted, `"`+s+`"`)
-	}
-	return "[" + strings.Join(quoted, ",") + "]"
-}
-
 func (d *driftEnv) check(t *testing.T) DriftResult {
 	t.Helper()
 	res, err := CheckDrift(context.Background(), d.env.appDB, d.env.identityDB)
@@ -63,21 +48,16 @@ func (d *driftEnv) check(t *testing.T) DriftResult {
 	return res
 }
 
-func tmpl(id, name string, scopes ...string) Template {
-	return Template{ID: id, Name: name, DisplayName: name, Scopes: scopes, IsSystem: true}
-}
-
 // Two sides that agree are clean, and the comparison says how much it looked at.
 // The Compared count is asserted because a merge that read nothing also reports
 // no drift, and the two are the same value in every field but that one.
 func TestCheckDrift_AgreementIsClean(t *testing.T) {
 	d := newDriftEnv(t)
-	both := []Template{tmpl(adminTemplateID, "admin", "admin")}
 	rows := []assignment{
 		{"11111111-0000-0000-0000-000000000001", "22222222-0000-0000-0000-000000000001", adminTemplateID},
 		{"11111111-0000-0000-0000-000000000002", "22222222-0000-0000-0000-000000000002", adminTemplateID},
 	}
-	d.stage(both, both, rows, rows)
+	d.stage(rows, rows)
 
 	res := d.check(t)
 	if !res.Clean() {
@@ -100,8 +80,7 @@ func TestCheckDrift_ClassifiesEveryDisagreement(t *testing.T) {
 		orgD = "11111111-0000-0000-0000-00000000000d"
 		user = "22222222-0000-0000-0000-000000000001"
 	)
-	templates := []Template{tmpl(adminTemplateID, "admin", "admin"), tmpl(editorTemplateID, "editor", "state:write")}
-	d.stage(templates, templates,
+	d.stage(
 		[]assignment{
 			{orgA, user, adminTemplateID}, // missing here
 			{orgB, user, adminTemplateID}, // agrees
@@ -138,66 +117,6 @@ func TestCheckDrift_ClassifiesEveryDisagreement(t *testing.T) {
 	}
 }
 
-// THE CASE PHASE 3A'S DriftQuery IS BLIND TO. Both sides name the same role
-// template id for the same principal, and the two schemas define that id with
-// different scopes — so an id comparison reports agreement while the principal
-// holds different permissions depending on which table is read. After the flip
-// that is the whole failure mode, so it is a first-class kind here.
-func TestCheckDrift_SeesScopesDivergingUnderAnIdenticalRoleID(t *testing.T) {
-	d := newDriftEnv(t)
-	const orgA = "11111111-0000-0000-0000-00000000000a"
-	const user = "22222222-0000-0000-0000-000000000001"
-	d.stage(
-		[]Template{tmpl(adminTemplateID, "editor", "modules:read", "providers:read")},
-		[]Template{tmpl(adminTemplateID, "editor", "state:read", "state:write")},
-		[]assignment{{orgA, user, adminTemplateID}},
-		[]assignment{{orgA, user, adminTemplateID}})
-
-	res := d.check(t)
-	if res.AssignmentDrift() != 0 {
-		t.Fatalf("AssignmentDrift() = %d, want 0: the ids agree", res.AssignmentDrift())
-	}
-	if res.ScopeDivergent != 1 {
-		t.Fatalf("ScopeDivergent = %d, want 1: the two schemas grant different scopes for the same role id", res.ScopeDivergent)
-	}
-	if len(res.TemplateDrift) != 1 || res.TemplateDrift[0].Name != "editor" {
-		t.Fatalf("TemplateDrift = %+v, want one entry naming editor", res.TemplateDrift)
-	}
-	if res.Clean() {
-		t.Fatal("Clean() = true while a principal's effective permissions differ between the two sources: " +
-			"the gate would pass a deployment the flip is not safe on")
-	}
-	// The report must carry BOTH scope sets, or an operator cannot tell which
-	// direction the change goes.
-	out := res.String()
-	if !strings.Contains(out, "modules:read") || !strings.Contains(out, "state:write") {
-		t.Errorf("the report does not show both sides of the divergence:\n%s", out)
-	}
-}
-
-// A template only one side has is reported as such, not as an empty scope set:
-// "the sibling defines a role we do not" is a different fact from "we define it
-// with nothing in it", and only one of them is a reason to act.
-func TestCheckDrift_ReportsATemplateOnlyOneSideHas(t *testing.T) {
-	d := newDriftEnv(t)
-	d.stage(
-		[]Template{tmpl(adminTemplateID, "admin", "admin"), tmpl(editorTemplateID, "registry_publisher", "modules:write")},
-		[]Template{tmpl(adminTemplateID, "admin", "admin")},
-		nil, nil)
-
-	res := d.check(t)
-	if len(res.TemplateDrift) != 1 {
-		t.Fatalf("TemplateDrift = %+v, want one entry", res.TemplateDrift)
-	}
-	got := res.TemplateDrift[0]
-	if got.Name != "registry_publisher" || got.OnlyIn != "identity" {
-		t.Fatalf("TemplateDrift[0] = %+v, want registry_publisher only in identity", got)
-	}
-	if len(got.AppScopes) != 0 {
-		t.Errorf("AppScopes = %v, want empty for a template this application does not have", got.AppScopes)
-	}
-}
-
 // A READ THAT FAILS PART-WAY LOOKS EXACTLY LIKE THE END OF THE STREAM to
 // rows.Next(). Unchecked, the merge would then report every remaining row on the
 // OTHER side as drift — turning a transient fault into a report claiming the
@@ -206,15 +125,7 @@ func TestCheckDrift_ReportsATemplateOnlyOneSideHas(t *testing.T) {
 func TestCheckDrift_DoesNotReadAMidStreamFailureAsTheEndOfTheStream(t *testing.T) {
 	d := newDriftEnv(t)
 	const user = "22222222-0000-0000-0000-000000000001"
-	templates := []Template{tmpl(adminTemplateID, "admin", "admin")}
 
-	identityTemplateRows := identityTemplateProbeRows().
-		AddRow(adminTemplateID, "admin", "admin", nil, []byte(`["admin"]`), true)
-	appTemplateRows := appTemplateRows().
-		AddRow(adminTemplateID, "admin", "admin", nil, []byte(`["admin"]`), true, time.Now(), time.Now())
-	_ = templates
-	d.env.identity.ExpectQuery(regexp.QuoteMeta(`SELECT id::text, name`)).WillReturnRows(identityTemplateRows)
-	d.env.app.ExpectQuery(regexp.QuoteMeta(`SELECT id, name, COALESCE(display_name`)).WillReturnRows(appTemplateRows)
 	d.env.identity.ExpectQuery(`FROM organization_members ORDER BY`).
 		WillReturnRows(sqlmock.NewRows([]string{"organization_id", "user_id", "role_template_id"}).
 			AddRow("11111111-0000-0000-0000-00000000000a", user, adminTemplateID).
@@ -239,7 +150,7 @@ func TestCheckDrift_DoesNotReadAMidStreamFailureAsTheEndOfTheStream(t *testing.T
 // distinguishes "they agree" from "there was nothing to compare".
 func TestCheckDrift_EmptyEstateIsCleanAndSaysSo(t *testing.T) {
 	d := newDriftEnv(t)
-	d.stage(nil, nil, nil, nil)
+	d.stage(nil, nil)
 	res := d.check(t)
 	if !res.Clean() {
 		t.Fatalf("Clean() = false on an empty estate: %s", res.String())
@@ -266,8 +177,7 @@ func TestCheckDrift_BoundsTheSampleWithoutBoundingTheCounts(t *testing.T) {
 			role: adminTemplateID,
 		})
 	}
-	templates := []Template{tmpl(adminTemplateID, "admin", "admin")}
-	d.stage(templates, templates, rows, nil)
+	d.stage(rows, nil)
 
 	res := d.check(t)
 	if res.Missing != want {
@@ -288,7 +198,7 @@ func TestCheckDrift_BoundsTheSampleWithoutBoundingTheCounts(t *testing.T) {
 func TestCheckDrift_ARoleLessMembershipOnBothSidesAgrees(t *testing.T) {
 	d := newDriftEnv(t)
 	rows := []assignment{{"11111111-0000-0000-0000-00000000000a", "22222222-0000-0000-0000-000000000001", ""}}
-	d.stage(nil, nil, rows, rows)
+	d.stage(rows, rows)
 	res := d.check(t)
 	if !res.Clean() {
 		t.Fatalf("Clean() = false for a role-less membership present on both sides: %s", res.String())

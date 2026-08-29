@@ -17,8 +17,12 @@ import (
 // an alert that adds them up would be unactionable: `missing` is a principal who
 // has LOST access they should have (loud, and self-reporting — they will say so),
 // `stale` is one who has KEPT access they should not (silent, and the one worth
-// paging on), `mismatched` is the wrong role entirely, and `scope_divergent` is
-// the right role name granting different permissions on the two sides.
+// paging on), and `mismatched` is the two sides recording different roles.
+//
+// The `scope_divergent` label and the tsm_authz_role_template_drift gauge are
+// RETIRED with the identity.role_templates reads that fed them: role definitions
+// are per-app by design now, so "identity's copy differs" stopped being drift —
+// see internal/approles/drift.go.
 var (
 	authzDriftAssignments = promauto.NewGaugeVec(
 		prometheus.GaugeOpts{
@@ -26,13 +30,6 @@ var (
 			Help: "Role records that disagree between this application's tables and the shared identity schema, by kind.",
 		},
 		[]string{"kind"},
-	)
-
-	authzDriftTemplates = promauto.NewGauge(
-		prometheus.GaugeOpts{
-			Name: "tsm_authz_role_template_drift",
-			Help: "Role definitions whose scopes differ between this application's role_templates and the shared identity schema.",
-		},
 	)
 
 	authzDriftCompared = promauto.NewGauge(
@@ -64,12 +61,10 @@ var (
 // reads exactly like a healthy one, and an alert on the counts alone would go
 // quiet at precisely the moment the detector broke. Alert on the age of
 // tsm_authz_role_drift_last_check_timestamp_seconds as well as on the counts.
-func AuthzDriftObserved(compared, missing, stale, mismatched, scopeDivergent, templateDrift int) {
+func AuthzDriftObserved(compared, missing, stale, mismatched int) {
 	authzDriftAssignments.WithLabelValues("missing").Set(float64(missing))
 	authzDriftAssignments.WithLabelValues("stale").Set(float64(stale))
 	authzDriftAssignments.WithLabelValues("mismatched").Set(float64(mismatched))
-	authzDriftAssignments.WithLabelValues("scope_divergent").Set(float64(scopeDivergent))
-	authzDriftTemplates.Set(float64(templateDrift))
 	authzDriftCompared.Set(float64(compared))
 	authzDriftLastCheck.SetToCurrentTime()
 }

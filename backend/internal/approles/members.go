@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"log/slog"
 
-	"github.com/google/uuid"
 	idstore "github.com/sethbacon/terraform-suite-identity/identity/store"
 )
 
@@ -98,10 +97,6 @@ type Members struct {
 	*identityOrgs
 
 	store *Store
-	// templates resolves a role template out of identity when the mirror is
-	// asked to record an assignment naming one it has never seen. See
-	// ensureTemplateByID.
-	templates *idstore.RoleTemplateRepository
 	// roleSource decides which tables the ROLE-CARRYING READS in reads.go
 	// resolve from. Writes are unaffected: both places are written under either
 	// value, which is what makes the identity value a working rollback rather
@@ -189,10 +184,36 @@ func NewMembers(identityDB, appDB *sql.DB, source RoleSource) *Members {
 	} else {
 		logDegradedSource(source)
 	}
-	if identityDB != nil {
-		m.templates = idstore.NewRoleTemplateRepository(identityDB)
-	}
 	return m
+}
+
+// ErrNoAppStore reports a Members that was asked a role-template question and
+// has no application connection to answer it from. Distinct from ErrNoTemplate
+// — "this deployment cannot resolve templates at all" is a wiring fault, not a
+// role that does not exist — so a handler can answer 500 rather than 400.
+var ErrNoAppStore = errors.New("approles: no application database connection to resolve role templates from")
+
+// TemplateByID resolves a role template from THIS APPLICATION's own tables.
+//
+// This is the only template lookup a handler can reach through a Members, and
+// that is the point: since sethbacon/terraform-suite-identity#206 Phase 3
+// retired the residual reads of identity.role_templates, what a role id or name
+// means is answered by this application's role_templates alone, under either
+// RoleSource — the rollback lever moves the ASSIGNMENT reads, not the policy of
+// what a role grants here.
+func (m *Members) TemplateByID(ctx context.Context, id string) (Template, error) {
+	if m.store == nil {
+		return Template{}, ErrNoAppStore
+	}
+	return m.store.TemplateByID(ctx, id)
+}
+
+// TemplateByName is TemplateByID keyed by name.
+func (m *Members) TemplateByName(ctx context.Context, name string) (Template, error) {
+	if m.store == nil {
+		return Template{}, ErrNoAppStore
+	}
+	return m.store.TemplateByName(ctx, name)
 }
 
 // Store exposes the app-side tables for the reconcile and for tests. It is nil
@@ -233,7 +254,20 @@ func (m *Members) Store() *Store { return m.store }
 // the argument that it is "grant-shaped" is an argument from the method's name
 // rather than from its statements.
 func (m *Members) AddMemberWithRoleTemplate(ctx context.Context, orgID, userID string, roleTemplateID *string, scope idstore.OrgScope, reduce AuthorityReducer) error {
-	if err := m.identityOrgs.AddMemberWithRoleTemplate(ctx, orgID, userID, roleTemplateID, scope); err != nil {
+	name, err := m.appTemplateName(ctx, roleTemplateID)
+	if err != nil {
+		return err
+	}
+	if name != nil {
+		// The identity leg is expressed by NAME since the reads of
+		// identity.role_templates were retired: the caller's id is THIS
+		// application's, identity resolves its own id for the name, and the two
+		// id spaces owe each other nothing. See appTemplateName.
+		err = m.identityOrgs.AddMemberWithParams(ctx, orgID, userID, *name, scope)
+	} else {
+		err = m.identityOrgs.AddMemberWithRoleTemplate(ctx, orgID, userID, roleTemplateID, scope)
+	}
+	if err != nil {
 		return err
 	}
 	if err := m.mirrorSetByID(ctx, orgID, userID, roleTemplateID, scope); err != nil {
@@ -251,10 +285,14 @@ func (m *Members) AddMemberWithRoleTemplate(ctx context.Context, orgID, userID s
 // GRANT: identity first. Takes an AuthorityReducer for the reason
 // AddMemberWithRoleTemplate does — it is the same mirror upsert, reached by name.
 func (m *Members) AddMemberWithParams(ctx context.Context, orgID, userID, roleTemplateName string, scope idstore.OrgScope, reduce AuthorityReducer) error {
+	id, err := m.appTemplateIDByName(ctx, roleTemplateName)
+	if err != nil {
+		return err
+	}
 	if err := m.identityOrgs.AddMemberWithParams(ctx, orgID, userID, roleTemplateName, scope); err != nil {
 		return err
 	}
-	if err := m.mirrorSetByName(ctx, orgID, userID, roleTemplateName, scope); err != nil {
+	if err := m.mirrorSetByID(ctx, orgID, userID, id, scope); err != nil {
 		return err
 	}
 	return reduceAuthority(ctx, reduce, userID, true)
@@ -266,24 +304,37 @@ func (m *Members) AddMemberWithParams(ctx context.Context, orgID, userID, roleTe
 // escalation, but the safe ordering for the pair as a whole is the one that
 // never leaves this app holding authority identity does not.
 func (m *Members) UpdateMemberRoleTemplate(ctx context.Context, orgID, userID string, roleTemplateID *string, scope idstore.OrgScope, reduce AuthorityReducer) error {
+	name, err := m.appTemplateName(ctx, roleTemplateID)
+	if err != nil {
+		return err
+	}
+
 	// Read the role currently recorded BEFORE the write, so a reassignment to
 	// the role already held can be recognised as the no-op it is (#491).
 	//
-	// Read through identityOrgs, not through m.GetMember: this compares against
-	// the value identityOrgs.UpdateMemberRoleTemplate is about to overwrite, on
-	// the same axis. m.GetMember may substitute the app mirror's role id
-	// depending on the configured source, and the two spaces are not
-	// interchangeable -- comparing across them would silently answer "changed"
-	// or "unchanged" on the wrong evidence.
+	// Read from THE MIRROR, on the caller's scope: the caller's id is this
+	// application's template id, so the only comparison on one axis is against
+	// the id this application currently records. The identity leg's record is a
+	// different id space now that the leg is expressed by name, and comparing
+	// across the two would silently answer "changed" or "unchanged" on the
+	// wrong evidence.
 	//
-	// A read that FAILS yields true: uncertainty must cost an unnecessary sweep,
-	// never a missed reduction.
+	// A read that FAILS — or a Members with no mirror to read — yields true:
+	// uncertainty must cost an unnecessary sweep, never a missed reduction.
 	authorityChanged := true
-	if before, berr := m.identityOrgs.GetMember(ctx, orgID, userID, scope); berr == nil && before != nil {
-		authorityChanged = !sameRoleTemplate(before.RoleTemplateID, roleTemplateID)
+	if m.store != nil {
+		if before, ok, berr := m.store.RoleForPair(ctx, orgID, userID, scope); berr == nil && ok {
+			authorityChanged = !sameRoleTemplate(before.TemplateID, roleTemplateID)
+		}
 	}
 
-	err := m.identityOrgs.UpdateMemberRoleTemplate(ctx, orgID, userID, roleTemplateID, scope)
+	if name != nil {
+		// By NAME, as AddMemberWithRoleTemplate's identity leg is and for the
+		// same reason: identity resolves its own id for the name.
+		err = m.identityOrgs.UpdateMemberRole(ctx, orgID, userID, *name, scope)
+	} else {
+		err = m.identityOrgs.UpdateMemberRoleTemplate(ctx, orgID, userID, roleTemplateID, scope)
+	}
 	if err == nil {
 		err = m.mirrorSetByID(ctx, orgID, userID, roleTemplateID, scope)
 	}
@@ -310,23 +361,30 @@ func sameRoleTemplate(a, b *string) bool {
 //
 // GRANT: identity first.
 func (m *Members) UpdateMemberRole(ctx context.Context, orgID, userID, roleTemplateName string, scope idstore.OrgScope, reduce AuthorityReducer) error {
-	// Same no-op detection as the id variant, on the NAME axis because that is
-	// what this method writes (#491). Read through identityOrgs for the same
-	// reason: it is identity's own record of the role, which is what
-	// identityOrgs.UpdateMemberRole is about to overwrite. Comparing against the
-	// app mirror's id would be comparing across two id spaces.
+	id, err := m.appTemplateIDByName(ctx, roleTemplateName)
+	if err != nil {
+		return err
+	}
+
+	// Same no-op detection as the id variant (#491), against THE MIRROR: the
+	// name has just been resolved to this application's template id, so the
+	// mirror's recorded id is the same axis. Reading identity's record instead
+	// would compare across two id spaces now that the two legs each resolve the
+	// name for themselves.
 	//
 	// This path matters most. Its caller is the IdP group-mapping reconcile on
 	// the LOGIN path, so before this a user in a mapped organization had every
 	// other session they held ended each time they signed in anywhere.
 	authorityChanged := true
-	if before, berr := m.identityOrgs.GetMemberWithRole(ctx, orgID, userID, scope); berr == nil && before != nil && before.RoleTemplateName != nil {
-		authorityChanged = *before.RoleTemplateName != roleTemplateName
+	if m.store != nil && id != nil {
+		if before, ok, berr := m.store.RoleForPair(ctx, orgID, userID, scope); berr == nil && ok {
+			authorityChanged = !sameRoleTemplate(before.TemplateID, id)
+		}
 	}
 
-	err := m.identityOrgs.UpdateMemberRole(ctx, orgID, userID, roleTemplateName, scope)
+	err = m.identityOrgs.UpdateMemberRole(ctx, orgID, userID, roleTemplateName, scope)
 	if err == nil {
-		err = m.mirrorSetByName(ctx, orgID, userID, roleTemplateName, scope)
+		err = m.mirrorSetByID(ctx, orgID, userID, id, scope)
 	}
 	if serr := reduceAuthority(ctx, reduce, userID, authorityChanged); serr != nil {
 		return serr
@@ -486,159 +544,80 @@ func reduceAuthority(ctx context.Context, reduce AuthorityReducer, userID string
 	return reduce(ctx, userID, authorityChanged)
 }
 
-// mirrorSetByID records an assignment whose role is named by identity's template
-// id.
+// appTemplateName resolves a role-template id the caller supplied onto the name
+// THIS application defines for it, for the identity leg of a grant.
 //
-// The id is identity's, and TSM's role_templates deliberately carries the SAME
-// uuid for every row it copied, so it is usable here as-is. When it is not
-// present — a template identity acquired after this deployment's last reconcile,
-// which in a shared identity database can be one the SIBLING app created — the
-// template is fetched and recorded first, because the foreign key would
-// otherwise reject the assignment and the mirror would lose a grant that did
-// happen.
+// # Why the identity leg speaks NAMES now
+//
+// The caller's id is this application's role_templates uuid — the ceiling check
+// validates it there, the role picker lists from there — and since the reads of
+// identity.role_templates were retired, nothing keeps identity's uuid for a role
+// aligned with this application's. Passing the app's uuid into
+// identity.organization_members.role_template_id would trip identity's own
+// foreign key on any deployment where the two id spaces have diverged (a fresh
+// install alongside a sibling that owns the identity seed). The NAME is the
+// contract both sides share: identity resolves its own id for it, exactly as it
+// always has for the by-name writes.
+//
+// nil id resolves to nil (a member with no role — identity represents that too).
+// A Members with NO app store also resolves to nil, which the callers treat as
+// "hand the raw id to the identity leg unchanged": that is the degraded
+// identity-only rig, where this application's id space does not exist.
+//
+// An id the app store does not hold is an ERROR, refused BEFORE either leg
+// writes: under per-app authorization a role this application does not define is
+// not grantable here, whatever the shared identity schema holds.
+func (m *Members) appTemplateName(ctx context.Context, roleTemplateID *string) (*string, error) {
+	if roleTemplateID == nil || m.store == nil {
+		return nil, nil
+	}
+	t, err := m.store.TemplateByID(ctx, *roleTemplateID)
+	if err != nil {
+		return nil, err
+	}
+	return &t.Name, nil
+}
+
+// appTemplateIDByName resolves a role NAME onto this application's template id,
+// for the mirror leg of a by-name grant.
+//
+// The name is what the caller meant and this application's table is what the
+// name must mean HERE. A name this application does not define is refused —
+// BEFORE the identity leg runs, so a role that exists only in the shared schema
+// (the sibling's) can no longer be granted in this application by naming it.
+// That refusal replaced the old behaviour of ADOPTING the identity definition
+// on first use, which was the last way a role this build never defined could
+// come to grant the sibling's scopes here.
+//
+// A Members with no app store resolves to nil: the degraded identity-only rig,
+// where the mirror leg is skipped anyway.
+func (m *Members) appTemplateIDByName(ctx context.Context, name string) (*string, error) {
+	if m.store == nil {
+		return nil, nil
+	}
+	id, err := m.store.TemplateIDByName(ctx, name)
+	if err != nil {
+		return nil, err
+	}
+	return &id, nil
+}
+
+// mirrorSetByID records an assignment in this application's own tables, keyed by
+// THIS application's template id.
+//
+// The id has already been resolved against the app store by the caller
+// (appTemplateName / appTemplateIDByName), so the foreign key can only reject a
+// template deleted in the window since — which is a real fault worth failing on.
 func (m *Members) mirrorSetByID(ctx context.Context, orgID, userID string, roleTemplateID *string, scope idstore.OrgScope) error {
 	if m.store == nil {
 		return nil
 	}
-	recorded := roleTemplateID
-	if roleTemplateID != nil {
-		resolved, err := m.resolveTemplateByID(ctx, *roleTemplateID)
-		if err != nil {
-			slog.Error("approles: could not record the role template for a mirrored assignment",
-				"organization_id", orgID, "user_id", userID, "role_template_id", *roleTemplateID, "error", err)
-			return err
-		}
-		recorded = &resolved
-	}
-	if err := m.store.SetRole(ctx, orgID, userID, recorded, scope); err != nil {
+	if err := m.store.SetRole(ctx, orgID, userID, roleTemplateID, scope); err != nil {
 		slog.Error("approles: identity recorded the role assignment but this application's mirror did not",
 			"organization_id", orgID, "user_id", userID, "error", err)
 		return err
 	}
 	return nil
-}
-
-// mirrorSetByName records an assignment whose role is named by template NAME,
-// resolving the name against TSM's OWN role_templates.
-//
-// Resolved locally rather than by asking identity for the id, because the name
-// is what the caller meant and this app's table is what the name must mean HERE.
-// In this phase the two resolve to the same row (the reconcile copies identity's
-// ids), so the distinction is invisible; from the phase that switches reads
-// onward it is the difference between "the editor role" meaning TSM's editor and
-// meaning whichever app seeded that name last.
-func (m *Members) mirrorSetByName(ctx context.Context, orgID, userID, roleTemplateName string, scope idstore.OrgScope) error {
-	if m.store == nil {
-		return nil
-	}
-	id, err := m.store.TemplateIDByName(ctx, roleTemplateName)
-	if errors.Is(err, ErrNoTemplate) {
-		// The identity write SUCCEEDED with this name, so identity has a
-		// template the mirror does not. Copy it across and retry once, rather
-		// than dropping the assignment: this is the shared-database case where
-		// the sibling app created a role since the last reconcile.
-		if id, err = m.adoptTemplateByName(ctx, roleTemplateName); err != nil {
-			slog.Error("approles: identity accepted a role name this application's mirror cannot resolve",
-				"organization_id", orgID, "user_id", userID, "role", roleTemplateName, "error", err)
-			return err
-		}
-	} else if err != nil {
-		slog.Error("approles: could not resolve a role name in this application's mirror",
-			"organization_id", orgID, "user_id", userID, "role", roleTemplateName, "error", err)
-		return err
-	}
-	if err := m.store.SetRole(ctx, orgID, userID, &id, scope); err != nil {
-		slog.Error("approles: identity recorded the role assignment but this application's mirror did not",
-			"organization_id", orgID, "user_id", userID, "role", roleTemplateName, "error", err)
-		return err
-	}
-	return nil
-}
-
-// resolveTemplateByID returns the role template id THIS APPLICATION will record
-// for an assignment identity expressed with roleTemplateID, adopting the
-// definition when this deployment has never seen it.
-//
-// # It never deletes anything, and that is the point
-//
-// An earlier version of this called Store.RepointTemplateName first — releasing
-// the name from whatever id held it — because Phase 3b's app-side seed can mint a
-// LOCAL uuid for a role name identity does not have (Store.DefineTemplate), so
-// `operator` can exist here under uuid Y while the sibling later seeds `operator`
-// into identity under uuid Z, and the adopt insert would then violate the unique
-// index on name.
-//
-// That fix was worse than the fault. RepointTemplateName DELETEs the row, and
-// organization_member_roles.role_template_id is ON DELETE SET NULL — so a request
-// GRANTING one principal a role would have silently withdrawn that role from
-// EVERY OTHER principal holding it, with no credential sweep and no repair until
-// the next boot. The reconcile can afford that statement because its assignment
-// pass restates every membership microseconds later; a request path cannot.
-// (sethbacon/security-orchestration#732 flagged exactly this, on both helpers.)
-//
-// The right answer was never to delete: it is to USE THE LOCAL ID. The caller
-// named a role, this application defines what that name means here, and under the
-// per-app model that definition is the answer — which is the same reasoning
-// mirrorSetByName already applies when the caller names the role directly.
-func (m *Members) resolveTemplateByID(ctx context.Context, roleTemplateID string) (string, error) {
-	present, err := m.store.TemplateExists(ctx, roleTemplateID)
-	if err != nil {
-		return "", err
-	}
-	if present {
-		return roleTemplateID, nil
-	}
-	if m.templates == nil {
-		return "", ErrNoTemplate
-	}
-	parsed, err := uuid.Parse(roleTemplateID)
-	if err != nil {
-		return "", err
-	}
-	rt, err := m.templates.GetRoleTemplate(ctx, parsed)
-	if err != nil {
-		return "", err
-	}
-	if rt == nil {
-		return "", ErrNoTemplate
-	}
-	// The NAME may already be defined here, under a locally-minted id. Use it.
-	local, lerr := m.store.TemplateIDByName(ctx, rt.Name)
-	if lerr == nil {
-		return local, nil
-	}
-	if !errors.Is(lerr, ErrNoTemplate) {
-		return "", lerr
-	}
-	// Genuinely new here: adopt identity's row, ids included. AdoptTemplate and
-	// not UpsertTemplate, for the reason the reconcile's adopt pass uses it —
-	// identity may supply a definition this deployment has never seen, and may not
-	// redefine one it already holds.
-	t := templateFromIdentity(rt.ID.String(), rt.Name, rt.DisplayName, rt.Description, rt.Scopes, rt.IsSystem)
-	if err := m.store.AdoptTemplate(ctx, t); err != nil {
-		return "", err
-	}
-	return t.ID, nil
-}
-
-// adoptTemplateByName resolves a role NAME the mirror could not resolve, by
-// asking identity for it and then resolving identity's id here.
-//
-// Delegates to resolveTemplateByID rather than inserting directly, so there is
-// ONE place that decides which id this application records — and so this path
-// cannot grow a delete of its own.
-func (m *Members) adoptTemplateByName(ctx context.Context, name string) (string, error) {
-	if m.templates == nil {
-		return "", ErrNoTemplate
-	}
-	rt, err := m.templates.GetRoleTemplateByName(ctx, name)
-	if err != nil {
-		return "", err
-	}
-	if rt == nil {
-		return "", ErrNoTemplate
-	}
-	return m.resolveTemplateByID(ctx, rt.ID.String())
 }
 
 func (m *Members) mirrorDelete(ctx context.Context, orgID, userID string, scope idstore.OrgScope) error {
@@ -685,16 +664,3 @@ func (m *Members) mirrorDeleteForOrganization(ctx context.Context, orgID string,
 // the statements (Store.andScope), so an out-of-tenancy write matches no row
 // instead of being skipped by a caller-side branch, and a new Store accessor
 // cannot omit it without failing the class guard.
-
-// templateFromIdentity converts identity's role template into this package's
-// transfer shape, preserving the id.
-func templateFromIdentity(id, name, displayName string, description *string, scopes []string, isSystem bool) Template {
-	return Template{
-		ID:          id,
-		Name:        name,
-		DisplayName: displayName,
-		Description: description,
-		Scopes:      scopes,
-		IsSystem:    isSystem,
-	}
-}

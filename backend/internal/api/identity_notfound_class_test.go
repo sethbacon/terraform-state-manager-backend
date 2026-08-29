@@ -164,7 +164,7 @@ func TestGuardEmailRebind_Arms(t *testing.T) {
 // failing the whole reconciliation here.
 func TestGuardProvisionableRole_UnknownTemplate_Allows(t *testing.T) {
 	h, mock := newReconcileEnv(t, nil)
-	mock.ExpectQuery("SELECT id, name, display_name, description, scopes").WithArgs("ghost-role").
+	mock.ExpectQuery(`SELECT id, name, COALESCE\(display_name`).WithArgs("ghost-role").
 		WillReturnRows(sqlmock.NewRows(roleTemplateCols))
 	if err := h.guardProvisionableRole(context.Background(), "ghost-role"); err != nil {
 		t.Fatalf("an unresolved role name must not fail the guard, got %v", err)
@@ -204,14 +204,14 @@ func TestNotificationChannel_UpdateMissing_Returns404(t *testing.T) {
 	}
 }
 
-// TestCheckRoleAssignment_UnknownTemplate_Returns400 covers a branch that was
-// UNREACHABLE before the sentinel existed: GetRoleTemplate returned (nil, nil)
-// for a well-formed UUID naming no row, the `err != nil` arm never fired, and
-// `tmpl == nil` was dead code. It is reachable now, and 400 (not 500) is the
-// answer that matches the malformed-UUID case right above it.
+// TestCheckRoleAssignment_UnknownTemplate_Returns400: a well-formed UUID that
+// names no role template IN THIS APPLICATION'S OWN role_templates — the only
+// table the ceiling reads since the identity-schema lookups were retired — is
+// a 400 (not 500), the answer that matches the malformed-UUID case right above
+// it.
 func TestCheckRoleAssignment_UnknownTemplate_Returns400(t *testing.T) {
-	e := newAdminWriteEnv(t)
-	e.mock.ExpectQuery("SELECT id, name, display_name, description, scopes").
+	e := newAdminWriteEnvWithApp(t)
+	e.mock.ExpectQuery(`SELECT id, name, COALESCE\(display_name`).
 		WillReturnRows(sqlmock.NewRows(roleTemplateCols))
 	w := e.do(http.MethodPost, "/api/v1/admin/organizations/o1/members",
 		`{"user_id":"u1","role_template_id":"11111111-1111-1111-1111-111111111111"}`)
@@ -328,7 +328,12 @@ func TestReconcile_AlreadyRemovedMembership_CompletesLoop(t *testing.T) {
 		WillReturnRows(sqlmock.NewRows(memberRowCols).AddRow("o-alpha", "u1", nil, time.Now()))
 	mock.ExpectQuery("FROM organization_members").WithArgs("o-beta", "u1", []string{"o-beta"}).
 		WillReturnRows(sqlmock.NewRows(memberRowCols).AddRow("o-beta", "u1", nil, time.Now()))
-	// ...but alpha's row is already gone by the time the DELETE lands.
+	// The mirror's own deletes run FIRST for each revocation (approles.Members).
+	mock.ExpectExec("DELETE FROM organization_member_roles").WithArgs("o-alpha", "u1", []string{"o-alpha"}).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec("DELETE FROM organization_member_roles").WithArgs("o-beta", "u1", []string{"o-beta"}).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	// ...but alpha's identity row is already gone by the time the DELETE lands.
 	mock.ExpectExec("DELETE FROM organization_members").WithArgs("o-alpha", "u1", []string{"o-alpha"}).
 		WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectExec("DELETE FROM organization_members").WithArgs("o-beta", "u1", []string{"o-beta"}).
@@ -354,6 +359,8 @@ func TestReconcile_MembershipVanishedBeforeRoleUpdate_Continues(t *testing.T) {
 	mock.ExpectQuery("FROM organization_members").WithArgs("o1", "u1", []string{"o1"}).
 		WillReturnRows(sqlmock.NewRows(memberRowCols).AddRow("o1", "u1", nil, time.Now()))
 	expectRoleScopesLookup(mock, "editor", []string{"state:read", "state:write"})
+	expectMirrorRoleResolution(mock, "editor", "rt-editor")
+	expectMirrorPriorRoleAbsent(mock)
 	mock.ExpectQuery("SELECT id FROM role_templates WHERE name").WithArgs("editor").
 		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("rt-editor"))
 	mock.ExpectExec("UPDATE organization_members").WillReturnResult(sqlmock.NewResult(0, 0))

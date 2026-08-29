@@ -8,8 +8,7 @@ import (
 	"errors"
 	"fmt"
 
-	idstore "github.com/sethbacon/terraform-suite-identity/identity/store"
-
+	"github.com/terraform-state-manager/terraform-state-manager/internal/approles"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/auth"
 )
 
@@ -33,27 +32,25 @@ import (
 // already has a SCIM surface), per terraform-suite-identity's
 // ValidateProvisionableScopes doc and this repo's issue #173.
 //
+// The name is resolved against THIS APPLICATION's own role_templates — the
+// table whose scopes the membership write would actually grant — since the
+// residual identity.role_templates reads were retired.
+//
 // A role_template name that does not resolve to a row returns nil (no error):
 // the caller's own AddMemberWithParams/UpdateMemberRole performs the
 // authoritative name lookup immediately afterward and surfaces its own clear
 // error there, so this guard does not need to duplicate that failure mode.
-// Since terraform-suite-identity v0.24.0 the store reports "no such template"
-// as an error wrapping store.ErrNotFound instead of (nil, nil), so that
-// contract is now kept by matching the sentinel — the `rt == nil` branch below
-// no longer fires, and without this the guard would reject every mapping whose
-// role name does not exist rather than deferring to the write's own error.
 //
-// Any other lookup failure is returned (fails closed) — a transient DB error
-// here should not silently let an unverified role's scopes through.
+// Any other lookup failure is returned (fails closed) — a transient DB error, or
+// a rig with no application connection at all, must not silently let an
+// unverified role's scopes through.
 func (h *AuthHandlers) guardProvisionableRole(ctx context.Context, roleTemplateName string) error {
-	rt, err := h.roleRepo.GetRoleTemplateByName(ctx, roleTemplateName)
+	rt, err := h.orgRepo.TemplateByName(ctx, roleTemplateName)
 	switch {
-	case errors.Is(err, idstore.ErrNotFound):
+	case errors.Is(err, approles.ErrNoTemplate):
 		return nil // unresolved name: the subsequent membership write reports it
 	case err != nil:
 		return fmt.Errorf("look up role template %q: %w", roleTemplateName, err)
-	case rt == nil:
-		return nil
 	}
 	return auth.ValidateProvisionableScopes(rt.Scopes)
 }
