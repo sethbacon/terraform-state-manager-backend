@@ -145,11 +145,14 @@ func TestScheduleRepository_ScopedReads_PlatformAdminIsUnfiltered(t *testing.T) 
 // oversight, and it is here so that nobody "fixes" it later.
 //
 // The background runner has no request and therefore no principal, so there is
-// no scope to resolve; #393 settled that a worker is an explicit exemption
-// rather than a synthetic platform admin. It reads every due schedule and
-// carries each one's organization forward in memory across the dispatcher seam,
-// because a schedule names its target only inside target_config JSONB and a run
-// fired from it has no edge to join back along.
+// no scope to resolve; the #393 background-authority decision (option B) makes
+// the split explicit: ENUMERATION STAYS UNSCOPED BY DESIGN -- reading every due
+// schedule across organizations is the system's job -- while every per-item
+// load after it runs under a scope DERIVED from the enumerated row
+// (tenancy.SystemActingIn). GetDue reads every due schedule and carries each
+// one's organization forward in memory across the dispatcher seam, because a
+// schedule names its target only inside target_config JSONB and a run fired
+// from it has no edge to join back along.
 //
 // Scoping GetDue to nothing — the reflex when a reader has no principal — would
 // stop every cron schedule in the deployment from ever firing, silently.

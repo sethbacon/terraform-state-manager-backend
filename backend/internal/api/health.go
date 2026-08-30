@@ -8,7 +8,6 @@ import (
 	"crypto/subtle"
 	"database/sql"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -98,22 +97,24 @@ func (h *HealthHandlers) CreateRun() gin.HandlerFunc {
 		}
 
 		ctx := c.Request.Context()
-		// The shared ownership rule, not a second copy of it: this check and
-		// dispatchDrift's used to be written separately, and only this one
-		// existed. See dispatch_ownership.go.
-		conn, err := pipelineConnectionFor(ctx, h.pipelineRepo, req.PipelineConnectionID, organizationID)
-		if errors.Is(err, errNotOwnedHere) || (err == nil && conn == nil) {
-			// Same shape either way: a caller outside the owning organization
-			// learns nothing about whether the id exists.
-			c.JSON(http.StatusNotFound, gin.H{"error": "pipeline connection not found"})
-			return
-		}
+		// The shared chain authority, not a second copy of the rule: this check
+		// and dispatchDrift's used to be written separately, and only this one
+		// existed. Every by-id load below is an InScope read under the acting
+		// organization (#393). See dispatch_ownership.go.
+		auth := requestAuthority(organizationID)
+		conn, err := pipelineConnectionFor(ctx, h.pipelineRepo, req.PipelineConnectionID, auth)
 		if err != nil {
 			serverError(c, err, "failed to load pipeline connection")
 			return
 		}
+		if conn == nil {
+			// Same shape whether the id names nothing or another organization's
+			// row: a caller learns nothing about whether the id exists.
+			c.JSON(http.StatusNotFound, gin.H{"error": "pipeline connection not found"})
+			return
+		}
 		// Connection-level token, or the shared token of its CI source.
-		token, bearer, err := resolvePipelineToken(ctx, h.ciSourceRepo, conn)
+		token, bearer, err := resolvePipelineToken(ctx, h.ciSourceRepo, conn, auth)
 		if err != nil {
 			serverError(c, err, "failed to resolve pipeline token")
 			return

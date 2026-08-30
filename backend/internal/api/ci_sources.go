@@ -87,7 +87,16 @@ func ciSourceJSON(s *repositories.CISource) gin.H {
 // @Router       /ci-sources [get]
 func (h *CISourceHandlers) ListCISources() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		sources, err := h.repo.List(c.Request.Context())
+		// The Phase 3 read flip for ci_sources (#393). Unscoped, this listed
+		// every organization's CI provider coordinates to any caller holding
+		// sources:manage in one of them. An unresolved scope is a 500: it means
+		// the route lost its middleware.TenantScope.
+		scope, resolved := tenantscope.FromContext(c)
+		if !resolved {
+			serverError(c, errNoTenantScope, "the tenant scope was not resolved for this route")
+			return
+		}
+		sources, err := h.repo.ListInScope(c.Request.Context(), scope)
 		if err != nil {
 			serverError(c, err, "failed to list CI sources")
 			return
@@ -371,8 +380,19 @@ func ptrStr(p *string) string {
 }
 
 // loadWithToken fetches a source and a usable credential for discovery.
+//
+// SCOPED (#393): this is the single by-id load behind verify, discovery, and
+// the whole repo-setup wizard, and it DECRYPTS the source's shared credential
+// two lines later -- so an unscoped load here handed any sources:manage holder
+// any organization's CI credential for use, by id. A source in another
+// organization is a plain 404; an unresolved scope is a wiring fault and a 500.
 func (h *CISourceHandlers) loadWithToken(c *gin.Context) (*repositories.CISource, string, bool) {
-	src, err := h.repo.GetByID(c.Request.Context(), c.Param("id"))
+	scope, resolved := tenantscope.FromContext(c)
+	if !resolved {
+		serverError(c, errNoTenantScope, "the tenant scope was not resolved for this route")
+		return nil, "", false
+	}
+	src, err := h.repo.GetByIDInScope(c.Request.Context(), c.Param("id"), scope)
 	if err != nil {
 		serverError(c, err, "failed to load CI source")
 		return nil, "", false
@@ -572,7 +592,7 @@ func (h *CISourceHandlers) CreateSourcePipeline() gin.HandlerFunc {
 // of the CI source referenced by config.ci_source_id (Bearer when that source is
 // app-auth). token is "" when neither exists (the dispatcher rejects empty
 // credentials with its own message).
-func resolvePipelineToken(ctx context.Context, ciRepo *repositories.CISourceRepository, conn *repositories.PipelineConnection) (token string, bearer bool, err error) {
+func resolvePipelineToken(ctx context.Context, ciRepo *repositories.CISourceRepository, conn *repositories.PipelineConnection, auth dispatchAuthority) (token string, bearer bool, err error) {
 	if len(conn.EncryptedToken) > 0 {
 		pt, decErr := crypto.DecryptFor(conn.EncryptedToken, crypto.PurposePipelineDispatchToken)
 		if decErr != nil {
@@ -584,12 +604,19 @@ func resolvePipelineToken(ctx context.Context, ciRepo *repositories.CISourceRepo
 	if id == "" {
 		return "", false, nil
 	}
-	src, loadErr := ciRepo.GetByID(ctx, id)
+	// THE HOP THAT USED TO BE UNSCOPED (#393). This is the chained load the
+	// background-authority decision names: connection -> CI source, where the
+	// source holds an ORGANIZATION-LEVEL shared credential. Loaded under the
+	// same single-organization authority as every other read on the chain, so
+	// a connection whose config points across the partition matches no row --
+	// and the refusal names the row and the provenance, because a dispatch
+	// that silently skipped here would hide a poisoned reference forever.
+	src, loadErr := ciRepo.GetByIDInScope(ctx, id, auth.scope)
 	if loadErr != nil {
 		return "", false, fmt.Errorf("load CI source: %w", loadErr)
 	}
 	if src == nil {
-		return "", false, fmt.Errorf("CI source referenced by this connection no longer exists")
+		return "", false, errChainCrossesOrganizations("ci_sources", id, auth, errCISourceNotReachable)
 	}
 	tok, tokErr := sourceToken(ctx, src)
 	if tokErr != nil {

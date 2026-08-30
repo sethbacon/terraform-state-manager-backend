@@ -62,7 +62,7 @@ func TestVerifyCISource_App(t *testing.T) {
 	defer pipelines.OverrideBaseURLsForTest(adoSrv.URL, "")()
 
 	e := newCISourcesEnv(t)
-	e.mock.ExpectQuery("SELECT .+ FROM ci_sources WHERE id").WithArgs("c1").
+	e.mock.ExpectQuery("FROM ci_sources WHERE organization_id = ANY").WithArgs([]string{testActingOrg}, "c1").
 		WillReturnRows(appCiSrcRow(t))
 	w := e.do(http.MethodPost, "/api/v1/ci-sources/c1/verify", "")
 	if w.Code != http.StatusOK {
@@ -90,7 +90,7 @@ func ghAppCiSrcRow(t *testing.T) *sqlmock.Rows {
 		t.Fatalf("Encrypt: %v", err)
 	}
 	return sqlmock.NewRows(ciSrcCols).
-		AddRow("c1", "corp", "github_actions", "corp-org", nil, "app", nil, nil, nil, nil, "app-123", "inst-9", enc, "2026-06-10", "2026-06-10")
+		AddRow("c1", "corp", "github_actions", "corp-org", nil, "app", nil, nil, nil, nil, "app-123", "inst-9", enc, "2026-06-10", "2026-06-10", testActingOrg)
 }
 
 // TestVerifyCISource_GitHubApp: VerifyCISource on a GitHub App source mints an
@@ -119,7 +119,7 @@ func TestVerifyCISource_GitHubApp(t *testing.T) {
 	defer pipelines.OverrideBaseURLsForTest("", ghSrv.URL)()
 
 	e := newCISourcesEnv(t)
-	e.mock.ExpectQuery("SELECT .+ FROM ci_sources WHERE id").WithArgs("c1").
+	e.mock.ExpectQuery("FROM ci_sources WHERE organization_id = ANY").WithArgs([]string{testActingOrg}, "c1").
 		WillReturnRows(ghAppCiSrcRow(t))
 	w := e.do(http.MethodPost, "/api/v1/ci-sources/c1/verify", "")
 	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"ok":true`) {
@@ -141,7 +141,7 @@ func TestCISourceProxies_AzureDevOps(t *testing.T) {
 	e := newCISourcesEnv(t)
 	proj := "Platform"
 	expectSrc := func() {
-		e.mock.ExpectQuery("SELECT .+ FROM ci_sources WHERE id").WithArgs("c1").
+		e.mock.ExpectQuery("FROM ci_sources WHERE organization_id = ANY").WithArgs([]string{testActingOrg}, "c1").
 			WillReturnRows(ciSrcRow(t, "azure_devops", &proj, "pat"))
 	}
 
@@ -195,7 +195,7 @@ func TestCISourceProxies_GitHub(t *testing.T) {
 
 	e := newCISourcesEnv(t)
 	expectSrc := func() {
-		e.mock.ExpectQuery("SELECT .+ FROM ci_sources WHERE id").WithArgs("c1").
+		e.mock.ExpectQuery("FROM ci_sources WHERE organization_id = ANY").WithArgs([]string{testActingOrg}, "c1").
 			WillReturnRows(ciSrcRow(t, "github_actions", nil, "ghp"))
 	}
 
@@ -240,7 +240,8 @@ func TestDriftDispatch_HappyPathOverFakeProvider(t *testing.T) {
 	defer restore()
 
 	e := newDriftEnv(t)
-	e.mock.ExpectQuery("SELECT .+ FROM pipeline_connections WHERE id").WithArgs("p1").
+	e.mock.ExpectQuery("FROM pipeline_connections WHERE organization_id = ANY").
+		WithArgs([]string{testActingOrg}, "p1").
 		WillReturnRows(pipelineHTTPRow(t, "azure_devops", "pat",
 			map[string]any{"organization": "corp", "project": "Platform", "pipeline_id": "7"}))
 	e.mock.ExpectQuery("INSERT INTO drift_runs").WillReturnRows(driftRow("tok-1"))
@@ -267,7 +268,7 @@ func TestSetupSourceWorkflow_ProviderFailureIs502(t *testing.T) {
 
 	e := newCISourcesEnv(t)
 	proj := "Platform"
-	e.mock.ExpectQuery("SELECT .+ FROM ci_sources WHERE id").WithArgs("c1").
+	e.mock.ExpectQuery("FROM ci_sources WHERE organization_id = ANY").WithArgs([]string{testActingOrg}, "c1").
 		WillReturnRows(ciSrcRow(t, "azure_devops", &proj, "pat"))
 
 	w := e.do(http.MethodPost, "/api/v1/ci-sources/c1/repos/ghost/workflow-setup",

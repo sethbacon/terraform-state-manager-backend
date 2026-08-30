@@ -68,7 +68,7 @@ func newCISourcesEnv(t *testing.T) *sourcesEnv {
 	return &sourcesEnv{r: r, mock: mock}
 }
 
-var ciSrcCols = []string{"id", "name", "provider", "organization", "project", "auth_method", "encrypted_token", "tenant_id", "client_id", "encrypted_client_secret", "github_app_id", "github_installation_id", "encrypted_app_private_key", "created_at", "updated_at"}
+var ciSrcCols = []string{"id", "name", "provider", "organization", "project", "auth_method", "encrypted_token", "tenant_id", "client_id", "encrypted_client_secret", "github_app_id", "github_installation_id", "encrypted_app_private_key", "created_at", "updated_at", "organization_id"}
 
 func ciSrcRow(t *testing.T, provider string, project *string, token string) *sqlmock.Rows {
 	t.Helper()
@@ -77,7 +77,7 @@ func ciSrcRow(t *testing.T, provider string, project *string, token string) *sql
 		t.Fatalf("Encrypt: %v", err)
 	}
 	return sqlmock.NewRows(ciSrcCols).
-		AddRow("c1", "corp", provider, "corp-org", project, "pat", enc, nil, nil, nil, nil, nil, nil, "2026-06-10", "2026-06-10")
+		AddRow("c1", "corp", provider, "corp-org", project, "pat", enc, nil, nil, nil, nil, nil, nil, "2026-06-10", "2026-06-10", testActingOrg)
 }
 
 // appCiSrcRow builds an Entra app-auth ADO source row whose encrypted client
@@ -90,7 +90,7 @@ func appCiSrcRow(t *testing.T) *sqlmock.Rows {
 	}
 	proj := "Platform"
 	return sqlmock.NewRows(ciSrcCols).
-		AddRow("c1", "corp", "azure_devops", "corp-org", &proj, "app", nil, "the-tenant", "the-client", enc, nil, nil, nil, "2026-06-10", "2026-06-10")
+		AddRow("c1", "corp", "azure_devops", "corp-org", &proj, "app", nil, "the-tenant", "the-client", enc, nil, nil, nil, "2026-06-10", "2026-06-10", testActingOrg)
 }
 
 func TestCISources_CreateApp(t *testing.T) {
@@ -146,7 +146,7 @@ func TestCISources_CreateGitHubApp(t *testing.T) {
 	}
 	e.mock.ExpectQuery("INSERT INTO ci_sources").WillReturnRows(
 		sqlmock.NewRows(ciSrcCols).
-			AddRow("c1", "corp", "github_actions", "corp-org", nil, "app", nil, nil, nil, nil, "app-123", "inst-9", enc, "2026-06-10", "2026-06-10"))
+			AddRow("c1", "corp", "github_actions", "corp-org", nil, "app", nil, nil, nil, nil, "app-123", "inst-9", enc, "2026-06-10", "2026-06-10", testActingOrg))
 	payload, _ := json.Marshal(map[string]string{
 		"name": "corp-gh", "provider": "github_actions", "organization": "corp-org",
 		"auth_method": "app", "github_app_id": "app-123", "github_installation_id": "inst-9",
@@ -173,7 +173,7 @@ func TestCISources_CRUD(t *testing.T) {
 	e := newCISourcesEnv(t)
 	proj := "Platform"
 
-	e.mock.ExpectQuery("SELECT .+ FROM ci_sources ORDER BY name").
+	e.mock.ExpectQuery("FROM ci_sources WHERE organization_id = ANY").
 		WillReturnRows(ciSrcRow(t, "azure_devops", &proj, "pat"))
 	w := e.do(http.MethodGet, "/api/v1/ci-sources", "")
 	if w.Code != http.StatusOK {
@@ -222,16 +222,16 @@ func TestCISources_LoadWithTokenGuards(t *testing.T) {
 	e := newCISourcesEnv(t)
 
 	// Missing source → 404 (any discovery route exercises loadWithToken).
-	e.mock.ExpectQuery("SELECT .+ FROM ci_sources WHERE id").WithArgs("ghost").
+	e.mock.ExpectQuery("FROM ci_sources WHERE organization_id = ANY").WithArgs([]string{testActingOrg}, "ghost").
 		WillReturnRows(sqlmock.NewRows(ciSrcCols))
 	if w := e.do(http.MethodGet, "/api/v1/ci-sources/ghost/repos", ""); w.Code != http.StatusNotFound {
 		t.Errorf("missing source: status = %d, want 404", w.Code)
 	}
 
 	// Corrupted sealed token → 500 before any provider call.
-	e.mock.ExpectQuery("SELECT .+ FROM ci_sources WHERE id").WithArgs("c1").
+	e.mock.ExpectQuery("FROM ci_sources WHERE organization_id = ANY").WithArgs([]string{testActingOrg}, "c1").
 		WillReturnRows(sqlmock.NewRows(ciSrcCols).
-			AddRow("c1", "corp", "github_actions", "corp-org", nil, "pat", []byte("not-a-ciphertext"), nil, nil, nil, nil, nil, nil, "2026-06-10", "2026-06-10"))
+			AddRow("c1", "corp", "github_actions", "corp-org", nil, "pat", []byte("not-a-ciphertext"), nil, nil, nil, nil, nil, nil, "2026-06-10", "2026-06-10", testActingOrg))
 	if w := e.do(http.MethodGet, "/api/v1/ci-sources/c1/repos", ""); w.Code != http.StatusInternalServerError {
 		t.Errorf("corrupt token: status = %d, want 500", w.Code)
 	}
@@ -241,7 +241,7 @@ func TestCreateSourcePipeline_Validation(t *testing.T) {
 	e := newCISourcesEnv(t)
 
 	// GitHub sources cannot create ADO pipeline definitions.
-	e.mock.ExpectQuery("SELECT .+ FROM ci_sources WHERE id").WithArgs("c1").
+	e.mock.ExpectQuery("FROM ci_sources WHERE organization_id = ANY").WithArgs([]string{testActingOrg}, "c1").
 		WillReturnRows(ciSrcRow(t, "github_actions", nil, "ghp"))
 	w := e.do(http.MethodPost, "/api/v1/ci-sources/c1/repos/r1/pipelines", `{"name":"TSM Drift"}`)
 	if w.Code != http.StatusBadRequest {
@@ -250,7 +250,7 @@ func TestCreateSourcePipeline_Validation(t *testing.T) {
 
 	// ADO source with a blank name.
 	proj := "Platform"
-	e.mock.ExpectQuery("SELECT .+ FROM ci_sources WHERE id").WithArgs("c1").
+	e.mock.ExpectQuery("FROM ci_sources WHERE organization_id = ANY").WithArgs([]string{testActingOrg}, "c1").
 		WillReturnRows(ciSrcRow(t, "azure_devops", &proj, "pat"))
 	w = e.do(http.MethodPost, "/api/v1/ci-sources/c1/repos/r1/pipelines", `{"name":"  "}`)
 	if w.Code != http.StatusBadRequest {
@@ -263,7 +263,7 @@ func TestSetupSourceWorkflow_Validation(t *testing.T) {
 	proj := "Platform"
 
 	expectSrc := func() {
-		e.mock.ExpectQuery("SELECT .+ FROM ci_sources WHERE id").WithArgs("c1").
+		e.mock.ExpectQuery("FROM ci_sources WHERE organization_id = ANY").WithArgs([]string{testActingOrg}, "c1").
 			WillReturnRows(ciSrcRow(t, "azure_devops", &proj, "pat"))
 	}
 
@@ -296,7 +296,7 @@ func TestGetSourcePRState_Validation(t *testing.T) {
 	proj := "Platform"
 
 	for _, pr := range []string{"abc", "0", "-3"} {
-		e.mock.ExpectQuery("SELECT .+ FROM ci_sources WHERE id").WithArgs("c1").
+		e.mock.ExpectQuery("FROM ci_sources WHERE organization_id = ANY").WithArgs([]string{testActingOrg}, "c1").
 			WillReturnRows(ciSrcRow(t, "azure_devops", &proj, "pat"))
 		if w := e.do(http.MethodGet, "/api/v1/ci-sources/c1/repos/r1/prs/"+pr, ""); w.Code != http.StatusBadRequest {
 			t.Errorf("pr=%s: status = %d, want 400", pr, w.Code)
