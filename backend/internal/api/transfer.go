@@ -329,14 +329,38 @@ func emptyState(a *analyzer.Analysis) []byte {
 	return b
 }
 
-// GetTransfer returns a transfer record by id.
+// GetTransfer returns a transfer record by id, scoped to the caller's
+// organization (#393 Phase 3, the last of the nine roots).
+//
+// It read by id alone, so any caller holding state:read anywhere could fetch any
+// transfer in the deployment: both source ids, both state keys, the actor, and
+// whether the source was decommissioned. That is a map of another tenant's state
+// files, and the state key is the argument the read routes take.
+//
+// The row records ONE organization -- the one the caller was acting as when they
+// performed the transfer -- and this predicate is on that column alone. A
+// transfer whose ends sit in different organizations is a supported move
+// (000033), and the counterparty learns of it through its own audit entry
+// (#541), not by being admitted to this read. transfer_scope.go states why
+// widening the predicate to either end would be wrong in both directions.
 func (h *SourcesHandlers) GetTransfer() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		t, err := h.transferRepo.GetByID(c.Request.Context(), c.Param("id"))
+		// An unresolved scope is a wiring fault, not an empty one: this route
+		// carries middleware.TenantScope, and if it stopped doing so, reading it
+		// as "no memberships" would turn a missing router line into a silent
+		// unscoped read the next time someone simplified the branch.
+		scope, resolved := tenantscope.FromContext(c)
+		if !resolved {
+			serverError(c, errNoTenantScope, "the tenant scope was not resolved for this route")
+			return
+		}
+		t, err := h.transferRepo.GetByIDInScope(c.Request.Context(), c.Param("id"), scope)
 		if err != nil {
 			serverError(c, err, "failed to load transfer")
 			return
 		}
+		// A transfer in another organization is reported EXACTLY as one that does
+		// not exist; the two share this branch on purpose.
 		if t == nil {
 			c.JSON(http.StatusNotFound, gin.H{"error": "transfer not found"})
 			return

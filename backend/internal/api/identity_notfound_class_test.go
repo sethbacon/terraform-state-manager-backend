@@ -195,7 +195,11 @@ func TestMeHandler_DeletedUser_Returns404(t *testing.T) {
 
 func TestNotificationChannel_UpdateMissing_Returns404(t *testing.T) {
 	e := newNotificationsEnv(t)
-	e.mock.ExpectQuery("UPDATE notification_channels").
+	// The organization array is bound after the six value arguments, and it is
+	// asserted rather than AnyArg'd: an UPDATE expectation that binds nothing is
+	// how a scope swap goes unnoticed.
+	e.mock.ExpectQuery(`UPDATE notification_channels[\s\S]*organization_id = ANY`).
+		WithArgs("ghost", "ops", "webhook", sqlmock.AnyArg(), true, nil, []string{testActingOrg}).
 		WillReturnRows(sqlmock.NewRows(notifChannelCols))
 	w := e.do(http.MethodPut, "/api/v1/notifications/channels/ghost",
 		`{"name":"ops","type":"webhook"}`)
@@ -298,7 +302,8 @@ func TestAPIKeyDelete_AlreadyGone_Returns204(t *testing.T) {
 
 func TestNotificationChannel_DeleteMissing_Returns204(t *testing.T) {
 	e := newNotificationsEnv(t)
-	e.mock.ExpectExec("DELETE FROM notification_channels").WithArgs("ghost").
+	e.mock.ExpectExec(`DELETE FROM notification_channels[\s\S]*organization_id = ANY`).
+		WithArgs("ghost", []string{testActingOrg}).
 		WillReturnResult(sqlmock.NewResult(0, 0))
 	if w := e.do(http.MethodDelete, "/api/v1/notifications/channels/ghost", ""); w.Code != http.StatusNoContent {
 		t.Errorf("repeat DELETE channel: status = %d, want 204", w.Code)

@@ -25,6 +25,7 @@ import (
 	"github.com/terraform-state-manager/terraform-state-manager/internal/crypto"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/db/repositories"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/services/notify"
+	"github.com/terraform-state-manager/terraform-state-manager/internal/tenantscope"
 )
 
 var validChannelTypes = map[string]bool{"webhook": true, "slack": true, "teams": true, "email": true}
@@ -127,7 +128,32 @@ func (req *channelRequest) events() []string {
 	return req.Events
 }
 
-// ListChannels returns all notification channels (without their secret targets).
+// channelScope resolves the tenant scope for a channel route, writing the
+// refusal itself when there is none.
+//
+// AN UNRESOLVED SCOPE IS A WIRING FAULT, NOT AN EMPTY ONE, and the two must not
+// be conflated: an empty scope is an answer ("this caller may read in no
+// organization") and reading with it correctly returns nothing, while an
+// unresolved scope means the route lost its middleware.TenantScope. Treating the
+// second as the first would turn a missing router line into a silent, permanent
+// "you have no channels"; treating it as a full scope would restore the unscoped
+// read. It is a 500.
+func channelScope(c *gin.Context) (tenantscope.Scope, bool) {
+	scope, resolved := tenantscope.FromContext(c)
+	if !resolved {
+		serverError(c, errNoTenantScope, "the tenant scope was not resolved for this route")
+		return tenantscope.Scope{}, false
+	}
+	return scope, true
+}
+
+// ListChannels returns the caller's notification channels (without their secret
+// targets).
+//
+// SCOPED BY ORGANIZATION (#393 Phase 3). It read every organization's channels:
+// names, types, subscribed events and delivery status for the whole deployment.
+// Now it reads the ones the caller's scope permits, and an unresolved scope is a
+// 500 rather than an empty read -- see channelScope above.
 // @Summary      List notification channels
 // @Tags         Notifications
 // @Produce      json
@@ -137,7 +163,11 @@ func (req *channelRequest) events() []string {
 // @Router       /notifications/channels [get]
 func (h *NotificationHandlers) ListChannels() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		items, err := h.repo.List(c.Request.Context())
+		scope, ok := channelScope(c)
+		if !ok {
+			return
+		}
+		items, err := h.repo.ListInScope(c.Request.Context(), scope)
 		if err != nil {
 			serverError(c, err, "failed to list channels")
 			return
@@ -211,6 +241,13 @@ func (h *NotificationHandlers) CreateChannel() gin.HandlerFunc {
 		if organizationID == "" {
 			return // actingOrganization has already written the response
 		}
+		// Resolved AFTER actingOrganization, which has already refused an
+		// unresolved scope with the same 500; this cannot fail here and is asked
+		// rather than assumed so the re-seal below has a scope to run under.
+		scope, ok := channelScope(c)
+		if !ok {
+			return
+		}
 		saved, err := h.repo.Create(c.Request.Context(), ch,
 			identitynotify.WithOwningOrganization(organizationID))
 		if err != nil {
@@ -221,11 +258,18 @@ func (h *NotificationHandlers) CreateChannel() gin.HandlerFunc {
 		// exists and delivers either way, and returning an error for a row that
 		// was created would invite a retry that creates a duplicate. The row is
 		// left unbound and a backfill can convert it later.
+		//
+		// The re-seal goes through the SCOPED update like every other mutation of
+		// this table. Under the current handler the predicate is tautological --
+		// the row was created moments ago in an organization this caller is acting
+		// as -- and that is exactly the property a later edit takes away, by
+		// binding an id that came from somewhere else. A partition that only holds
+		// while nobody moves one line is not a partition.
 		if bound, sealErr := h.tokenCipher.SealWithContext(
 			req.Target, identitynotify.TargetContext(saved.ID),
 		); sealErr == nil {
-			if _, updErr := h.repo.Update(c.Request.Context(), saved.ID, saved.Name, saved.Type,
-				saved.Events, saved.Enabled, bound); updErr != nil {
+			if _, updErr := h.repo.UpdateInScope(c.Request.Context(), saved.ID, saved.Name, saved.Type,
+				saved.Events, saved.Enabled, bound, scope); updErr != nil {
 				logChannelBindFailure(saved.ID, updErr)
 			}
 		} else {
@@ -276,11 +320,24 @@ func (h *NotificationHandlers) UpdateChannel() gin.HandlerFunc {
 			}
 		}
 		enabled := req.Enabled == nil || *req.Enabled
+		scope, ok := channelScope(c)
+		if !ok {
+			return
+		}
 		// identity/notify reports a zero-row update with identity/store's
 		// ErrNotFound (one sentinel across both packages), so the 404 below is
-		// reached through the error rather than a nil row.
-		updated, err := h.repo.Update(c.Request.Context(), c.Param("id"), req.Name, req.Type, req.events(), enabled, enc)
-		if errors.Is(err, idstore.ErrNotFound) || (err == nil && updated == nil) {
+		// reached through the error rather than a nil row. A channel in another
+		// organization matches nothing and lands on that same 404: an update is
+		// the write that REDIRECTS a channel's target, so an unscoped one lets a
+		// caller point another tenant's alerts at an endpoint they control.
+		//
+		// ErrNotInScope (the scope reaches no organization at all) renders as 404
+		// too. It is told apart from "no such row" in logs and deliberately not
+		// in the response, for the reason tenant_write_scope.go gives: a 403
+		// would confirm the id names a real channel somewhere in the deployment.
+		updated, err := h.repo.UpdateInScope(c.Request.Context(), c.Param("id"), req.Name, req.Type, req.events(), enabled, enc, scope)
+		if errors.Is(err, idstore.ErrNotFound) || errors.Is(err, repositories.ErrNotInScope) ||
+			(err == nil && updated == nil) {
 			c.JSON(http.StatusNotFound, gin.H{"error": "channel not found"})
 			return
 		}
@@ -298,10 +355,17 @@ func (h *NotificationHandlers) UpdateChannel() gin.HandlerFunc {
 func (h *NotificationHandlers) DeleteChannel() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		id := c.Param("id")
+		scope, ok := channelScope(c)
+		if !ok {
+			return
+		}
 		// Idempotent DELETE: an already-absent channel answered 204 before the
-		// identity bump and keeps answering 204.
-		if err := h.repo.Delete(c.Request.Context(), id); err != nil &&
-			!errors.Is(err, idstore.ErrNotFound) {
+		// identity bump and keeps answering 204. A channel in ANOTHER
+		// organization now matches nothing and takes that same branch, so it is
+		// reported exactly as one that does not exist -- and, unlike before, it
+		// is not deleted.
+		if err := h.repo.DeleteInScope(c.Request.Context(), id, scope); err != nil &&
+			!errors.Is(err, idstore.ErrNotFound) && !errors.Is(err, repositories.ErrNotInScope) {
 			serverError(c, err, "failed to delete channel")
 			return
 		}
@@ -322,6 +386,29 @@ func (h *NotificationHandlers) DeleteChannel() gin.HandlerFunc {
 // @Router       /notifications/channels/{id}/test [post]
 func (h *NotificationHandlers) TestChannel() gin.HandlerFunc {
 	return func(c *gin.Context) {
+		// THE SCOPED READ HAPPENS HERE AND NOT INSIDE SendTest, because the shared
+		// library's SendTest takes no query options: its signature is
+		// (ctx, channelID). So this is the layer that can ask the question, and it
+		// has to ask it BEFORE the send -- SendTest loads the channel, DECRYPTS
+		// its target and POSTs to it, so an unscoped test-send is one tenant
+		// making this deployment deliver to another tenant's webhook, and it also
+		// stamps that channel's last_status/last_error as a side effect.
+		//
+		// A channel the scope does not reach is reported as 404, identically to
+		// one that does not exist.
+		scope, ok := channelScope(c)
+		if !ok {
+			return
+		}
+		ch, err := h.repo.GetByIDInScope(c.Request.Context(), c.Param("id"), scope)
+		if err != nil {
+			serverError(c, err, "failed to load channel")
+			return
+		}
+		if ch == nil {
+			c.JSON(http.StatusNotFound, gin.H{"error": "channel not found"})
+			return
+		}
 		if err := h.notifier.SendTest(c.Request.Context(), c.Param("id")); err != nil {
 			c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
 			return

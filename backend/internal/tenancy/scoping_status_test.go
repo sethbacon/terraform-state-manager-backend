@@ -4,12 +4,25 @@ package tenancy
 // organization-scoped yet (#502, tracking #393).
 //
 // WHY THIS EXISTS. The Phase 3 read flip landed for state_sources and shipped
-// in v3.13.0; schedules, pipeline_connections and ci_sources followed, and the
-// three callback roots after them. Two roots are still unscoped, so this
-// application is isolated on seven planes and shared on two -- which is
+// in v3.13.0; schedules, pipeline_connections and ci_sources followed, then the
+// three callback roots, and finally notification_channels and state_transfers.
+// ALL NINE ROOTS NOW READ THROUGH A TENANT-SCOPED READER. While that was untrue
+// the application was isolated on some planes and shared on others -- which is
 // neither model, and not a state anyone would choose to sit in indefinitely.
-// That is expected DURING a phased migration and dangerous as a resting
-// position, and the difference between the two is whether anyone can see it.
+// That was expected DURING a phased migration and would have been dangerous as a
+// resting position, and the difference between the two is whether anyone can see
+// it. This table is how anyone could see it, and it is now also what stops the
+// finished state from quietly coming apart.
+//
+// WHAT "ALL NINE SCOPED" DOES NOT MEAN. It means the READ PREDICATE is closed on
+// every partition root. It does not mean the application is tenant-isolated: the
+// enumerators that are unscoped by design (GetDue and its siblings, the
+// statesync reconcile loop, the pre-authentication callback lookups) are still
+// unscoped by design, and an API key minted before mintKey learned the acting
+// organization still carries the DEFAULT one with no backfill, so in a
+// multi-organization deployment it binds to the wrong tenant until it is
+// rotated. docs/tenancy-decision.md states the remainder in the terms an
+// operator needs; do not let this table be read as the larger claim.
 //
 // Before this, the only way to know which roots were flipped was to read nine
 // roots' call sites. An inventory nobody can derive is one that goes stale silently --
@@ -81,8 +94,32 @@ var rootScoping = map[string]scopingStatus{
 	"drift_records": scopedNow,
 	"health_runs":   scopedNow,
 
-	"notification_channels": unscopedPending,
-	"state_transfers":       unscopedPending,
+	// The final two (#393 Phase 3, the last increment). Neither was blocked on
+	// anything: an earlier note claimed notification_channels was held because the
+	// shared library could not carry an organization, and that was false against
+	// current main.
+	//
+	// notification_channels had all THREE sides open at once. The DELIVERY path
+	// was already scoped -- identity/notify exposes WithOrgScope, Notify forwards
+	// it to ListEnabledForEvent, and internal/services/notify.ForOrganization is
+	// passed at all three Notify call sites -- but the CRUD surface was not:
+	// ListChannels served every organization's channels and the update, delete
+	// and test-send found their row by id alone. A channel's encrypted_target is
+	// a capability-bearing secret, and the test-send decrypts it and POSTs to it,
+	// so the by-id sides were credential disclosure and cross-tenant action, not
+	// only listing. All of it now goes through the InScope readers in
+	// internal/db/repositories/notification_channel_scope.go, behind
+	// middleware.TenantScope on every /notifications/channels route.
+	"notification_channels": scopedNow,
+	// state_transfers is the deliberate TWO-ORGANIZATION case, and the scoped read
+	// deliberately does NOT try to serve both ends. The row records the ACTING
+	// organization by design; the write path already loads both ends through
+	// GetByIDInScope under the caller's scope (the target before its credentials
+	// are decrypted), and the counterparty organization gets its own audit entry
+	// (#541) so a move out of it is not invisible to it. GetByIDInScope is the
+	// whole read surface of this root -- there is no list or history read -- and
+	// GET /transfers/:id carries middleware.TenantScope.
+	"state_transfers": scopedNow,
 }
 
 // TestEveryPartitionRootHasADeclaredScopingStatus checks the inventory against
@@ -109,12 +146,43 @@ func TestEveryPartitionRootHasADeclaredScopingStatus(t *testing.T) {
 	}
 }
 
+// TestEveryPartitionRootIsScoped is the assertion this file deliberately did NOT
+// make while the migration was running, and now can.
+//
+// The comment on TestScopingProgressIsVisible explains why: an "all roots
+// scoped" assertion would have failed every build for the whole duration of a
+// phased migration, and a permanently-red check is as uninformative as a
+// permanently-green one -- it gets skipped, then deleted. That objection expires
+// the moment the last root flips. From here the assertion is green, and its
+// failure means something precise and bad: a root's reads went back to serving
+// every organization, or a NEW root was added without its reads being scoped.
+//
+// The second case is the likelier one and is why this is not merely a comment.
+// TestEveryPartitionRootHasADeclaredScopingStatus already forces a new root to
+// DECLARE a status, and unscopedPending is a legal answer there -- correctly,
+// because a root can be added before its reads are written. This test is what
+// makes that answer temporary: it is fine in a branch and it does not merge.
+func TestEveryPartitionRootIsScoped(t *testing.T) {
+	if len(rootScoping) == 0 {
+		t.Fatal("rootScoping is empty; this assertion would pass while checking nothing")
+	}
+	for tbl, st := range rootScoping {
+		if st != scopedNow {
+			t.Errorf("partition root %q still reads unscoped.\n"+
+				"Every root's Phase 3 read flip has landed (#393), so this is either a "+
+				"regression -- a reader that lost its predicate -- or a new root whose reads "+
+				"have not been written yet. The second is a fine state for a branch and not "+
+				"for main: scope it, or argue in this file why it is not tenant data.", tbl)
+		}
+	}
+}
+
 // TestScopingProgressIsVisible fails nothing on its own and prints the state of
 // the migration, so a reader of a CI log does not have to open nine files.
 //
-// Deliberately NOT an assertion that all roots are scoped: that would fail every
-// build for the whole duration of a phased migration, and a permanently-red
-// check is as uninformative as a permanently-green one.
+// It stays alongside the assertion above rather than being replaced by it: the
+// log line is what tells a reader WHICH roots are covered, and "all nine" is a
+// claim worth being able to read the membership of.
 func TestScopingProgressIsVisible(t *testing.T) {
 	var scoped, pending []string
 	for tbl, st := range rootScoping {

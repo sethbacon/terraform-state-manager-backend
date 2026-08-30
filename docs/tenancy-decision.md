@@ -39,33 +39,95 @@ a shared design. It is what an organization already meant, finally enforced.
 
 ## Where the migration actually stands
 
-Isolation is **not complete**, and this is the honest position rather than the
-advertised one. Of the nine partition roots, seven have scoped reads:
+**All nine partition roots now read through an organization-scoped reader.**
 
 | Reads are organization-scoped | Reads still return every row |
 | --- | --- |
-| `state_sources`, `schedules`, `pipeline_connections`, `ci_sources`, `drift_runs`, `drift_records`, `health_runs` | `notification_channels`, `state_transfers` |
+| `state_sources`, `schedules`, `pipeline_connections`, `ci_sources`, `drift_runs`, `drift_records`, `health_runs`, `notification_channels`, `state_transfers` |  |
 
-That is two planes on which a caller still sees other organizations' rows.
-The remaining flips are tracked by [#393][issue393]; do not read this page as
-saying the application is isolated today.
+The right-hand column is empty, and that is the finished state of the Phase 3
+read flip tracked by [#393][issue393]. **It is not the same claim as "this
+application is tenant-isolated"** — see [what is still
+open](#what-a-closed-read-predicate-does-not-close) below, which is the part of
+this page an operator should read before deciding anything.
 
-The two that remain are held for different reasons, and neither is a missing
-dependency.
+The last two roots landed together, and neither was blocked on a dependency. An
+earlier version of this page said `notification_channels` was held because the
+shared notification library could not carry an organization; that was inherited
+from a stale note and was false.
 
-`notification_channels` needs only its CRUD read flip. Its **delivery** path is
-already scoped: the shared library exposes `WithOrgScope` as a channel query
-option, `Notify` forwards those options to `ListEnabledForEvent`, and this
-application passes `notify.ForOrganization` at every `Notify` call site. So a
-notification for one tenant is not delivered to another's channel. What is still
-unscoped is `ListChannels`, which shows an operator every organization's
-channels — a disclosure, not a misdelivery.
+`notification_channels` had all **three** sides of the partition open at once.
+Its **delivery** path was already scoped — the shared library exposes
+`WithOrgScope` as a channel query option, `Notify` forwards those options to
+`ListEnabledForEvent`, and this application passes `notify.ForOrganization` at
+every `Notify` call site — so a notification for one tenant was never delivered
+to another's channel. The **CRUD** surface was the gap: `ListChannels` showed an
+operator every organization's channels, and the update, delete and test-send
+found their row by id alone. That last one is not a listing problem. A channel's
+`encrypted_target` is a capability-bearing secret (a Slack or webhook URL,
+or an SMTP recipient list), the by-id read returns it, and the test-send
+*decrypts it and POSTs to it* — so an unscoped test-send was one tenant making
+this deployment deliver to another tenant's webhook, and an unscoped update was
+one tenant redirecting another's alerts. All four now resolve a scope, and every
+`/notifications/channels` route carries `TenantScope`.
 
 `state_transfers` is the deliberate **two-organization** case 000033 calls a
-supported capability, and scoping the record to one organization would forbid
-the move it exists to describe. Its write path already requires the caller to
-hold authority on **both** ends, and the counterparty organization now receives
-its own audit entry so a transfer out of it is not invisible to it.
+supported capability, and the scoped read does **not** try to serve both ends of
+a move. The row records the **acting** organization by design. The write path
+already requires the caller to hold authority on both ends — it loads each end
+through the scoped source reader, the target *before* its credentials are
+decrypted — and the counterparty organization receives its own audit entry so a
+transfer out of it is not invisible to it. Admitting the counterparty to the
+scoped read instead would show one organization the other's source ids and state
+keys, which is most of what a transfer record consists of; deriving the row's
+organization from the source instead of the caller would hide a transfer from
+the organization that performed it. The audit entry is the mechanism for "the
+counterparty needs to know", and widening a tenant predicate is not.
+
+## What a closed read predicate does not close
+
+Read this section before telling anyone this deployment is isolated. Nine of
+nine roots scoped means **no read path serves another organization's row of a
+partitioned table to a caller who resolved a scope**. Four things sit outside
+that sentence, and three of them are deliberate.
+
+**Enumeration is still deployment-wide, on purpose.** `GetDue` and its siblings,
+and the statesync reconcile loop, walk every organization's rows because finding
+due work across the fleet is the system's job. What is scoped is what happens
+*next*: every per-item load runs under an authority derived from the row that was
+enumerated (`internal/tenancy.SystemActingIn`). The HTTP-triggered ones are
+recorded per method in `internal/api/unscoped_twin_class_test.go`'s
+`justifiedUnscoped`, where an exemption names one method and cannot silently
+cover its neighbours. **The background ones are not recorded anywhere**: that
+scan parses `internal/api` only, so `statesync`'s fleet-wide reconcile is
+justified by the same reasoning and checked by nothing. That gap is stated in
+the guard itself and is a known follow-up, not a claim that it does not exist.
+
+**The machine-callback lookups precede their own authority.** The read that
+identifies the run a callback token belongs to cannot run under a scope, because
+that run is where the scope comes from. Also in `justifiedUnscoped`, also
+per-method.
+
+**An API key minted before the acting-organization fix is bound to the wrong
+organization.** A key's request is scoped to the organization the key itself
+carries, not to the union of its owner's memberships — which is the correct,
+narrower answer. But keys minted before `mintKey` learned to stamp the *acting*
+organization all carry the deployment's default one, and **there is no
+backfill**: their organization is a fact about when they were created rather than
+about where they are used. In a single-organization deployment that is right by
+coincidence. In a multi-organization one, a legacy key belonging to someone who
+works elsewhere binds to the default organization. **Rotating the key re-mints it
+against the acting organization and fixes it**, and that is the only remedy —
+nothing in this work changes it.
+
+(An API key with *no owning user* is a different matter and is not a gap: such a
+key is refused outright at authentication, along with one whose owner no longer
+exists and one bound to no organization. That was closed separately.)
+
+**The write side is scoped separately, and is not what this table describes.**
+Mutating statements on the roots go through the `InScope` mutators and
+`scopeWrite`; INSERTs are stamped with the acting organization. Those landed
+across other increments, and this page's table is about reads.
 
 ### The machine callbacks are scoped too, and not by a middleware
 
@@ -131,4 +193,7 @@ exactly that.
    organization, or accept per-organization visibility and re-own the rows to
    the organizations that should hold them.
 4. **More than one, already expecting isolation:** this is the behaviour you
-   wanted, on one plane so far. Track [#393][issue393] for the other eight.
+   wanted, and the read predicate is now closed on all nine partition roots.
+   Read [what a closed read predicate does not
+   close](#what-a-closed-read-predicate-does-not-close) before treating the
+   deployment as isolated.

@@ -128,6 +128,10 @@ func newSourcesEnvScoped(t *testing.T, scope *tenantscope.Scope) *sourcesEnv {
 	v1.DELETE("/sources/:id/state/lock", h.ForceUnlock())
 	v1.POST("/sources/:id/state/backup", h.BackupToSource())
 	v1.POST("/sources/:id/state/migrate", h.MigrateToSource())
+	// The transfer RECORD read, which is a partition root of its own and now
+	// resolves a scope (#393 Phase 3). Registered here rather than only in
+	// router.go so the refusal has a rig to be asserted in.
+	v1.GET("/transfers/:id", h.GetTransfer())
 
 	env.r = r
 	return env

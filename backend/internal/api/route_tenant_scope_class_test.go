@@ -37,8 +37,8 @@ var (
 )
 
 // scopeAwareHandlers finds every exported handler method in this package whose
-// body resolves a tenant scope — via tenantscope.FromContext or the
-// actingOrganization helper that wraps it.
+// body resolves a tenant scope — directly via tenantscope.FromContext, or
+// through a package-local helper that does.
 //
 // AST, not text slicing. A first version bounded each function at the next
 // `func (h *X) Y() gin.HandlerFunc` and so swept in any plain helper declared
@@ -46,9 +46,27 @@ var (
 // transferEndpointsReachable sits below it. A false positive here is not
 // harmless: it teaches whoever reads the failure that the guard is noisy.
 //
-// Matching is by METHOD NAME, which is deliberately conservative: two handler
-// types both exporting CreateRun means BOTH routes must be scoped before this
-// passes. Over-requiring a scope is safe; under-requiring one is the bug.
+// # The indirection is DERIVED, not listed, and that is the second thing this
+// scan got wrong
+//
+// It used to recognise exactly two things: the literal tenantscope.FromContext
+// call, and one helper named in the code here — `actingOrganization`. A helper
+// is precisely what a handler reaches for once three of them need the same four
+// lines, so the list was one refactor away from going quiet: the
+// notification-channel flip extracted `channelScope`, and four handlers that
+// resolve a scope through it would have been invisible to a guard that was
+// looking for a different spelling.
+//
+// So the resolvers are computed to a FIXPOINT over this package's own call
+// graph: a function resolves a scope if it calls tenantscope.FromContext, or if
+// it calls something that does. `actingOrganization` is no longer named here —
+// it is found, because it calls FromContext, which is the property that made it
+// worth naming in the first place.
+//
+// Matching is by FUNCTION NAME throughout, which is deliberately conservative:
+// two handler types both exporting CreateRun means BOTH routes must be scoped
+// before this passes. Over-requiring a scope is safe; under-requiring one is the
+// bug.
 func scopeAwareHandlers(t *testing.T) map[string]string {
 	t.Helper()
 	fset := token.NewFileSet()
@@ -58,39 +76,112 @@ func scopeAwareHandlers(t *testing.T) map[string]string {
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
-	out := map[string]string{}
+
+	type decl struct {
+		fn     *ast.FuncDecl
+		file   string
+		method bool
+	}
+	var decls []decl
 	for _, pkg := range pkgs {
 		for path, file := range pkg.Files {
-			for _, decl := range file.Decls {
-				fn, ok := decl.(*ast.FuncDecl)
-				if !ok || fn.Recv == nil || fn.Body == nil || !fn.Name.IsExported() {
+			for _, d := range file.Decls {
+				fn, ok := d.(*ast.FuncDecl)
+				if !ok || fn.Body == nil {
 					continue
 				}
-				resolves := false
-				ast.Inspect(fn.Body, func(n ast.Node) bool {
-					call, ok := n.(*ast.CallExpr)
-					if !ok {
-						return true
-					}
-					switch f := call.Fun.(type) {
-					case *ast.SelectorExpr:
-						if id, ok := f.X.(*ast.Ident); ok && id.Name == "tenantscope" && f.Sel.Name == "FromContext" {
-							resolves = true
-						}
-					case *ast.Ident:
-						if f.Name == "actingOrganization" {
-							resolves = true
-						}
-					}
+				decls = append(decls, decl{fn: fn, file: filepath.Base(path), method: fn.Recv != nil})
+			}
+		}
+	}
+
+	// calleeNames returns the package-local names a body invokes: bare calls
+	// (helpers) and selector calls whose receiver is a local identifier (h.foo()).
+	// A selector on a PACKAGE — tenantscope.FromContext — is handled separately,
+	// and is what seeds the fixpoint.
+	calleeNames := func(fn *ast.FuncDecl) (direct bool, callees []string) {
+		ast.Inspect(fn.Body, func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			switch f := call.Fun.(type) {
+			case *ast.SelectorExpr:
+				id, ok := f.X.(*ast.Ident)
+				if !ok {
 					return true
-				})
-				if resolves {
-					out[fn.Name.Name] = filepath.Base(path)
+				}
+				if id.Name == "tenantscope" && f.Sel.Name == "FromContext" {
+					direct = true
+					return true
+				}
+				callees = append(callees, f.Sel.Name)
+			case *ast.Ident:
+				callees = append(callees, f.Name)
+			}
+			return true
+		})
+		return direct, callees
+	}
+
+	resolves := map[string]bool{}
+	edges := map[string][]string{}
+	for _, d := range decls {
+		direct, callees := calleeNames(d.fn)
+		if direct {
+			resolves[d.fn.Name.Name] = true
+		}
+		edges[d.fn.Name.Name] = append(edges[d.fn.Name.Name], callees...)
+	}
+	if len(resolves) == 0 {
+		t.Fatal("nothing in this package calls tenantscope.FromContext, so the fixpoint below " +
+			"starts empty and every handler passes for free. The scan is looking at the wrong " +
+			"package, or the resolver was renamed.")
+	}
+	for changed := true; changed; {
+		changed = false
+		for name, callees := range edges {
+			if resolves[name] {
+				continue
+			}
+			for _, callee := range callees {
+				if resolves[callee] {
+					resolves[name] = true
+					changed = true
+					break
 				}
 			}
 		}
 	}
+
+	out := map[string]string{}
+	for _, d := range decls {
+		if d.method && d.fn.Name.IsExported() && resolves[d.fn.Name.Name] {
+			out[d.fn.Name.Name] = d.file
+		}
+	}
 	return out
+}
+
+// TestTheScopeAwareScanSeesAnIndirectResolver asserts the fixpoint POSITIVELY,
+// because a scan that resolved nothing indirectly and a tree with no indirect
+// resolvers produce the same green.
+//
+// The canaries are the two shapes the direct-only version missed: a bare helper
+// call (`channelScope`, extracted by the notification-channel flip) and a method
+// call on the receiver (`sourceInScope`). Neither mentions tenantscope itself.
+func TestTheScopeAwareScanSeesAnIndirectResolver(t *testing.T) {
+	need := scopeAwareHandlers(t)
+	for _, tc := range []struct{ handler, via string }{
+		{"ListChannels", "channelScope"},
+		{"StateHistory", "sourceInScope"},
+	} {
+		if need[tc.handler] == "" {
+			t.Errorf("%s resolves a tenant scope through %s and the scan did not see it. "+
+				"The scan is direct-only again, and every handler that reaches its scope "+
+				"through a helper is invisible to the route check below.", tc.handler, tc.via)
+		}
+	}
 }
 
 func TestEveryScopeAwareHandlerIsRoutedWithTenantScope(t *testing.T) {

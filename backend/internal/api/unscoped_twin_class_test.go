@@ -31,6 +31,22 @@ import (
 // handler still calling the unscoped one? A twin existing is the repository's own
 // statement that this read has a tenant-aware form. Calling the other one is then
 // a decision, and it has to be written down.
+//
+// # WHAT THIS GUARD DOES NOT SEE, stated so it is not mistaken for clean
+//
+// It parses THIS PACKAGE only. A repository call from internal/services/* or
+// internal/maintenance is outside the scan entirely, so the answer it gives is
+// "no HANDLER calls an unscoped twin", not "nothing does". Two such calls exist
+// today, both in internal/services/statesync's SyncAll/one-source paths, and
+// both are the same fleet-wide reconcile the ReconcileSources entry below
+// justifies -- a background sweep with no caller to narrow to. They are
+// justified by the same reasoning and recorded by nothing, which is the gap:
+// extending the scan there means resolving struct field types across packages,
+// and it is a separate increment rather than a line.
+//
+// Until it happens, "this guard is green" means less than it looks like. That
+// sentence is here rather than in a commit message because the place a blind
+// spot has to be readable is the guard that has it.
 
 // justifiedUnscoped records call sites that deliberately use the unscoped twin.
 //

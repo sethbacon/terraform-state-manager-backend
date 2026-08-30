@@ -84,18 +84,49 @@ func Run(ctx context.Context, identityDB, appDB *sql.DB, seedRoles bool) error {
 	// authorization or backfilling a partition against a schema that is already
 	// wrong buys nothing.
 	//
-	// VerifyChannelOrganizationColumn is NOT called here, and that is a decision
-	// rather than an omission. It asserts the organization_id column that #393's
-	// migration 000033 added, and nothing in this repository passes
-	// notify.WithOrgScope yet. Failing a boot over a column no statement reads
-	// would refuse to start a deployment for a capability it is not using. Add
-	// the call in the change that first scopes a channel read — #393 Phase 3 —
-	// where a missing column becomes a real fault.
 	channelTable, err := identitynotify.VerifyChannelTable(ctx, appDB)
 	if err != nil {
 		return fmt.Errorf("verify the notification_channels table: %w", err)
 	}
 	slog.Info("notification channel table verified", "table", channelTable)
+
+	// AND ITS organization_id COLUMN, which this file's previous note deferred to
+	// "the change that first scopes a channel read". That is this change: the
+	// #393 Phase 3 flip makes every /notifications/channels read bind
+	// `organization_id = ANY($n)`.
+	//
+	// The deferral was right at the time, and its stated reason had already gone
+	// stale before this: it said nothing here passed notify.WithOrgScope, and the
+	// delivery path had since started passing it at every Notify call site.
+	//
+	// WHAT THIS ACTUALLY BUYS, stated precisely, because it is less than it first
+	// looks and it is not nothing. A missing column does NOT get a deployment
+	// past startup today — tenancy.Backfill runs unconditionally on every boot
+	// and UPDATEs organization_id on all nine roots, so it would already die.
+	// Three things change:
+	//
+	//  1. WHEN. This is among the schema assertions at the top of the
+	//     app-connection sequence, before authorization reconciliation and role
+	//     seeding. This file's own rule is that reconciling against a schema that
+	//     is already wrong buys nothing.
+	//  2. WHAT IT NAMES. The backfill's failure reads "backfill
+	//     notification_channels.organization_id: column does not exist", which
+	//     points an operator at the backfill. This one names the partition
+	//     migration and the option that requires the column.
+	//  3. WHAT IT DOES NOT DEPEND ON. The backfill catches this incidentally,
+	//     because notification_channels happens to be in PartitionedTables. The
+	//     read predicate binds that column whether or not the backfill still
+	//     touches the table, so the assertion belongs next to the reader's
+	//     requirement rather than borrowed from an unrelated loop.
+	//
+	// It sits AFTER VerifyChannelTable because the library's own error text says
+	// to call that one first — it is what reports where the table is expected to
+	// be.
+	if err := identitynotify.VerifyChannelOrganizationColumn(ctx, appDB); err != nil {
+		return fmt.Errorf("verify the notification_channels organization column: %w", err)
+	}
+	slog.Info("notification channel organization column verified",
+		"table", channelTable, "column", identitynotify.ChannelOrganizationColumn)
 
 	rep, err := approles.Reconcile(ctx, appDB, identityDB, seedRoleTemplates)
 	if err != nil {
