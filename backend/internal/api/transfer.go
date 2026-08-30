@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 
@@ -225,10 +226,28 @@ func (h *SourcesHandlers) doTransfer(c *gin.Context, mode string) {
 		serverError(c, err, "transfer completed but failed to record it")
 		return
 	}
-	h.audit.write(c, "state."+mode, "state", srcA.ID, map[string]interface{}{
+	details := map[string]interface{}{
 		"key": key, "target_source_id": srcB.ID, "target_key": req.TargetKey,
 		"status": rec.Status, "decommissioned": rec.Decommissioned,
-	})
+	}
+	h.audit.write(c, "state."+mode, "state", srcA.ID, details)
+
+	// THE COUNTERPARTY GETS ITS OWN ENTRY. A transfer spans two organizations
+	// but the transfer row records ONE -- the organization the caller declared
+	// they were acting as. Everything above is therefore visible to that
+	// organization and to nobody else, which means a transfer out of the OTHER
+	// organization leaves it with no record that its state was read and copied
+	// elsewhere. The row does not need a second owner; the counterparty needs
+	// to KNOW.
+	//
+	// Written per DISTINCT counterparty, and only when there is one: a transfer
+	// within a single organization already has its entry, and writing a second
+	// identical one would double every ordinary transfer in that tenant's log.
+	// An unstamped source contributes nothing rather than an entry attributed
+	// to the empty organization, which ListAuditLogs would show to everyone.
+	for _, counterparty := range counterpartyOrganizations(organizationID, srcA, srcB) {
+		h.audit.writeForOrg(c, counterparty, "state."+mode+".counterparty", "state", srcA.ID, details)
+	}
 	c.JSON(http.StatusOK, saved)
 }
 
@@ -351,4 +370,31 @@ func transferEndpointsReachable(c *gin.Context, ends ...*repositories.Source) bo
 		}
 	}
 	return true
+}
+
+// counterpartyOrganizations returns the organizations that were party to a
+// transfer OTHER than the one it was recorded under, de-duplicated.
+//
+// Both ends are considered because either can be the counterparty: a caller
+// acting as A may move state INTO A from B, or OUT OF A into B, and in both
+// cases B is the tenant with no record of its own involvement. The acting
+// organization is excluded because it already has the primary entry, and the
+// empty string is excluded because an audit entry attributed to no
+// organization is shown to everyone by ListAuditLogs -- which would turn a fix
+// for under-disclosure into over-disclosure.
+func counterpartyOrganizations(actingOrg string, ends ...*repositories.Source) []string {
+	seen := map[string]bool{strings.TrimSpace(actingOrg): true, "": true}
+	var out []string
+	for _, e := range ends {
+		if e == nil {
+			continue
+		}
+		org := strings.TrimSpace(e.OrganizationID)
+		if seen[org] {
+			continue
+		}
+		seen[org] = true
+		out = append(out, org)
+	}
+	return out
 }
