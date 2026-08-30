@@ -37,10 +37,10 @@ import (
 // It parses THIS PACKAGE only. A repository call from internal/services/* or
 // internal/maintenance is outside the scan entirely, so the answer it gives is
 // "no HANDLER calls an unscoped twin", not "nothing does". Two such calls exist
-// today, both in internal/services/statesync's SyncAll/one-source paths, and
-// both are the same fleet-wide reconcile the ReconcileSources entry below
-// justifies -- a background sweep with no caller to narrow to. They are
-// justified by the same reasoning and recorded by nothing, which is the gap:
+// today, both in internal/services/statesync's SyncAll/one-source paths: the
+// same fleet-wide reconcile a handler used to make directly -- a background
+// sweep with no caller to narrow to. They are justified by that reasoning and
+// recorded by nothing, which is the gap:
 // extending the scan there means resolving struct field types across packages,
 // and it is a separate increment rather than a line.
 //
@@ -61,7 +61,6 @@ import (
 // lookup that identifies the run) and several afterwards that must be, and a
 // function-wide exemption would have covered all of them silently.
 var justifiedUnscoped = map[string]string{
-	"reconcile.go:ReconcileSources:SourceRepository.List": "the statesync reconcile loop reads the whole fleet by design: it syncs every tenant's sources and has no caller to narrow to",
 
 	// THE MACHINE CALLBACKS (#393 option B, item 5). A CI job posts its result
 	// holding a per-run bearer token and nothing else — no session, no
@@ -307,6 +306,57 @@ func TestJustifiedUnscopedEntriesAreLive(t *testing.T) {
 			}
 		}
 	}
+	// offends[k] is true when the call k excuses is STILL PRESENT. It is built
+	// by the same walk the main guard uses -- receiver type, then h.<field>.<M>
+	// against the twin set -- so the two cannot disagree about what an
+	// offending call is. A second, independent implementation here would be
+	// free to drift from the guard it audits, which is the defect one level up.
+	offends := map[string]bool{}
+	for _, p := range pkgs {
+		fieldType := repoFieldTypes(t, p.Files)
+		for path, file := range p.Files {
+			base := filepath.Base(path)
+			for _, decl := range file.Decls {
+				fn, ok := decl.(*ast.FuncDecl)
+				if !ok || fn.Body == nil || fn.Recv == nil || len(fn.Recv.List) == 0 {
+					continue
+				}
+				var recvType string
+				switch e := fn.Recv.List[0].Type.(type) {
+				case *ast.StarExpr:
+					if id, ok := e.X.(*ast.Ident); ok {
+						recvType = id.Name
+					}
+				case *ast.Ident:
+					recvType = e.Name
+				}
+				fields := fieldType[recvType]
+				if fields == nil {
+					continue
+				}
+				key := base + ":" + fn.Name.Name
+				ast.Inspect(fn.Body, func(n ast.Node) bool {
+					call, ok := n.(*ast.CallExpr)
+					if !ok {
+						return true
+					}
+					sel, ok := call.Fun.(*ast.SelectorExpr)
+					if !ok {
+						return true
+					}
+					inner, ok := sel.X.(*ast.SelectorExpr)
+					if !ok {
+						return true
+					}
+					if typ := fields[inner.Sel.Name]; typ != "" {
+						offends[key+":"+typ+"."+sel.Sel.Name] = true
+					}
+					return true
+				})
+			}
+		}
+	}
+
 	var stale []string
 	for k := range justifiedUnscoped {
 		// "file:function:Type.Method" — the liveness question is about the
@@ -319,12 +369,25 @@ func TestJustifiedUnscopedEntriesAreLive(t *testing.T) {
 			continue
 		}
 		if !live[parts[0]+":"+parts[1]] {
-			stale = append(stale, k)
+			stale = append(stale, k+" (the function no longer exists)")
+			continue
+		}
+		// AND THE EXCUSED CALL MUST STILL OFFEND. Checking only that the
+		// FUNCTION exists lets an entry outlive the thing it excuses: review
+		// found "reconcile.go:ReconcileSources:SourceRepository.List" alive by
+		// that test while ReconcileSources had stopped calling any repository
+		// at all -- it delegates to h.syncer -- so the entry excused nothing
+		// and was still being cited as precedent. An exemption with nothing
+		// under it is a carve-out waiting to absorb an unrelated call in the
+		// same function, which is the failure the file:function:Type.Method
+		// key format was narrowed to prevent one level down.
+		if !offends[k] {
+			stale = append(stale, k+" (the function exists but no longer makes that unscoped call)")
 		}
 	}
 	sort.Strings(stale)
 	for _, k := range stale {
-		t.Errorf("justifiedUnscoped names %s, which no longer exists. Remove it: an exemption "+
-			"for a site that is gone is a carve-out waiting to absorb an unrelated one.", k)
+		t.Errorf("justifiedUnscoped names %s. Remove it: an exemption for a site that no longer "+
+			"offends is a carve-out waiting to absorb an unrelated one.", k)
 	}
 }
