@@ -1,5 +1,12 @@
 # Changelog
 
+## [3.19.1](https://github.com/sethbacon/terraform-state-manager-backend/compare/v3.19.0...v3.19.1) (2026-08-30)
+
+
+### Bug Fixes
+
+* **ci:** fail the required check when the guard's schedule is disabled ([#547](https://github.com/sethbacon/terraform-state-manager-backend/issues/547)) ([146fe7b](https://github.com/sethbacon/terraform-state-manager-backend/commit/146fe7b9bb959cebbb2b4e487b7eb7bc25eaacc9))
+
 ## [3.19.0](https://github.com/sethbacon/terraform-state-manager-backend/compare/v3.18.0...v3.19.0) (2026-08-30)
 
 
