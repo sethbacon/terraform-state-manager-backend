@@ -10,6 +10,8 @@ import (
 
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
 	"github.com/gin-gonic/gin"
+	"github.com/golang-jwt/jwt/v5"
+	"github.com/terraform-state-manager/terraform-state-manager/internal/auth"
 
 	"github.com/terraform-state-manager/terraform-state-manager/internal/config"
 )
@@ -410,4 +412,111 @@ func TestLogoutPostHandler(t *testing.T) {
 	if !authCleared {
 		t.Error("logout POST did not expire the auth cookie")
 	}
+}
+
+// The /me session-expiry fields, which no other test reaches: newAuthEnv's
+// middleware sets user_id but never jwt_claims, so both fields are skipped
+// entirely in TestMeHandler.
+//
+// session_expires_in exists because session_expires_at alone is unusable when the
+// browser's clock disagrees with ours -- the client would be comparing our instant
+// against its own Date.now(), which is wrong by exactly the skew. A duration we
+// measure and it applies shares no clock (4cloudguru/cloud-suite-ui#181).
+func TestMeHandlerSessionExpiry(t *testing.T) {
+	newEnv := func(t *testing.T, exp *time.Time) *sourcesEnv {
+		t.Helper()
+		db, mock, err := sqlmock.New()
+		if err != nil {
+			t.Fatalf("sqlmock.New: %v", err)
+		}
+		t.Cleanup(func() { db.Close() })
+		h, err := NewAuthHandlers(&config.Config{}, db, nil)
+		if err != nil {
+			t.Fatalf("NewAuthHandlers: %v", err)
+		}
+		r := gin.New()
+		r.Use(func(c *gin.Context) {
+			c.Set("user_id", "u1")
+			if exp != nil {
+				c.Set("jwt_claims", &auth.Claims{
+					RegisteredClaims: jwt.RegisteredClaims{ExpiresAt: jwt.NewNumericDate(*exp)},
+				})
+			}
+			c.Next()
+		})
+		r.GET("/api/v1/auth/me", h.MeHandler())
+		return &sourcesEnv{r: r, mock: mock}
+	}
+
+	expectUser := func(e *sourcesEnv) {
+		now := time.Now()
+		e.mock.ExpectQuery("SELECT id, email, name, oidc_sub").WithArgs("u1").
+			WillReturnRows(sqlmock.NewRows(idUserCols).AddRow("u1", "a@b.c", "Alice", "sub-1", now, now))
+		e.mock.ExpectQuery("FROM organization_members om").WithArgs("u1").
+			WillReturnRows(sqlmock.NewRows(membershipCols))
+		e.mock.ExpectQuery("FROM organization_members om").WithArgs("u1").
+			WillReturnRows(sqlmock.NewRows(membershipCols))
+	}
+
+	decode := func(t *testing.T, body string) map[string]any {
+		t.Helper()
+		var got map[string]any
+		if err := json.Unmarshal([]byte(body), &got); err != nil {
+			t.Fatalf("unmarshal: %v (%s)", err, body)
+		}
+		return got
+	}
+
+	t.Run("a live session reports both the instant and the remaining seconds", func(t *testing.T) {
+		exp := time.Now().Add(90 * time.Minute)
+		e := newEnv(t, &exp)
+		expectUser(e)
+		w := e.do(http.MethodGet, "/api/v1/auth/me", "")
+		if w.Code != http.StatusOK {
+			t.Fatalf("status = %d (%s)", w.Code, w.Body.String())
+		}
+		got := decode(t, w.Body.String())
+		if _, ok := got["session_expires_at"]; !ok {
+			t.Errorf("session_expires_at missing: %s", w.Body.String())
+		}
+		secs, ok := got["session_expires_in"].(float64)
+		if !ok {
+			t.Fatalf("session_expires_in missing or not a number: %s", w.Body.String())
+		}
+		// Truncation toward zero costs at most a second; the handler runs in far less.
+		if secs < 5390 || secs > 5400 {
+			t.Errorf("session_expires_in = %v, want ~5400 (90m)", secs)
+		}
+	})
+
+	t.Run("an already-lapsed expiry omits the duration rather than sending a non-positive one", func(t *testing.T) {
+		// The client reads a non-positive duration as a real expiry and fails closed, so
+		// asserting that about a request we just served 200 would be a lie. requireAuth
+		// makes this unreachable in production; the handler still must not emit it.
+		exp := time.Now().Add(-time.Minute)
+		e := newEnv(t, &exp)
+		expectUser(e)
+		w := e.do(http.MethodGet, "/api/v1/auth/me", "")
+		if w.Code != http.StatusOK {
+			t.Fatalf("status = %d (%s)", w.Code, w.Body.String())
+		}
+		if _, present := decode(t, w.Body.String())["session_expires_in"]; present {
+			t.Errorf("session_expires_in present for a lapsed expiry: %s", w.Body.String())
+		}
+	})
+
+	t.Run("no claims means neither field", func(t *testing.T) {
+		e := newEnv(t, nil)
+		expectUser(e)
+		w := e.do(http.MethodGet, "/api/v1/auth/me", "")
+		if w.Code != http.StatusOK {
+			t.Fatalf("status = %d (%s)", w.Code, w.Body.String())
+		}
+		got := decode(t, w.Body.String())
+		for _, k := range []string{"session_expires_at", "session_expires_in"} {
+			if _, present := got[k]; present {
+				t.Errorf("%s present without claims: %s", k, w.Body.String())
+			}
+		}
+	})
 }
