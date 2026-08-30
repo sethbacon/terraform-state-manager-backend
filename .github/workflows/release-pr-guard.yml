@@ -159,6 +159,10 @@ jobs:
       contents: read
       pull-requests: read
       issues: read
+      # To read this workflow's own state. GitHub disables a scheduled workflow
+      # after 60 days of repository inactivity, which removes the re-grade below
+      # with no signal at all.
+      actions: read
       # To publish the same verdict as a commit status on the head SHA, so the
       # scheduled re-grade below has something to overwrite and a pull request
       # is never left waiting on a context only the cron can post.
@@ -177,6 +181,54 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+
+      # THE SCHEDULE THAT BOUNDS THE TIME-OF-CHECK WINDOW MUST STILL EXIST.
+      #
+      # The re-grade job below is the only thing narrowing the window in which
+      # an issue linked through the Development panel can be merged ungraded --
+      # `connected` fires no pull_request activity, so nothing re-runs after the
+      # link. That job is schedule-driven, and GitHub DISABLES a scheduled
+      # workflow after 60 days of repository inactivity. When it does the
+      # mitigation is gone and every check here still reports green: a detector
+      # that stopped running is indistinguishable from one that keeps finding
+      # nothing.
+      #
+      # ASKED OF GITHUB'S OWN RECORD, not inferred from timing. The declared
+      # cadence is */5 and the OBSERVED gap between scheduled runs here is 118
+      # to 413 minutes -- high-frequency cron is throttled by roughly fifty
+      # times -- so "no run recently" cannot tell disabled from merely late.
+      # `state` can: GitHub sets it to disabled_inactivity itself.
+      #
+      # It runs in THIS job, which is required on main, so a dead schedule
+      # blocks every pull request until somebody re-enables it. Putting the
+      # check inside the scheduled workflow would be the joke version.
+      - name: The scheduled re-grade is still enabled
+        env:
+          GH_TOKEN: ${{ github.token }}
+          WORKFLOW_PATH: .github/workflows/release-pr-guard.yml
+        run: |
+          set -euo pipefail
+          state=$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows" --paginate \
+            --jq ".workflows[] | select(.path == \"${WORKFLOW_PATH}\") | .state")
+          if [ -z "$state" ]; then
+            echo "::error::could not find ${WORKFLOW_PATH} in this repository's workflow list."
+            echo "::error::  The check cannot tell an enabled schedule from a disabled one, so it"
+            echo "::error::  refuses to report clean. If the file moved, update WORKFLOW_PATH."
+            exit 1
+          fi
+          if [ "$(printf '%s\n' "$state" | wc -l)" -ne 1 ]; then
+            echo "::error::${WORKFLOW_PATH} matched more than one workflow: ${state}"
+            exit 1
+          fi
+          if [ "$state" != "active" ]; then
+            echo "::error::the release-PR guard workflow is ${state}, not active."
+            echo "::error::  Its scheduled re-grade bounds the window in which an issue linked through"
+            echo "::error::  the Development panel can be merged ungraded. While the workflow is"
+            echo "::error::  disabled that window is unbounded, and nothing else reports it."
+            echo "::error::  Re-enable it: gh workflow enable ${WORKFLOW_PATH}"
+            exit 1
+          fi
+          echo "the release-PR guard workflow is active, so its scheduled re-grade still runs"
 
       # The body and the head branch are read back through the API rather than
       # taken from the event payload. Two reasons, and both matter: an event
