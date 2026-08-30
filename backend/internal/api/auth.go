@@ -574,6 +574,27 @@ func (h *AuthHandlers) MeHandler() gin.HandlerFunc {
 		if claimsVal, ok := c.Get("jwt_claims"); ok {
 			if claims, ok := claimsVal.(*auth.Claims); ok && claims.ExpiresAt != nil {
 				resp["session_expires_at"] = claims.ExpiresAt.Time
+				// Emit the REMAINING LIFETIME alongside the absolute instant, because the
+				// absolute one is only usable if the browser's clock agrees with ours, and
+				// often it does not — a VM resumed from suspend, a container with a drifting
+				// RTC, a workstation whose NTP has not corrected since boot. Comparing our
+				// instant against their Date.now() is wrong by exactly the skew; a duration we
+				// measure here and they apply there shares no clock at all, so skew cannot
+				// enter it (4cloudguru/cloud-suite-ui#181).
+				//
+				// Truncated toward zero rather than rounded: erring a fraction of a second
+				// short of the real expiry can only make the client schedule marginally early,
+				// where rounding up would let it hold a session past the instant we would
+				// start rejecting.
+				//
+				// Omitted rather than sent non-positive when the remaining lifetime has already
+				// run out. requireAuth would have rejected an expired token before reaching
+				// this handler, so a non-positive value here is not reachable in practice; if
+				// it ever were, the client treats it as a real expiry and fails closed, and we
+				// would rather say nothing than assert that about a request we just served.
+				if remaining := time.Until(claims.ExpiresAt.Time); remaining > 0 {
+					resp["session_expires_in"] = int64(remaining.Seconds())
+				}
 			}
 		}
 		c.JSON(http.StatusOK, resp)
