@@ -59,9 +59,13 @@ func newNotificationsEnvWithoutScope(t *testing.T) *sourcesEnv {
 func newNotificationsEnvWithScope(t *testing.T, withScope bool) *sourcesEnv {
 	t.Helper()
 	t.Setenv("TSM_ENCRYPTION_KEY", testEncryptionKey)
-	db, mock, err := sqlmock.New()
+	// newSQLMock, not sqlmock.New: the channel reads are organization-scoped now
+	// and bind their organization array as a []string, which sqlmock's default
+	// conversion rejects on both the bind and the expectation. See
+	// identity/pgxparam.
+	db, mock, err := newSQLMock()
 	if err != nil {
-		t.Fatalf("sqlmock.New: %v", err)
+		t.Fatalf("newSQLMock: %v", err)
 	}
 	t.Cleanup(func() { db.Close() })
 
@@ -97,7 +101,12 @@ func newNotificationsEnvWithScope(t *testing.T, withScope bool) *sourcesEnv {
 func TestNotificationChannels_CRUD(t *testing.T) {
 	e := newNotificationsEnv(t)
 
-	e.mock.ExpectQuery("SELECT .+ FROM notification_channels ORDER BY").
+	// The list is organization-scoped now, and the expectation asserts BOTH the
+	// predicate and the bound array. A regex that only matched the table name
+	// would keep passing if the predicate were dropped, which is the one change
+	// this expectation exists to catch.
+	e.mock.ExpectQuery("SELECT .+ FROM notification_channels WHERE organization_id = ANY.+ORDER BY").
+		WithArgs([]string{testActingOrg}).
 		WillReturnRows(notifChannelRow(t, "https://hooks.example.com/x"))
 	w := e.do(http.MethodGet, "/api/v1/notifications/channels", "")
 	if w.Code != http.StatusOK {
@@ -126,6 +135,11 @@ func TestNotificationChannels_CRUD(t *testing.T) {
 
 	e.mock.ExpectQuery("INSERT INTO notification_channels").
 		WillReturnRows(notifChannelRow(t, "https://hooks.example.com/x"))
+	// The follow-up target bind, which is a scoped UPDATE like every other
+	// mutation of this table.
+	e.mock.ExpectQuery(`UPDATE notification_channels[\s\S]*organization_id = ANY`).
+		WithArgs("n1", "ops", "webhook", sqlmock.AnyArg(), true, sqlmock.AnyArg(), []string{testActingOrg}).
+		WillReturnRows(notifChannelRow(t, "https://hooks.example.com/x"))
 	w = e.do(http.MethodPost, "/api/v1/notifications/channels",
 		`{"name":"ops","type":"webhook","target":"https://hooks.example.com/x","events":["drift_detected"]}`)
 	if w.Code != http.StatusCreated {
@@ -133,7 +147,8 @@ func TestNotificationChannels_CRUD(t *testing.T) {
 	}
 
 	// Update with a blank target keeps the existing secret (enc arg nil).
-	e.mock.ExpectQuery("UPDATE notification_channels").
+	e.mock.ExpectQuery(`UPDATE notification_channels[\s\S]*organization_id = ANY`).
+		WithArgs("n1", "ops", "webhook", sqlmock.AnyArg(), false, nil, []string{testActingOrg}).
 		WillReturnRows(notifChannelRow(t, "https://hooks.example.com/x"))
 	w = e.do(http.MethodPut, "/api/v1/notifications/channels/n1",
 		`{"name":"ops","type":"webhook","events":["drift_detected"],"enabled":false}`)
@@ -141,15 +156,19 @@ func TestNotificationChannels_CRUD(t *testing.T) {
 		t.Fatalf("update: status = %d (%s)", w.Code, w.Body.String())
 	}
 
-	// Updating a deleted channel → 404 (repo returns nil on no rows).
-	e.mock.ExpectQuery("UPDATE notification_channels").
+	// Updating a deleted channel → 404 (repo returns nil on no rows). A channel
+	// in ANOTHER organization reaches the same branch, because the scoped UPDATE
+	// matches nothing — the refusal and the absence are one answer on purpose.
+	e.mock.ExpectQuery(`UPDATE notification_channels[\s\S]*organization_id = ANY`).
+		WithArgs("ghost", "x", "slack", sqlmock.AnyArg(), true, nil, []string{testActingOrg}).
 		WillReturnRows(sqlmock.NewRows(notifChannelCols))
 	if w := e.do(http.MethodPut, "/api/v1/notifications/channels/ghost",
 		`{"name":"x","type":"slack"}`); w.Code != http.StatusNotFound {
 		t.Errorf("update missing: status = %d, want 404", w.Code)
 	}
 
-	e.mock.ExpectExec("DELETE FROM notification_channels").WithArgs("n1").
+	e.mock.ExpectExec(`DELETE FROM notification_channels[\s\S]*organization_id = ANY`).
+		WithArgs("n1", []string{testActingOrg}).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	if w := e.do(http.MethodDelete, "/api/v1/notifications/channels/n1", ""); w.Code != http.StatusNoContent {
 		t.Errorf("delete: status = %d, want 204", w.Code)
@@ -166,6 +185,13 @@ func TestNotificationChannels_TestEndpoint(t *testing.T) {
 	}))
 	defer srv.Close()
 
+	// TWO by-id reads, and the first one is the point. The handler asks whether
+	// this caller's organization owns the channel BEFORE the notifier loads it,
+	// decrypts its target and POSTs to it, because the shared SendTest takes no
+	// query option and cannot be told which organization is asking.
+	e.mock.ExpectQuery("FROM notification_channels WHERE id .+ organization_id = ANY").
+		WithArgs("n1", []string{testActingOrg}).
+		WillReturnRows(notifChannelRow(t, srv.URL))
 	e.mock.ExpectQuery("FROM notification_channels WHERE id").WithArgs("n1").
 		WillReturnRows(notifChannelRow(t, srv.URL))
 	e.mock.ExpectExec("UPDATE notification_channels").WillReturnResult(sqlmock.NewResult(0, 1))
@@ -174,11 +200,15 @@ func TestNotificationChannels_TestEndpoint(t *testing.T) {
 		t.Fatalf("test: status = %d, received = %v (%s)", w.Code, received, w.Body.String())
 	}
 
-	// Missing channel surfaces the notifier error.
-	e.mock.ExpectQuery("FROM notification_channels WHERE id").WithArgs("ghost").
+	// A channel that does not exist is now refused by the SCOPED read, before the
+	// notifier is reached at all, so it is a 404 rather than the 502 the notifier
+	// error used to surface. A channel in another organization is answered
+	// identically, which is the reason the refusal moved in front.
+	e.mock.ExpectQuery("FROM notification_channels WHERE id .+ organization_id = ANY").
+		WithArgs("ghost", []string{testActingOrg}).
 		WillReturnRows(sqlmock.NewRows(notifChannelCols))
-	if w := e.do(http.MethodPost, "/api/v1/notifications/channels/ghost/test", ""); w.Code != http.StatusBadGateway {
-		t.Errorf("missing channel: status = %d, want 502", w.Code)
+	if w := e.do(http.MethodPost, "/api/v1/notifications/channels/ghost/test", ""); w.Code != http.StatusNotFound {
+		t.Errorf("missing channel: status = %d, want 404", w.Code)
 	}
 }
 
@@ -188,9 +218,13 @@ func TestNotificationChannels_TestEndpoint(t *testing.T) {
 
 func newSSOEnv(t *testing.T, mutate func(*config.Config)) *sourcesEnv {
 	t.Helper()
-	db, mock, err := sqlmock.New()
+	// newSQLMock, not sqlmock.New: the channel reads are organization-scoped now
+	// and bind their organization array as a []string, which sqlmock's default
+	// conversion rejects on both the bind and the expectation. See
+	// identity/pgxparam.
+	db, mock, err := newSQLMock()
 	if err != nil {
-		t.Fatalf("sqlmock.New: %v", err)
+		t.Fatalf("newSQLMock: %v", err)
 	}
 	t.Cleanup(func() { db.Close() })
 

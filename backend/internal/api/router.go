@@ -365,7 +365,12 @@ func NewRouter(cfg *config.Config, database *sql.DB, identityDB *sql.DB) (*gin.E
 			s.POST("/:id/state/migrate", middleware.RequireScope(auth.ScopeStateTransfer), tenantScopeStateTransfer, sources.MigrateToSource())
 		}
 
-		v1.GET("/transfers/:id", requireAuth, middleware.RequireScope(auth.ScopeStateRead), sources.GetTransfer())
+		// tenantScopeStateRead, because GetTransfer now reads through
+		// GetByIDInScope (#393 Phase 3). It is the READ instance and not
+		// tenantScopeStateTransfer: this route only shows a record, and resolving
+		// "which organizations may this caller transfer in" would hide records
+		// from a caller entitled to read them.
+		v1.GET("/transfers/:id", requireAuth, middleware.RequireScope(auth.ScopeStateRead), tenantScopeStateRead, sources.GetTransfer())
 
 		// Cross-app: states consuming a given registry module (a sibling registry
 		// server-proxies to this to power its "Consumed by" panel).
@@ -671,11 +676,23 @@ func NewRouter(cfg *config.Config, database *sql.DB, identityDB *sql.DB) (*gin.E
 		tenantScopeAdmin := middleware.TenantScope(orgMembers, platformAdmins, auth.ScopeAdmin)
 		ng := v1.Group("/notifications", requireAuth, middleware.RequireScope(auth.ScopeAdmin))
 		{
-			ng.GET("/channels", notif.ListChannels())
+			// tenantScopeAdmin on EVERY channel route, not only the one that
+			// creates (#393 Phase 3). The list read served every organization's
+			// channels; the update, delete and test-send found their row by id
+			// alone. A channel's encrypted_target is a capability-bearing secret,
+			// and the test-send decrypts it and POSTs to it, so all three of the
+			// partition's sides were open on this root at once.
+			//
+			// The SETTINGS routes below are deliberately left unscoped: the SMTP
+			// relay and the API-key-expiry policy are one deployment-wide
+			// configuration in system_settings, not a partition root, and giving
+			// them a scope would imply a per-organization relay that does not
+			// exist.
+			ng.GET("/channels", tenantScopeAdmin, notif.ListChannels())
 			ng.POST("/channels", tenantScopeAdmin, notif.CreateChannel())
-			ng.PUT("/channels/:id", notif.UpdateChannel())
-			ng.DELETE("/channels/:id", notif.DeleteChannel())
-			ng.POST("/channels/:id/test", notif.TestChannel())
+			ng.PUT("/channels/:id", tenantScopeAdmin, notif.UpdateChannel())
+			ng.DELETE("/channels/:id", tenantScopeAdmin, notif.DeleteChannel())
+			ng.POST("/channels/:id/test", tenantScopeAdmin, notif.TestChannel())
 			ng.GET("/smtp-config", notif.GetSMTPConfig())
 			ng.PUT("/smtp-config", notif.PutSMTPConfig())
 			ng.POST("/test-email", notif.TestEmail())

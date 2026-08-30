@@ -3,6 +3,8 @@ package notify
 import (
 	identitynotify "github.com/sethbacon/terraform-suite-identity/identity/notify"
 	idstore "github.com/sethbacon/terraform-suite-identity/identity/store"
+
+	"github.com/terraform-state-manager/terraform-state-manager/internal/db/repositories"
 )
 
 // ForOrganization is the ONE place a TSM organization id becomes a channel
@@ -36,12 +38,16 @@ func ForOrganization(organizationID string) identitynotify.ChannelQueryOption {
 // directly. A ChannelQueryOption is opaque, so a test of ForOrganization alone
 // could only check that it returns non-nil -- which is exactly the shape of a
 // test that passes while the scope inside it is wrong.
+//
+// IT DELEGATES, and that is what keeps "there is one conversion" true. The
+// Phase 3 CRUD read flip needed the same "organization ids -> channel query
+// scope" step for a whole resolved tenantscope.Scope, and writing a second one
+// there would have made this file's own claim false in the very commit that
+// flipped the root. repositories.ChannelOrgScope is that one conversion; it
+// drops blank ids and so yields OrgScopeOrganizations() -- which renders the
+// literal FALSE -- for the empty case this file exists for. Still NOT
+// OrgScopeAllOrganizations(), and not the zero value with `unowned` set: an
+// event with no organization must reach nobody.
 func orgScopeFor(organizationID string) idstore.OrgScope {
-	if organizationID == "" {
-		// OrgScopeOrganizations with no ids matches nothing -- the fail-closed
-		// direction. NOT OrgScopeAllOrganizations(), and not the zero value with
-		// `unowned` set: an event with no organization must reach nobody.
-		return idstore.OrgScopeOrganizations()
-	}
-	return idstore.OrgScopeOrganizations(organizationID)
+	return repositories.ChannelOrgScope(organizationID)
 }

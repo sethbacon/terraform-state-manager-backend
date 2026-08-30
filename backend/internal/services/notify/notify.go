@@ -54,5 +54,8 @@ func New(repo *repositories.NotificationChannelRepository, smtp *SMTPConfig, tok
 		Source:      "terraform-state-manager",
 		TestMessage: "This is a test from Terraform State Manager.",
 	}
-	return identitynotify.NewNotifier(repo, provider, tokenCipher, guard, opts)
+	// Channels() rather than repo itself: the shared constructor takes the shared
+	// DAO, and this application's repository is now a wrapper around it whose own
+	// surface is the InScope one (see internal/db/repositories/notification_channel_scope.go).
+	return identitynotify.NewNotifier(repo.Channels(), provider, tokenCipher, guard, opts)
 }

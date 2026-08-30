@@ -319,6 +319,64 @@ func TestIntegrationRunRefusesADriftedChannelTable(t *testing.T) {
 	}
 }
 
+// TestIntegrationRunRefusesAChannelTableWithNoOrganizationColumn is the sibling
+// of the test above, for the column the #393 read flip made load-bearing.
+//
+// It is a SEPARATE assertion and not another DROP COLUMN inside that test,
+// because the two failures are different faults with different remedies: a
+// missing encrypted_target is a broken table, while a missing organization_id is
+// a deployment that never ran the partition migration. The library reports them
+// through different checks and names different fixes, and a test that merged
+// them could pass while only one of the two calls existed.
+//
+// WHAT HAPPENS WITHOUT THE CHECK, verified by mutation rather than assumed:
+// Run still fails, but at tenancy.Backfill, with "backfill
+// notification_channels.organization_id: column does not exist". So the boot was
+// already refused and the value here is WHERE and WHAT IT NAMES — a schema
+// assertion at the top of the sequence, naming the partition migration, instead
+// of an incidental failure two steps later naming a backfill loop.
+//
+// The last assertion below is what makes this test about the new check rather
+// than about "Run fails somehow": it requires the error to come from the column
+// check specifically. Without it this test passes on the backfill's failure and
+// would have gone on passing with the new call deleted.
+func TestIntegrationRunRefusesAChannelTableWithNoOrganizationColumn(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+
+	// Control. The migrated schema must pass, or the negative case below proves
+	// only that Run fails for some reason.
+	if err := bootstrapRun(ctx, e, true); err != nil {
+		t.Fatalf("Run against the migrated schema: %v", err)
+	}
+
+	if _, err := e.appDB.ExecContext(ctx,
+		`ALTER TABLE notification_channels DROP COLUMN organization_id`); err != nil {
+		t.Fatalf("drop the organization column: %v", err)
+	}
+
+	err := bootstrapRun(ctx, e, true)
+	if err == nil {
+		t.Fatal("Run succeeded against a notification_channels table with no organization_id. " +
+			"Every scoped channel read binds that column, so this deployment would answer " +
+			"`column \"organization_id\" does not exist` on the admin channels page — and the " +
+			"startup check that exists to turn that into a refusal to start is not being called.")
+	}
+	if !strings.Contains(err.Error(), "organization_id") {
+		t.Errorf("Run failed, but not in a way that names the column: %v\n"+
+			"An operator reading this has to know that the partition migration is the one "+
+			"that did not run.", err)
+	}
+	// And it must be THIS check failing, not the table check next to it tripping
+	// over the same DROP. Distinguishing them is the whole reason the two live
+	// apart: they name different migrations.
+	if !strings.Contains(err.Error(), "organization column") {
+		t.Errorf("Run failed on the wrong check (%v). VerifyChannelTable and "+
+			"VerifyChannelOrganizationColumn report different faults with different "+
+			"remedies, and only the second one is about the partition.", err)
+	}
+}
+
 // bootstrapRun is Run with this suite's arguments, so the control and the
 // negative case cannot drift apart.
 func bootstrapRun(ctx context.Context, e *env, seedRoles bool) error {

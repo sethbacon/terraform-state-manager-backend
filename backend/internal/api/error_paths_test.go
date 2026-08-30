@@ -92,7 +92,11 @@ func TestErrorPaths_NotificationsAndCISources(t *testing.T) {
 		{http.MethodPost, "/api/v1/notifications/channels", `{"name":"n","type":"slack","target":"https://h.example/x"}`, http.StatusInternalServerError},
 		{http.MethodPut, "/api/v1/notifications/channels/n1", `{"name":"n","type":"slack"}`, http.StatusInternalServerError},
 		{http.MethodDelete, "/api/v1/notifications/channels/n1", "", http.StatusInternalServerError},
-		{http.MethodPost, "/api/v1/notifications/channels/n1/test", "", http.StatusBadGateway},
+		// 500, not the 502 the notifier used to surface: the test-send now asks
+		// whether the caller's organization owns this channel BEFORE the notifier
+		// loads and decrypts its target, and that read is the one whose database
+		// error this env produces.
+		{http.MethodPost, "/api/v1/notifications/channels/n1/test", "", http.StatusInternalServerError},
 	} {
 		if w := n.do(tc.method, tc.path, tc.body); w.Code != tc.want {
 			t.Errorf("%s %s: status = %d, want %d (%s)", tc.method, tc.path, w.Code, tc.want, w.Body.String())

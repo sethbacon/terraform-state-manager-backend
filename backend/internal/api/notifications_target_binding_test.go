@@ -76,10 +76,14 @@ func TestCreateChannel_BindsTheTargetToTheNewRow(t *testing.T) {
 		WillReturnRows(notifChannelRow(t, target))
 
 	var stored string
-	e.mock.ExpectQuery("UPDATE notification_channels").
+	// The organization array is the LAST bind, and it is asserted rather than
+	// waved through: the re-seal is an UPDATE on a partition root, and an UPDATE
+	// expectation that binds no organization cannot see a scope swap.
+	e.mock.ExpectQuery(`UPDATE notification_channels[\s\S]*organization_id = ANY`).
 		WithArgs(
 			sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(),
 			sqlmock.AnyArg(), sqlmock.AnyArg(), capturedArg{got: &stored},
+			[]string{testActingOrg},
 		).
 		WillReturnRows(notifChannelRow(t, target))
 
@@ -102,10 +106,11 @@ func TestUpdateChannel_BindsTheTargetToTheRowBeingUpdated(t *testing.T) {
 
 	// Update already has the id in hand, so unlike create this is one write.
 	var stored string
-	e.mock.ExpectQuery("UPDATE notification_channels").
+	e.mock.ExpectQuery(`UPDATE notification_channels[\s\S]*organization_id = ANY`).
 		WithArgs(
 			sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(),
 			sqlmock.AnyArg(), sqlmock.AnyArg(), capturedArg{got: &stored},
+			[]string{testActingOrg},
 		).
 		WillReturnRows(notifChannelRow(t, target))
 
