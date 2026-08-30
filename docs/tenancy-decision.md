@@ -50,12 +50,22 @@ That is two planes on which a caller still sees other organizations' rows.
 The remaining flips are tracked by [#393][issue393]; do not read this page as
 saying the application is isolated today.
 
-The two that remain are held for reasons rather than for want of effort.
-`notification_channels` needs the shared notify library to be able to carry an
-organization at all (`Notify` cannot express one today, so every enabled channel
-receives every event); `state_transfers` is the deliberate **two-organization**
-case 000033 calls a supported capability, and scoping it to one organization
-would forbid the move it exists to record.
+The two that remain are held for different reasons, and neither is a missing
+dependency.
+
+`notification_channels` needs only its CRUD read flip. Its **delivery** path is
+already scoped: the shared library exposes `WithOrgScope` as a channel query
+option, `Notify` forwards those options to `ListEnabledForEvent`, and this
+application passes `notify.ForOrganization` at every `Notify` call site. So a
+notification for one tenant is not delivered to another's channel. What is still
+unscoped is `ListChannels`, which shows an operator every organization's
+channels — a disclosure, not a misdelivery.
+
+`state_transfers` is the deliberate **two-organization** case 000033 calls a
+supported capability, and scoping the record to one organization would forbid
+the move it exists to describe. Its write path already requires the caller to
+hold authority on **both** ends, and the counterparty organization now receives
+its own audit entry so a transfer out of it is not invisible to it.
 
 ### The machine callbacks are scoped too, and not by a middleware
 
