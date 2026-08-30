@@ -1,5 +1,13 @@
 # Changelog
 
+## [3.18.0](https://github.com/sethbacon/terraform-state-manager-backend/compare/v3.17.0...v3.18.0) (2026-08-30)
+
+
+### Features
+
+* **tenancy:** background work acts under a derived single-organization scope ([#539](https://github.com/sethbacon/terraform-state-manager-backend/issues/539)) ([0473be0](https://github.com/sethbacon/terraform-state-manager-backend/commit/0473be0785862ec7dde55ac821be3ac790b67d3f))
+* **transfer:** tell the counterparty organization its state moved ([#541](https://github.com/sethbacon/terraform-state-manager-backend/issues/541)) ([abbbc71](https://github.com/sethbacon/terraform-state-manager-backend/commit/abbbc71201156888453a779e6f8126d9fa1e9418))
+
 ## [3.17.0](https://github.com/sethbacon/terraform-state-manager-backend/compare/v3.16.2...v3.17.0) (2026-08-29)
 
 
