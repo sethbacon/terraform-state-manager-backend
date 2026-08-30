@@ -6,7 +6,6 @@ package api
 import (
 	"context"
 	"crypto/rand"
-	"crypto/subtle"
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
@@ -489,12 +488,28 @@ func (h *DriftHandlers) ListRuns() gin.HandlerFunc {
 		}
 		limit, _ := strconv.Atoi(c.Query("limit"))   // 0 -> repo default (50)
 		offset, _ := strconv.Atoi(c.Query("offset")) // 0 -> first page
-		runs, err := h.driftRepo.List(ctx, limit, offset, status)
+		// The Phase 3 read flip for drift_runs (#393). Unscoped, this listed
+		// every organization's runs -- each one naming a state key and carrying
+		// the plan summary, i.e. the resource addresses another tenant is about
+		// to change or destroy -- to any caller holding state:read anywhere.
+		//
+		// An UNRESOLVED scope is a 500, never an empty one and certainly never a
+		// full one: it means the route was registered without
+		// middleware.TenantScope.
+		scope, resolved := tenantscope.FromContext(c)
+		if !resolved {
+			serverError(c, errNoTenantScope, "the tenant scope was not resolved for this route")
+			return
+		}
+		runs, err := h.driftRepo.ListInScope(ctx, limit, offset, status, scope)
 		if err != nil {
 			serverError(c, err, "failed to list drift runs")
 			return
 		}
-		total, err := h.driftRepo.CountRuns(ctx, status)
+		// The total is scoped with the page: "showing 3 of 47" beside a
+		// three-row list would report how many runs the rest of the deployment
+		// has.
+		total, err := h.driftRepo.CountRunsInScope(ctx, status, scope)
 		if err != nil {
 			serverError(c, err, "failed to count drift runs")
 			return
@@ -506,7 +521,15 @@ func (h *DriftHandlers) ListRuns() gin.HandlerFunc {
 // GetRun returns a single drift run (without the callback token).
 func (h *DriftHandlers) GetRun() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		run, err := h.driftRepo.GetByID(c.Request.Context(), c.Param("id"))
+		scope, resolved := tenantscope.FromContext(c)
+		if !resolved {
+			serverError(c, errNoTenantScope, "the tenant scope was not resolved for this route")
+			return
+		}
+		// A run in another organization is reported EXACTLY as one that does not
+		// exist, so this endpoint cannot be used to test which run ids are real
+		// elsewhere in the deployment.
+		run, err := h.driftRepo.GetByIDInScope(c.Request.Context(), c.Param("id"), scope)
 		if err != nil {
 			serverError(c, err, "failed to load drift run")
 			return
@@ -572,24 +595,37 @@ func (h *DriftHandlers) RunResults() gin.HandlerFunc {
 		var body driftRunResultPayload
 		_ = c.ShouldBindJSON(&body)
 
-		token := c.GetHeader("X-TSM-Callback-Token")
-		if token == "" {
-			token = body.Token
-		}
+		token := callbackTokenFrom(c.GetHeader("X-TSM-Callback-Token"), body.Token)
 
+		// THE PRE-AUTHENTICATION LOOKUP, and the one read on this path that has
+		// no scope to run under: the credential being authenticated is what
+		// identifies the run, so there is nothing to scope BY until this returns.
+		// Recorded in unscoped_twin_class_test.go's justifiedUnscoped for exactly
+		// that reason. Everything after it runs under the authority the run
+		// confers.
 		run, err := h.driftRepo.GetByID(ctx, c.Param("id"))
 		if err != nil {
 			serverError(c, err, "failed to load drift run")
 			return
 		}
-		// Uniform 401 whether the run is missing or the token is wrong, so the
-		// endpoint is not a run-ID existence oracle.
-		if run == nil || run.CallbackToken == "" ||
-			subtle.ConstantTimeCompare([]byte(token), []byte(run.CallbackToken)) != 1 {
+		// Uniform 401 whether the run is missing, the token is wrong, or the run
+		// belongs to no organization -- so the endpoint is not a run-ID existence
+		// oracle, and an unstamped run confers no authority rather than a
+		// deployment-wide one. See callback_authority.go.
+		auth, authenticated := dispatchAuthority{}, false
+		if run != nil {
+			auth, authenticated = authenticateCallback("drift_runs",
+				callbackRun{ID: run.ID, OrganizationID: run.OrganizationID, StoredToken: run.CallbackToken}, token)
+		}
+		if !authenticated {
+			// ONE EXIT for all three refusals, which is what keeps them
+			// indistinguishable from outside.
 			c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid callback token"})
 			return
 		}
-		// One-shot: atomically consume the token; a replay finds it already cleared.
+		// One-shot: atomically consume the token; a replay finds it already
+		// cleared. Keyed on the credential itself (id AND token), which is a
+		// narrower predicate than the organization one and needs no scope on top.
 		consumed, err := h.driftRepo.ConsumeCallbackToken(ctx, run.ID, run.CallbackToken)
 		if err != nil {
 			serverError(c, err, "failed to record results")
@@ -608,24 +644,58 @@ func (h *DriftHandlers) RunResults() gin.HandlerFunc {
 		if body.Drifted != nil {
 			drifted = *body.Drifted
 		}
-		if err := h.driftRepo.UpdateResult(ctx, run.ID, status, body.Added, body.Changed, body.Destroyed, drifted, body.Summary, body.Detail, body.Completeness); err != nil {
+		if err := h.driftRepo.UpdateResultInScope(ctx, run.ID, status, body.Added, body.Changed, body.Destroyed, drifted, body.Summary, body.Detail, body.Completeness, auth.scope); err != nil {
 			serverError(c, err, "failed to record results")
 			return
 		}
 
-		h.recordDriftOutcome(ctx, run, status, body.Added, body.Changed, body.Destroyed, drifted, body.Summary, body.Completeness)
-		h.notifyDriftResult(run.OrganizationID, run.ID, status, body.Added, body.Changed, body.Destroyed, drifted, body.Detail)
-
-		// Best-effort module provenance for dispatched runs: if the runner uploaded
-		// the plan's module calls (+ optional locks), capture them against this
-		// run's source/state (both taken from the token-scoped run record, never the
-		// body). Never fails the callback — the drift result is the primary product.
-		if run.SourceID != nil && len(body.Plan) > 0 {
-			var plan driftingest.Plan
-			if err := json.Unmarshal(body.Plan, &plan); err == nil {
-				h.captureModuleRefs(ctx, *run.SourceID, run.StateKey, &plan, body.ModuleLocks)
+		// THE RUN'S SOURCE, LOADED UNDER THE RUN'S OWN AUTHORITY, before anything
+		// keyed on it is written.
+		//
+		// drift_runs.source_id is nullable and carries no same-organization
+		// constraint. The dispatch chain refuses a crossing target now, but a run
+		// dispatched before that landed -- or written by direct SQL -- can still
+		// name a source in another organization, and every statement below is
+		// keyed on that source: UpsertDetection would write into the other
+		// tenant's drift ledger, ResolveClean would close their live finding, and
+		// ReplaceForState would rewrite their module provenance. #393's survey
+		// settled the rule: the run is the CROSS-CHECK, a mismatch is refused
+		// rather than silently resolved.
+		//
+		// A source that is gone (ON DELETE SET NULL) is the same answer as one in
+		// another organization, and the same answer the record maintenance
+		// already gives for a run with no source: nothing is written, the run
+		// result itself is still recorded, and the finding survives until
+		// something that can see it verifies it.
+		runSourceID := ""
+		if run.SourceID != nil {
+			runSourceID = *run.SourceID
+		}
+		src, err := sourceFor(ctx, h.sourceRepo, runSourceID, auth)
+		switch {
+		case errors.Is(err, errNotOwnedHere):
+			driftLog.Error("drift callback refused: the run's source is not reachable under its own organization",
+				"run", run.ID, "error", errChainCrossesOrganizations("state_sources", runSourceID, auth, errNotOwnedHere))
+			src = nil
+		case err != nil:
+			serverError(c, err, "failed to record results")
+			return
+		}
+		if src != nil {
+			h.recordDriftOutcome(ctx, run, status, body.Added, body.Changed, body.Destroyed, drifted, body.Summary, body.Completeness, auth)
+			// Best-effort module provenance for dispatched runs: if the runner
+			// uploaded the plan's module calls (+ optional locks), capture them
+			// against this run's source/state (both taken from the token-scoped
+			// run record, never the body). Never fails the callback — the drift
+			// result is the primary product.
+			if len(body.Plan) > 0 {
+				var plan driftingest.Plan
+				if err := json.Unmarshal(body.Plan, &plan); err == nil {
+					h.captureModuleRefs(ctx, src.ID, run.StateKey, &plan, body.ModuleLocks, auth.scope)
+				}
 			}
 		}
+		h.notifyDriftResult(run.OrganizationID, run.ID, status, body.Added, body.Changed, body.Destroyed, drifted, body.Detail)
 		c.JSON(http.StatusOK, gin.H{"status": "recorded"})
 	}
 }

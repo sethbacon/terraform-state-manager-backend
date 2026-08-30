@@ -52,8 +52,9 @@ func TestRunResults_UnparseableCleanRunRoundTripsMarkersOnTheRun(t *testing.T) {
 	// The five markers must reach the run UPDATE, not stop at the handler.
 	e.mock.ExpectExec("UPDATE drift_runs").
 		WithArgs("d1", "completed", 0, 0, 0, false, nil, "gh run 9",
-			false, 0, 0, true, false).
+			false, 0, 0, true, false, []string{testActingOrg}).
 		WillReturnResult(sqlmock.NewResult(0, 1))
+	sourceRowFor(e, "s1")
 
 	body := `{"status":"completed","added":0,"changed":0,"destroyed":0,"drifted":false,
 		"unparseable":true,"unmasked":false,"truncated":false,
@@ -66,7 +67,8 @@ func TestRunResults_UnparseableCleanRunRoundTripsMarkersOnTheRun(t *testing.T) {
 
 	// ...and come back on the stored run: per-run history must be able to say
 	// this run never finished checking.
-	e.mock.ExpectQuery("FROM drift_runs WHERE id").WithArgs("d1").
+	e.mock.ExpectQuery("FROM drift_runs WHERE organization_id = ANY.+AND id").
+		WithArgs([]string{testActingOrg}, "d1").
 		WillReturnRows(driftRunRowMarked("completed", "", false, 0, 0, true, false))
 	w = e.do(http.MethodGet, "/api/v1/drift/runs/d1", "")
 	if w.Code != http.StatusOK {
@@ -94,12 +96,13 @@ func TestRunResults_CleanButBoundedRunRoundTripsMarkersOnTheRun(t *testing.T) {
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	e.mock.ExpectExec("UPDATE drift_runs").
 		WithArgs("d1", "completed", 0, 0, 0, false, nil, "",
-			true, 12, 3, false, true).
+			true, 12, 3, false, true, []string{testActingOrg}).
 		WillReturnResult(sqlmock.NewResult(0, 1))
+	sourceRowFor(e, "s1")
 	// Clean and readable, so the live finding is still resolved — the markers
 	// qualify the run, they do not change drift semantics.
 	e.mock.ExpectExec("UPDATE drift_records SET status='resolved'").
-		WithArgs("s1", "envs/prod.tfstate").WillReturnResult(sqlmock.NewResult(0, 1))
+		WithArgs("s1", "envs/prod.tfstate", []string{testActingOrg}).WillReturnResult(sqlmock.NewResult(0, 1))
 
 	body := `{"added":0,"changed":0,"destroyed":0,
 		"truncated":true,"omitted_entries":12,"omitted_attrs":3,

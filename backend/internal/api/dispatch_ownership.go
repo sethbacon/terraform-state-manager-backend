@@ -74,6 +74,12 @@ func requestAuthority(organizationID string) dispatchAuthority {
 // derived from the row being processed. The zero SystemScope yields an
 // authority whose scope permits nothing, so a caller that forgets to derive
 // reads nothing rather than everything.
+//
+// Two callers, and they differ only in which row confers the authority: the
+// scheduler, from the schedule it is firing; and the machine callbacks, from the
+// run an org-bound bearer credential authenticated (callback_authority.go, #393
+// option B item 5). Both end up here rather than in a second authority model,
+// which is the whole point of the type.
 func systemAuthority(s tenancy.SystemScope) dispatchAuthority {
 	return dispatchAuthority{
 		scope:          s.Scope(),

@@ -244,7 +244,7 @@ func TestDriftCreateRun(t *testing.T) {
 func TestDriftRunsReadAndCallback(t *testing.T) {
 	e := newDriftEnv(t)
 
-	e.mock.ExpectQuery("SELECT .+ FROM drift_runs ORDER BY").WithArgs(50, 0).
+	e.mock.ExpectQuery("FROM drift_runs WHERE organization_id = ANY.+ORDER BY").WithArgs([]string{testActingOrg}, 50, 0).
 		WillReturnRows(driftRow("secret"))
 	e.mock.ExpectQuery(`SELECT COUNT\(\*\) FROM drift_runs`).
 		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
@@ -253,14 +253,14 @@ func TestDriftRunsReadAndCallback(t *testing.T) {
 		t.Fatalf("list: status = %d, token leaked = %v", w.Code, strings.Contains(w.Body.String(), "secret"))
 	}
 
-	e.mock.ExpectQuery("SELECT .+ FROM drift_runs WHERE id").WithArgs("d1").
+	e.mock.ExpectQuery("FROM drift_runs WHERE organization_id = ANY.+AND id").WithArgs([]string{testActingOrg}, "d1").
 		WillReturnRows(driftRow("secret"))
 	w = e.do(http.MethodGet, "/api/v1/drift/runs/d1", "")
 	if w.Code != http.StatusOK || strings.Contains(w.Body.String(), "secret") {
 		t.Fatalf("get: status = %d, token leaked = %v", w.Code, strings.Contains(w.Body.String(), "secret"))
 	}
 
-	e.mock.ExpectQuery("SELECT .+ FROM drift_runs WHERE id").WithArgs("ghost").
+	e.mock.ExpectQuery("FROM drift_runs WHERE organization_id = ANY.+AND id").WithArgs([]string{testActingOrg}, "ghost").
 		WillReturnRows(sqlmock.NewRows(driftCols))
 	if w := e.do(http.MethodGet, "/api/v1/drift/runs/ghost", ""); w.Code != http.StatusNotFound {
 		t.Errorf("missing run: status = %d, want 404", w.Code)
@@ -351,7 +351,7 @@ func TestWorkflowTemplates(t *testing.T) {
 func TestHealthRuns(t *testing.T) {
 	e := newDriftEnv(t)
 
-	e.mock.ExpectQuery("SELECT .+ FROM health_runs ORDER BY").WithArgs(50, 0).
+	e.mock.ExpectQuery("FROM health_runs WHERE organization_id = ANY.+ORDER BY").WithArgs([]string{testActingOrg}, 50, 0).
 		WillReturnRows(healthRow("secret"))
 	e.mock.ExpectQuery(`SELECT COUNT\(\*\) FROM health_runs`).
 		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(7))
@@ -379,7 +379,15 @@ func TestHealthRuns(t *testing.T) {
 		WillReturnRows(healthRow("cb-token"))
 	e.mock.ExpectExec("UPDATE health_runs SET callback_token=''").WithArgs("h1", "cb-token").
 		WillReturnResult(sqlmock.NewResult(0, 1))
-	e.mock.ExpectExec("UPDATE health_runs").WillReturnResult(sqlmock.NewResult(0, 1))
+	// THE ORGANIZATION IS PINNED as the last argument, and it is the RUN'S, not
+	// the request's -- a machine callback has no principal, so its authority is
+	// derived from the run the token authenticated (#393, callback_authority.go).
+	// Without this argument the expectation matches the unscoped statement too,
+	// and a callback given a platform-admin scope -- the mutation that survived
+	// the previous increment -- would look identical here.
+	e.mock.ExpectExec("UPDATE health_runs SET status.+organization_id = ANY").
+		WithArgs("h1", "completed", true, true, true, sqlmock.AnyArg(), "", []string{testActingOrg}).
+		WillReturnResult(sqlmock.NewResult(0, 1))
 	w = e.doWithHeader(http.MethodPost, "/api/v1/health-lab/runs/h1/results",
 		`{"status":"completed","init_ok":true,"plan_ok":true,"success":true}`,
 		"X-TSM-Callback-Token", "cb-token")
@@ -403,10 +411,10 @@ func TestHealthRunsPagination(t *testing.T) {
 	e := newDriftEnv(t)
 
 	// status + limit + offset reach the query as args; total reflects the filter.
-	e.mock.ExpectQuery("SELECT .+ FROM health_runs WHERE status = .+ ORDER BY").
-		WithArgs("failed", 25, 50).WillReturnRows(healthRow("secret"))
-	e.mock.ExpectQuery(`SELECT COUNT\(\*\) FROM health_runs WHERE status =`).
-		WithArgs("failed").WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(3))
+	e.mock.ExpectQuery("FROM health_runs WHERE organization_id = ANY.+AND status = .+ ORDER BY").
+		WithArgs([]string{testActingOrg}, "failed", 25, 50).WillReturnRows(healthRow("secret"))
+	e.mock.ExpectQuery(`SELECT COUNT\(\*\) FROM health_runs WHERE organization_id = ANY.+AND status =`).
+		WithArgs([]string{testActingOrg}, "failed").WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(3))
 	w := e.do(http.MethodGet, "/api/v1/health-lab/runs?status=failed&limit=25&offset=50", "")
 	if w.Code != http.StatusOK {
 		t.Fatalf("paged list: status = %d (%s)", w.Code, w.Body.String())
@@ -428,10 +436,10 @@ func TestDriftRunsPagination(t *testing.T) {
 	e := newDriftEnv(t)
 
 	// status + limit + offset reach the query as args; total reflects the filter.
-	e.mock.ExpectQuery("SELECT .+ FROM drift_runs WHERE status = .+ ORDER BY").
-		WithArgs("failed", 25, 50).WillReturnRows(driftRow("secret"))
-	e.mock.ExpectQuery(`SELECT COUNT\(\*\) FROM drift_runs WHERE status =`).
-		WithArgs("failed").WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(3))
+	e.mock.ExpectQuery("FROM drift_runs WHERE organization_id = ANY.+AND status = .+ ORDER BY").
+		WithArgs([]string{testActingOrg}, "failed", 25, 50).WillReturnRows(driftRow("secret"))
+	e.mock.ExpectQuery(`SELECT COUNT\(\*\) FROM drift_runs WHERE organization_id = ANY.+AND status =`).
+		WithArgs([]string{testActingOrg}, "failed").WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(3))
 	w := e.do(http.MethodGet, "/api/v1/drift/runs?status=failed&limit=25&offset=50", "")
 	if w.Code != http.StatusOK {
 		t.Fatalf("paged list: status = %d (%s)", w.Code, w.Body.String())

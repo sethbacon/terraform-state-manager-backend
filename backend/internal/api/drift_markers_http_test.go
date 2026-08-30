@@ -32,7 +32,7 @@ func TestIngestDrift_PersistsCompletenessMarkers(t *testing.T) {
 	e.mock.ExpectQuery("INSERT INTO drift_records").
 		WithArgs("s1", "envs/prod.tfstate", nil, nil, "ingest", "warning",
 			3, 0, 0, `[{"address":"aws_instance.web","actions":["create"]}]`, "run-88",
-			true, 7, 15, true, true).
+			true, 7, 15, true, true, []string{testActingOrg}).
 		WillReturnRows(driftRecRowMarked("r1", "open", "warning", true, 7, 15, true, true))
 
 	body := `{
@@ -70,10 +70,13 @@ func TestRunResults_PersistsCompletenessMarkers(t *testing.T) {
 	e.mock.ExpectExec("UPDATE drift_runs SET callback_token=''").WithArgs("d1", "tok1").
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	e.mock.ExpectExec("UPDATE drift_runs").WillReturnResult(sqlmock.NewResult(0, 1))
+	// The run's source, loaded under the authority the callback token derived,
+	// before anything keyed on it is written (#393).
+	sourceRowFor(e, "s1")
 	e.mock.ExpectQuery("INSERT INTO drift_records").
 		WithArgs("s1", "envs/prod.tfstate", "p1", "d1", "run", "warning",
 			1, 0, 0, `[{"address":"a.b","actions":["create"]}]`, nil,
-			true, 4, 0, false, true).
+			true, 4, 0, false, true, []string{testActingOrg}).
 		WillReturnRows(driftRecRowMarked("r1", "open", "warning", true, 4, 0, false, true))
 
 	body := `{"added":1,"changed":0,"destroyed":0,"drifted":true,
@@ -100,7 +103,7 @@ func TestDriftMarkers_TruncatedIsWidenedNotNarrowed(t *testing.T) {
 	sourceRowFor(e, "s1")
 	e.mock.ExpectQuery("INSERT INTO drift_records").
 		WithArgs("s1", "k", nil, nil, "ingest", "warning", 1, 0, 0, nil, nil,
-			true, 2, 0, false, false). // truncated derived from omitted_entries
+			true, 2, 0, false, false, []string{testActingOrg}). // truncated derived from omitted_entries
 		WillReturnRows(driftRecRowMarked("r1", "open", "warning", true, 2, 0, false, false))
 
 	w := e.do(http.MethodPost, "/api/v1/drift/ingest",
@@ -126,7 +129,7 @@ func TestIngestDrift_ServerParsedPlanOverridesClaimedMarkers(t *testing.T) {
 	// unmasked=TRUE — the exact inverse of every claim in the body below.
 	e.mock.ExpectQuery("INSERT INTO drift_records").
 		WithArgs("s1", "k", nil, nil, "ingest", "warning", 0, 1, 0, sqlmock.AnyArg(), nil,
-			false, 0, 0, false, true).
+			false, 0, 0, false, true, []string{testActingOrg}).
 		WillReturnRows(driftRecRowMarked("r1", "open", "warning", false, 0, 0, false, true))
 
 	body := `{"source_id":"s1","state_key":"k",
@@ -174,11 +177,12 @@ func TestDriftMarkers_UnparseableDoesNotResolve(t *testing.T) {
 		e.mock.ExpectExec("UPDATE drift_runs SET callback_token=''").WithArgs("d1", "tok1").
 			WillReturnResult(sqlmock.NewResult(0, 1))
 		e.mock.ExpectExec("UPDATE drift_runs").WillReturnResult(sqlmock.NewResult(0, 1))
+		sourceRowFor(e, "s1")
 		// The resolve is QUEUED and then required to go UNUSED. sqlmock does not
 		// fail on an unexpected call — it just errors that call — so asserting the
 		// absence of a resolve needs this inversion; a plain "no expectation" test
 		// stays green with the guard removed and proves nothing.
-		e.mock.ExpectExec("UPDATE drift_records SET status='resolved'").WithArgs("s1", "envs/prod.tfstate").
+		e.mock.ExpectExec("UPDATE drift_records SET status='resolved'").WithArgs("s1", "envs/prod.tfstate", []string{testActingOrg}).
 			WillReturnResult(sqlmock.NewResult(0, 1))
 
 		w := e.doWithHeader(http.MethodPost, "/api/v1/drift/runs/d1/results",

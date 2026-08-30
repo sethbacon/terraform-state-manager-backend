@@ -599,18 +599,29 @@ func NewRouter(cfg *config.Config, database *sql.DB, identityDB *sql.DB) (*gin.E
 		{
 			d.GET("/workflow", middleware.RequireScope(auth.ScopeStateRead), drift.WorkflowTemplate(templateRepo))
 			d.POST("/runs", middleware.RequireScope(auth.ScopeStateDrift), tenantScopeStateDrift, drift.CreateRun())
-			d.GET("/runs", middleware.RequireScope(auth.ScopeStateRead), drift.ListRuns())
-			d.GET("/runs/:id", middleware.RequireScope(auth.ScopeStateRead), drift.GetRun())
+			// The run and record reads resolve a tenant scope too (#393): a drift
+			// run carries a state key and a plan summary, and a drift record is
+			// the acknowledgeable statement of what is wrong with a tenant's
+			// infrastructure. The two acknowledge/resolve routes are the WRITE
+			// side of the same root and resolve the scope for their own verb.
+			d.GET("/runs", middleware.RequireScope(auth.ScopeStateRead), tenantScopeStateRead, drift.ListRuns())
+			d.GET("/runs/:id", middleware.RequireScope(auth.ScopeStateRead), tenantScopeStateRead, drift.GetRun())
 
 			// Drift records: the durable, acknowledgeable layer over runs, plus
 			// push-style ingest for pipelines TSM did not dispatch.
 			d.POST("/ingest", middleware.RequireScope(auth.ScopeStateDrift), tenantScopeStateDrift, drift.IngestDrift())
-			d.GET("/records", middleware.RequireScope(auth.ScopeStateRead), drift.ListDriftRecords())
-			d.GET("/records/:id", middleware.RequireScope(auth.ScopeStateRead), drift.GetDriftRecord())
-			d.POST("/records/:id/acknowledge", middleware.RequireScope(auth.ScopeStateDrift), drift.AcknowledgeDriftRecord())
-			d.POST("/records/:id/resolve", middleware.RequireScope(auth.ScopeStateDrift), drift.ResolveDriftRecord())
+			d.GET("/records", middleware.RequireScope(auth.ScopeStateRead), tenantScopeStateRead, drift.ListDriftRecords())
+			d.GET("/records/:id", middleware.RequireScope(auth.ScopeStateRead), tenantScopeStateRead, drift.GetDriftRecord())
+			d.POST("/records/:id/acknowledge", middleware.RequireScope(auth.ScopeStateDrift), tenantScopeStateDrift, drift.AcknowledgeDriftRecord())
+			d.POST("/records/:id/resolve", middleware.RequireScope(auth.ScopeStateDrift), tenantScopeStateDrift, drift.ResolveDriftRecord())
 		}
-		// Machine callback (authenticated by the per-run token, not a user session).
+		// Machine callback (authenticated by the per-run token, not a user
+		// session), and DELIBERATELY WITHOUT middleware.TenantScope: a CI job
+		// carries no principal, so there is no tenancy to resolve for it and the
+		// middleware would refuse every legitimate callback. Its authority comes
+		// from the credential instead -- the run the token authenticates names
+		// the organization every statement afterwards runs under. See
+		// callback_authority.go.
 		v1.POST("/drift/runs/:id/results", drift.RunResults())
 
 		// Phase 4 version lab: dispatch plan against pinned versions + health.
@@ -620,9 +631,10 @@ func NewRouter(cfg *config.Config, database *sql.DB, identityDB *sql.DB) (*gin.E
 		{
 			hg.GET("/workflow", middleware.RequireScope(auth.ScopeStateRead), health.WorkflowTemplate(templateRepo))
 			hg.POST("/runs", middleware.RequireScope(auth.ScopeStateExecute), tenantScopeStateExecute, health.CreateRun())
-			hg.GET("/runs", middleware.RequireScope(auth.ScopeStateRead), health.ListRuns())
-			hg.GET("/runs/:id", middleware.RequireScope(auth.ScopeStateRead), health.GetRun())
+			hg.GET("/runs", middleware.RequireScope(auth.ScopeStateRead), tenantScopeStateRead, health.ListRuns())
+			hg.GET("/runs/:id", middleware.RequireScope(auth.ScopeStateRead), tenantScopeStateRead, health.GetRun())
 		}
+		// The health callback, on the same terms as the drift one above.
 		v1.POST("/health-lab/runs/:id/results", health.RunResults())
 
 		// Scheduler: cron-driven schedules that dispatch drift runs. The same drift

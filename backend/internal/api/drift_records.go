@@ -8,6 +8,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/tenantscope"
 	"io"
@@ -46,7 +47,13 @@ func completenessFromResult(res *driftingest.Result) repositories.Completeness {
 // completion upserts the live record for the state, a clean completion resolves
 // it. Runs without a source_id + state_key cannot be mapped to a record (the
 // pair is the record identity) and are skipped; failures don't touch records.
-func (h *DriftHandlers) recordDriftOutcome(ctx context.Context, run *repositories.DriftRun, status string, added, changed, destroyed int, drifted bool, summary []byte, marks repositories.Completeness) {
+// auth is the authority the CALLBACK derived from the run it authenticated (see
+// callback_authority.go), and both statements below run under it. The caller has
+// already established that the run's source is reachable under that authority;
+// scoping the statements as well is the defence that survives the caller being
+// edited, and it is the layer a mock cannot stand in for -- the refusal happens
+// in SQL, not in a comparison somebody has to keep writing.
+func (h *DriftHandlers) recordDriftOutcome(ctx context.Context, run *repositories.DriftRun, status string, added, changed, destroyed int, drifted bool, summary []byte, marks repositories.Completeness, auth dispatchAuthority) {
 	if h.recordRepo == nil || status != "completed" || run.SourceID == nil || run.StateKey == "" {
 		return
 	}
@@ -63,7 +70,7 @@ func (h *DriftHandlers) recordDriftOutcome(ctx context.Context, run *repositorie
 			Summary:              summary,
 			Completeness:         marks,
 		}
-		if _, err := h.recordRepo.UpsertDetection(ctx, d); err != nil {
+		if _, err := h.recordRepo.UpsertDetectionInScope(ctx, d, auth.scope); err != nil {
 			driftLog.Error("failed to upsert drift record from run", "run", run.ID, "error", err)
 		}
 		return
@@ -78,7 +85,7 @@ func (h *DriftHandlers) recordDriftOutcome(ctx context.Context, run *repositorie
 			"run", run.ID, "state", run.StateKey)
 		return
 	}
-	if _, err := h.recordRepo.ResolveClean(ctx, *run.SourceID, run.StateKey); err != nil {
+	if _, err := h.recordRepo.ResolveCleanInScope(ctx, *run.SourceID, run.StateKey, auth.scope); err != nil {
 		driftLog.Error("failed to resolve drift record after clean run", "run", run.ID, "error", err)
 	}
 }
@@ -209,7 +216,7 @@ func (h *DriftHandlers) IngestDrift() gin.HandlerFunc {
 			// configuration block. Never fails the ingest — the drift record is the
 			// primary product; provenance powers the optional "modules in use" /
 			// "consumed by" views.
-			h.captureModuleRefs(ctx, req.SourceID, req.StateKey, &plan, req.ModuleLocks)
+			h.captureModuleRefs(ctx, req.SourceID, req.StateKey, &plan, req.ModuleLocks, scope)
 		}
 		if req.Drifted != nil {
 			drifted = *req.Drifted
@@ -236,7 +243,7 @@ func (h *DriftHandlers) IngestDrift() gin.HandlerFunc {
 					"reason": "result reported unparseable; the drift record was left unresolved"})
 				return
 			}
-			resolved, err := h.recordRepo.ResolveClean(ctx, req.SourceID, req.StateKey)
+			resolved, err := h.recordRepo.ResolveCleanInScope(ctx, req.SourceID, req.StateKey, scope)
 			if err != nil {
 				serverError(c, err, "failed to record clean result")
 				return
@@ -258,7 +265,7 @@ func (h *DriftHandlers) IngestDrift() gin.HandlerFunc {
 			ExternalRef:  extRef,
 			Completeness: req.Completeness,
 		}
-		rec, err := h.recordRepo.UpsertDetection(ctx, det)
+		rec, err := h.recordRepo.UpsertDetectionInScope(ctx, det, scope)
 		if err != nil {
 			serverError(c, err, "failed to record drift")
 			return
@@ -273,7 +280,12 @@ func (h *DriftHandlers) IngestDrift() gin.HandlerFunc {
 // captureModuleRefs persists the registry-module provenance found in an ingested
 // plan, replacing any prior refs for the (source, state). Best-effort: a failure
 // is logged, never surfaced — the drift record is the primary product.
-func (h *DriftHandlers) captureModuleRefs(ctx context.Context, sourceID, stateKey string, plan *driftingest.Plan, moduleLocks []byte) {
+// scope is the authority the caller established for this source -- the request's
+// on the ingest path, the run's derived one on the callback path. Passed rather
+// than assumed because this statement DELETEs before it INSERTs, so an unscoped
+// call against a source in another organization does not add a wrong row, it
+// destroys a right one.
+func (h *DriftHandlers) captureModuleRefs(ctx context.Context, sourceID, stateKey string, plan *driftingest.Plan, moduleLocks []byte, scope tenantscope.Scope) {
 	refs := driftingest.ModuleRefs(plan, driftingest.ParseModuleLocks(moduleLocks))
 	rows := make([]repositories.StateModuleRef, len(refs))
 	for i, m := range refs {
@@ -283,7 +295,7 @@ func (h *DriftHandlers) captureModuleRefs(ctx context.Context, sourceID, stateKe
 			ModuleVersion: m.ModuleVersion,
 		}
 	}
-	if err := h.moduleRefRepo.ReplaceForState(ctx, sourceID, stateKey, rows); err != nil {
+	if err := h.moduleRefRepo.ReplaceForStateInScope(ctx, sourceID, stateKey, rows, scope); err != nil {
 		driftLog.Warn("failed to capture module provenance",
 			"source_id", sourceID, "state_key", stateKey, "error", err)
 	}
@@ -364,17 +376,29 @@ func (h *DriftHandlers) ListDriftRecords() gin.HandlerFunc {
 		}
 
 		sourceID, severity := c.Query("source_id"), c.Query("severity")
-		records, err := h.recordRepo.List(ctx, statuses, sourceID, severity, perPage, (page-1)*perPage, start, end)
+		// The Phase 3 read flip for drift_records (#393), and the root with the
+		// most to disclose: a record is the durable, acknowledgeable statement of
+		// what is currently wrong with somebody's infrastructure, resource
+		// addresses included. Unscoped, this served every organization's to any
+		// caller holding state:read in one of them.
+		scope, resolved := tenantscope.FromContext(c)
+		if !resolved {
+			serverError(c, errNoTenantScope, "the tenant scope was not resolved for this route")
+			return
+		}
+		records, err := h.recordRepo.ListInScope(ctx, statuses, sourceID, severity, perPage, (page-1)*perPage, start, end, scope)
 		if err != nil {
 			serverError(c, err, "failed to list drift records")
 			return
 		}
-		total, err := h.recordRepo.CountRecords(ctx, statuses, sourceID, severity, start, end)
+		total, err := h.recordRepo.CountRecordsInScope(ctx, statuses, sourceID, severity, start, end, scope)
 		if err != nil {
 			serverError(c, err, "failed to list drift records")
 			return
 		}
-		counts, err := h.recordRepo.CountsByStatus(ctx)
+		// The status chips are scoped with the list. An unscoped tally beside a
+		// scoped list would say "12 open" to a tenant who can see three of them.
+		counts, err := h.recordRepo.CountsByStatusInScope(ctx, scope)
 		if err != nil {
 			serverError(c, err, "failed to list drift records")
 			return
@@ -386,7 +410,12 @@ func (h *DriftHandlers) ListDriftRecords() gin.HandlerFunc {
 // GetDriftRecord returns one drift record.
 func (h *DriftHandlers) GetDriftRecord() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		rec, err := h.recordRepo.GetByID(c.Request.Context(), c.Param("id"))
+		scope, resolved := tenantscope.FromContext(c)
+		if !resolved {
+			serverError(c, errNoTenantScope, "the tenant scope was not resolved for this route")
+			return
+		}
+		rec, err := h.recordRepo.GetByIDInScope(c.Request.Context(), c.Param("id"), scope)
 		if err != nil {
 			serverError(c, err, "failed to load drift record")
 			return
@@ -421,14 +450,30 @@ func (h *DriftHandlers) AcknowledgeDriftRecord() gin.HandlerFunc {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "note must be 1000 characters or fewer"})
 			return
 		}
-		rec, err := h.recordRepo.Acknowledge(c.Request.Context(), c.Param("id"), userIDOf(c), req.Note)
+		// THE WRITE SIDE (#393): an acknowledgement is the statement that a human
+		// has SEEN a finding, so an unscoped one silences another tenant's live
+		// drift under a name from outside their organization. ErrNotInScope is
+		// rendered as 404 like every other unreachable row -- see
+		// tenant_write_scope.go on why a 403 would itself be a disclosure.
+		scope, resolved := tenantscope.FromContext(c)
+		if !resolved {
+			serverError(c, errNoTenantScope, "the tenant scope was not resolved for this route")
+			return
+		}
+		rec, err := h.recordRepo.AcknowledgeInScope(c.Request.Context(), c.Param("id"), userIDOf(c), req.Note, scope)
+		if errors.Is(err, repositories.ErrNotInScope) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "drift record not found"})
+			return
+		}
 		if err != nil {
 			serverError(c, err, "failed to acknowledge drift record")
 			return
 		}
 		if rec == nil {
-			// Missing vs not-open: look it up to answer precisely.
-			existing, gErr := h.recordRepo.GetByID(c.Request.Context(), c.Param("id"))
+			// Missing vs not-open: look it up to answer precisely -- IN SCOPE, so
+			// a record in another organization stays a plain 404 rather than
+			// being reported as "not open", which would confirm it exists.
+			existing, gErr := h.recordRepo.GetByIDInScope(c.Request.Context(), c.Param("id"), scope)
 			if gErr == nil && existing != nil {
 				c.JSON(http.StatusConflict, gin.H{"error": "drift record is not open (status: " + existing.Status + ")"})
 				return
@@ -445,13 +490,22 @@ func (h *DriftHandlers) AcknowledgeDriftRecord() gin.HandlerFunc {
 // ResolveDriftRecord manually closes a record (drift remediated out-of-band).
 func (h *DriftHandlers) ResolveDriftRecord() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		rec, err := h.recordRepo.Resolve(c.Request.Context(), c.Param("id"))
+		scope, resolved := tenantscope.FromContext(c)
+		if !resolved {
+			serverError(c, errNoTenantScope, "the tenant scope was not resolved for this route")
+			return
+		}
+		rec, err := h.recordRepo.ResolveInScope(c.Request.Context(), c.Param("id"), scope)
+		if errors.Is(err, repositories.ErrNotInScope) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "drift record not found"})
+			return
+		}
 		if err != nil {
 			serverError(c, err, "failed to resolve drift record")
 			return
 		}
 		if rec == nil {
-			existing, gErr := h.recordRepo.GetByID(c.Request.Context(), c.Param("id"))
+			existing, gErr := h.recordRepo.GetByIDInScope(c.Request.Context(), c.Param("id"), scope)
 			if gErr == nil && existing != nil {
 				c.JSON(http.StatusConflict, gin.H{"error": "drift record is already resolved"})
 				return

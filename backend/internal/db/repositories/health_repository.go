@@ -144,12 +144,7 @@ func (r *HealthRepository) GetByID(ctx context.Context, id string) (*HealthRun, 
 // by limit/offset for server-side pagination. Use CountRuns with the same status
 // for the total.
 func (r *HealthRepository) List(ctx context.Context, limit, offset int, status string) ([]HealthRun, error) {
-	if limit <= 0 || limit > 200 {
-		limit = 50
-	}
-	if offset < 0 {
-		offset = 0
-	}
+	limit, offset = runPage(limit, offset)
 	var (
 		rows *sql.Rows
 		err  error

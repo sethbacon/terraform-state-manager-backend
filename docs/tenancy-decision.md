@@ -40,15 +40,39 @@ a shared design. It is what an organization already meant, finally enforced.
 ## Where the migration actually stands
 
 Isolation is **not complete**, and this is the honest position rather than the
-advertised one. Of the nine partition roots, four have scoped reads:
+advertised one. Of the nine partition roots, seven have scoped reads:
 
 | Reads are organization-scoped | Reads still return every row |
 | --- | --- |
-| `state_sources`, `schedules`, `pipeline_connections`, `ci_sources` | `notification_channels`, `state_transfers`, `drift_runs`, `drift_records`, `health_runs` |
+| `state_sources`, `schedules`, `pipeline_connections`, `ci_sources`, `drift_runs`, `drift_records`, `health_runs` | `notification_channels`, `state_transfers` |
 
-That is five planes on which a caller still sees other organizations' rows.
+That is two planes on which a caller still sees other organizations' rows.
 The remaining flips are tracked by [#393][issue393]; do not read this page as
 saying the application is isolated today.
+
+The two that remain are held for reasons rather than for want of effort.
+`notification_channels` needs the shared notify library to be able to carry an
+organization at all (`Notify` cannot express one today, so every enabled channel
+receives every event); `state_transfers` is the deliberate **two-organization**
+case 000033 calls a supported capability, and scoping it to one organization
+would forbid the move it exists to record.
+
+### The machine callbacks are scoped too, and not by a middleware
+
+`drift_runs`, `drift_records` and `health_runs` are read by two kinds of caller,
+and only one of them is a person. A CI job posts its plan result to
+`/api/v1/drift/runs/{id}/results` carrying a per-run bearer token and nothing
+else — no session, no membership, no organization. There is no tenancy to
+resolve for a request like that, so those two callback routes deliberately carry
+no `TenantScope` middleware.
+
+Their authority comes from the credential instead: the token authenticates one
+run, the run carries its own `organization_id`, and that organization derives a
+single-organization scope which every statement afterwards runs under — the same
+scope type, and the same SQL predicates, the request path uses. A callback
+authenticated for a run in one organization therefore cannot read or write a
+drift record or health run in another, and a run that belongs to no organization
+confers no authority at all rather than a deployment-wide one.
 
 One clarification the `schedules` flip earned. On that root the unscoped read
 was not only a disclosure: `POST /schedules/{id}/run` loaded the schedule by id

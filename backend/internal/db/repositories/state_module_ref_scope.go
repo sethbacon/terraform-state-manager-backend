@@ -57,3 +57,38 @@ func (r *StateModuleRefRepository) FindConsumersInScope(ctx context.Context, sco
 	}
 	return out, rows.Err()
 }
+
+// ReplaceForStateInScope is the scoped twin of ReplaceForState, and it closes
+// the WRITE side of this table's inherited partition (#393).
+//
+// state_module_refs has no organization_id: it inherits through source_id, so
+// the predicate is a JOIN, exactly as the read side above. That makes it easy to
+// forget on a mutating statement, and this one is reached from the drift
+// CALLBACK -- whose source_id comes off the run row, is nullable, and carries no
+// same-organization constraint. Unscoped, a callback holding one organization's
+// run token could rewrite ANOTHER organization's module provenance for a state
+// file: a DELETE followed by an INSERT, so the loss is silent and total rather
+// than additive.
+//
+// Refuses rather than no-ops when the source is out of scope: the caller is
+// doing this best-effort and logs, and a silent success would leave "the refs
+// were replaced" indistinguishable from "the refs were not touched".
+func (r *StateModuleRefRepository) ReplaceForStateInScope(ctx context.Context, sourceID, stateKey string, refs []StateModuleRef, scope tenantscope.Scope) error {
+	w := scopeWrite(scope)
+	if w.Deny {
+		return ErrNotInScope
+	}
+	if w.Skip {
+		return r.ReplaceForState(ctx, sourceID, stateKey, refs)
+	}
+	var owned bool
+	if err := r.db.QueryRowContext(ctx,
+		`SELECT EXISTS (SELECT 1 FROM state_sources WHERE id = $1 AND organization_id = ANY($2::uuid[]))`,
+		sourceID, w.OrgIDs).Scan(&owned); err != nil {
+		return err
+	}
+	if !owned {
+		return ErrNotInScope
+	}
+	return r.ReplaceForState(ctx, sourceID, stateKey, refs)
+}

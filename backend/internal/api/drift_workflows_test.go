@@ -110,10 +110,16 @@ func TestRunResults_CapturesModuleProvenance(t *testing.T) {
 	e.mock.ExpectExec("UPDATE drift_runs SET callback_token=''").WithArgs("d1", "tokX").
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	e.mock.ExpectExec("UPDATE drift_runs").WillReturnResult(sqlmock.NewResult(0, 1))
+	sourceRowFor(e, "s1")
 	// Clean callback: the record layer resolves.
-	e.mock.ExpectExec("UPDATE drift_records SET status='resolved'").WithArgs("s1", "envs/prod.tfstate").
+	e.mock.ExpectExec("UPDATE drift_records SET status='resolved'").WithArgs("s1", "envs/prod.tfstate", []string{testActingOrg}).
 		WillReturnResult(sqlmock.NewResult(0, 1))
-	// Capture: ReplaceForState tx writes one ref with the version from the lockfile.
+	// Capture: the ownership check first (state_module_refs inherits through
+	// state_sources and has no organization_id of its own), then the
+	// ReplaceForState tx writing one ref with the version from the lockfile.
+	e.mock.ExpectQuery("SELECT EXISTS.+FROM state_sources WHERE id = .+ organization_id = ANY").
+		WithArgs("s1", []string{testActingOrg}).
+		WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(true))
 	e.mock.ExpectBegin()
 	e.mock.ExpectExec("DELETE FROM state_module_refs").WithArgs("s1", "envs/prod.tfstate").
 		WillReturnResult(sqlmock.NewResult(0, 0))
