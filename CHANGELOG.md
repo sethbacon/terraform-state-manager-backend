@@ -1,5 +1,14 @@
 # Changelog
 
+## [3.19.0](https://github.com/sethbacon/terraform-state-manager-backend/compare/v3.18.0...v3.19.0) (2026-08-30)
+
+
+### Features
+
+* **auth:** report the remaining session lifetime, not only its expiry instant ([#545](https://github.com/sethbacon/terraform-state-manager-backend/issues/545)) ([fba2050](https://github.com/sethbacon/terraform-state-manager-backend/commit/fba20504974fd827c68fa910505e3a4c7001a01b))
+* **tenancy:** scope the callback roots, and derive a machine callback's authority from its run ([#542](https://github.com/sethbacon/terraform-state-manager-backend/issues/542)) ([2b938eb](https://github.com/sethbacon/terraform-state-manager-backend/commit/2b938eb0b93affc2317adffeea6fb8eeea835ab9))
+* **tenancy:** scope the notification-channel and transfer reads by organization ([#544](https://github.com/sethbacon/terraform-state-manager-backend/issues/544)) ([31de110](https://github.com/sethbacon/terraform-state-manager-backend/commit/31de1101bee2e3444cee5a4abfe1b49686864ac1))
+
 ## [3.18.0](https://github.com/sethbacon/terraform-state-manager-backend/compare/v3.17.0...v3.18.0) (2026-08-30)
 
 
