@@ -40,13 +40,13 @@ a shared design. It is what an organization already meant, finally enforced.
 ## Where the migration actually stands
 
 Isolation is **not complete**, and this is the honest position rather than the
-advertised one. Of the nine partition roots, two have scoped reads:
+advertised one. Of the nine partition roots, four have scoped reads:
 
 | Reads are organization-scoped | Reads still return every row |
 | --- | --- |
-| `state_sources`, `schedules` | `pipeline_connections`, `ci_sources`, `notification_channels`, `state_transfers`, `drift_runs`, `drift_records`, `health_runs` |
+| `state_sources`, `schedules`, `pipeline_connections`, `ci_sources` | `notification_channels`, `state_transfers`, `drift_runs`, `drift_records`, `health_runs` |
 
-That is seven planes on which a caller still sees other organizations' rows.
+That is five planes on which a caller still sees other organizations' rows.
 The remaining flips are tracked by [#393][issue393]; do not read this page as
 saying the application is isolated today.
 
@@ -56,6 +56,20 @@ and dispatched its target under the *schedule's* organization, so a caller in
 another organization could execute it on that organization's pipeline
 connection. Where a root's reads feed a dispatch, an unscoped read is an
 execution boundary and not merely a visibility one.
+
+The `pipeline_connections` and `ci_sources` flips carried the decision that
+question forced ([#393][issue393], option B): **background work acts under a
+derived tenant scope**. The scheduler has no request and no principal, so for
+each schedule it fires it derives "system, acting in organization X" from the
+schedule row itself (`internal/tenancy.SystemActingIn`, provenance included)
+and every by-id load on the dispatch chain — the pipeline connection, the
+target state source, and the CI source whose *shared credential*
+`resolvePipelineToken` decrypts — is an `InScope` read under that one-organization
+scope. A chain that crosses organizations fails closed and logs the row that
+led there. Enumeration (`GetDue` and its siblings) stays deliberately unscoped:
+finding due work across organizations is the system's job; acting on an item is
+scoped to that item's owner. Write-side, a schedule or connection that
+references a row in another organization is refused at write time.
 
 That table is **checked against the code, not maintained by hand**.
 `internal/tenancy/scoping_status_test.go` declares the status of every root,

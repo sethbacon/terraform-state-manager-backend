@@ -15,6 +15,7 @@ import (
 
 	"github.com/terraform-state-manager/terraform-state-manager/internal/db/repositories"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/telemetry"
+	"github.com/terraform-state-manager/terraform-state-manager/internal/tenancy"
 )
 
 // defaultInterval is how often the runner polls for due schedules.
@@ -28,8 +29,17 @@ const fireTimeout = 30 * time.Second
 // (which can dispatch drift runs); kept here as an interface so this package does
 // not import api. runID is the id of the work item created (e.g. a drift run);
 // status is "success" | "failed" | "skipped".
+//
+// The seam carries a tenancy.SystemScope rather than a bare organization id --
+// the #393 background-authority decision (option B). The worker has no
+// principal, so the authority for everything the dispatch loads is DERIVED from
+// the schedule row being fired, and it travels as a real scope so every by-id
+// load under the dispatch goes through the same InScope readers the request
+// path uses. A chain that crosses organizations then fails closed instead of
+// silently succeeding, and the SystemScope's provenance names the schedule that
+// led there.
 type Dispatcher interface {
-	Dispatch(ctx context.Context, targetType string, targetConfig json.RawMessage, actor, organizationID string) (runID, status string, err error)
+	Dispatch(ctx context.Context, targetType string, targetConfig json.RawMessage, actor string, derived tenancy.SystemScope) (runID, status string, err error)
 }
 
 // Runner polls for due schedules on an interval and fires each via the Dispatcher.
@@ -121,10 +131,30 @@ func (r *Runner) fire(s *repositories.Schedule) {
 		return
 	}
 
-	// THE WORKER HAS NO PRINCIPAL, so the organization comes from the SCHEDULE
-	// row it is firing — carried in memory since GetDue selected it, because
-	// there is no edge from a run back to its schedule to join along (#436).
-	runID, status, err := r.dispatcher.Dispatch(ctx, s.TargetType, s.TargetConfig, "scheduler", s.OrganizationID)
+	// THE WORKER HAS NO PRINCIPAL, so its authority is DERIVED from the
+	// SCHEDULE row it is firing -- "system, acting in the schedule's
+	// organization" (#393 option B). The organization is carried in memory
+	// since GetDue selected it, because there is no edge from a run back to
+	// its schedule to join along (#436); the derivation turns it into a real
+	// scope so every load under the dispatch is an InScope read.
+	//
+	// A schedule with NO organization derives NO authority. That is only
+	// possible on a database restored from a pre-000034 backup, and it is a
+	// refusal rather than a skip: the failure is logged with the schedule's
+	// coordinates and recorded as the firing's outcome, so an operator can
+	// find the row -- a silent skip here would hide it forever. Derived AFTER
+	// the claim, mirroring a dispatch failure, so the firing stays
+	// at-most-once and surfaces in last_status instead of hot-looping.
+	sysScope, err := tenancy.SystemActingIn(s.OrganizationID, "schedules", s.ID)
+	if err != nil {
+		logger.Error("schedule dispatch refused: no derivable authority", "error", err)
+		if recErr := r.repo.RecordOutcome(ctx, s.ID, "failed", nil); recErr != nil {
+			logger.Error("failed to record schedule outcome", "error", recErr)
+		}
+		return
+	}
+
+	runID, status, err := r.dispatcher.Dispatch(ctx, s.TargetType, s.TargetConfig, "scheduler", sysScope)
 	if err != nil {
 		logger.Error("schedule dispatch failed", "error", err)
 		if status == "" {

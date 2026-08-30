@@ -112,7 +112,11 @@ func pipelineHTTPRow(t *testing.T, provider, token string, cfgMap map[string]any
 func TestPipelines_CRUD(t *testing.T) {
 	e := newDriftEnv(t)
 
-	e.mock.ExpectQuery("SELECT .+ FROM pipeline_connections").
+	// SCOPED (#393 Phase 3): the organization array is bound as $1, so an
+	// expectation that did not name it would also match the old unscoped
+	// statement -- the thing this flip removed.
+	e.mock.ExpectQuery("FROM pipeline_connections WHERE organization_id = ANY").
+		WithArgs([]string{testActingOrg}).
 		WillReturnRows(pipelineHTTPRow(t, "github_actions", "", map[string]any{"owner": "o"}))
 	if w := e.do(http.MethodGet, "/api/v1/pipelines", ""); w.Code != http.StatusOK {
 		t.Errorf("list: status = %d", w.Code)
@@ -141,6 +145,11 @@ func TestPipelines_CRUD(t *testing.T) {
 	}
 
 	// Update edits name+config; an omitted token preserves the stored credential.
+	// The row is loaded in scope first (#393): the write-side linkage invariant
+	// checks any config.ci_source_id against the ROW's organization.
+	e.mock.ExpectQuery("FROM pipeline_connections WHERE organization_id = ANY").
+		WithArgs([]string{testActingOrg}, "p1").
+		WillReturnRows(pipelineHTTPRow(t, "github_actions", "", map[string]any{"owner": "o"}))
 	e.mock.ExpectQuery(`UPDATE pipeline_connections[\s\S]*WHERE id = \$1 AND organization_id`).
 		WithArgs("p1", "renamed", `{"owner":"o","repo":"r2"}`, false, nil, []string{testActingOrg}).
 		WillReturnRows(pipelineHTTPRow(t, "github_actions", "", map[string]any{"owner": "o", "repo": "r2"}))
@@ -150,6 +159,9 @@ func TestPipelines_CRUD(t *testing.T) {
 	}
 
 	// Supplying a token rotates the encrypted credential; it must never echo back.
+	e.mock.ExpectQuery("FROM pipeline_connections WHERE organization_id = ANY").
+		WithArgs([]string{testActingOrg}, "p1").
+		WillReturnRows(pipelineHTTPRow(t, "github_actions", "", map[string]any{"owner": "o"}))
 	e.mock.ExpectQuery(`UPDATE pipeline_connections[\s\S]*WHERE id = \$1 AND organization_id`).
 		WithArgs("p1", "renamed", `{"owner":"o"}`, true, sqlmock.AnyArg(), []string{testActingOrg}).
 		WillReturnRows(pipelineHTTPRow(t, "github_actions", "tok", map[string]any{"owner": "o"}))
@@ -162,9 +174,10 @@ func TestPipelines_CRUD(t *testing.T) {
 		t.Error("update response leaked the rotated token")
 	}
 
-	// No row matched → 404.
-	e.mock.ExpectQuery(`UPDATE pipeline_connections[\s\S]*WHERE id = \$1 AND organization_id`).
-		WillReturnError(sql.ErrNoRows)
+	// No row matched → 404, from the scoped preload; the UPDATE never runs.
+	e.mock.ExpectQuery("FROM pipeline_connections WHERE organization_id = ANY").
+		WithArgs([]string{testActingOrg}, "ghost").
+		WillReturnRows(sqlmock.NewRows(apiPipelineCols))
 	if w := e.do(http.MethodPut, "/api/v1/pipelines/ghost", `{"name":"x"}`); w.Code != http.StatusNotFound {
 		t.Errorf("update missing: status = %d, want 404", w.Code)
 	}
@@ -188,7 +201,8 @@ func TestDriftCreateRun(t *testing.T) {
 	}
 
 	// Unknown pipeline → 404.
-	e.mock.ExpectQuery("SELECT .+ FROM pipeline_connections WHERE id").WithArgs("ghost").
+	e.mock.ExpectQuery("FROM pipeline_connections WHERE organization_id = ANY").
+		WithArgs([]string{testActingOrg}, "ghost").
 		WillReturnRows(sqlmock.NewRows(apiPipelineCols))
 	if w := e.do(http.MethodPost, "/api/v1/drift/runs", `{"pipeline_connection_id":"ghost"}`); w.Code != http.StatusNotFound {
 		t.Errorf("missing pipeline: status = %d, want 404", w.Code)
@@ -197,7 +211,8 @@ func TestDriftCreateRun(t *testing.T) {
 	// Incomplete GitHub config: the run is recorded, the dispatch fails before
 	// any network call, the run flips to failed, and the handler returns 502
 	// with the run body (callback token stripped).
-	e.mock.ExpectQuery("SELECT .+ FROM pipeline_connections WHERE id").WithArgs("p1").
+	e.mock.ExpectQuery("FROM pipeline_connections WHERE organization_id = ANY").
+		WithArgs([]string{testActingOrg}, "p1").
 		WillReturnRows(pipelineHTTPRow(t, "github_actions", "ghp_x", map[string]any{"owner": "o"}))
 	e.mock.ExpectQuery("INSERT INTO drift_runs").WillReturnRows(driftRow("tok-1"))
 	e.mock.ExpectExec("UPDATE drift_runs SET status").WillReturnResult(sqlmock.NewResult(0, 1))
@@ -214,9 +229,11 @@ func TestDriftCreateRun(t *testing.T) {
 
 	// Pipeline without its own token resolves through its CI source; a missing
 	// CI source is a hard error before dispatch.
-	e.mock.ExpectQuery("SELECT .+ FROM pipeline_connections WHERE id").WithArgs("p1").
+	e.mock.ExpectQuery("FROM pipeline_connections WHERE organization_id = ANY").
+		WithArgs([]string{testActingOrg}, "p1").
 		WillReturnRows(pipelineHTTPRow(t, "github_actions", "", map[string]any{"ci_source_id": "c-gone"}))
-	e.mock.ExpectQuery("SELECT .+ FROM ci_sources WHERE id").WithArgs("c-gone").
+	e.mock.ExpectQuery("FROM ci_sources WHERE organization_id = ANY").
+		WithArgs([]string{testActingOrg}, "c-gone").
 		WillReturnRows(sqlmock.NewRows([]string{"id", "name", "provider", "organization", "project", "encrypted_token", "created_at", "updated_at"}))
 	w = e.do(http.MethodPost, "/api/v1/drift/runs", `{"pipeline_connection_id":"p1"}`)
 	if w.Code != http.StatusInternalServerError {
@@ -347,7 +364,8 @@ func TestHealthRuns(t *testing.T) {
 	}
 
 	// Dispatch with incomplete ADO config: recorded then failed → 502.
-	e.mock.ExpectQuery("SELECT .+ FROM pipeline_connections WHERE id").WithArgs("p1").
+	e.mock.ExpectQuery("FROM pipeline_connections WHERE organization_id = ANY").
+		WithArgs([]string{testActingOrg}, "p1").
 		WillReturnRows(pipelineHTTPRow(t, "azure_devops", "pat", map[string]any{"organization": "corp"}))
 	e.mock.ExpectQuery("INSERT INTO health_runs").WillReturnRows(healthRow("tok"))
 	e.mock.ExpectExec("UPDATE health_runs SET status").WillReturnResult(sqlmock.NewResult(0, 1))

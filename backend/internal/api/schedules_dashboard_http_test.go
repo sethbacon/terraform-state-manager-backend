@@ -2,7 +2,6 @@ package api
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -16,19 +15,20 @@ import (
 
 	"github.com/terraform-state-manager/terraform-state-manager/internal/db/repositories"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/services/statesync"
+	"github.com/terraform-state-manager/terraform-state-manager/internal/tenancy"
 )
 
 // fakeDispatcher records the dispatch and returns a scripted outcome.
 type fakeDispatcher struct {
-	gotOrg string
-	runID  string
-	status string
-	err    error
-	calls  int
+	gotScope tenancy.SystemScope
+	runID    string
+	status   string
+	err      error
+	calls    int
 }
 
-func (f *fakeDispatcher) Dispatch(_ context.Context, _ string, _ json.RawMessage, _, organizationID string) (string, string, error) {
-	f.gotOrg = organizationID
+func (f *fakeDispatcher) Dispatch(_ context.Context, _ string, _ json.RawMessage, _ string, derived tenancy.SystemScope) (string, string, error) {
+	f.gotScope = derived
 	f.calls++
 	return f.runID, f.status, f.err
 }
@@ -121,6 +121,10 @@ func TestSchedules_CRUD(t *testing.T) {
 		t.Errorf("missing pipeline id: status = %d, want 400", w.Code)
 	}
 
+	// The write-side linkage invariant (#393): the referenced pipeline
+	// connection is verified IN THE SCHEDULE'S ORGANIZATION before the INSERT.
+	e.mock.ExpectQuery("FROM pipeline_connections WHERE organization_id = ANY").
+		WithArgs([]string{testActingOrg}, "p1").WillReturnRows(pipelineRowOwnedBy(t, "github_actions", "tok", testActingOrg))
 	e.mock.ExpectQuery("INSERT INTO schedules").WillReturnRows(scheduleHTTPRow())
 	w := e.do(http.MethodPost, "/api/v1/schedules",
 		`{"name":"nightly","cron_expr":"0 2 * * *","target_config":{"pipeline_connection_id":"p1"}}`)
@@ -143,6 +147,13 @@ func TestSchedules_CRUD(t *testing.T) {
 		t.Errorf("missing: status = %d, want 404", w.Code)
 	}
 
+	// Update loads the row in scope first (to learn WHOSE organization the
+	// linkage invariant is checked against), verifies the reference, then runs
+	// the scoped UPDATE.
+	e.mock.ExpectQuery("FROM schedules WHERE organization_id = ANY").
+		WithArgs([]string{testActingOrg}, "sc1").WillReturnRows(scheduleHTTPRow())
+	e.mock.ExpectQuery("FROM pipeline_connections WHERE organization_id = ANY").
+		WithArgs([]string{testActingOrg}, "p1").WillReturnRows(pipelineRowOwnedBy(t, "github_actions", "tok", testActingOrg))
 	e.mock.ExpectQuery(`UPDATE schedules[\s\S]*WHERE id=\$1 AND organization_id`).WillReturnRows(scheduleHTTPRow())
 	w = e.do(http.MethodPut, "/api/v1/schedules/sc1",
 		`{"name":"nightly","cron_expr":"daily","target_config":{"pipeline_connection_id":"p1"},"enabled":false}`)
@@ -150,7 +161,11 @@ func TestSchedules_CRUD(t *testing.T) {
 		t.Fatalf("update: status = %d (%s)", w.Code, w.Body.String())
 	}
 
-	e.mock.ExpectQuery(`UPDATE schedules[\s\S]*WHERE id=\$1 AND organization_id`).WillReturnError(sql.ErrNoRows)
+	// A schedule in another organization (or absent) is a 404 from the scoped
+	// load; nothing further runs.
+	e.mock.ExpectQuery("FROM schedules WHERE organization_id = ANY").
+		WithArgs([]string{testActingOrg}, "ghost").
+		WillReturnRows(sqlmock.NewRows(scheduleHTTPCols))
 	if w := e.do(http.MethodPut, "/api/v1/schedules/ghost",
 		`{"name":"x","cron_expr":"daily","target_config":{"pipeline_connection_id":"p1"}}`); w.Code != http.StatusNotFound {
 		t.Errorf("update missing: status = %d, want 404", w.Code)
@@ -546,9 +561,15 @@ func TestSchedules_RunNowUsesTheSchedulesOrganization(t *testing.T) {
 	if w := e.do(http.MethodPost, "/api/v1/schedules/sc1/run", ""); w.Code != http.StatusOK {
 		t.Fatalf("run: status = %d (%s)", w.Code, w.Body.String())
 	}
-	if e.dispatcher.gotOrg != testActingOrg {
+	if got := e.dispatcher.gotScope.OrganizationID(); got != testActingOrg {
 		t.Errorf("dispatched with organization %q, want the SCHEDULE's %q. The caller's acting "+
 			"organization is not the answer here: the run belongs where the schedule does.",
-			e.dispatcher.gotOrg, testActingOrg)
+			got, testActingOrg)
+	}
+	// The derived authority names the row it came from (#393): run-now uses the
+	// SAME system derivation the background runner does, so a refused chained
+	// load under it is attributable to this schedule.
+	if got := e.dispatcher.gotScope.Origin(); got != "system:schedules/sc1" {
+		t.Errorf("dispatch scope origin = %q, want %q", got, "system:schedules/sc1")
 	}
 }

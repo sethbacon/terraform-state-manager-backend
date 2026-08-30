@@ -102,7 +102,20 @@ func randomToken() string {
 // ListPipelines returns configured CI connections (no secrets).
 func (h *DriftHandlers) ListPipelines() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		conns, err := h.pipelineRepo.List(c.Request.Context())
+		// The Phase 3 read flip for pipeline_connections (#393). Unscoped, this
+		// listed every organization's CI connections to any caller holding
+		// sources:manage in one of them -- including each connection's config,
+		// which names its repository coordinates and its CI source.
+		//
+		// An UNRESOLVED scope is a 500, never an empty one and certainly never
+		// a full one: it means the route was registered without
+		// middleware.TenantScope.
+		scope, resolved := tenantscope.FromContext(c)
+		if !resolved {
+			serverError(c, errNoTenantScope, "the tenant scope was not resolved for this route")
+			return
+		}
+		conns, err := h.pipelineRepo.ListInScope(c.Request.Context(), scope)
 		if err != nil {
 			serverError(c, err, "failed to list pipelines")
 			return
@@ -149,6 +162,15 @@ func (h *DriftHandlers) CreatePipeline() gin.HandlerFunc {
 			return
 		}
 
+		// THE WRITE-SIDE LINKAGE INVARIANT (#393): a connection may only
+		// reference a CI source its own organization owns. The dispatch chain
+		// fails closed on a crossing reference, but refusing it here -- before
+		// the row exists -- is what keeps refused rows from accumulating as
+		// schedules and connections that can never fire.
+		if !h.ciSourceReferenceInOrganization(c, pc.Config, orgID) {
+			return
+		}
+
 		saved, err := h.pipelineRepo.Create(c.Request.Context(), pc, orgID)
 		if err != nil {
 			serverError(c, err, "failed to create pipeline connection")
@@ -191,6 +213,24 @@ func (h *DriftHandlers) UpdatePipeline() gin.HandlerFunc {
 		scope, resolved := tenantscope.FromContext(c)
 		if !resolved {
 			serverError(c, errNoTenantScope, "the tenant scope was not resolved for this route")
+			return
+		}
+		// THE WRITE-SIDE LINKAGE INVARIANT (#393): the referenced CI source must
+		// belong to the CONNECTION'S organization -- the row's, not the
+		// caller's, because a multi-organization caller may reach both while
+		// the dispatch chain later runs under the row's organization alone.
+		// The row is loaded in the caller's scope first, so a connection in
+		// another organization stays a plain 404.
+		existing, err := h.pipelineRepo.GetByIDInScope(c.Request.Context(), id, scope)
+		if err != nil {
+			serverError(c, err, "failed to load pipeline connection")
+			return
+		}
+		if existing == nil {
+			c.JSON(http.StatusNotFound, gin.H{"error": "pipeline connection not found"})
+			return
+		}
+		if !h.ciSourceReferenceInOrganization(c, pc.Config, existing.OrganizationID) {
 			return
 		}
 		// Scoped: this can REPLACE the stored CI token, so an unscoped update is
@@ -279,7 +319,7 @@ func (h *DriftHandlers) CreateRun() gin.HandlerFunc {
 			StateKey:             req.StateKey,
 			RepoRef:              req.RepoRef,
 			WorkingDir:           req.WorkingDir,
-		}, userIDOf(c), orgID)
+		}, userIDOf(c), requestAuthority(orgID))
 		if saved != nil {
 			h.audit.write(c, "drift_run.dispatch", "drift_run", saved.ID, map[string]interface{}{
 				"pipeline_connection_id": req.PipelineConnectionID,
@@ -313,37 +353,73 @@ type DriftTarget struct {
 
 var errPipelineNotFound = errors.New("pipeline connection not found")
 
+// errCISourceNotReachable reports a connection whose config names a CI source
+// the dispatching organization cannot reach. Surfaced to HTTP callers only as a
+// generic 500 (the connection is theirs; its reference is poisoned), while the
+// wrapped chain error carries the provenance an operator needs.
+var errCISourceNotReachable = errors.New("the connection's CI source is not reachable in the dispatching organization")
+
+// ciSourceReferenceInOrganization enforces the write-side linkage invariant for
+// pipeline connections (#393): config.ci_source_id, when present, must name a
+// CI source owned by organizationID. Writes the refusal itself and reports
+// whether the caller may proceed.
+//
+// The refusal does not say whether the id exists elsewhere -- "does not name a
+// CI source in your organization" covers a typo and a crossing reference in the
+// same words, deliberately.
+func (h *DriftHandlers) ciSourceReferenceInOrganization(c *gin.Context, config map[string]any, organizationID string) bool {
+	refID, _ := config["ci_source_id"].(string)
+	if strings.TrimSpace(refID) == "" {
+		return true
+	}
+	src, err := h.ciSourceRepo.GetByIDInScope(c.Request.Context(), refID, organizationScope(organizationID))
+	if err != nil {
+		serverError(c, err, "failed to verify the connection's CI source")
+		return false
+	}
+	if src == nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": "config.ci_source_id does not name a CI source in this connection's organization",
+		})
+		return false
+	}
+	return true
+}
+
 // dispatchDrift loads the pipeline, records a drift run, and triggers the CI
 // workflow. On a CI-dispatch failure it returns the saved run (status "failed")
 // alongside the error so the HTTP caller can surface the detail; the callback
 // token is always stripped from the returned run. Shared by CreateRun (HTTP) and
 // the scheduler.
-func (h *DriftHandlers) dispatchDrift(ctx context.Context, tgt DriftTarget, actor, organizationID string) (*repositories.DriftRun, error) {
-	// OWNERSHIP FIRST, because the next call decrypts a credential.
+func (h *DriftHandlers) dispatchDrift(ctx context.Context, tgt DriftTarget, actor string, auth dispatchAuthority) (*repositories.DriftRun, error) {
+	// THE SCOPED LOAD FIRST, because the next call decrypts a credential.
 	// resolvePipelineToken opens the connection's token, or its CI source's
-	// shared token, so a check placed after it is a check that runs with the
-	// other tenant's secret already in memory. Reported as "not found", so a
-	// caller cannot use dispatch to probe which connection ids exist elsewhere.
-	conn, err := pipelineConnectionFor(ctx, h.pipelineRepo, tgt.PipelineConnectionID, organizationID)
-	if errors.Is(err, errNotOwnedHere) {
-		return nil, errPipelineNotFound
-	}
+	// shared token, so a load placed after it runs with the other tenant's
+	// secret already in memory. Every by-id load on this chain is an InScope
+	// read under ONE authority -- request-resolved or system-derived, with
+	// provenance either way (#393 option B) -- so a connection in another
+	// organization matches no row. Reported as "not found", so a caller cannot
+	// use dispatch to probe which connection ids exist elsewhere; the wrapped
+	// error carries the provenance for the log line.
+	conn, err := pipelineConnectionFor(ctx, h.pipelineRepo, tgt.PipelineConnectionID, auth)
 	if err != nil {
 		return nil, fmt.Errorf("load pipeline connection: %w", err)
 	}
 	if conn == nil {
-		return nil, errPipelineNotFound
+		return nil, errChainCrossesOrganizations("pipeline_connections", tgt.PipelineConnectionID, auth, errPipelineNotFound)
 	}
 	// ...and the state source the job will be pointed at, for the same reason:
 	// a target naming another organization's source aims this run at their state.
-	if _, err := sourceFor(ctx, h.sourceRepo, tgt.SourceID, organizationID); err != nil {
+	if _, err := sourceFor(ctx, h.sourceRepo, tgt.SourceID, auth); err != nil {
 		if errors.Is(err, errNotOwnedHere) {
-			return nil, errPipelineNotFound
+			return nil, errChainCrossesOrganizations("state_sources", tgt.SourceID, auth, errPipelineNotFound)
 		}
 		return nil, fmt.Errorf("load target source: %w", err)
 	}
-	// Connection-level token, or the shared token of its CI source.
-	token, bearer, err := resolvePipelineToken(ctx, h.ciSourceRepo, conn)
+	// Connection-level token, or the shared token of its CI source -- the
+	// latter loaded under the SAME authority, which is the hop that used to be
+	// entirely unscoped.
+	token, bearer, err := resolvePipelineToken(ctx, h.ciSourceRepo, conn, auth)
 	if err != nil {
 		return nil, err
 	}
@@ -360,7 +436,7 @@ func (h *DriftHandlers) dispatchDrift(ctx context.Context, tgt DriftTarget, acto
 	if tgt.SourceID != "" {
 		run.SourceID = &tgt.SourceID
 	}
-	saved, err := h.driftRepo.Create(ctx, run, organizationID)
+	saved, err := h.driftRepo.Create(ctx, run, auth.organizationID)
 	if err != nil {
 		return nil, fmt.Errorf("create drift run: %w", err)
 	}

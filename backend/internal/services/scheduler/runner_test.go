@@ -11,33 +11,36 @@ import (
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
 
 	"github.com/terraform-state-manager/terraform-state-manager/internal/db/repositories"
+	"github.com/terraform-state-manager/terraform-state-manager/internal/tenancy"
 )
 
 type recordingDispatcher struct {
 	mu     sync.Mutex
 	calls  []string
-	orgs   []string
+	scopes []tenancy.SystemScope
 	runID  string
 	status string
 	err    error
 }
 
-func (d *recordingDispatcher) Dispatch(_ context.Context, targetType string, _ json.RawMessage, actor, organizationID string) (string, string, error) {
+func (d *recordingDispatcher) Dispatch(_ context.Context, targetType string, _ json.RawMessage, actor string, derived tenancy.SystemScope) (string, string, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	// The organization is recorded, not ignored: the worker has no request to
-	// derive one from, so whether it carries the SCHEDULE's is the only thing
-	// standing between a scheduled run and an unowned row (#436).
+	// The derived scope is recorded, not ignored: the worker has no request to
+	// resolve one from, so whether it carries the SCHEDULE's organization is
+	// the only thing standing between a scheduled run and an unowned row
+	// (#436) -- and, since #393's option B, whether every load under the
+	// dispatch is scoped at all.
 	d.calls = append(d.calls, targetType+"/"+actor)
-	d.orgs = append(d.orgs, organizationID)
+	d.scopes = append(d.scopes, derived)
 	return d.runID, d.status, d.err
 }
 
-// dispatchedOrgs returns the organization each Dispatch was given.
-func (d *recordingDispatcher) dispatchedOrgs() []string {
+// dispatchedScopes returns the derived scope each Dispatch was given.
+func (d *recordingDispatcher) dispatchedScopes() []tenancy.SystemScope {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	return append([]string(nil), d.orgs...)
+	return append([]tenancy.SystemScope(nil), d.scopes...)
 }
 
 func (d *recordingDispatcher) callCount() int {
@@ -182,8 +185,10 @@ func TestRunner_StartStop(t *testing.T) {
 	}
 }
 
-// TestRunner_CarriesTheSchedulesOrganizationIntoTheDispatch is the worker half of
-// #436, and the only thing standing between a scheduled run and an unowned row.
+// TestRunner_DerivesTheDispatchScopeFromTheScheduleRow is the worker half of
+// #436 plus the #393 option-B property: the authority handed to the dispatch is
+// a real, single-organization scope DERIVED from the schedule row, with
+// provenance naming that row.
 //
 // The scheduler has NO request, NO principal and NO header. It cannot resolve an
 // acting organization, and a drift run cannot inherit one either: 000033 gave
@@ -195,7 +200,7 @@ func TestRunner_StartStop(t *testing.T) {
 // GetDue selected through to Dispatch. A schedule names its target only inside
 // target_config JSONB, with no column and no foreign key, so there is no edge to
 // join back along afterwards: if it is not carried here, it is gone.
-func TestRunner_CarriesTheSchedulesOrganizationIntoTheDispatch(t *testing.T) {
+func TestRunner_DerivesTheDispatchScopeFromTheScheduleRow(t *testing.T) {
 	d := &recordingDispatcher{runID: "run-1", status: "success"}
 	r, mock := newRunner(t, d)
 
@@ -205,13 +210,61 @@ func TestRunner_CarriesTheSchedulesOrganizationIntoTheDispatch(t *testing.T) {
 
 	r.checkDue()
 
-	orgs := d.dispatchedOrgs()
-	if len(orgs) != 1 {
-		t.Fatalf("dispatched %d times, want 1", len(orgs))
+	scopes := d.dispatchedScopes()
+	if len(scopes) != 1 {
+		t.Fatalf("dispatched %d times, want 1", len(scopes))
 	}
-	if orgs[0] != testScheduleOrg {
+	got := scopes[0]
+	if got.IsZero() {
+		t.Fatal("the dispatch was handed a ZERO system scope. Every load under it would read " +
+			"nothing, and the firing would fail for a reason no log could attribute to this row.")
+	}
+	if got.OrganizationID() != testScheduleOrg {
 		t.Errorf("dispatched with organization %q, want %q (the schedule's). An empty value here "+
 			"means the run is created with no owning organization, and nothing downstream can "+
-			"recover it — there is no edge from a run back to its schedule.", orgs[0], testScheduleOrg)
+			"recover it — there is no edge from a run back to its schedule.", got.OrganizationID(), testScheduleOrg)
+	}
+	// THE PROVENANCE PROPERTY (#393): the dispatch path must run under a
+	// SYSTEM-DERIVED scope, and that scope must name the row it derives from.
+	// A request-resolved scope can never produce this origin.
+	if want := "system:schedules/sc1"; got.Origin() != want {
+		t.Errorf("dispatch scope origin = %q, want %q. Without provenance, a refused chained "+
+			"load cannot say which schedule led there, and the poisoned row is unfindable.", got.Origin(), want)
+	}
+}
+
+// TestRunner_RefusesToDispatchAnUnownedSchedule pins the fail-closed half of the
+// derivation: a schedule whose organization_id is NULL (possible only on a
+// pre-000034 restore) derives no authority, so the runner must not dispatch it
+// -- and must not skip it SILENTLY either. The refusal is recorded as the
+// firing's outcome, which is what makes the poisoned row findable: it surfaces
+// as last_status=failed on the schedule itself rather than as an absence.
+func TestRunner_RefusesToDispatchAnUnownedSchedule(t *testing.T) {
+	d := &recordingDispatcher{runID: "run-1", status: "success"}
+	r, mock := newRunner(t, d)
+
+	unowned := sqlmock.NewRows(schedCols).
+		AddRow("sc1", "nightly", "daily", "drift", []byte(`{"pipeline_connection_id":"p1"}`), true,
+			nil, "2026-06-10 00:00:00", nil, nil, "2026-06-09", "2026-06-09", nil)
+	mock.ExpectQuery("FROM schedules WHERE enabled").WillReturnRows(unowned)
+	// The claim still happens (at-most-once is preserved; the row does not
+	// hot-loop an error every poll)...
+	mock.ExpectExec("UPDATE schedules").
+		WithArgs("sc1", "2026-06-10 00:00:00", sqlmock.AnyArg(), sqlmock.AnyArg()).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	// ...and the refusal is RECORDED, with no run id.
+	mock.ExpectExec("UPDATE schedules SET last_status").
+		WithArgs("sc1", "failed", nil).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+
+	r.checkDue()
+
+	if d.callCount() != 0 {
+		t.Fatalf("a schedule with no owning organization was dispatched %d time(s). It derives "+
+			"no authority: dispatching it would either fail everywhere (best case) or, if any "+
+			"load treats an empty value loosely, run without a tenant.", d.callCount())
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("the refusal must be observable — claimed, then recorded as failed: %v", err)
 	}
 }

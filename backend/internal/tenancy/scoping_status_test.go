@@ -46,12 +46,22 @@ var rootScoping = map[string]scopingStatus{
 	"state_sources": scopedNow, // Phase 3 flip, eba27bb, shipped v3.13.0
 	// ListSchedules, GetSchedule and RunSchedule all read through
 	// ScheduleRepository's ListInScope/GetByIDInScope, and all three routes
-	// carry middleware.TenantScope. GetDue stays unscoped: the background runner
-	// has no principal and is #393's explicit worker exemption.
+	// carry middleware.TenantScope. GetDue stays unscoped BY DESIGN, per the
+	// #393 background-authority decision (option B): enumeration is the
+	// system's cross-organization job, and every per-item load after it runs
+	// under a scope DERIVED from the row it enumerates (tenancy.SystemActingIn).
 	"schedules": scopedNow,
+	// The background-authority increment (#393 option B): ListPipelines reads
+	// ListInScope; the dispatch chain (drift + health + the scheduler) loads
+	// connections through GetByIDInScope under a single-organization authority;
+	// every /pipelines route carries middleware.TenantScope.
+	"pipeline_connections": scopedNow,
+	// Same increment. Every by-id read -- discovery, verify, the repo-setup
+	// wizard, and resolvePipelineToken's shared-credential hop, previously
+	// entirely unscoped -- goes through GetByIDInScope; all /ci-sources routes
+	// carry middleware.TenantScope.
+	"ci_sources": scopedNow,
 
-	"pipeline_connections":  unscopedPending,
-	"ci_sources":            unscopedPending,
 	"notification_channels": unscopedPending,
 	"state_transfers":       unscopedPending,
 	"drift_runs":            unscopedPending,

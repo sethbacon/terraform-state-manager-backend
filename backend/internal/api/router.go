@@ -558,7 +558,10 @@ func NewRouter(cfg *config.Config, database *sql.DB, identityDB *sql.DB) (*gin.E
 		drift.AttachOrganizations(orgMembers)
 		p := v1.Group("/pipelines", requireAuth)
 		{
-			p.GET("", middleware.RequireScope(auth.ScopeSourcesManage), drift.ListPipelines())
+			// The read routes resolve a tenant scope too (#393): listing CI
+			// connections is organization-scoped, and the write routes verify
+			// cross-references against it.
+			p.GET("", middleware.RequireScope(auth.ScopeSourcesManage), tenantScopeSourcesManage, drift.ListPipelines())
 			p.POST("", middleware.RequireScope(auth.ScopeSourcesManage), tenantScopeSourcesManage, drift.CreatePipeline())
 			p.PUT("/:id", middleware.RequireScope(auth.ScopeSourcesManage), tenantScopeSourcesManage, drift.UpdatePipeline())
 			p.DELETE("/:id", middleware.RequireScope(auth.ScopeSourcesManage), tenantScopeSourcesManage, drift.DeletePipeline())
@@ -572,19 +575,25 @@ func NewRouter(cfg *config.Config, database *sql.DB, identityDB *sql.DB) (*gin.E
 		ciSources.AttachOrganizations(orgMembers)
 		cs := v1.Group("/ci-sources", requireAuth, middleware.RequireScope(auth.ScopeSourcesManage))
 		{
-			cs.GET("", ciSources.ListCISources())
+			// EVERY route here resolves a tenant scope now (#393): the list and
+			// each by-id route read through the scoped readers, and every by-id
+			// route decrypts the source's shared credential on the way to a
+			// provider call -- which is why the read routes are not exempt.
+			// Wired per-route rather than on the group because the route class
+			// guard reads registration lines.
+			cs.GET("", tenantScopeSourcesManage, ciSources.ListCISources())
 			cs.POST("", tenantScopeSourcesManage, ciSources.CreateCISource())
 			cs.DELETE("/:id", tenantScopeSourcesManage, ciSources.DeleteCISource())
-			cs.POST("/:id/verify", ciSources.VerifyCISource())
-			cs.GET("/:id/pipelines", ciSources.ListSourcePipelines())
-			cs.GET("/:id/repos", ciSources.ListSourceRepos())
-			cs.GET("/:id/repos/:repo/workflows", ciSources.ListSourceWorkflows())
+			cs.POST("/:id/verify", tenantScopeSourcesManage, ciSources.VerifyCISource())
+			cs.GET("/:id/pipelines", tenantScopeSourcesManage, ciSources.ListSourcePipelines())
+			cs.GET("/:id/repos", tenantScopeSourcesManage, ciSources.ListSourceRepos())
+			cs.GET("/:id/repos/:repo/workflows", tenantScopeSourcesManage, ciSources.ListSourceWorkflows())
 			// Repo-setup wizard: ADO service connections + pipeline creation.
-			cs.GET("/:id/service-connections", ciSources.ListSourceServiceConnections())
-			cs.POST("/:id/repos/:repo/pipelines", ciSources.CreateSourcePipeline())
+			cs.GET("/:id/service-connections", tenantScopeSourcesManage, ciSources.ListSourceServiceConnections())
+			cs.POST("/:id/repos/:repo/pipelines", tenantScopeSourcesManage, ciSources.CreateSourcePipeline())
 			// Phase 2: commit the workflow via branch + PR, and poll the PR state.
-			cs.POST("/:id/repos/:repo/workflow-setup", ciSources.SetupSourceWorkflow())
-			cs.GET("/:id/repos/:repo/prs/:pr", ciSources.GetSourcePRState())
+			cs.POST("/:id/repos/:repo/workflow-setup", tenantScopeSourcesManage, ciSources.SetupSourceWorkflow())
+			cs.GET("/:id/repos/:repo/prs/:pr", tenantScopeSourcesManage, ciSources.GetSourcePRState())
 		}
 		d := v1.Group("/drift", requireAuth)
 		{

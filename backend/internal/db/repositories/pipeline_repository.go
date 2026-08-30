@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"strings"
+
+	"github.com/terraform-state-manager/terraform-state-manager/internal/tenantscope"
 )
 
 // PipelineConnection is a CI integration used to dispatch drift/version runs.
@@ -149,4 +151,89 @@ func (r *PipelineRepository) Update(ctx context.Context, p *PipelineConnection, 
 func (r *PipelineRepository) Delete(ctx context.Context, id string) error {
 	_, err := r.db.ExecContext(ctx, `DELETE FROM pipeline_connections WHERE id = $1`, id)
 	return err
+}
+
+// ===========================================================================
+// THE PHASE 3 READ FLIP FOR pipeline_connections -- #393.
+//
+// The write side was scoped first (tenant_write_scope.go); these are the reads.
+// A pipeline connection row holds an encrypted CI token and names, in config,
+// the CI source whose SHARED token stands in when it has none of its own --
+// so an unscoped read here is not a listing leak, it is the first hop of the
+// execution chain the #393 background-authority decision (option B) exists to
+// close: load the connection, resolve its credential, fire a pipeline.
+//
+// Both the request path (ListPipelines, the dispatch handlers) and the
+// background path (the scheduler's dispatch) read through these. The
+// background path passes a scope DERIVED from the row that led here -- see
+// internal/tenancy.SystemActingIn -- so a schedule in one organization
+// reaching a connection in another matches no row and fails closed.
+// ===========================================================================
+
+// pipelineOrgPredicate is the organization filter, written once so the two
+// scoped readers cannot come to mean different things.
+//
+// IT EXCLUDES NULL: `NULL = ANY(...)` is NULL, never true, so a row whose
+// organization_id was never stamped is invisible to every tenant instead of
+// visible to all of them. 000034 made the column NOT NULL, but a database
+// restored from an older backup still holds such rows, and this is the layer
+// that keeps working when the constraint above it is absent.
+const pipelineOrgPredicate = `organization_id = ANY($1::uuid[])`
+
+// ListInScope returns the pipeline connections the scope permits, newest first.
+//
+// An empty scope reads NOTHING, without a query -- the early return is not an
+// optimisation, it is the fail-closed answer stated where a later edit cannot
+// change it by accident (see ScheduleRepository.ListInScope).
+func (r *PipelineRepository) ListInScope(ctx context.Context, scope tenantscope.Scope) ([]PipelineConnection, error) {
+	if scope.Empty() {
+		return []PipelineConnection{}, nil
+	}
+	if scope.PlatformAdmin {
+		// The one principal that is genuinely deployment-wide; also the only
+		// reader of rows whose organization_id is NULL.
+		return r.List(ctx)
+	}
+	rows, err := r.db.QueryContext(ctx, `SELECT `+pipelineColumns+`
+		FROM pipeline_connections WHERE `+pipelineOrgPredicate+`
+		ORDER BY created_at DESC`, scope.OrgIDs)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []PipelineConnection{}
+	for rows.Next() {
+		p, err := scanPipeline(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, *p)
+	}
+	return out, rows.Err()
+}
+
+// GetByIDInScope returns the connection with the given id when the scope
+// permits it, and (nil, nil) otherwise.
+//
+// A row that exists in another organization is reported EXACTLY as a row that
+// does not exist: this is the read that precedes a credential decryption, and
+// "that one is not yours" would let a caller enumerate which ids name real
+// connections elsewhere in the deployment.
+func (r *PipelineRepository) GetByIDInScope(ctx context.Context, id string, scope tenantscope.Scope) (*PipelineConnection, error) {
+	if scope.Empty() {
+		return nil, nil
+	}
+	if scope.PlatformAdmin {
+		return r.GetByID(ctx, id)
+	}
+	row := r.db.QueryRowContext(ctx, `SELECT `+pipelineColumns+`
+		FROM pipeline_connections WHERE `+pipelineOrgPredicate+` AND id = $2`, scope.OrgIDs, id)
+	p, err := scanPipeline(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return p, nil
 }

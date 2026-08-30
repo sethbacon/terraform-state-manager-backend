@@ -35,7 +35,8 @@ const otherOrg = "22222222-2222-4222-8222-222222222222"
 func TestHealthRun_IsStampedWithTheActingOrganization(t *testing.T) {
 	e := newDriftEnv(t)
 
-	e.mock.ExpectQuery("SELECT .+ FROM pipeline_connections WHERE id").WithArgs("p1").
+	e.mock.ExpectQuery("FROM pipeline_connections WHERE organization_id = ANY").
+		WithArgs([]string{testActingOrg}, "p1").
 		WillReturnRows(pipelineHTTPRow(t, "github", "tok", map[string]any{"repo": "o/r"}))
 	// The regex REQUIRES the column: drop it from the INSERT and no expectation
 	// matches, which is the failure this assertion exists to produce.
@@ -62,9 +63,11 @@ func TestHealthRun_IsStampedWithTheActingOrganization(t *testing.T) {
 func TestHealthRun_RefusesAConnectionOwnedElsewhere(t *testing.T) {
 	e := newDriftEnv(t)
 
-	rows := pipelineHTTPRow(t, "github", "tok", map[string]any{"repo": "o/r"})
-	e.mock.ExpectQuery("SELECT .+ FROM pipeline_connections WHERE id").WithArgs("p1").
-		WillReturnRows(rowsOwnedBy(t, rows, otherOrg))
+	// The scoped read binds the acting organization; a connection owned
+	// elsewhere matches NO row (#393). The empty result is the refusal.
+	e.mock.ExpectQuery("FROM pipeline_connections WHERE organization_id = ANY").
+		WithArgs([]string{testActingOrg}, "p1").
+		WillReturnRows(sqlmock.NewRows(apiPipelineCols))
 	// No INSERT is expected: the refusal must happen BEFORE the write.
 
 	w := e.do(http.MethodPost, "/api/v1/health-lab/runs", `{"pipeline_connection_id":"p1"}`)
@@ -114,30 +117,29 @@ func TestHealthRun_UnresolvedScopeIs500(t *testing.T) {
 	}
 }
 
-// TestHealthRun_UnstampedConnectionTakesTheCallersOrganization separates two
-// values that the happy path cannot tell apart.
-//
-// Everywhere else the connection's organization and the caller's are the same, so
-// a handler that stamped conn.OrganizationID would look identical to one that
-// stamped the caller's. Here the connection carries NO organization -- the state
-// #436's backfill is still repairing -- and the row must still be owned by the
-// caller rather than by NULL.
-func TestHealthRun_UnstampedConnectionTakesTheCallersOrganization(t *testing.T) {
+// TestHealthRun_RefusesAnUnstampedConnection REVERSES the previous pin here,
+// with the same reasoning as TestDriftDispatch_RefusesAnUnstampedConnection:
+// post-000034 the schema cannot produce a NULL-stamped connection, a pre-000034
+// restore can, and under the #393 option-B scoped chain such a row matches no
+// organization's predicate -- it is dispatched by no one until the boot
+// backfill stamps it. The old behaviour (dispatch anyway, stamp the run with
+// the caller's organization) ran CI under an authority nothing had verified
+// against the connection's owner.
+func TestHealthRun_RefusesAnUnstampedConnection(t *testing.T) {
 	e := newDriftEnv(t)
 
-	cfgJSON, _ := json.Marshal(map[string]any{"repo": "o/r"})
-	e.mock.ExpectQuery("SELECT .+ FROM pipeline_connections WHERE id").WithArgs("p1").
-		WillReturnRows(sqlmock.NewRows(apiPipelineCols).
-			AddRow("p1", "ci", "github", cfgJSON, nil, "2026-06-10", "2026-06-10", nil))
-	e.mock.ExpectQuery(`INSERT INTO health_runs[\s\S]*organization_id`).
-		WithArgs(sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(),
-			sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(),
-			sqlmock.AnyArg(), sqlmock.AnyArg(), testActingOrg).
-		WillReturnRows(healthRow("tok-1"))
+	// The scoped statement runs; NULL organization_id matches nothing.
+	e.mock.ExpectQuery("FROM pipeline_connections WHERE organization_id = ANY").
+		WithArgs([]string{testActingOrg}, "p1").
+		WillReturnRows(sqlmock.NewRows(apiPipelineCols))
+	// No INSERT: the refusal precedes the write.
 
-	e.do(http.MethodPost, "/api/v1/health-lab/runs", `{"pipeline_connection_id":"p1"}`)
+	w := e.do(http.MethodPost, "/api/v1/health-lab/runs", `{"pipeline_connection_id":"p1"}`)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404 (%s)", w.Code, w.Body.String())
+	}
 	if err := e.mock.ExpectationsWereMet(); err != nil {
-		t.Fatalf("the run was not stamped with the CALLER's organization: %v", err)
+		t.Fatalf("a statement ran past the scoped-load refusal: %v", err)
 	}
 }
 
@@ -251,15 +253,6 @@ func TestTransfer_RefusesAnEndTheCallerDoesNotHold(t *testing.T) {
 
 // ---------------------------------------------------------------------------
 // helpers
-
-// rowsOwnedBy rebuilds a pipeline fixture with a different owner in the last
-// column. Rebuilt rather than mutated because sqlmock.Rows exposes no accessor.
-func rowsOwnedBy(t *testing.T, _ *sqlmock.Rows, orgID string) *sqlmock.Rows {
-	t.Helper()
-	cfgJSON, _ := json.Marshal(map[string]any{"repo": "o/r"})
-	return sqlmock.NewRows(apiPipelineCols).
-		AddRow("p1", "ci", "github", cfgJSON, nil, "2026-06-10", "2026-06-10", orgID)
-}
 
 func (e *sourcesEnv) expectSourceOwnedBy(id, dir, orgID string) {
 	cfg, _ := json.Marshal(map[string]any{"base_path": dir})

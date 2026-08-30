@@ -162,10 +162,14 @@ func scanSchedules(rows *sql.Rows) ([]Schedule, error) {
 //
 // WHAT IS DELIBERATELY NOT SCOPED HERE: GetDue, ClaimDue, RecordOutcome. The
 // background runner (internal/services/scheduler) has no request and therefore
-// no principal, and #393 settled that a worker is an explicit exemption rather
-// than a synthetic platform admin. It carries each schedule's organization
-// forward in memory instead -- see Create's comment on why there is no edge to
-// join back along.
+// no principal, and the #393 background-authority decision (option B,
+// 2026-08-29) settled the shape precisely: ENUMERATION IS CROSS-ORGANIZATION BY
+// DESIGN -- finding due work across every tenant is the system's job -- and
+// every per-item load that follows carries a scope DERIVED from the enumerated
+// row (tenancy.SystemActingIn), through the same InScope readers the request
+// path uses. So GetDue stays unscoped, and nothing loaded FROM a due schedule
+// does. It carries each schedule's organization forward in memory -- see
+// Create's comment on why there is no edge to join back along.
 // ===========================================================================
 
 // scheduleOrgPredicate is the organization filter, written once so the two
