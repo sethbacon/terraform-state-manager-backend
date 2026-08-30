@@ -167,12 +167,32 @@ type Detection struct {
 // drift record with a NULL organization, which is invisible to every tenant —
 // a finding nobody can see is worse than a refused write.
 func (r *DriftRecordRepository) UpsertDetection(ctx context.Context, d *Detection) (*DriftRecord, error) {
+	return r.upsertDetection(ctx, d, "")
+}
+
+// upsertDetection is the one copy of the statement, with an optional EXTRA
+// predicate on the source SELECT.
+//
+// Written once because the scoped and unscoped forms differ by a single AND, and
+// a second hand-written copy of a statement whose ON CONFLICT decides a record's
+// tenant permanently is exactly the drift this file's own comment warns about.
+// sourceFilter is fixed SQL supplied by this package -- never a caller value --
+// and everything variable binds through extra.
+func (r *DriftRecordRepository) upsertDetection(ctx context.Context, d *Detection, sourceFilter string, extra ...any) (*DriftRecord, error) {
 	var summaryArg any
 	if len(d.Summary) > 0 {
 		summaryArg = string(d.Summary)
 	}
 	d.MarkTruncation()
-	row := r.db.QueryRowContext(ctx, `
+	args := []any{
+		d.SourceID, d.StateKey, d.PipelineConnectionID, d.RunID, d.Origin, DriftSeverity(d.Destroyed),
+		d.Added, d.Changed, d.Destroyed, summaryArg, d.ExternalRef,
+		d.Truncated, d.OmittedEntries, d.OmittedAttrs, d.Unparseable, d.Unmasked,
+	}
+	args = append(args, extra...)
+	// #nosec G202 -- sourceFilter is fixed SQL from this package (a bound
+	// placeholder, never a caller value); every value binds through args.
+	q := `
 		INSERT INTO drift_records
 			(source_id, state_key, pipeline_connection_id, last_run_id, origin, severity,
 			 added, changed, destroyed, summary, external_ref,
@@ -180,7 +200,7 @@ func (r *DriftRecordRepository) UpsertDetection(ctx context.Context, d *Detectio
 		SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, COALESCE($10::jsonb,'[]'::jsonb), $11,
 			 $12, $13, $14, $15, $16, s.organization_id
 		FROM state_sources s
-		WHERE s.id = $1 AND s.organization_id IS NOT NULL
+		WHERE s.id = $1 AND s.organization_id IS NOT NULL` + sourceFilter + `
 		ON CONFLICT (source_id, state_key) WHERE status <> 'resolved'
 		DO UPDATE SET
 			pipeline_connection_id = COALESCE(EXCLUDED.pipeline_connection_id, drift_records.pipeline_connection_id),
@@ -199,10 +219,8 @@ func (r *DriftRecordRepository) UpsertDetection(ctx context.Context, d *Detectio
 			unmasked         = EXCLUDED.unmasked,
 			detections       = drift_records.detections + 1,
 			last_detected_at = now()
-		RETURNING `+driftRecordColumns,
-		d.SourceID, d.StateKey, d.PipelineConnectionID, d.RunID, d.Origin, DriftSeverity(d.Destroyed),
-		d.Added, d.Changed, d.Destroyed, summaryArg, d.ExternalRef,
-		d.Truncated, d.OmittedEntries, d.OmittedAttrs, d.Unparseable, d.Unmasked)
+		RETURNING ` + driftRecordColumns
+	row := r.db.QueryRowContext(ctx, q, args...) // #nosec G202 -- q assembled above from fixed SQL only
 	rec, err := scanDriftRecord(row)
 	if err != nil {
 		// A resolved record can still hold this external_ref (pipeline retry
@@ -255,12 +273,27 @@ func (r *DriftRecordRepository) ResolveClean(ctx context.Context, sourceID, stat
 	return n > 0, nil
 }
 
+// recordPage clamps a records page window. Shared by the scoped and unscoped
+// readers so a page bound cannot differ between the two.
+func recordPage(limit, offset int) (int, int) {
+	if limit <= 0 || limit > 500 {
+		limit = 100
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	return limit, offset
+}
+
 // driftRecordFilter renders the shared WHERE tail for List/CountRecords. The
 // clause only ever gains fixed SQL with positional placeholders; all
 // caller-supplied values bind through the returned args.
-func driftRecordFilter(statuses []string, sourceID, severity string, start, end *time.Time) (string, []any) {
+// args is SEEDED by the caller rather than started empty, so the scoped readers
+// can bind the organization array as $1 and have every filter placeholder
+// numbered after it. Renumbering by hand in a second copy of this function is
+// how a by-id read ends up filtered on somebody else's value.
+func driftRecordFilter(args []any, statuses []string, sourceID, severity string, start, end *time.Time) (string, []any) {
 	clause := ""
-	args := []any{}
 	if len(statuses) > 0 {
 		args = append(args, statuses)
 		clause += fmt.Sprintf(" AND status = ANY($%d)", len(args)) // #nosec G202 -- placeholder only; value bound via args
@@ -288,13 +321,8 @@ func driftRecordFilter(statuses []string, sourceID, severity string, start, end 
 // filter values mean "any"; statuses filters to the given set; start/end bound
 // last_detected_at. Use CountRecords with the same filters for the total.
 func (r *DriftRecordRepository) List(ctx context.Context, statuses []string, sourceID, severity string, limit, offset int, start, end *time.Time) ([]DriftRecord, error) {
-	if limit <= 0 || limit > 500 {
-		limit = 100
-	}
-	if offset < 0 {
-		offset = 0
-	}
-	clause, args := driftRecordFilter(statuses, sourceID, severity, start, end)
+	limit, offset = recordPage(limit, offset)
+	clause, args := driftRecordFilter(nil, statuses, sourceID, severity, start, end)
 	q := `SELECT ` + driftRecordColumns + ` FROM drift_records WHERE 1=1` + clause // #nosec G202 -- fixed SQL + placeholder-only clause from driftRecordFilter; no interpolated values
 	args = append(args, limit, offset)
 	q += fmt.Sprintf(" ORDER BY last_detected_at DESC LIMIT $%d OFFSET $%d", len(args)-1, len(args)) // #nosec G202 -- placeholder only
@@ -317,7 +345,7 @@ func (r *DriftRecordRepository) List(ctx context.Context, statuses []string, sou
 
 // CountRecords returns the record total for the same filters as List.
 func (r *DriftRecordRepository) CountRecords(ctx context.Context, statuses []string, sourceID, severity string, start, end *time.Time) (int, error) {
-	clause, args := driftRecordFilter(statuses, sourceID, severity, start, end)
+	clause, args := driftRecordFilter(nil, statuses, sourceID, severity, start, end)
 	var n int
 	// #nosec G202 -- clause is fixed SQL with positional placeholders; values bound via args
 	err := r.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM drift_records WHERE 1=1`+clause, args...).Scan(&n)

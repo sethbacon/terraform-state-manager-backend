@@ -5,7 +5,6 @@ package api
 
 import (
 	"context"
-	"crypto/subtle"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -19,6 +18,7 @@ import (
 	"github.com/terraform-state-manager/terraform-state-manager/internal/db/repositories"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/pipelines"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/services/notify"
+	"github.com/terraform-state-manager/terraform-state-manager/internal/tenantscope"
 )
 
 // HealthHandlers serves version-lab (health run) endpoints.
@@ -208,12 +208,21 @@ func (h *HealthHandlers) ListRuns() gin.HandlerFunc {
 		}
 		limit, _ := strconv.Atoi(c.Query("limit"))   // 0 -> repo default (50)
 		offset, _ := strconv.Atoi(c.Query("offset")) // 0 -> first page
-		runs, err := h.healthRepo.List(ctx, limit, offset, status)
+		// The Phase 3 read flip for health_runs (#393). Unscoped, this listed
+		// every organization's version-lab runs -- each naming a repository ref,
+		// a working directory and a private registry host -- to any caller
+		// holding state:read in one of them.
+		scope, resolved := tenantscope.FromContext(c)
+		if !resolved {
+			serverError(c, errNoTenantScope, "the tenant scope was not resolved for this route")
+			return
+		}
+		runs, err := h.healthRepo.ListInScope(ctx, limit, offset, status, scope)
 		if err != nil {
 			serverError(c, err, "failed to list health runs")
 			return
 		}
-		total, err := h.healthRepo.CountRuns(ctx, status)
+		total, err := h.healthRepo.CountRunsInScope(ctx, status, scope)
 		if err != nil {
 			serverError(c, err, "failed to count health runs")
 			return
@@ -225,7 +234,13 @@ func (h *HealthHandlers) ListRuns() gin.HandlerFunc {
 // GetRun returns a single health run.
 func (h *HealthHandlers) GetRun() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		run, err := h.healthRepo.GetByID(c.Request.Context(), c.Param("id"))
+		scope, resolved := tenantscope.FromContext(c)
+		if !resolved {
+			serverError(c, errNoTenantScope, "the tenant scope was not resolved for this route")
+			return
+		}
+		// A run in another organization reads exactly as one that does not exist.
+		run, err := h.healthRepo.GetByIDInScope(c.Request.Context(), c.Param("id"), scope)
 		if err != nil {
 			serverError(c, err, "failed to load health run")
 			return
@@ -255,19 +270,28 @@ func (h *HealthHandlers) RunResults() gin.HandlerFunc {
 		}
 		_ = c.ShouldBindJSON(&body)
 
-		token := c.GetHeader("X-TSM-Callback-Token")
-		if token == "" {
-			token = body.Token
-		}
+		token := callbackTokenFrom(c.GetHeader("X-TSM-Callback-Token"), body.Token)
 
+		// The pre-authentication lookup: the credential being checked is what
+		// identifies the run, so there is no scope to run this under. Recorded in
+		// unscoped_twin_class_test.go's justifiedUnscoped; everything after it
+		// runs under the authority the run confers. See callback_authority.go.
 		run, err := h.healthRepo.GetByID(ctx, c.Param("id"))
 		if err != nil {
 			serverError(c, err, "failed to load health run")
 			return
 		}
-		// Uniform 401 whether the run is missing or the token is wrong (no oracle).
-		if run == nil || run.CallbackToken == "" ||
-			subtle.ConstantTimeCompare([]byte(token), []byte(run.CallbackToken)) != 1 {
+		// Uniform 401 whether the run is missing, the token is wrong, or the run
+		// belongs to no organization (no oracle, and no authority from an
+		// unstamped row).
+		auth, authenticated := dispatchAuthority{}, false
+		if run != nil {
+			auth, authenticated = authenticateCallback("health_runs",
+				callbackRun{ID: run.ID, OrganizationID: run.OrganizationID, StoredToken: run.CallbackToken}, token)
+		}
+		if !authenticated {
+			// ONE EXIT for all three refusals, which is what keeps them
+			// indistinguishable from outside.
 			c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid callback token"})
 			return
 		}
@@ -292,7 +316,7 @@ func (h *HealthHandlers) RunResults() gin.HandlerFunc {
 		if body.Success != nil {
 			success = *body.Success
 		}
-		if err := h.healthRepo.UpdateResult(ctx, run.ID, status, initOK, planOK, success, body.Summary, body.Detail); err != nil {
+		if err := h.healthRepo.UpdateResultInScope(ctx, run.ID, status, initOK, planOK, success, body.Summary, body.Detail, auth.scope); err != nil {
 			serverError(c, err, "failed to record results")
 			return
 		}

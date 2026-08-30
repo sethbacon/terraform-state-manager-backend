@@ -36,9 +36,26 @@ import (
 //
 // An entry is a claim that this site has NO caller to scope by, or that it is
 // comparing the two reads on purpose. "It was awkward to thread" is not a reason.
-// The map is keyed "file:function".
+//
+// KEYED "file:function:Type.Method", and the third part is not decoration. The
+// key used to stop at the function, so an exemption written for ONE read
+// excused every unscoped read in the same handler — including ones added later,
+// by someone who never saw the reason. That is not theoretical here: the machine
+// callbacks below have exactly one read that cannot be scoped (the credential
+// lookup that identifies the run) and several afterwards that must be, and a
+// function-wide exemption would have covered all of them silently.
 var justifiedUnscoped = map[string]string{
-	"reconcile.go:ReconcileSources": "the statesync reconcile loop reads the whole fleet by design: it syncs every tenant's sources and has no caller to narrow to",
+	"reconcile.go:ReconcileSources:SourceRepository.List": "the statesync reconcile loop reads the whole fleet by design: it syncs every tenant's sources and has no caller to narrow to",
+
+	// THE MACHINE CALLBACKS (#393 option B, item 5). A CI job posts its result
+	// holding a per-run bearer token and nothing else — no session, no
+	// membership, no organization. This read is what the token is compared
+	// against, so it necessarily precedes the authority rather than running
+	// under it: the run it finds is where the organization COMES FROM. Every
+	// statement after it is InScope under that derived authority, and this
+	// exemption names one method so it cannot quietly cover them.
+	"drift.go:RunResults:DriftRepository.GetByID":   "the pre-authentication lookup on the drift callback: the callback token is the credential and this read is what identifies the run it belongs to, so there is no scope in existence yet to run it under (see callback_authority.go)",
+	"health.go:RunResults:HealthRepository.GetByID": "the pre-authentication lookup on the health callback, on the same terms as the drift one",
 }
 
 // repoFieldTypes maps HANDLER STRUCT -> field name -> repository type, so a call
@@ -159,9 +176,6 @@ func TestNoHandlerCallsAnUnscopedTwinWithoutSayingWhy(t *testing.T) {
 				continue
 			}
 			key := base + ":" + fn.Name.Name
-			if justifiedUnscoped[key] != "" {
-				continue
-			}
 			// The receiver's type selects which field map applies.
 			recvType := ""
 			if fn.Recv != nil && len(fn.Recv.List) == 1 {
@@ -190,6 +204,9 @@ func TestNoHandlerCallsAnUnscopedTwinWithoutSayingWhy(t *testing.T) {
 				}
 				typ := fields[inner.Sel.Name]
 				if typ == "" || !twins[typ+"."+sel.Sel.Name] {
+					return true
+				}
+				if justifiedUnscoped[key+":"+typ+"."+sel.Sel.Name] != "" {
 					return true
 				}
 				offenders = append(offenders,
@@ -276,7 +293,16 @@ func TestJustifiedUnscopedEntriesAreLive(t *testing.T) {
 	}
 	var stale []string
 	for k := range justifiedUnscoped {
-		if !live[k] {
+		// "file:function:Type.Method" — the liveness question is about the
+		// function, so the method suffix is trimmed before the lookup.
+		parts := strings.SplitN(k, ":", 3)
+		if len(parts) != 3 {
+			t.Errorf("justifiedUnscoped key %q is not \"file:function:Type.Method\". An entry "+
+				"that does not name the METHOD it excuses is a function-wide exemption, which is "+
+				"the shape this key format exists to prevent.", k)
+			continue
+		}
+		if !live[parts[0]+":"+parts[1]] {
 			stale = append(stale, k)
 		}
 	}

@@ -80,7 +80,7 @@ func TestIngestDrift_ReplayIsIdempotent(t *testing.T) {
 func TestIngestDrift_CleanResolves(t *testing.T) {
 	e := newDriftEnv(t)
 	sourceRowFor(e, "s1")
-	e.mock.ExpectExec("UPDATE drift_records SET status='resolved'").WithArgs("s1", "envs/prod.tfstate").
+	e.mock.ExpectExec("UPDATE drift_records SET status='resolved'").WithArgs("s1", "envs/prod.tfstate", []string{testActingOrg}).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 
 	// A no-op plan is a clean signal: the live record auto-resolves.
@@ -140,6 +140,7 @@ func TestRunResults_DriftCreatesRecord_CleanResolves(t *testing.T) {
 	e.mock.ExpectExec("UPDATE drift_runs SET callback_token=''").WithArgs("d1", "tok1").
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	e.mock.ExpectExec("UPDATE drift_runs").WillReturnResult(sqlmock.NewResult(0, 1))
+	sourceRowFor(e, "s1")
 	e.mock.ExpectQuery("INSERT INTO drift_records").WillReturnRows(driftRecRow("r1", "open", "warning"))
 
 	w := e.doWithHeader(http.MethodPost, "/api/v1/drift/runs/d1/results",
@@ -157,7 +158,8 @@ func TestRunResults_DriftCreatesRecord_CleanResolves(t *testing.T) {
 	e.mock.ExpectExec("UPDATE drift_runs SET callback_token=''").WithArgs("d1", "tok2").
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	e.mock.ExpectExec("UPDATE drift_runs").WillReturnResult(sqlmock.NewResult(0, 1))
-	e.mock.ExpectExec("UPDATE drift_records SET status='resolved'").WithArgs("s1", "envs/prod.tfstate").
+	sourceRowFor(e, "s1")
+	e.mock.ExpectExec("UPDATE drift_records SET status='resolved'").WithArgs("s1", "envs/prod.tfstate", []string{testActingOrg}).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 
 	w = e.doWithHeader(http.MethodPost, "/api/v1/drift/runs/d1/results",
@@ -174,7 +176,8 @@ func TestRunResults_DriftCreatesRecord_CleanResolves(t *testing.T) {
 func TestListDriftRecords(t *testing.T) {
 	e := newDriftEnv(t)
 
-	e.mock.ExpectQuery("FROM drift_records WHERE 1=1 AND status = ANY").
+	e.mock.ExpectQuery("FROM drift_records WHERE organization_id = ANY.+AND status = ANY").
+		WithArgs([]string{testActingOrg}, sqlmock.AnyArg(), 100, 0).
 		WillReturnRows(driftRecRow("r1", "open", "warning"))
 	e.mock.ExpectQuery(`SELECT COUNT\(\*\) FROM drift_records`).
 		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
@@ -204,11 +207,11 @@ func TestDriftRecordsPagination(t *testing.T) {
 	e := newDriftEnv(t)
 
 	// page=2&per_page=25 → LIMIT 25 OFFSET 25; both dates bound as args.
-	e.mock.ExpectQuery(`FROM drift_records WHERE 1=1 AND status = ANY.+last_detected_at >=.+last_detected_at <=.+LIMIT.+OFFSET`).
-		WithArgs(sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), 25, 25).
+	e.mock.ExpectQuery(`FROM drift_records WHERE organization_id = ANY.+AND status = ANY.+last_detected_at >=.+last_detected_at <=.+LIMIT.+OFFSET`).
+		WithArgs([]string{testActingOrg}, sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), 25, 25).
 		WillReturnRows(driftRecRow("r1", "open", "warning"))
-	e.mock.ExpectQuery(`SELECT COUNT\(\*\) FROM drift_records`).
-		WithArgs(sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg()).
+	e.mock.ExpectQuery(`SELECT COUNT\(\*\) FROM drift_records WHERE organization_id = ANY`).
+		WithArgs([]string{testActingOrg}, sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg()).
 		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(60))
 	e.mock.ExpectQuery("SELECT status, COUNT").
 		WillReturnRows(sqlmock.NewRows([]string{"status", "count"}).AddRow("open", 60))
@@ -223,8 +226,8 @@ func TestDriftRecordsPagination(t *testing.T) {
 
 	// Out-of-range per_page falls back to the default window; unparsable dates
 	// are ignored rather than erroring (mirrors the audit-log filters).
-	e.mock.ExpectQuery("FROM drift_records WHERE 1=1 .+ LIMIT .+ OFFSET").
-		WithArgs(100, 0).
+	e.mock.ExpectQuery("FROM drift_records WHERE organization_id = ANY.+LIMIT.+OFFSET").
+		WithArgs([]string{testActingOrg}, 100, 0).
 		WillReturnRows(driftRecRow("r1", "open", "warning"))
 	e.mock.ExpectQuery(`SELECT COUNT\(\*\) FROM drift_records`).
 		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
@@ -242,7 +245,8 @@ func TestDriftRecordsPagination(t *testing.T) {
 func TestAcknowledgeAndResolveDriftRecord(t *testing.T) {
 	e := newDriftEnv(t)
 
-	e.mock.ExpectQuery("UPDATE drift_records").
+	e.mock.ExpectQuery("UPDATE drift_records.+organization_id = ANY").
+		WithArgs("r1", sqlmock.AnyArg(), sqlmock.AnyArg(), []string{testActingOrg}).
 		WillReturnRows(driftRecRow("r1", "acknowledged", "warning"))
 	w := e.do(http.MethodPost, "/api/v1/drift/records/r1/acknowledge", `{"note":"expected during cert rotation"}`)
 	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"acknowledged"`) {
@@ -250,16 +254,18 @@ func TestAcknowledgeAndResolveDriftRecord(t *testing.T) {
 	}
 
 	// Acknowledging a non-open record is a conflict, not a 500/404.
-	e.mock.ExpectQuery("UPDATE drift_records").WillReturnRows(sqlmock.NewRows(driftRecCols))
-	e.mock.ExpectQuery("FROM drift_records WHERE id").WithArgs("r1").
+	e.mock.ExpectQuery("UPDATE drift_records.+organization_id = ANY").WillReturnRows(sqlmock.NewRows(driftRecCols))
+	e.mock.ExpectQuery("FROM drift_records WHERE organization_id = ANY.+AND id").
+		WithArgs([]string{testActingOrg}, "r1").
 		WillReturnRows(driftRecRow("r1", "resolved", "warning"))
 	if w := e.do(http.MethodPost, "/api/v1/drift/records/r1/acknowledge", `{}`); w.Code != http.StatusConflict {
 		t.Errorf("ack non-open: %d (%s)", w.Code, w.Body.String())
 	}
 
 	// Missing record is a 404.
-	e.mock.ExpectQuery("UPDATE drift_records").WillReturnRows(sqlmock.NewRows(driftRecCols))
-	e.mock.ExpectQuery("FROM drift_records WHERE id").WithArgs("ghost").
+	e.mock.ExpectQuery("UPDATE drift_records.+organization_id = ANY").WillReturnRows(sqlmock.NewRows(driftRecCols))
+	e.mock.ExpectQuery("FROM drift_records WHERE organization_id = ANY.+AND id").
+		WithArgs([]string{testActingOrg}, "ghost").
 		WillReturnRows(sqlmock.NewRows(driftRecCols))
 	if w := e.do(http.MethodPost, "/api/v1/drift/records/ghost/acknowledge", `{}`); w.Code != http.StatusNotFound {
 		t.Errorf("ack missing: %d", w.Code)
@@ -272,7 +278,8 @@ func TestAcknowledgeAndResolveDriftRecord(t *testing.T) {
 	}
 
 	// Manual resolve.
-	e.mock.ExpectQuery("UPDATE drift_records SET status='resolved'").
+	e.mock.ExpectQuery("UPDATE drift_records SET status='resolved'.+organization_id = ANY").
+		WithArgs("r1", []string{testActingOrg}).
 		WillReturnRows(driftRecRow("r1", "resolved", "warning"))
 	if w := e.do(http.MethodPost, "/api/v1/drift/records/r1/resolve", ""); w.Code != http.StatusOK {
 		t.Errorf("resolve: %d (%s)", w.Code, w.Body.String())
@@ -282,16 +289,76 @@ func TestAcknowledgeAndResolveDriftRecord(t *testing.T) {
 func TestGetDriftRecord(t *testing.T) {
 	e := newDriftEnv(t)
 
-	e.mock.ExpectQuery("FROM drift_records WHERE id").WithArgs("r1").
+	e.mock.ExpectQuery("FROM drift_records WHERE organization_id = ANY.+AND id").
+		WithArgs([]string{testActingOrg}, "r1").
 		WillReturnRows(driftRecRow("r1", "open", "critical"))
 	w := e.do(http.MethodGet, "/api/v1/drift/records/r1", "")
 	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"critical"`) {
 		t.Fatalf("get: %d (%s)", w.Code, w.Body.String())
 	}
 
-	e.mock.ExpectQuery("FROM drift_records WHERE id").WithArgs("ghost").
+	e.mock.ExpectQuery("FROM drift_records WHERE organization_id = ANY.+AND id").
+		WithArgs([]string{testActingOrg}, "ghost").
 		WillReturnRows(sqlmock.NewRows(driftRecCols))
 	if w := e.do(http.MethodGet, "/api/v1/drift/records/ghost", ""); w.Code != http.StatusNotFound {
 		t.Errorf("missing: %d", w.Code)
+	}
+}
+
+// TestRunResults_RefusesRecordMaintenanceWhenTheRunsSourceIsNotItsOwn is the
+// callback's CROSS-CHECK, and it is the ordering half of the guard rather than
+// the predicate half.
+//
+// drift_runs.source_id is nullable and carries no same-organization constraint,
+// so a run can name a source its own organization does not own — dispatched
+// before the chain check landed, or written by direct SQL. Everything the record
+// layer does afterwards is keyed on that source: the detection upsert, the clean
+// resolve, and the module-provenance replace, which DELETEs before it INSERTs.
+//
+// Each of those statements now refuses on its own predicate — proved against a
+// real PostgreSQL in internal/tenancy/callback_roots_integration_test.go, which
+// a mock cannot do. What is asserted HERE is the property a mock is exactly
+// right for: that NO record statement is attempted at all when the source is
+// unreachable, so a refusal is one named log line rather than three quiet
+// failures. The queued expectation is required to go UNUSED, because sqlmock
+// does not fail on an unexpected call — it just errors that call, which this
+// handler logs and swallows.
+func TestRunResults_RefusesRecordMaintenanceWhenTheRunsSourceIsNotItsOwn(t *testing.T) {
+	e := newDriftEnv(t)
+
+	e.mock.ExpectQuery("FROM drift_runs WHERE id").WithArgs("d1").WillReturnRows(
+		sqlmock.NewRows(driftCols).AddRow("d1", "p1", "s-elsewhere", "envs/prod.tfstate", "", "", "dispatched",
+			nil, nil, nil, nil, nil, "", "tok1", "alice", "2026-06-11", "2026-06-11",
+			false, 0, 0, false, false, testActingOrg))
+	e.mock.ExpectExec("UPDATE drift_runs SET callback_token=''").WithArgs("d1", "tok1").
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	e.mock.ExpectExec("UPDATE drift_runs").WillReturnResult(sqlmock.NewResult(0, 1))
+	// The source the run names is not reachable under the run's own
+	// organization: no row.
+	e.mock.ExpectQuery("SELECT .+ FROM state_sources WHERE organization_id").
+		WithArgs(sqlmock.AnyArg(), "s-elsewhere").
+		WillReturnRows(sqlmock.NewRows(apiSourceCols))
+	// QUEUED AND REQUIRED TO GO UNUSED.
+	e.mock.ExpectQuery("INSERT INTO drift_records").WillReturnRows(driftRecRow("r1", "open", "warning"))
+
+	w := e.doWithHeader(http.MethodPost, "/api/v1/drift/runs/d1/results",
+		`{"added":1,"changed":0,"destroyed":0,"drifted":true,
+		  "plan":{"configuration":{"root_module":{"module_calls":{"vpc":{"source":"acme/vpc/aws"}}}}}}`,
+		"X-TSM-Callback-Token", "tok1")
+
+	// The run result itself is still recorded — the drift outcome is the primary
+	// product and a poisoned parent reference must not lose it.
+	if w.Code != http.StatusOK {
+		t.Fatalf("callback: %d (%s)", w.Code, w.Body.String())
+	}
+	err := e.mock.ExpectationsWereMet()
+	if err == nil {
+		t.Fatal("the callback maintained a drift record against a source its own organization " +
+			"does not own. #393's survey settled that the run is the CROSS-CHECK and a mismatch is " +
+			"refused, not silently resolved.")
+	}
+	if !strings.Contains(err.Error(), "INSERT INTO drift_records") {
+		t.Errorf("the unmet expectation should be the record insert alone; the run result and the "+
+			"source load must both have happened: %v", err)
 	}
 }

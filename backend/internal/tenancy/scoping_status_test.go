@@ -4,8 +4,9 @@ package tenancy
 // organization-scoped yet (#502, tracking #393).
 //
 // WHY THIS EXISTS. The Phase 3 read flip landed for state_sources and shipped
-// in v3.13.0; schedules followed. The remaining seven roots are still unscoped,
-// so this application is isolated on two planes and shared on seven -- which is
+// in v3.13.0; schedules, pipeline_connections and ci_sources followed, and the
+// three callback roots after them. Two roots are still unscoped, so this
+// application is isolated on seven planes and shared on two -- which is
 // neither model, and not a state anyone would choose to sit in indefinitely.
 // That is expected DURING a phased migration and dangerous as a resting
 // position, and the difference between the two is whether anyone can see it.
@@ -62,11 +63,26 @@ var rootScoping = map[string]scopingStatus{
 	// carry middleware.TenantScope.
 	"ci_sources": scopedNow,
 
+	// The callback roots (#393 option B, item 5). These are the three with TWO
+	// kinds of reader, and both had to close before either could be called done:
+	// a person reads them through a request that resolves a scope
+	// (ListInScope/GetByIDInScope behind middleware.TenantScope on every
+	// /drift and /health-lab read route, plus the acknowledge and resolve
+	// writes), and a CI job posts results to them holding a per-run bearer token
+	// and no principal at all. The machine path derives its authority FROM THE
+	// CREDENTIAL -- the run the token authenticates names the organization -- so
+	// its callback route carries no TenantScope by design and is not a gap.
+	// See internal/api/callback_authority.go.
+	//
+	// The one read that stays unscoped on each is the pre-authentication lookup
+	// the token is compared against; it is recorded per-method in
+	// unscoped_twin_class_test.go's justifiedUnscoped.
+	"drift_runs":    scopedNow,
+	"drift_records": scopedNow,
+	"health_runs":   scopedNow,
+
 	"notification_channels": unscopedPending,
 	"state_transfers":       unscopedPending,
-	"drift_runs":            unscopedPending,
-	"drift_records":         unscopedPending,
-	"health_runs":           unscopedPending,
 }
 
 // TestEveryPartitionRootHasADeclaredScopingStatus checks the inventory against
