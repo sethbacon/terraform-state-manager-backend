@@ -1,5 +1,12 @@
 # Changelog
 
+## [3.20.0](https://github.com/sethbacon/terraform-state-manager-backend/compare/v3.19.2...v3.20.0) (2026-08-31)
+
+
+### Features
+
+* **ci:** adopt the shared Dependabot CI-health check ([#554](https://github.com/sethbacon/terraform-state-manager-backend/issues/554)) ([109c19e](https://github.com/sethbacon/terraform-state-manager-backend/commit/109c19ea5ae4211c956631aa5ab065271e9c5bd7))
+
 ## [3.19.2](https://github.com/sethbacon/terraform-state-manager-backend/compare/v3.19.1...v3.19.2) (2026-08-31)
 
 
