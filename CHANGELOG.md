@@ -1,5 +1,15 @@
 # Changelog
 
+## [3.19.2](https://github.com/sethbacon/terraform-state-manager-backend/compare/v3.19.1...v3.19.2) (2026-08-31)
+
+
+### Bug Fixes
+
+* **ci:** a non-empty, non-ref-shaped comment satisfies both pin gates ([78d9a56](https://github.com/sethbacon/terraform-state-manager-backend/commit/78d9a569c5df2d38628d4081734e86b7e78e6e73))
+* **ci:** correct the pin comment to name the commit actually referenced ([a123c29](https://github.com/sethbacon/terraform-state-manager-backend/commit/a123c291b6955d745ddff727bd54d19399fa9277))
+* **ci:** drop the unresolvable pin comment zizmor's ref-version-mismatch flagged ([1e953f7](https://github.com/sethbacon/terraform-state-manager-backend/commit/1e953f714c0d383eec3cbd571aff474ce5b39682))
+* **ci:** re-pin the release-close guard to the fixed shared-workflows commit ([9236748](https://github.com/sethbacon/terraform-state-manager-backend/commit/9236748a552c464f8641a43fa566355c084efc8a))
+
 ## [3.19.1](https://github.com/sethbacon/terraform-state-manager-backend/compare/v3.19.0...v3.19.1) (2026-08-30)
 
 
