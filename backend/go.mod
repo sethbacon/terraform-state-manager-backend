@@ -25,7 +25,7 @@ require (
 	github.com/robfig/cron/v3 v3.0.1
 	github.com/sethbacon/terraform-suite-identity v0.41.0
 	github.com/spf13/viper v1.21.0
-	golang.org/x/crypto v0.55.0
+	golang.org/x/crypto v0.56.0
 	golang.org/x/mod v0.40.0
 	google.golang.org/api v0.293.0
 	gopkg.in/yaml.v3 v3.0.1
