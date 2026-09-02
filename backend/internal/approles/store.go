@@ -212,14 +212,14 @@ func (s *Store) resolve(ctx context.Context, table string) (string, error) {
 	return qualified.String, nil
 }
 
-// UpsertTemplate writes a role definition, keyed by id.
+// upsertTemplate writes a role definition, keyed by id.
 //
 // KEYED BY ID, NOT BY NAME, because the id is carried over from identity and is
 // what organization_member_roles stores. A conflict on name with a DIFFERENT id
 // would be identity having recreated the template — the ON CONFLICT (name) arm
 // re-points the row at the new id rather than failing, so the reconcile
 // converges instead of wedging on a template somebody dropped and recreated.
-func (s *Store) UpsertTemplate(ctx context.Context, t Template) error {
+func (s *Store) upsertTemplate(ctx context.Context, t Template) error {
 	scopes, err := json.Marshal(nonNilScopes(t.Scopes))
 	if err != nil {
 		return fmt.Errorf("approles: encoding scopes for role template %q: %w", t.Name, err)
@@ -240,7 +240,19 @@ func (s *Store) UpsertTemplate(ctx context.Context, t Template) error {
 	return nil
 }
 
-// DefineTemplate writes THIS BUILD's definition of a role, keyed by NAME.
+// defineTemplate writes THIS BUILD's definition of a role, keyed by NAME.
+//
+// UNEXPORTED SINCE #557, and that is the enforcement rather than a tidy-up. This
+// statement REDUCES derived authority whenever the scope list it writes is
+// narrower than the one already there — for every member holding the template,
+// which for a seeded role is potentially the whole deployment. While it was
+// exported, `approles.NewStore(db).DefineTemplate(...)` was a complete bypass of
+// the reconciliation that invalidates the credentials that narrowing strands:
+// available to any future caller, compiling cleanly, and indistinguishable in
+// review from the correct path. Unexporting it means the only way to write a
+// role definition is ApplyTemplateDefinitions, which cannot be expressed without
+// the reducer. The membership axis needed `type identityOrgs` to close the same
+// hole; here the package boundary does it.
 //
 // This is the app-side seed (bootstrap.seedRoleTemplates), and it is keyed by
 // name rather than id on purpose: the NAME is what this build claims to define,
@@ -256,7 +268,7 @@ func (s *Store) UpsertTemplate(ctx context.Context, t Template) error {
 // role assignment in this application is expressed in; identity's copy of the
 // definitions is written FROM here (bootstrap.seedSharedRoleTemplates) rather
 // than the other way around.
-func (s *Store) DefineTemplate(ctx context.Context, t Template) error {
+func (s *Store) defineTemplate(ctx context.Context, t Template) error {
 	scopes, err := json.Marshal(nonNilScopes(t.Scopes))
 	if err != nil {
 		return fmt.Errorf("approles: encoding scopes for role template %q: %w", t.Name, err)
@@ -410,6 +422,45 @@ func andScope(query string, scope idstore.OrgScope, column string, args []interf
 // this the strongest of the three axes would be the one left open. Recording a
 // role is a privilege GRANT. Out of scope, the SELECT produces no row, the
 // insert writes nothing, and the ON CONFLICT arm is never reached.
+// HoldersOfTemplate returns the DISTINCT users this application has assigned
+// the given role template, within the caller's tenancy.
+//
+// It exists for the boot reconciliation (#557): when a template's scopes are
+// about to be narrowed, these are the principals whose derived authority is
+// about to shrink, and therefore whose credentials the application has to
+// decide about. This package deliberately does not know what a credential is —
+// it answers "who holds this role", and TemplateAuthorityReducer's implementor
+// decides what that means for sessions and keys.
+//
+// DISTINCT because a user holding one template in several organizations is one
+// principal with one set of credentials; returning them once per assignment
+// would make every consumer deduplicate, and the one that forgot would write
+// the same watermark twice.
+func (s *Store) HoldersOfTemplate(ctx context.Context, roleTemplateID string, scope idstore.OrgScope) ([]string, error) {
+	query := `SELECT DISTINCT user_id::text FROM organization_member_roles WHERE role_template_id = $1`
+	args := []interface{}{roleTemplateID}
+	query, args = andScope(query, scope, "organization_id", args)
+
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("approles: reading holders of role template %s: %w", roleTemplateID, err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var holders []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("approles: scanning holder of role template %s: %w", roleTemplateID, err)
+		}
+		holders = append(holders, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("approles: reading holders of role template %s: %w", roleTemplateID, err)
+	}
+	return holders, nil
+}
+
 func (s *Store) SetRole(ctx context.Context, orgID, userID string, roleTemplateID *string, scope idstore.OrgScope) error {
 	query := `
 		INSERT INTO organization_member_roles (organization_id, user_id, role_template_id, created_at, updated_at, mirrored_at)

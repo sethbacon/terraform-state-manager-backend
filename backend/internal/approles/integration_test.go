@@ -387,7 +387,7 @@ func TestIntegrationMembershipFactsConfirmWithoutIdentitysRoles(t *testing.T) {
 		t.Fatal("the app tables are not empty before the reconcile; the test is not testing the confirmation pass")
 	}
 
-	rep, err := Reconcile(ctx, e.appDB, e.identityDB, ownTemplates)
+	rep, err := Reconcile(ctx, e.appDB, e.identityDB, ownTemplates, NoTemplateAuthorityReduction)
 	if err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}
@@ -452,7 +452,7 @@ func TestIntegrationReconcileSweepsWhatIdentityNoLongerHas(t *testing.T) {
 		t.Fatalf("out-of-band delete: %v", err)
 	}
 
-	rep, err := Reconcile(ctx, e.appDB, e.identityDB, ownTemplates)
+	rep, err := Reconcile(ctx, e.appDB, e.identityDB, ownTemplates, NoTemplateAuthorityReduction)
 	if err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}
@@ -477,7 +477,7 @@ func TestIntegrationReconcileSparesAConcurrentWrite(t *testing.T) {
 	if err := e.members.AddMemberWithParams(ctx, org, user, "viewer", idstore.OrgScopeAllOrganizations(), sweepOfARealReduction); err != nil {
 		t.Fatalf("AddMemberWithParams: %v", err)
 	}
-	if _, err := Reconcile(ctx, e.appDB, e.identityDB, ownTemplates); err != nil {
+	if _, err := Reconcile(ctx, e.appDB, e.identityDB, ownTemplates, NoTemplateAuthorityReduction); err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}
 	if _, ok := e.mirroredRole(t, org, user); !ok {
@@ -663,7 +663,7 @@ func TestIntegrationDriftQueryReportsAllThreeKinds(t *testing.T) {
 	// recorded role for it now reads as mismatched — and the mismatched pair
 	// keeps THIS application's role, because identity's opinion is no longer
 	// restated over these tables.
-	if _, err := Reconcile(ctx, e.appDB, e.identityDB, ownTemplates); err != nil {
+	if _, err := Reconcile(ctx, e.appDB, e.identityDB, ownTemplates, NoTemplateAuthorityReduction); err != nil {
 		t.Fatalf("repairing Reconcile: %v", err)
 	}
 	kinds = driftKinds(t, e)
@@ -709,7 +709,7 @@ func TestIntegrationKeysetScanPagesBeyondOneBatch(t *testing.T) {
 		}
 	}
 
-	rep, err := Reconcile(ctx, e.appDB, e.identityDB, ownTemplates)
+	rep, err := Reconcile(ctx, e.appDB, e.identityDB, ownTemplates, NoTemplateAuthorityReduction)
 	if err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}
@@ -736,7 +736,7 @@ func TestIntegrationThisBuildsScopesReplaceTheSiblings(t *testing.T) {
 	ctx := context.Background()
 
 	e.newIdentityRole(t, "editor", "modules:read", "providers:read") // the sibling's, not this build's
-	if _, err := Reconcile(ctx, e.appDB, e.identityDB, ownTemplates); err != nil {
+	if _, err := Reconcile(ctx, e.appDB, e.identityDB, ownTemplates, NoTemplateAuthorityReduction); err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}
 
@@ -771,7 +771,7 @@ func TestIntegrationAForeignRoleNoLongerArrives(t *testing.T) {
 	ctx := context.Background()
 
 	e.newIdentityRole(t, "registry_publisher", "modules:write")
-	rep, err := Reconcile(ctx, e.appDB, e.identityDB, ownTemplates)
+	rep, err := Reconcile(ctx, e.appDB, e.identityDB, ownTemplates, NoTemplateAuthorityReduction)
 	if err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}
@@ -788,7 +788,7 @@ func TestIntegrationAForeignRoleNoLongerArrives(t *testing.T) {
 		VALUES (gen_random_uuid(), 'registry_publisher', 'Publisher', NULL, '["modules:write"]'::jsonb, true, now(), now())`); err != nil {
 		t.Fatalf("simulating a legacy adopted row: %v", err)
 	}
-	rep, err = Reconcile(ctx, e.appDB, e.identityDB, ownTemplates)
+	rep, err = Reconcile(ctx, e.appDB, e.identityDB, ownTemplates, NoTemplateAuthorityReduction)
 	if err != nil {
 		t.Fatalf("second Reconcile: %v", err)
 	}
@@ -1042,20 +1042,20 @@ func TestIntegrationTheSweepLearnsWhetherAuthorityActuallyMoved(t *testing.T) {
 // package, so the real one cannot be called from its tests. The real one is run
 // end to end against Postgres by internal/bootstrap's own integration test, which
 // is what establishes that these two agree.
-func ownTemplates(ctx context.Context, s *Store) error {
-	for _, rt := range auth.AppRoleTemplates() {
+func ownTemplates(context.Context) ([]Template, error) {
+	seeds := auth.AppRoleTemplates()
+	defs := make([]Template, 0, len(seeds))
+	for _, rt := range seeds {
 		description := rt.Description
-		if err := s.DefineTemplate(ctx, Template{
+		defs = append(defs, Template{
 			Name:        rt.Name,
 			DisplayName: rt.DisplayName,
 			Description: &description,
 			Scopes:      rt.Scopes,
 			IsSystem:    true,
-		}); err != nil {
-			return err
-		}
+		})
 	}
-	return nil
+	return defs, nil
 }
 
 // seedIdentityWithThisBuildsRoles puts this build's own role -> scope mapping in
@@ -1070,7 +1070,7 @@ func ownTemplates(ctx context.Context, s *Store) error {
 func (e *env) alignedRoles(t *testing.T) map[string]string {
 	t.Helper()
 	ctx := context.Background()
-	if _, err := Reconcile(ctx, e.appDB, e.identityDB, ownTemplates); err != nil {
+	if _, err := Reconcile(ctx, e.appDB, e.identityDB, ownTemplates, NoTemplateAuthorityReduction); err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}
 	held, err := e.store.ListTemplates(ctx)
@@ -1292,7 +1292,7 @@ func TestIntegrationEffectiveScopesAreEquivalentBothWays(t *testing.T) {
 	}
 
 	// The boot-time reconcile runs over it, and must change nothing.
-	if _, err := Reconcile(ctx, e.appDB, e.identityDB, ownTemplates); err != nil {
+	if _, err := Reconcile(ctx, e.appDB, e.identityDB, ownTemplates, NoTemplateAuthorityReduction); err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}
 

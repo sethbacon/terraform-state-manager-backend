@@ -293,7 +293,14 @@ func serve(cfg *config.Config) error {
 	// the result (internal/approles): it takes the app connection because those
 	// tables live there, and it runs after the seed because what it copies is
 	// what the seed just produced.
-	if err := bootstrap.Run(context.Background(), identityDB, database, cfg.Suite.ShouldSeedRoles("tsm")); err != nil {
+	//
+	// The token-revocation repository is constructed here, ahead of the router's
+	// own, because the reconcile needs it: a build that NARROWS a role template
+	// ends the sessions of everyone holding it before the narrowing lands
+	// (#557), and that write is the application's to make — approles declares
+	// the contract and does not know what a credential is.
+	if err := bootstrap.Run(context.Background(), identityDB, database, cfg.Suite.ShouldSeedRoles("tsm"),
+		repositories.NewUserTokenRevocationRepository(database)); err != nil {
 		return fmt.Errorf("failed to bootstrap identity data: %w", err)
 	}
 	slog.Info("identity schema ready (role templates + default org seeded)")

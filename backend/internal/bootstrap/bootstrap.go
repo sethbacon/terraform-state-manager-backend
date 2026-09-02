@@ -29,6 +29,7 @@ import (
 
 	"github.com/terraform-state-manager/terraform-state-manager/internal/approles"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/auth"
+	"github.com/terraform-state-manager/terraform-state-manager/internal/db/repositories"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/tenancy"
 )
 
@@ -57,7 +58,7 @@ import (
 // app connection to offer; the server always passes one. With no app table to
 // take uuids from, the identity-side seed then mints them identity-side, as it
 // always did.
-func Run(ctx context.Context, identityDB, appDB *sql.DB, seedRoles bool) error {
+func Run(ctx context.Context, identityDB, appDB *sql.DB, seedRoles bool, revocations *repositories.UserTokenRevocationRepository) error {
 	if err := ensureDefaultOrg(ctx, identityDB); err != nil {
 		return fmt.Errorf("ensure default organization: %w", err)
 	}
@@ -128,7 +129,7 @@ func Run(ctx context.Context, identityDB, appDB *sql.DB, seedRoles bool) error {
 	slog.Info("notification channel organization column verified",
 		"table", channelTable, "column", identitynotify.ChannelOrganizationColumn)
 
-	rep, err := approles.Reconcile(ctx, appDB, identityDB, seedRoleTemplates)
+	rep, err := approles.Reconcile(ctx, appDB, identityDB, appRoleDefinitions, retireSessionsOfNarrowedRoles(revocations))
 	if err != nil {
 		return fmt.Errorf("reconcile per-app authorization tables: %w", err)
 	}
@@ -199,27 +200,78 @@ func defaultOrgID(ctx context.Context, db *sql.DB) (string, error) {
 // there is nothing left to arbitrate and no configuration that should be able to
 // leave this application's roles undefined.
 //
-// Keyed by NAME, preserving whatever id the row already carries (see
-// Store.DefineTemplate), so seeding cannot orphan an assignment restated from
-// identity. It is handed to approles.Reconcile rather than called directly,
-// because it is only correct AFTER the adopt pass.
-func seedRoleTemplates(ctx context.Context, store *approles.Store) error {
-	for _, rt := range auth.AppRoleTemplates() {
+// Keyed by NAME, preserving whatever id the row already carries, so seeding
+// cannot orphan an assignment restated from identity.
+//
+// IT RETURNS THE DEFINITIONS AND WRITES NOTHING (#557). approles.Reconcile
+// writes them, at the one point that is right: after it has compared them with
+// what the deployment currently records and invalidated the credentials of
+// everyone whose authority a narrowing is about to reduce. A definer that wrote
+// through a store could narrow a role that the comparison never saw.
+func appRoleDefinitions(ctx context.Context) ([]approles.Template, error) {
+	seeds := auth.AppRoleTemplates()
+	defs := make([]approles.Template, 0, len(seeds))
+	for _, rt := range seeds {
 		description := rt.Description
-		// No id: DefineTemplate keeps the adopted one on conflict and mints a
-		// fresh uuid only for a name identity does not have — which no assignment
-		// can reference.
-		if err := store.DefineTemplate(ctx, approles.Template{
+		// No id: the write conflicts on name and keeps whatever uuid this
+		// deployment already carries, minting a fresh one only for a name it has
+		// never held — which no assignment can reference.
+		defs = append(defs, approles.Template{
 			Name:        rt.Name,
 			DisplayName: rt.DisplayName,
 			Description: &description,
 			Scopes:      rt.Scopes,
 			IsSystem:    true,
-		}); err != nil {
-			return err
-		}
+		})
 	}
-	return nil
+	return defs, nil
+}
+
+// retireSessionsOfNarrowedRoles is TSM's answer to "a role this build defines
+// now grants less than the row already in the table" (#557).
+//
+// IT ENDS SESSIONS, AND DELIBERATELY DOES NOT DESTROY API KEYS.
+//
+// The two credential families are not in the same position here. A JWT freezes
+// its scopes at login and nothing re-derives them, so a holder of a narrowed
+// role keeps exercising the removed scopes until their token expires — up to the
+// full session lifetime — and the per-JTI denylist cannot help because a
+// template narrowing knows no JTIs. The per-user revoke-all watermark (#330) is
+// the only instrument that reaches them, and moving it is one set-based write.
+//
+// An API key is already contained. middleware.authenticateAPIKey caps a key's
+// stored scopes by the owner's CURRENT combined scopes on every request and
+// strips `admin` unconditionally, so the moment the role narrows, every key its
+// holders carry grants less — automatically, with no sweep. Deleting those keys
+// would buy hygiene, not containment, and it would buy it at a price this path
+// cannot afford: the deletion is irreversible, an API key's secret is shown
+// exactly once, and this runs on the startup path before /health answers, inside
+// the startup probe's budget. A scope typo in a deployment would become a
+// fleet-wide, unrecoverable credential loss discovered from a log line. The
+// membership axis destroys keys because there the authority is genuinely gone
+// for that principal; here the request-time cap already expresses the reduction.
+//
+// Ending sessions is not the same trade. It costs the holder a re-login, after
+// which they hold exactly the authority the new definition grants.
+func retireSessionsOfNarrowedRoles(revocations *repositories.UserTokenRevocationRepository) approles.TemplateAuthorityReducer {
+	return func(ctx context.Context, reduced []approles.ReducedTemplate) error {
+		if revocations == nil {
+			// Refused rather than skipped: a deployment whose sessions cannot be
+			// ended must not narrow a role and report a clean boot.
+			return fmt.Errorf("no token-revocation repository: cannot end the sessions of holders of %d narrowed role template(s)", len(reduced))
+		}
+		for _, r := range reduced {
+			ended, err := revocations.RevokeAllUserTokensFor(ctx, r.Holders)
+			if err != nil {
+				return fmt.Errorf("ending sessions for holders of role template %q: %w", r.Name, err)
+			}
+			slog.Warn("role template narrowed: holders' sessions ended",
+				"role", r.Name, "was", r.Was, "now", r.Now,
+				"holders", len(r.Holders), "sessions_ended", ended,
+				"api_keys", "left in place; capped at request time by the owner's current scopes")
+		}
+		return nil
+	}
 }
 
 // appTemplateIDs reads the uuid this application's own role_templates holds for
