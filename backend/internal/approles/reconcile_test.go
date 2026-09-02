@@ -83,6 +83,19 @@ func expectDriftProbe(env *reconcileEnv) {
 		WillReturnRows(sqlmock.NewRows([]string{"organization_id", "user_id", "role_template_id"}))
 }
 
+// expectTemplatePreImage stages the ListTemplates the reconcile issues BEFORE
+// it writes any definition (#557).
+//
+// It is a separate helper from the readback below even though the statement is
+// identical, because the two reads answer different questions at different
+// points in the sequence and the mocks are ordered: this one is the pre-image
+// the narrowing detector compares against, and staging it in the wrong place
+// would move the detection to the wrong side of the write. Rows given here are
+// what the deployment ALREADY holds.
+func expectTemplatePreImage(env *reconcileEnv, rows *sqlmock.Rows) {
+	env.app.ExpectQuery(regexp.QuoteMeta(`SELECT id, name, COALESCE(display_name`)).WillReturnRows(rows)
+}
+
 // expectForeignTemplateReadback stages the ListTemplates the reconcile issues
 // after the definition pass, to report what this application holds and does not
 // define.
@@ -122,9 +135,40 @@ func expectConfirmMembership(env *reconcileEnv, orgID, userID string) {
 // recordingDefiner is the app-side seed, as a test double that records that it
 // ran and where in the sequence.
 func recordingDefiner(ran *bool) TemplateDefiner {
-	return func(context.Context, *Store) error {
+	return func(context.Context) ([]Template, error) {
 		*ran = true
-		return nil
+		return buildDefinitions(), nil
+	}
+}
+
+// buildDefinitions is this build's own role definitions, in the shape the real
+// definer supplies them.
+//
+// It returns the REAL set rather than an empty slice, because since #557 the
+// definitions the definer supplies are what the reconcile writes and what the
+// foreign-template report measures "ours" against. A double that supplied
+// nothing while the readback showed six roles describes a state the production
+// code can no longer produce — the reconcile writes exactly what it was handed —
+// and a fixture that models an impossible state tests nothing that can happen.
+func buildDefinitions() []Template {
+	seeds := auth.AppRoleTemplates()
+	defs := make([]Template, 0, len(seeds))
+	for _, rt := range seeds {
+		description := rt.Description
+		defs = append(defs, Template{
+			Name: rt.Name, DisplayName: rt.DisplayName, Description: &description,
+			Scopes: rt.Scopes, IsSystem: true,
+		})
+	}
+	return defs
+}
+
+// expectBuildDefinitionWrites stages the one INSERT the reconcile issues per
+// supplied definition.
+func expectBuildDefinitionWrites(env *reconcileEnv) {
+	for range auth.AppRoleTemplates() {
+		env.app.ExpectExec(regexp.QuoteMeta(`INSERT INTO role_templates`)).
+			WillReturnResult(sqlmock.NewResult(0, 1))
 	}
 }
 
@@ -141,6 +185,11 @@ func TestReconcile_DefinesOwnRolesAndConfirmsMemberships(t *testing.T) {
 	expectDriftProbe(env)
 	env.app.ExpectQuery(regexp.QuoteMeta(`SELECT now()`)).
 		WillReturnRows(sqlmock.NewRows([]string{"now"}).AddRow(time.Now()))
+	// The pre-image: this deployment holds no definitions yet, so this build's
+	// definitions cannot be narrowing anything (#557), and every definition the
+	// definer supplies is then written.
+	expectTemplatePreImage(env, appTemplateRows())
+	expectBuildDefinitionWrites(env)
 	// The readback the report is built from. It carries every role this build
 	// defines, because TemplatesDefined is counted from the ROWS rather than
 	// from len(auth.AppRoleTemplates()) — the constant would read the same on a
@@ -157,7 +206,7 @@ func TestReconcile_DefinesOwnRolesAndConfirmsMemberships(t *testing.T) {
 	env.app.ExpectExec(regexp.QuoteMeta(`DELETE FROM organization_member_roles WHERE mirrored_at < $1`)).
 		WillReturnResult(sqlmock.NewResult(0, 4))
 
-	rep, err := Reconcile(context.Background(), env.appDB, env.identityDB, recordingDefiner(&defined))
+	rep, err := Reconcile(context.Background(), env.appDB, env.identityDB, recordingDefiner(&defined), NoTemplateAuthorityReduction)
 	if err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}
@@ -199,18 +248,23 @@ func TestReconcile_DefinesOwnTemplatesBeforeMemberships(t *testing.T) {
 	expectDriftProbe(env)
 	env.app.ExpectQuery(regexp.QuoteMeta(`SELECT now()`)).
 		WillReturnRows(sqlmock.NewRows([]string{"now"}).AddRow(time.Now()))
+	// The pre-image: this deployment holds no definitions yet, so this build's
+	// definitions cannot be narrowing anything (#557), and every definition the
+	// definer supplies is then written.
+	expectTemplatePreImage(env, appTemplateRows())
+	expectBuildDefinitionWrites(env)
 	expectForeignTemplateReadback(env, appTemplateRows())
 	expectMembershipScan(env, membershipScanRows())
 	env.app.ExpectExec("DELETE FROM organization_member_roles WHERE mirrored_at").
 		WillReturnResult(sqlmock.NewResult(0, 0))
 
 	var definerSawPendingWork bool
-	definer := func(ctx context.Context, _ *Store) error {
+	definer := func(context.Context) ([]Template, error) {
 		// The readback, the scan and the sweep must all still be pending.
 		definerSawPendingWork = env.app.ExpectationsWereMet() != nil
-		return nil
+		return buildDefinitions(), nil
 	}
-	if _, err := Reconcile(context.Background(), env.appDB, env.identityDB, definer); err != nil {
+	if _, err := Reconcile(context.Background(), env.appDB, env.identityDB, definer, NoTemplateAuthorityReduction); err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}
 	if !definerSawPendingWork {
@@ -226,7 +280,7 @@ func TestReconcile_DefinesOwnTemplatesBeforeMemberships(t *testing.T) {
 // is the wrong answer for a build that reads them.
 func TestReconcile_RefusesWithoutATemplateDefiner(t *testing.T) {
 	env := newReconcileEnv(t)
-	_, err := Reconcile(context.Background(), env.appDB, env.identityDB, nil)
+	_, err := Reconcile(context.Background(), env.appDB, env.identityDB, nil, NoTemplateAuthorityReduction)
 	if err == nil {
 		t.Fatal("Reconcile ran with no template definer, so this build's role scopes would never be written")
 	}
@@ -248,6 +302,11 @@ func TestReconcile_ConfirmsPresenceWithoutRestatingTheRole(t *testing.T) {
 	expectDriftProbe(env)
 	env.app.ExpectQuery(regexp.QuoteMeta(`SELECT now()`)).
 		WillReturnRows(sqlmock.NewRows([]string{"now"}).AddRow(time.Now()))
+	// The pre-image: this deployment holds no definitions yet, so this build's
+	// definitions cannot be narrowing anything (#557), and every definition the
+	// definer supplies is then written.
+	expectTemplatePreImage(env, appTemplateRows())
+	expectBuildDefinitionWrites(env)
 	expectForeignTemplateReadback(env, appTemplateRows())
 	expectMembershipScan(env, membershipScanRows([2]string{"org-1", "user-1"}))
 	// expectConfirmMembership pins the statement shape: WithArgs carries NO
@@ -256,7 +315,7 @@ func TestReconcile_ConfirmsPresenceWithoutRestatingTheRole(t *testing.T) {
 	env.app.ExpectExec("DELETE FROM organization_member_roles WHERE mirrored_at").
 		WillReturnResult(sqlmock.NewResult(0, 0))
 
-	if _, err := Reconcile(context.Background(), env.appDB, env.identityDB, recordingDefiner(&defined)); err != nil {
+	if _, err := Reconcile(context.Background(), env.appDB, env.identityDB, recordingDefiner(&defined), NoTemplateAuthorityReduction); err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}
 	if err := env.app.ExpectationsWereMet(); err != nil {
@@ -291,13 +350,18 @@ func TestReconcile_ReportsWhatItIsAboutToRepair(t *testing.T) {
 
 	env.app.ExpectQuery(regexp.QuoteMeta(`SELECT now()`)).
 		WillReturnRows(sqlmock.NewRows([]string{"now"}).AddRow(time.Now()))
+	// The pre-image: this deployment holds no definitions yet, so this build's
+	// definitions cannot be narrowing anything (#557), and every definition the
+	// definer supplies is then written.
+	expectTemplatePreImage(env, appTemplateRows())
+	expectBuildDefinitionWrites(env)
 	expectForeignTemplateReadback(env, appTemplateRows())
 	expectMembershipScan(env, membershipScanRows([2]string{orgID, userID}))
 	expectConfirmMembership(env, orgID, userID)
 	env.app.ExpectExec("DELETE FROM organization_member_roles WHERE mirrored_at").
 		WillReturnResult(sqlmock.NewResult(0, 0))
 
-	rep, err := Reconcile(context.Background(), env.appDB, env.identityDB, recordingDefiner(&defined))
+	rep, err := Reconcile(context.Background(), env.appDB, env.identityDB, recordingDefiner(&defined), NoTemplateAuthorityReduction)
 	if err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}
@@ -331,12 +395,17 @@ func TestReconcile_DoesNotSweepWhenTheMembershipScanFails(t *testing.T) {
 	expectDriftProbe(env)
 	env.app.ExpectQuery(regexp.QuoteMeta(`SELECT now()`)).
 		WillReturnRows(sqlmock.NewRows([]string{"now"}).AddRow(time.Now()))
+	// The pre-image: this deployment holds no definitions yet, so this build's
+	// definitions cannot be narrowing anything (#557), and every definition the
+	// definer supplies is then written.
+	expectTemplatePreImage(env, appTemplateRows())
+	expectBuildDefinitionWrites(env)
 	expectForeignTemplateReadback(env, appTemplateRows())
 	env.identity.ExpectQuery(`SELECT organization_id, user_id\s+FROM organization_members\s+WHERE`).
 		WillReturnError(errors.New("identity is unreachable"))
 	// The app mock has NO sweep expectation: issuing one fails this test.
 
-	rep, err := Reconcile(context.Background(), env.appDB, env.identityDB, recordingDefiner(&defined))
+	rep, err := Reconcile(context.Background(), env.appDB, env.identityDB, recordingDefiner(&defined), NoTemplateAuthorityReduction)
 	if err == nil {
 		t.Fatal("Reconcile reported success despite an unreadable identity membership scan")
 	}
@@ -362,11 +431,16 @@ func TestReconcile_DoesNotSweepWhenTheMembershipStreamBreaksMidway(t *testing.T)
 	expectDriftProbe(env)
 	env.app.ExpectQuery(regexp.QuoteMeta(`SELECT now()`)).
 		WillReturnRows(sqlmock.NewRows([]string{"now"}).AddRow(time.Now()))
+	// The pre-image: this deployment holds no definitions yet, so this build's
+	// definitions cannot be narrowing anything (#557), and every definition the
+	// definer supplies is then written.
+	expectTemplatePreImage(env, appTemplateRows())
+	expectBuildDefinitionWrites(env)
 	expectForeignTemplateReadback(env, appTemplateRows())
 	expectMembershipScan(env, membershipScanRows([2]string{"org-1", "user-1"}).
 		RowError(0, errors.New("connection reset mid-stream")))
 
-	_, err := Reconcile(context.Background(), env.appDB, env.identityDB, recordingDefiner(&defined))
+	_, err := Reconcile(context.Background(), env.appDB, env.identityDB, recordingDefiner(&defined), NoTemplateAuthorityReduction)
 	if err == nil {
 		t.Fatal("Reconcile reported success despite a membership stream that broke midway")
 	}
@@ -391,7 +465,7 @@ func TestReconcile_RefusesAnAppConnectionRoutedIntoIdentity(t *testing.T) {
 	env.app.ExpectQuery(regexp.QuoteMeta(`SHOW search_path`)).
 		WillReturnRows(sqlmock.NewRows([]string{"search_path"}).AddRow("identity, public"))
 
-	_, err := Reconcile(context.Background(), env.appDB, env.identityDB, recordingDefiner(&defined))
+	_, err := Reconcile(context.Background(), env.appDB, env.identityDB, recordingDefiner(&defined), NoTemplateAuthorityReduction)
 	if !errors.Is(err, ErrMisrouted) {
 		t.Fatalf("expected ErrMisrouted, got %v", err)
 	}
@@ -419,7 +493,7 @@ func TestReconcile_RefusesWhenTheMigrationHasNotRun(t *testing.T) {
 		WithArgs("role_templates").
 		WillReturnRows(sqlmock.NewRows([]string{"to_regclass"}).AddRow(nil))
 
-	_, err := Reconcile(context.Background(), env.appDB, env.identityDB, recordingDefiner(&defined))
+	_, err := Reconcile(context.Background(), env.appDB, env.identityDB, recordingDefiner(&defined), NoTemplateAuthorityReduction)
 	if err == nil {
 		t.Fatal("Reconcile succeeded against a connection with no role_templates table")
 	}
@@ -441,6 +515,11 @@ func TestReconcile_ReportsRolesThisBuildDoesNotDefine(t *testing.T) {
 	expectDriftProbe(env)
 	env.app.ExpectQuery(regexp.QuoteMeta(`SELECT now()`)).
 		WillReturnRows(sqlmock.NewRows([]string{"now"}).AddRow(time.Now()))
+	// The pre-image: this deployment holds no definitions yet, so this build's
+	// definitions cannot be narrowing anything (#557), and every definition the
+	// definer supplies is then written.
+	expectTemplatePreImage(env, appTemplateRows())
+	expectBuildDefinitionWrites(env)
 	// The table already holds a row an earlier build adopted from the shared
 	// schema, alongside one role this build defines.
 	expectForeignTemplateReadback(env, appTemplateRows().
@@ -450,7 +529,7 @@ func TestReconcile_ReportsRolesThisBuildDoesNotDefine(t *testing.T) {
 	env.app.ExpectExec("DELETE FROM organization_member_roles WHERE mirrored_at").
 		WillReturnResult(sqlmock.NewResult(0, 0))
 
-	rep, err := Reconcile(context.Background(), env.appDB, env.identityDB, recordingDefiner(&defined))
+	rep, err := Reconcile(context.Background(), env.appDB, env.identityDB, recordingDefiner(&defined), NoTemplateAuthorityReduction)
 	if err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}
@@ -473,10 +552,10 @@ func TestReconcile_ReportsRolesThisBuildDoesNotDefine(t *testing.T) {
 func TestReconcile_RefusesWithoutAnIdentityConnection(t *testing.T) {
 	env := newReconcileEnv(t)
 	var defined bool
-	if _, err := Reconcile(context.Background(), env.appDB, nil, recordingDefiner(&defined)); err == nil {
+	if _, err := Reconcile(context.Background(), env.appDB, nil, recordingDefiner(&defined), NoTemplateAuthorityReduction); err == nil {
 		t.Fatal("Reconcile succeeded with no identity connection to reconcile from")
 	}
-	if _, err := Reconcile(context.Background(), nil, env.identityDB, recordingDefiner(&defined)); !errors.Is(err, ErrMisrouted) {
+	if _, err := Reconcile(context.Background(), nil, env.identityDB, recordingDefiner(&defined), NoTemplateAuthorityReduction); !errors.Is(err, ErrMisrouted) {
 		t.Fatalf("Reconcile with no app connection: got %v, want ErrMisrouted", err)
 	}
 }

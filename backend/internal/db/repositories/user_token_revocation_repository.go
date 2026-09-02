@@ -18,6 +18,7 @@ package repositories
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"time"
 )
 
@@ -43,6 +44,60 @@ func (r *UserTokenRevocationRepository) RevokeAllUserTokens(ctx context.Context,
 	`
 	_, err := r.db.ExecContext(ctx, query, userID)
 	return err
+}
+
+// RevokeAllUserTokensFor moves the watermark for MANY users in one statement.
+//
+// One statement rather than a loop over RevokeAllUserTokens, because the caller
+// this exists for is the boot-time role-template reconciliation: a narrowed
+// template can be held by every member in the deployment, and a per-user round
+// trip there turns a fixed cost into one that scales with the membership — on
+// the startup path, before /health answers, inside the startup probe's budget
+// (deployments/helm/templates/deployment-backend.yaml: periodSeconds 5,
+// failureThreshold 12, no initial delay). This form is one statement whatever
+// the holder count.
+//
+// DISTINCT is load-bearing rather than tidy. A user holding the same narrowed
+// template in several organizations arrives once per assignment, and ON CONFLICT
+// DO UPDATE cannot fire twice for one key inside a single statement — Postgres
+// raises "ON CONFLICT DO UPDATE command cannot affect row a second time" and the
+// whole write fails. Deduplicating in SQL keeps that unreachable regardless of
+// what the caller passes, rather than making it the caller's problem to remember.
+//
+// Returns how many watermarks were written, which is what the caller reports:
+// the number of principals whose sessions this ended, not the number of ids it
+// was handed.
+func (r *UserTokenRevocationRepository) RevokeAllUserTokensFor(ctx context.Context, userIDs []string) (int, error) {
+	if len(userIDs) == 0 {
+		return 0, nil
+	}
+	// THE IDS TRAVEL AS JSON, not as a Go slice bound to a text[] parameter.
+	// pgx encodes a []string happily, but database/sql converts arguments before
+	// any driver sees them and its default converter rejects a slice outright —
+	// so the array form works against Postgres and fails under sqlmock, which is
+	// the shape of bug that ships because the unit tests cannot express it. One
+	// string parameter is accepted by every driver and every mock, and
+	// jsonb_array_elements_text unpacks it server-side; DISTINCT and the uuid
+	// cast do the rest.
+	ids, err := json.Marshal(userIDs)
+	if err != nil {
+		return 0, err
+	}
+	query := `
+		INSERT INTO user_token_revocations (user_id, revoked_before, updated_at)
+		SELECT DISTINCT u::uuid, NOW(), NOW() FROM jsonb_array_elements_text($1::jsonb) AS u
+		ON CONFLICT (user_id) DO UPDATE
+		SET revoked_before = EXCLUDED.revoked_before, updated_at = EXCLUDED.updated_at
+	`
+	res, err := r.db.ExecContext(ctx, query, string(ids))
+	if err != nil {
+		return 0, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	return int(n), nil
 }
 
 // TokensRevokedSince reports whether tokens issued to the user at issuedAt are

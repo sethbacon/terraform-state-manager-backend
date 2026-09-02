@@ -42,6 +42,7 @@ import (
 
 	"github.com/terraform-state-manager/terraform-state-manager/internal/auth"
 	appdb "github.com/terraform-state-manager/terraform-state-manager/internal/db"
+	"github.com/terraform-state-manager/terraform-state-manager/internal/db/repositories"
 )
 
 // testDatabaseName is this suite's OWN database, for the reason
@@ -196,7 +197,7 @@ func TestIntegrationRunSeedsThisApplicationsOwnScopes(t *testing.T) {
 	}
 
 	// seedRoles=false: coupled, the sibling owns the shared seed.
-	if err := Run(ctx, e.identityDB, e.appDB, false); err != nil {
+	if err := Run(ctx, e.identityDB, e.appDB, false, repositories.NewUserTokenRevocationRepository(e.appDB)); err != nil {
 		t.Fatalf("bootstrap.Run: %v", err)
 	}
 
@@ -236,7 +237,7 @@ func TestIntegrationRunSeedsIdentityWithTheAppsIDsOnAFreshInstall(t *testing.T) 
 	e := newEnv(t)
 	ctx := context.Background()
 
-	if err := Run(ctx, e.identityDB, e.appDB, true); err != nil {
+	if err := Run(ctx, e.identityDB, e.appDB, true, repositories.NewUserTokenRevocationRepository(e.appDB)); err != nil {
 		t.Fatalf("bootstrap.Run: %v", err)
 	}
 	for _, rt := range auth.AppRoleTemplates() {
@@ -263,7 +264,7 @@ func TestIntegrationRunSeedsIdentityWithTheAppsIDsOnAFreshInstall(t *testing.T) 
 		AddMemberWithParams(ctx, orgID, user.ID, "editor", idstore.OrgScopeAllOrganizations()); err != nil {
 		t.Fatalf("seed membership: %v", err)
 	}
-	if err := Run(ctx, e.identityDB, e.appDB, true); err != nil {
+	if err := Run(ctx, e.identityDB, e.appDB, true, repositories.NewUserTokenRevocationRepository(e.appDB)); err != nil {
 		t.Fatalf("second bootstrap.Run: %v", err)
 	}
 
@@ -380,5 +381,125 @@ func TestIntegrationRunRefusesAChannelTableWithNoOrganizationColumn(t *testing.T
 // bootstrapRun is Run with this suite's arguments, so the control and the
 // negative case cannot drift apart.
 func bootstrapRun(ctx context.Context, e *env, seedRoles bool) error {
-	return Run(ctx, e.identityDB, e.appDB, seedRoles)
+	// A real repository, because Run refuses to narrow a role without one and a
+	// helper that passed nil would quietly exempt every test using it from the
+	// one refusal that matters (#557).
+	return Run(ctx, e.identityDB, e.appDB, seedRoles, repositories.NewUserTokenRevocationRepository(e.appDB))
+}
+
+// GUARD narrowed-role-ends-its-holders-sessions-end-to-end (#557).
+//
+// internal/approles' own integration suite proves the reconcile DETECTS a
+// narrowing and hands the holders to a reducer. What it cannot reach is the
+// reducer itself: internal/db/repositories imports approles, so the real
+// watermark repository is unreachable from that package's tests. This closes it
+// from the side that owns the wiring — the actual bootstrap.Run, with the actual
+// retireSessionsOfNarrowedRoles, writing through the actual repository into the
+// table middleware.AuthMiddleware reads.
+//
+// The narrowing is staged the way a real one arrives: the table is left holding
+// a WIDER definition than this build's, which is exactly the state a deployment
+// is in the moment an operator ships a binary that takes a scope away.
+//
+// MUTATION: pass NoTemplateAuthorityReduction from bootstrap.Run; or write the
+// definitions before invalidating.
+func TestIntegrationRunEndsSessionsOfANarrowedRolesHolders(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	revocations := repositories.NewUserTokenRevocationRepository(e.appDB)
+
+	// A first boot writes this build's definitions and reduces nothing.
+	if err := Run(ctx, e.identityDB, e.appDB, false, revocations); err != nil {
+		t.Fatalf("first Run: %v", err)
+	}
+
+	// Widen `editor` in the table, so this build's own definition is now a
+	// narrowing relative to what the deployment holds.
+	if _, err := e.appDB.ExecContext(ctx,
+		`UPDATE role_templates SET scopes = scopes || '["admin"]'::jsonb WHERE name = 'editor'`); err != nil {
+		t.Fatalf("widening the stored definition: %v", err)
+	}
+
+	holder, other := seedHolder(t, e, "editor"), seedHolder(t, e, "viewer")
+
+	if err := Run(ctx, e.identityDB, e.appDB, false, revocations); err != nil {
+		t.Fatalf("second Run: %v", err)
+	}
+
+	if !hasWatermark(t, e, holder) {
+		t.Error("the holder of the narrowed role kept every session they had: their tokens still carry " +
+			"the scope the build removed, until they expire")
+	}
+	if hasWatermark(t, e, other) {
+		t.Error("a member holding a different role was logged out by another role's narrowing")
+	}
+	if got := e.appScopes(t, "editor"); !equal(got, buildScopes(t, "editor")) {
+		t.Errorf("editor scopes = %v, want this build's %v — the narrowing did not land", got, buildScopes(t, "editor"))
+	}
+}
+
+// GUARD run-refuses-without-a-way-to-end-sessions. A deployment that cannot
+// invalidate must not narrow a role and report a clean boot.
+//
+// MUTATION: treat a nil repository as "nothing to do".
+func TestIntegrationRunRefusesToNarrowWithNoRevocationRepository(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	revocations := repositories.NewUserTokenRevocationRepository(e.appDB)
+
+	if err := Run(ctx, e.identityDB, e.appDB, false, revocations); err != nil {
+		t.Fatalf("first Run: %v", err)
+	}
+	if _, err := e.appDB.ExecContext(ctx,
+		`UPDATE role_templates SET scopes = scopes || '["admin"]'::jsonb WHERE name = 'editor'`); err != nil {
+		t.Fatalf("widening the stored definition: %v", err)
+	}
+	seedHolder(t, e, "editor")
+
+	before := e.appScopes(t, "editor")
+	// nil: this deployment has no way to end a session. The narrowing must be
+	// refused rather than applied silently.
+	if err := Run(ctx, e.identityDB, e.appDB, false, nil); err == nil {
+		t.Fatal("Run narrowed a role with no way to end its holders' sessions, and reported success")
+	}
+	if after := e.appScopes(t, "editor"); !equal(after, before) {
+		t.Errorf("editor scopes = %v, want the unchanged %v: the narrowing landed although it was refused", after, before)
+	}
+}
+
+// seedHolder creates a user in a fresh organization holding the named role in
+// this application's own mirror, and returns the user id.
+func seedHolder(t *testing.T, e *env, roleName string) string {
+	t.Helper()
+	ctx := context.Background()
+	var orgID, userID string
+	if err := e.identityDB.QueryRowContext(ctx, `
+		INSERT INTO identity.organizations (id, name, display_name, created_at, updated_at)
+		VALUES (gen_random_uuid(), $1, $1, now(), now()) RETURNING id`,
+		"holder-org-"+roleName).Scan(&orgID); err != nil {
+		t.Fatalf("seed organization: %v", err)
+	}
+	if err := e.identityDB.QueryRowContext(ctx, `
+		INSERT INTO identity.users (id, email, name, created_at, updated_at)
+		VALUES (gen_random_uuid(), $1, $1, now(), now()) RETURNING id`,
+		"holder-"+roleName+"@example.test").Scan(&userID); err != nil {
+		t.Fatalf("seed user: %v", err)
+	}
+	if _, err := e.appDB.ExecContext(ctx, `
+		INSERT INTO organization_member_roles (organization_id, user_id, role_template_id, mirrored_at)
+		VALUES ($1, $2, $3, now())
+		ON CONFLICT (organization_id, user_id) DO UPDATE SET role_template_id = EXCLUDED.role_template_id`,
+		orgID, userID, e.appTemplateID(t, roleName)); err != nil {
+		t.Fatalf("assign role: %v", err)
+	}
+	return userID
+}
+
+func hasWatermark(t *testing.T, e *env, userID string) bool {
+	t.Helper()
+	var n int
+	if err := e.appDB.QueryRow(`SELECT count(*) FROM user_token_revocations WHERE user_id = $1`, userID).Scan(&n); err != nil {
+		t.Fatalf("reading watermark: %v", err)
+	}
+	return n > 0
 }

@@ -216,7 +216,7 @@ func TestUpsertTemplate_EncodesAbsentScopesAsAnEmptyArray(t *testing.T) {
 	mock.ExpectExec("INSERT INTO role_templates").
 		WithArgs(templateID, "viewer", "Viewer", nil, "[]", false).
 		WillReturnResult(sqlmock.NewResult(0, 1))
-	if err := s.UpsertTemplate(context.Background(), Template{ID: templateID, Name: "viewer", DisplayName: "Viewer"}); err != nil {
+	if err := s.upsertTemplate(context.Background(), Template{ID: templateID, Name: "viewer", DisplayName: "Viewer"}); err != nil {
 		t.Fatalf("UpsertTemplate: %v", err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {

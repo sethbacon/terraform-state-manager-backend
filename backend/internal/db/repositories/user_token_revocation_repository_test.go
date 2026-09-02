@@ -1,6 +1,7 @@
 package repositories
 
 import (
+	"context"
 	"database/sql"
 	"testing"
 	"time"
@@ -64,5 +65,54 @@ func TestUserTokenRevocationRepository_Errors(t *testing.T) {
 	mock.ExpectExec("DELETE FROM user_token_revocations").WillReturnError(sql.ErrConnDone)
 	if err := r.CleanupExpiredWatermarks(ctx, time.Hour); err == nil {
 		t.Error("CleanupExpiredWatermarks must surface the delete error")
+	}
+}
+
+// GUARD bulk-revocation-issues-one-statement. The caller is the boot-time
+// role-template reduction, where the holder list can be every member in the
+// deployment; a per-user loop there scales the startup path with the membership.
+//
+// MUTATION: loop over RevokeAllUserTokens instead.
+func TestRevokeAllUserTokensFor_IssuesOneStatement(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	mock.ExpectExec("INSERT INTO user_token_revocations").
+		WillReturnResult(sqlmock.NewResult(0, 3))
+
+	repo := NewUserTokenRevocationRepository(db)
+	n, err := repo.RevokeAllUserTokensFor(context.Background(), []string{"u1", "u2", "u3"})
+	if err != nil {
+		t.Fatalf("RevokeAllUserTokensFor: %v", err)
+	}
+	if n != 3 {
+		t.Errorf("n = %d, want the number of rows the statement reported", n)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("more than one statement was issued: %v", err)
+	}
+}
+
+// GUARD bulk-revocation-of-nobody-issues-nothing. A narrowed role nobody holds
+// is the ordinary case, and it must not reach the database at all.
+//
+// MUTATION: drop the length check.
+func TestRevokeAllUserTokensFor_EmptyIssuesNothing(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	repo := NewUserTokenRevocationRepository(db)
+	n, err := repo.RevokeAllUserTokensFor(context.Background(), nil)
+	if err != nil || n != 0 {
+		t.Fatalf("n=%d err=%v, want 0 and no error", n, err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("a statement was issued for an empty holder list: %v", err)
 	}
 }

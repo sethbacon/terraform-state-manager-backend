@@ -38,6 +38,13 @@ type Report struct {
 	// StaleRemoved is the number of mirrored assignments deleted because
 	// identity no longer has them.
 	StaleRemoved int64
+	// TemplatesReduced names the role definitions this boot NARROWED, with the
+	// scopes before and after and the principals holding them. Empty is the
+	// normal case: a build that redefines the same roles reduces nothing. A
+	// non-empty one is the single most consequential thing a boot can do to a
+	// running deployment's authorization, so it is reported rather than
+	// inferred from a diff of two images.
+	TemplatesReduced []ReducedTemplate
 	// ForeignTemplates names the role templates this application holds but does
 	// NOT define — adopted from identity, and therefore meaning here whatever the
 	// application that seeded them there decided. See ForeignTemplateRemedy.
@@ -140,7 +147,7 @@ type Report struct {
 // # Idempotent, and safe to run on every boot
 //
 // Running it twice changes nothing the first run did not already do.
-func Reconcile(ctx context.Context, appDB, identityDB *sql.DB, defineOwn TemplateDefiner) (Report, error) {
+func Reconcile(ctx context.Context, appDB, identityDB *sql.DB, defineOwn TemplateDefiner, reduce TemplateAuthorityReducer) (Report, error) {
 	var rep Report
 	if appDB == nil {
 		return rep, fmt.Errorf("%w: no application database connection", ErrMisrouted)
@@ -151,6 +158,9 @@ func Reconcile(ctx context.Context, appDB, identityDB *sql.DB, defineOwn Templat
 	if defineOwn == nil {
 		return rep, errors.New("approles: no role-template definer supplied: the reconcile would leave this application's " +
 			"role definitions as identity wrote them, which is not what this build grants for those names")
+	}
+	if reduce == nil {
+		return rep, ErrNoTemplateAuthorityReducer
 	}
 
 	store := NewStore(appDB)
@@ -172,7 +182,7 @@ func Reconcile(ctx context.Context, appDB, identityDB *sql.DB, defineOwn Templat
 		return rep, err
 	}
 
-	if err := reconcileTemplates(ctx, store, defineOwn, &rep); err != nil {
+	if err := reconcileTemplates(ctx, store, defineOwn, reduce, &rep); err != nil {
 		return rep, err
 	}
 	if err := reconcileMemberships(ctx, store, identityDB, &rep); err != nil {
@@ -187,14 +197,89 @@ func Reconcile(ctx context.Context, appDB, identityDB *sql.DB, defineOwn Templat
 	return rep, nil
 }
 
-// TemplateDefiner writes THIS BUILD's own role definitions into TSM's tables.
+// TemplateDefiner SUPPLIES this build's own role definitions. It does not write
+// them.
 //
-// Defined here and implemented by the application (bootstrap.seedRoleTemplates)
-// for the same reason AuthorityReducer is: the ordering relative to the adopt
-// pass is a correctness property of the reconcile, not of the caller, so the seed
-// is a step this function runs at the one point it is right rather than a call
-// somebody makes near it.
-type TemplateDefiner func(ctx context.Context, store *Store) error
+// Defined here and implemented by the application (bootstrap.appRoleDefinitions)
+// for the same reason AuthorityReducer is: the ordering relative to everything
+// else the reconcile does is a correctness property of the reconcile, not of the
+// caller, so the seed is a step this function runs at the one point it is right
+// rather than a call somebody makes near it.
+//
+// IT RETURNS DEFINITIONS RATHER THAN WRITING THEM, since #557. While it held a
+// *Store and wrote through it, the definitions this function judged for an
+// authority reduction and the definitions that reached the table were two
+// different things connected only by the definer's good behaviour: a definer
+// that wrote one extra template, or wrote different scopes than it returned,
+// would have its narrowing land with nothing invalidated. Returning the slice
+// makes them the same values by construction. It also removes the reason
+// Store.defineTemplate had to be exported, which is what closed the bypass.
+type TemplateDefiner func(ctx context.Context) ([]Template, error)
+
+// ReducedTemplate is one role definition whose authority this boot is about to
+// REDUCE, together with the principals that reduction lands on.
+//
+// Was and Now are the scope lists before and after. Holders are the users this
+// application has assigned the template, read from its own
+// organization_member_roles under the reconcile's platform-wide scope — every
+// tenant, because a role template has no organization of its own and narrowing
+// one narrows it everywhere at once.
+type ReducedTemplate struct {
+	ID      string
+	Name    string
+	Was     []string
+	Now     []string
+	Holders []string
+}
+
+// ErrNoTemplateAuthorityReducer is the refusal of a reconcile that was given no
+// TemplateAuthorityReducer.
+//
+// A SENTINEL rather than a bare error string, for the reason
+// ErrNoCredentialDecision is one in the shared module: a test that asserts only
+// "some error came back" passes just as well when the reconcile ran and failed
+// for an unrelated reason — a mocked statement it did not expect, say — which is
+// exactly how a fail-closed guard gets verified into existence without ever
+// being verified. This one was: the first version of its test passed against a
+// build that accepted a nil reducer.
+var ErrNoTemplateAuthorityReducer = errors.New("approles: no template-authority reducer supplied: a build that narrows " +
+	"a role's scopes would reduce every holder's authority while their existing sessions keep the scopes it removed, " +
+	"and nothing would say so. Pass NoTemplateAuthorityReduction to state that this caller has no credentials to invalidate")
+
+// TemplateAuthorityReducer invalidates the credentials derived from role
+// templates whose authority this boot is about to reduce.
+//
+// The inversion, and the reasons, are AuthorityReducer's in members.go: this
+// package must not know what a credential family is, `credlifecycle` imports
+// `approles` so the dependency cannot run the other way, and the flavour is the
+// caller's to choose. What is different here is WHEN it runs — BEFORE the
+// definitions are written, not after.
+//
+// THE ORDER IS THE CONTRACT. A narrowing that lands before its credentials are
+// invalidated is precisely the defect (#557): holders keep exercising the
+// removed scopes from tokens minted under the old definition. Running the
+// reducer first means the failure mode of a crash in between is the harmless
+// one — sessions ended for a narrowing that did not land, which the next boot
+// recomputes identically because the pre-image is still in the table. It also
+// means an error here STOPS the write: a build whose credentials could not be
+// invalidated does not get to narrow the role.
+//
+// A reducer is called only when something was genuinely reduced. Widening a
+// role, reordering its scope list, or re-seeding the identical definition calls
+// nothing, because AuthorityRetained answers on scope semantics rather than
+// slice identity — and ending every session in the estate for a boot that
+// granted MORE would be pure damage.
+type TemplateAuthorityReducer func(ctx context.Context, reduced []ReducedTemplate) error
+
+// NoTemplateAuthorityReduction is the DELIBERATE opt-out: this caller has no
+// credentials derived from role templates to invalidate.
+//
+// It exists because nil must not mean "nothing to do". A nil reducer is a caller
+// that did not decide, and an optional guard is how a guard goes silently
+// absent — the same reasoning NoAppCredentials applies in the shared identity
+// module and approles already applies to a nil AuthorityReducer. Passing this
+// function by name puts the decision in the diff.
+func NoTemplateAuthorityReduction(context.Context, []ReducedTemplate) error { return nil }
 
 // reconcileScope is the tenancy the startup reconcile writes under.
 //
@@ -225,9 +310,44 @@ func reconcileScope() idstore.OrgScope { return idstore.OrgScopeAllOrganizations
 // referencing it — turning old adoptions into a silent loss of every role that
 // used them. It is inert once no assignment points at it, it is visible to the
 // operator in the table, and it is reported below (ForeignTemplates).
-func reconcileTemplates(ctx context.Context, store *Store, defineOwn TemplateDefiner, rep *Report) error {
-	if err := defineOwn(ctx, store); err != nil {
-		return fmt.Errorf("approles: defining this application's own role templates: %w", err)
+func reconcileTemplates(ctx context.Context, store *Store, defineOwn TemplateDefiner, reduce TemplateAuthorityReducer, rep *Report) error {
+	definitions, err := defineOwn(ctx)
+	if err != nil {
+		return fmt.Errorf("approles: obtaining this application's own role definitions: %w", err)
+	}
+
+	// THE PRE-IMAGE, READ BEFORE ANYTHING IS WRITTEN. The blind upsert below
+	// overwrites `scopes` unconditionally, so after it runs there is no record
+	// anywhere of what the role used to grant: not in the row, not in
+	// updated_at (re-stamped every boot whether or not anything changed), and
+	// not in CheckDrift, which compares assignments and deliberately not
+	// definitions. If this read moves below the write, the reduction becomes
+	// undetectable rather than merely undetected.
+	prior, err := store.ListTemplates(ctx)
+	if err != nil {
+		return err
+	}
+
+	reduced, err := reducedTemplates(ctx, store, prior, definitions)
+	if err != nil {
+		return err
+	}
+	if len(reduced) > 0 {
+		// BEFORE THE WRITE. See TemplateAuthorityReducer: an error here stops
+		// the narrowing, so a build whose credentials could not be invalidated
+		// does not get to reduce the role.
+		if err := reduce(ctx, reduced); err != nil {
+			return fmt.Errorf("approles: invalidating credentials for role definitions this build narrows: %w", err)
+		}
+		for _, r := range reduced {
+			rep.TemplatesReduced = append(rep.TemplatesReduced, r)
+		}
+	}
+
+	for _, def := range definitions {
+		if err := store.defineTemplate(ctx, def); err != nil {
+			return fmt.Errorf("approles: defining this application's own role templates: %w", err)
+		}
 	}
 
 	// BOTH COUNTS ARE READ BACK FROM THE TABLE, not inferred from what was meant
@@ -239,7 +359,16 @@ func reconcileTemplates(ctx context.Context, store *Store, defineOwn TemplateDef
 	if err != nil {
 		return err
 	}
-	expected := expectedScopes()
+	// OURS IS THE SLICE THE DEFINER SUPPLIED, not expectedScopes(). They agree
+	// today — bootstrap.appRoleDefinitions is built from auth.AppRoleTemplates()
+	// and so was expectedScopes() — but agreeing is not the same as being one
+	// fact. A definer that supplied a different set would have its templates
+	// written and then counted as FOREIGN, which reads as "this application
+	// holds roles it does not define" about the roles it just defined.
+	expected := make(map[string]struct{}, len(definitions))
+	for _, def := range definitions {
+		expected[def.Name] = struct{}{}
+	}
 	foreign := make([]string, 0)
 	defined := 0
 	for name := range held {
@@ -313,15 +442,47 @@ func reconcileMemberships(ctx context.Context, store *Store, identityDB *sql.DB,
 	}
 }
 
-// expectedScopes is this build's own role -> scope mapping, keyed by name. It
-// names the roles this application DEFINES; everything else it holds was adopted
-// from identity (Report.ForeignTemplates).
-func expectedScopes() map[string][]string {
-	out := make(map[string][]string)
-	for _, rt := range auth.AppRoleTemplates() {
-		out[rt.Name] = rt.Scopes
+// reducedTemplates reports which of this build's definitions REDUCE the
+// authority the deployment currently records for that name, and who holds them.
+//
+// The comparison is idstore.AuthorityRetained, the shared module's predicate,
+// asked in the direction that matters: is everything the role USED to grant
+// still granted by what it is about to grant? A widening answers yes, so does a
+// reorder, and so does an identical re-seed — none of them reduce anybody's
+// authority, and invalidating credentials for them would end every holder's
+// session for a change that took nothing away.
+//
+// auth.ReadWritePairs() is passed rather than nil. With no pairs the predicate
+// loses write-implies-read, so promoting a role from "state:read" to
+// "state:write" would read as a REDUCTION and log every holder out of a change
+// that granted them more.
+//
+// A name the deployment does not hold yet is skipped: there is no prior
+// authority to reduce, and on a first boot every name is in that position.
+func reducedTemplates(ctx context.Context, store *Store, prior map[string]Template, definitions []Template) ([]ReducedTemplate, error) {
+	pairs := auth.ReadWritePairs()
+	var reduced []ReducedTemplate
+	for _, def := range definitions {
+		was, held := prior[def.Name]
+		if !held {
+			continue
+		}
+		if idstore.AuthorityRetained(was.Scopes, def.Scopes, pairs) {
+			continue
+		}
+		// The id comes from the PRIOR row, not the definition: defineTemplate
+		// conflicts on name and deliberately preserves the existing uuid, so
+		// the row assignments point at is the one already there. Reading the
+		// definition's id would find the empty string the seed supplies.
+		holders, err := store.HoldersOfTemplate(ctx, was.ID, reconcileScope())
+		if err != nil {
+			return nil, err
+		}
+		reduced = append(reduced, ReducedTemplate{
+			ID: was.ID, Name: def.Name, Was: was.Scopes, Now: def.Scopes, Holders: holders,
+		})
 	}
-	return out
+	return reduced, nil
 }
 
 // ForeignTemplateRemedy is what an operator does about Report.ForeignTemplates.
@@ -402,6 +563,15 @@ func LogReport(rep Report) {
 		"templates_defined", rep.TemplatesDefined,
 		"memberships_confirmed", rep.MembershipsConfirmed,
 		"stale_removed", rep.StaleRemoved)
+	// AT WARN, ALWAYS, AND NAMING THE SCOPES. A boot that narrows a role changes
+	// what every holder may do, and the operator's only other evidence is a diff
+	// between two images. The count of ended sessions is included because it is
+	// the blast radius: "editor lost state:write, 412 principals logged out" is
+	// actionable in a way that "templates_defined=6" is not.
+	for _, r := range rep.TemplatesReduced {
+		slog.Warn("this build narrows a role template; holders' sessions were ended before the change landed",
+			"role", r.Name, "was", r.Was, "now", r.Now, "holders", len(r.Holders))
+	}
 	if len(rep.ForeignTemplates) > 0 {
 		slog.Warn("this application holds role templates it does not define",
 			"roles", rep.ForeignTemplates, "remedy", ForeignTemplateRemedy)
