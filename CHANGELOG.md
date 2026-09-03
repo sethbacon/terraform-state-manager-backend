@@ -1,5 +1,13 @@
 # Changelog
 
+## [3.20.1](https://github.com/sethbacon/terraform-state-manager-backend/compare/v3.20.0...v3.20.1) (2026-09-02)
+
+
+### Bug Fixes
+
+* **authz:** end sessions when a build narrows a role template ([#559](https://github.com/sethbacon/terraform-state-manager-backend/issues/559)) ([04297f6](https://github.com/sethbacon/terraform-state-manager-backend/commit/04297f62c7c0c059b6c8c6e4bca98a824409b156))
+* **deps:** move golang.org/x/crypto to 0.56.0 for GO-2026-6354 and GO-2026-6355 ([#561](https://github.com/sethbacon/terraform-state-manager-backend/issues/561)) ([c2978df](https://github.com/sethbacon/terraform-state-manager-backend/commit/c2978dff4a45bfbe0a8d8e4ad034a4c016579f6c))
+
 ## [3.20.0](https://github.com/sethbacon/terraform-state-manager-backend/compare/v3.19.2...v3.20.0) (2026-08-31)
 
 
