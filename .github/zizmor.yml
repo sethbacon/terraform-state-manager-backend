@@ -17,3 +17,21 @@ rules:
       # installation actually grants, not with adding inputs to see what breaks.
       - release-please.yml
 
+  self-repository:
+    ignore:
+      # zizmor 1.30.0 asks for GitHub's self-repository form, `uses: $/...`, in
+      # place of the `uses: ./...` references to this repo's own composite
+      # action and reusable workflow. actionlint rejects `$/` outright -- it is
+      # neither of the two shapes it accepts for `uses` -- and actionlint is a
+      # required check here via shared-workflows' workflow-security gate, so
+      # applying the remediation trades a zizmor finding for a red required
+      # check. That was proven, not assumed: the conversion was tried in
+      # 4cloudguru/shared-workflows#46, `$/` resolved correctly at runtime, and
+      # actionlint plus a pinning gate failed it.
+      #
+      # Blocked on rhysd/actionlint#711. Tracked in
+      # 4cloudguru/shared-workflows#45; drop these entries once actionlint
+      # accepts the syntax.
+      - ci.yml
+      - release.yml
+      - weekly-security.yml
