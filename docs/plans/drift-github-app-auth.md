@@ -1,6 +1,6 @@
 # Plan: GitHub App Auth for Drift CI Sources
 
-> **Status:** Proposed
+> **Status:** Implemented — runbook: `docs/deployment/github-app.md`
 > **Repo:** `terraform-state-manager-backend` (+ `terraform-state-manager-frontend`)
 > **Scope:** Add **GitHub App** authentication as the primary credential for GitHub
 > drift CI sources, keeping the existing **PAT** as a secondary fallback. Follows
