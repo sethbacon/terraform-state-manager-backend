@@ -1,6 +1,6 @@
 # Plan: Azure DevOps App-Registration Auth for Drift CI Sources (PAT secondary)
 
-> **Status:** Proposed
+> **Status:** Implemented — runbook: `docs/deployment/ado-app-registration.md`
 > **Repo:** `terraform-state-manager-backend` (+ `terraform-state-manager-frontend`)
 > **Scope:** Add Microsoft Entra **app-registration** auth as the primary credential
 > for Azure DevOps drift CI sources, keeping the existing **PAT** as a secondary
