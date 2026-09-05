@@ -329,6 +329,90 @@ func TestBackupRetentionValidation(t *testing.T) {
 	}
 }
 
+// TestDriftMaxInFlightDefault: unlimited out of the box, matching every
+// existing deployment's behavior before Phase 2 pacing existed — a config that
+// never touches this key must not suddenly start deferring dispatches.
+func TestDriftMaxInFlightDefault(t *testing.T) {
+	cfg, err := Load("")
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if cfg.Drift.MaxInFlight != 0 {
+		t.Errorf("default drift.max_in_flight = %d, want 0 (unlimited)", cfg.Drift.MaxInFlight)
+	}
+}
+
+func TestDriftMaxInFlightEnvOverride(t *testing.T) {
+	t.Setenv("TSM_DRIFT_MAX_IN_FLIGHT", "20")
+	cfg, err := Load("")
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if cfg.Drift.MaxInFlight != 20 {
+		t.Errorf("drift.max_in_flight = %d, want 20", cfg.Drift.MaxInFlight)
+	}
+}
+
+// A negative cap fits neither meaning the field supports (0 = unlimited, N>0 =
+// bounded), so Validate rejects it rather than silently behaving as unlimited
+// or as a cap of zero.
+func TestDriftMaxInFlightValidation(t *testing.T) {
+	c, _ := Load("")
+	c.Drift.MaxInFlight = -1
+	if err := c.Validate(); err == nil {
+		t.Error("expected a validation error for a negative drift.max_in_flight")
+	}
+}
+
+func TestSchedulerBatchLimitDefault(t *testing.T) {
+	cfg, err := Load("")
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if cfg.Scheduler.BatchLimit != 50 {
+		t.Errorf("default scheduler.batch_limit = %d, want 50", cfg.Scheduler.BatchLimit)
+	}
+}
+
+func TestSchedulerBatchLimitEnvOverride(t *testing.T) {
+	t.Setenv("TSM_SCHEDULER_BATCH_LIMIT", "10")
+	cfg, err := Load("")
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if cfg.Scheduler.BatchLimit != 10 {
+		t.Errorf("scheduler.batch_limit = %d, want 10", cfg.Scheduler.BatchLimit)
+	}
+}
+
+// A non-positive batch limit would either starve every schedule (0, if it were
+// sent to the database literally) or is simply nonsensical (negative), so
+// Validate rejects both.
+func TestSchedulerBatchLimitValidation(t *testing.T) {
+	cases := []struct {
+		name    string
+		limit   int
+		wantErr bool
+	}{
+		{"zero", 0, true},
+		{"negative", -5, true},
+		{"positive", 1, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c, _ := Load("")
+			c.Scheduler.BatchLimit = tc.limit
+			err := c.Validate()
+			if tc.wantErr && err == nil {
+				t.Error("expected a validation error, got nil")
+			}
+			if !tc.wantErr && err != nil {
+				t.Errorf("unexpected validation error: %v", err)
+			}
+		})
+	}
+}
+
 func TestStateSourceRootsEnvBinding(t *testing.T) {
 	// Default: no roots at all — the connectors that name a server-local path
 	// (local base_path, kubernetes kubeconfig) are unavailable until an operator

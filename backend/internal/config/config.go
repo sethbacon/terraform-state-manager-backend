@@ -35,6 +35,7 @@ type Config struct {
 	Suite            SuiteConfig         `mapstructure:"suite"`
 	Notifications    NotificationsConfig `mapstructure:"notifications"`
 	Drift            DriftConfig         `mapstructure:"drift"`
+	Scheduler        SchedulerConfig     `mapstructure:"scheduler"`
 	Security         SecurityConfig      `mapstructure:"security"`
 	// StateSource confines the server-local filesystem paths a state source may
 	// name (see StateSourceConfig).
@@ -93,10 +94,28 @@ type AuthzConfig struct {
 // legitimately slow plan is not expired mid-flight. ReconcileInterval is how often
 // the sweep runs. Like the schedule runner and statesync, the sweep is a periodic
 // worker gated by Workers.Enabled so it runs on exactly one replica.
-// Env: TSM_DRIFT_RUN_TTL, TSM_DRIFT_RECONCILE_INTERVAL.
+//
+// MaxInFlight bounds the fleet-scale scheduler's pacing (Phase 2): the largest
+// number of drift runs the scheduler will allow in "dispatched" or "running" at
+// once before it defers further firings to a later poll. Zero (the default)
+// means unlimited — a deployment that never sets this keeps today's behavior,
+// where every due schedule fires the moment it's due. Set it to the shared
+// agent pool's capacity so a nightly cohort of hundreds of schedules drains the
+// pool instead of landing on it as one herd.
+// Env: TSM_DRIFT_RUN_TTL, TSM_DRIFT_RECONCILE_INTERVAL, TSM_DRIFT_MAX_IN_FLIGHT.
 type DriftConfig struct {
 	RunTTL            time.Duration `mapstructure:"run_ttl"`
 	ReconcileInterval time.Duration `mapstructure:"reconcile_interval"`
+	MaxInFlight       int           `mapstructure:"max_in_flight"`
+}
+
+// SchedulerConfig tunes the background schedule runner's pacing (Phase 2
+// fleet-scale drift). BatchLimit bounds how many due schedules one poll reads
+// (the scheduler's GetDue LIMIT), so a large due cohort drains over several
+// polls instead of being claimed and dispatched all at once.
+// Env: TSM_SCHEDULER_BATCH_LIMIT.
+type SchedulerConfig struct {
+	BatchLimit int `mapstructure:"batch_limit"`
 }
 
 // SecurityConfig groups defense-in-depth controls. Egress governs the SSRF guard
@@ -716,6 +735,22 @@ func (c *Config) Validate() error {
 
 	}
 
+	// MaxInFlight has exactly two meanings -- 0 (unlimited) or a positive cap --
+	// so a negative value fits neither and must be refused rather than silently
+	// read as "unlimited" or as "cap of zero" (which would defer every firing
+	// forever).
+	if c.Drift.MaxInFlight < 0 {
+		problems = append(problems, fmt.Sprintf(
+			"drift.max_in_flight must be >= 0 (0 means unlimited), got %d", c.Drift.MaxInFlight))
+	}
+	// A non-positive batch limit is never valid: zero would starve every
+	// schedule (GetDue's LIMIT would return nothing) and negative is
+	// nonsensical.
+	if c.Scheduler.BatchLimit <= 0 {
+		problems = append(problems, fmt.Sprintf(
+			"scheduler.batch_limit must be > 0, got %d", c.Scheduler.BatchLimit))
+	}
+
 	if _, ok := validSSLModes[c.Database.SSLMode]; !ok {
 		problems = append(problems, fmt.Sprintf(
 			"database.ssl_mode %q is invalid (want one of disable, allow, prefer, require, verify-ca, verify-full)", c.Database.SSLMode))
@@ -790,6 +825,15 @@ func setDefaults(v *viper.Viper) {
 	// after run_ttl, sweeping every reconcile_interval.
 	v.SetDefault("drift.run_ttl", 2*time.Hour)
 	v.SetDefault("drift.reconcile_interval", 5*time.Minute)
+	// Fleet-scale scheduler pacing (Phase 2): unlimited in-flight drift runs by
+	// default, so an install that never touches this key keeps today's
+	// behavior; an operator sets this to the shared agent pool's capacity.
+	v.SetDefault("drift.max_in_flight", 0)
+
+	// Scheduler poll batch size: how many due schedules one poll claims work
+	// for. 50 comfortably covers a small/medium fleet without a config change;
+	// a fleet-scale deployment raises it alongside max_in_flight.
+	v.SetDefault("scheduler.batch_limit", 50)
 
 	// Backup retention: keep the newest 20 backups per state regardless of age,
 	// and drop anything older than 90 days beyond that floor.
