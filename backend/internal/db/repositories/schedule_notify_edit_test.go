@@ -83,9 +83,9 @@ func TestScheduleRepository_DueAndRecord(t *testing.T) {
 	r := NewScheduleRepository(db)
 	now := time.Now()
 
-	mock.ExpectQuery("FROM schedules WHERE enabled AND next_run_at IS NOT NULL").WithArgs(now).
+	mock.ExpectQuery("FROM schedules WHERE enabled AND next_run_at IS NOT NULL").WithArgs(now, 50).
 		WillReturnRows(scheduleRow())
-	due, err := r.GetDue(ctx, now)
+	due, err := r.GetDue(ctx, now, 50)
 	if err != nil || len(due) != 1 {
 		t.Fatalf("GetDue: %v %d", err, len(due))
 	}
@@ -105,6 +105,34 @@ func TestScheduleRepository_DueAndRecord(t *testing.T) {
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	if err := r.RecordRun(ctx, "sc1", "failed", nil, now, nil); err != nil {
 		t.Errorf("RecordRun nil: %v", err)
+	}
+}
+
+// TestGetDue_Limit proves the caller-supplied limit reaches the SQL as its own
+// bound parameter (a LIMIT clause after the existing ORDER BY), not merely a
+// Go-side truncation of an unbounded result set — the fleet-scale pacing
+// (Phase 2) depends on the database itself refusing to hand back more than one
+// poll's worth of work.
+func TestGetDue_Limit(t *testing.T) {
+	db, mock := newMock(t)
+	r := NewScheduleRepository(db)
+	now := time.Now()
+
+	mock.ExpectQuery(`FROM schedules WHERE enabled AND next_run_at IS NOT NULL AND next_run_at <= \$1\s+ORDER BY next_run_at LIMIT \$2`).
+		WithArgs(now, 7).
+		WillReturnRows(scheduleRow())
+	due, err := r.GetDue(ctx, now, 7)
+	if err != nil || len(due) != 1 {
+		t.Fatalf("GetDue: %v %d", err, len(due))
+	}
+
+	// A different limit must reach the query as a different bound value, not a
+	// constant baked into the SQL string.
+	mock.ExpectQuery(`FROM schedules WHERE enabled AND next_run_at IS NOT NULL AND next_run_at <= \$1\s+ORDER BY next_run_at LIMIT \$2`).
+		WithArgs(now, 1).
+		WillReturnRows(scheduleRow())
+	if _, err := r.GetDue(ctx, now, 1); err != nil {
+		t.Fatalf("GetDue with limit=1: %v", err)
 	}
 }
 
