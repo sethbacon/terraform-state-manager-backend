@@ -39,12 +39,14 @@ func (n *recordingNotifier) count() int {
 
 var driftCols = []string{"id", "pipeline_connection_id", "source_id", "state_key", "repo_ref", "working_dir",
 	"status", "added", "changed", "destroyed", "drifted", "summary", "detail", "callback_token", "actor",
-	"created_at", "updated_at", "truncated", "omitted_entries", "omitted_attrs", "unparseable", "unmasked", "organization_id"}
+	"created_at", "updated_at", "truncated", "omitted_entries", "omitted_attrs", "unparseable", "unmasked", "organization_id",
+	"batch_id", "ci_run_id", "ci_run_url"}
 
 func dispatchedRow(id, token string) *sqlmock.Rows {
 	return sqlmock.NewRows(driftCols).
 		AddRow(id, "p1", nil, "app.tfstate", "", "", "dispatched", nil, nil, nil, nil, nil, "", token, "alice",
-			"2026-06-21 10:00:00", "2026-06-21 10:00:00", false, 0, 0, false, false, "11111111-1111-4111-8111-111111111111")
+			"2026-06-21 10:00:00", "2026-06-21 10:00:00", false, 0, 0, false, false, "11111111-1111-4111-8111-111111111111",
+			nil, "", "")
 }
 
 // frozenNow is the reconciler's injected clock so the cutoff is deterministic and

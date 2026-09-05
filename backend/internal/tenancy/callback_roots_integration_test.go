@@ -208,7 +208,7 @@ func TestIntegration_ScopedCallbackRootReads_AreEquivalentInOneOrganization(t *t
 	health := repositories.NewHealthRepository(db)
 	records := repositories.NewDriftRecordRepository(db)
 
-	unscopedRuns, err := drift.List(ctx, 0, 0, "")
+	unscopedRuns, err := drift.List(ctx, 0, 0, repositories.DriftRunFilter{})
 	if err != nil {
 		t.Fatalf("drift List: %v", err)
 	}
@@ -216,7 +216,7 @@ func TestIntegration_ScopedCallbackRootReads_AreEquivalentInOneOrganization(t *t
 		t.Fatalf("drift List returned %d runs, want 1 — the fixture is wrong, not the system", len(unscopedRuns))
 	}
 	assertDriftRunFixtureIsNotVacuous(t, unscopedRuns)
-	scopedRuns, err := drift.ListInScope(ctx, 0, 0, "", scope)
+	scopedRuns, err := drift.ListInScope(ctx, 0, 0, repositories.DriftRunFilter{}, scope)
 	if err != nil {
 		t.Fatalf("drift ListInScope: %v", err)
 	}
@@ -315,14 +315,14 @@ func TestIntegration_ScopedCallbackRootReads_WithholdAnotherOrganization(t *test
 	health := repositories.NewHealthRepository(db)
 	records := repositories.NewDriftRecordRepository(db)
 
-	runs, err := drift.ListInScope(ctx, 0, 0, "", scopeA)
+	runs, err := drift.ListInScope(ctx, 0, 0, repositories.DriftRunFilter{}, scopeA)
 	if err != nil {
 		t.Fatalf("drift ListInScope: %v", err)
 	}
 	if len(runs) != 1 || runs[0].ID != runA {
 		t.Fatalf("drift ListInScope returned %v, want exactly Alpha's run %s", driftRunIDs(runs), runA)
 	}
-	if n, err := drift.CountRunsInScope(ctx, "", scopeA); err != nil || n != 1 {
+	if n, err := drift.CountRunsInScope(ctx, repositories.DriftRunFilter{}, scopeA); err != nil || n != 1 {
 		t.Fatalf("drift CountRunsInScope = %d, %v; want 1. An unscoped total beside a scoped page "+
 			"reports how many runs the rest of the deployment has.", n, err)
 	}
@@ -425,7 +425,7 @@ func TestIntegration_ScopedCallbackRootReads_FailClosed(t *testing.T) {
 		{"an organization with no rows", tenantscope.Scope{OrgIDs: []string{"33333333-3333-4333-8333-333333333333"}}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if rows, err := drift.ListInScope(ctx, 0, 0, "", tc.scope); err != nil || len(rows) != 0 {
+			if rows, err := drift.ListInScope(ctx, 0, 0, repositories.DriftRunFilter{}, tc.scope); err != nil || len(rows) != 0 {
 				t.Errorf("drift ListInScope returned %v (%v) for a scope that permits nothing", driftRunIDs(rows), err)
 			}
 			if got, err := drift.GetByIDInScope(ctx, runA, tc.scope); err != nil || got != nil {

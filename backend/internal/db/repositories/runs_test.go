@@ -13,25 +13,37 @@ import (
 
 var driftCols = []string{"id", "pipeline_connection_id", "source_id", "state_key", "repo_ref", "working_dir",
 	"status", "added", "changed", "destroyed", "drifted", "summary", "detail", "callback_token", "actor",
-	"created_at", "updated_at", "truncated", "omitted_entries", "omitted_attrs", "unparseable", "unmasked", "organization_id"}
+	"created_at", "updated_at", "truncated", "omitted_entries", "omitted_attrs", "unparseable", "unmasked", "organization_id",
+	"batch_id", "ci_run_id", "ci_run_url"}
 
 func driftRow(token string) *sqlmock.Rows {
 	return sqlmock.NewRows(driftCols).
 		AddRow("d1", "p1", "s1", "app.tfstate", "refs/heads/main", "infra/",
 			"completed", 1, 2, 0, true, []byte(`{"resources":[]}`), "", token, "alice",
-			"2026-06-10", "2026-06-10", false, 0, 0, false, false, "11111111-1111-4111-8111-111111111111")
+			"2026-06-10", "2026-06-10", false, 0, 0, false, false, "11111111-1111-4111-8111-111111111111",
+			nil, "", "")
+}
+
+// driftRowWithBatch is driftRow with a non-NULL batch_id, for the fan-out shape.
+func driftRowWithBatch(token, batchID string) *sqlmock.Rows {
+	return sqlmock.NewRows(driftCols).
+		AddRow("d1", "p1", "s1", "app.tfstate", "refs/heads/main", "infra/",
+			"dispatched", nil, nil, nil, nil, nil, "", token, "alice",
+			"2026-06-10", "2026-06-10", false, 0, 0, false, false, "11111111-1111-4111-8111-111111111111",
+			batchID, "", "")
 }
 
 func TestDriftRepository_CreateAndGet(t *testing.T) {
 	db, mock := newMock(t)
 	r := NewDriftRepository(db)
 
-	// The organization is pinned as the last argument: sqlmock matches the
-	// statement by regex, so without this the column could be dropped from the
-	// INSERT entirely and this test would still pass (#436).
+	// The organization is pinned as argument 9 (batch_id, not under test here,
+	// follows it as argument 10): sqlmock matches the statement by regex, so
+	// without this the column could be dropped from the INSERT entirely and
+	// this test would still pass (#436).
 	mock.ExpectQuery("INSERT INTO drift_runs").
 		WithArgs(sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(),
-			sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), testOrgID).
+			sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), testOrgID, sqlmock.AnyArg()).
 		WillReturnRows(driftRow("tok-1"))
 	conn := "p1"
 	created, err := r.Create(ctx, &DriftRun{PipelineConnectionID: &conn, StateKey: "app.tfstate", Status: "pending", CallbackToken: "tok-1"}, testOrgID)
@@ -52,9 +64,9 @@ func TestDriftRepository_ListHidesCallbackToken(t *testing.T) {
 	db, mock := newMock(t)
 	r := NewDriftRepository(db)
 
-	mock.ExpectQuery("SELECT .+ FROM drift_runs ORDER BY created_at DESC LIMIT").WithArgs(50, 0).
+	mock.ExpectQuery("SELECT .+ FROM drift_runs WHERE 1=1 ORDER BY created_at DESC LIMIT").WithArgs(50, 0).
 		WillReturnRows(driftRow("secret-token"))
-	out, err := r.List(ctx, 0, 0, "") // 0 → default limit 50
+	out, err := r.List(ctx, 0, 0, DriftRunFilter{}) // 0 → default limit 50
 	if err != nil || len(out) != 1 {
 		t.Fatalf("List: %v %d", err, len(out))
 	}
@@ -63,22 +75,139 @@ func TestDriftRepository_ListHidesCallbackToken(t *testing.T) {
 	}
 
 	// Out-of-range limits clamp to the default; negative offsets clamp to 0.
-	mock.ExpectQuery("SELECT .+ FROM drift_runs ORDER BY created_at DESC LIMIT").WithArgs(50, 0).
+	mock.ExpectQuery("SELECT .+ FROM drift_runs WHERE 1=1 ORDER BY created_at DESC LIMIT").WithArgs(50, 0).
 		WillReturnRows(driftRow(""))
-	if _, err := r.List(ctx, 9999, -3, ""); err != nil {
+	if _, err := r.List(ctx, 9999, -3, DriftRunFilter{}); err != nil {
 		t.Fatalf("List clamp: %v", err)
 	}
 
 	// A status filter binds ahead of the window; CountRuns shares it.
-	mock.ExpectQuery("SELECT .+ FROM drift_runs WHERE status = .+ ORDER BY created_at DESC LIMIT").
+	mock.ExpectQuery(`SELECT .+ FROM drift_runs WHERE 1=1 AND status = \$1 ORDER BY created_at DESC LIMIT`).
 		WithArgs("failed", 25, 50).WillReturnRows(driftRow(""))
-	if _, err := r.List(ctx, 25, 50, "failed"); err != nil {
+	if _, err := r.List(ctx, 25, 50, DriftRunFilter{Status: "failed"}); err != nil {
 		t.Fatalf("filtered List: %v", err)
 	}
-	mock.ExpectQuery(`SELECT COUNT\(\*\) FROM drift_runs WHERE status =`).WithArgs("failed").
+	mock.ExpectQuery(`SELECT COUNT\(\*\) FROM drift_runs WHERE 1=1 AND status = \$1`).WithArgs("failed").
 		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(7))
-	if n, err := r.CountRuns(ctx, "failed"); err != nil || n != 7 {
+	if n, err := r.CountRuns(ctx, DriftRunFilter{Status: "failed"}); err != nil || n != 7 {
 		t.Fatalf("CountRuns: %v n=%d", err, n)
+	}
+}
+
+// TestDriftRepository_Create_SetsBatchID pins the fan-out shape: a run created
+// with a BatchID binds it into the INSERT and gets it back on the round trip,
+// while a run with none (the legacy/single-target path) binds NULL rather than
+// an empty string — which would be a malformed uuid at the database instead of
+// the NULL that keeps schedules.last_run_id a real run id for that case.
+func TestDriftRepository_Create_SetsBatchID(t *testing.T) {
+	db, mock := newMock(t)
+	r := NewDriftRepository(db)
+	conn := "p1"
+	batchID := "22222222-2222-4222-8222-222222222222"
+
+	mock.ExpectQuery("INSERT INTO drift_runs").
+		WithArgs(sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(),
+			sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), testOrgID, &batchID).
+		WillReturnRows(driftRowWithBatch("tok-1", batchID))
+	created, err := r.Create(ctx, &DriftRun{
+		PipelineConnectionID: &conn, StateKey: "app.tfstate", Status: "dispatched",
+		CallbackToken: "tok-1", BatchID: &batchID,
+	}, testOrgID)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if created.BatchID == nil || *created.BatchID != batchID {
+		t.Errorf("BatchID not round-tripped: %+v", created.BatchID)
+	}
+
+	mock.ExpectQuery("INSERT INTO drift_runs").
+		WithArgs(sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(),
+			sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), testOrgID, (*string)(nil)).
+		WillReturnRows(driftRow("tok-2"))
+	unfanned, err := r.Create(ctx, &DriftRun{
+		PipelineConnectionID: &conn, StateKey: "app.tfstate", Status: "dispatched", CallbackToken: "tok-2",
+	}, testOrgID)
+	if err != nil {
+		t.Fatalf("Create (no batch): %v", err)
+	}
+	if unfanned.BatchID != nil {
+		t.Errorf("an unfanned run must bind NULL batch_id, got %+v", *unfanned.BatchID)
+	}
+}
+
+// TestDriftList_FilterBatchOrRunID pins the (batch_id = $n OR id = $n) shape: a
+// caller filtering by batch id does not know in advance whether the schedule
+// that produced it fanned out, so the predicate must match either column.
+func TestDriftList_FilterBatchOrRunID(t *testing.T) {
+	db, mock := newMock(t)
+	r := NewDriftRepository(db)
+
+	mock.ExpectQuery(`SELECT .+ FROM drift_runs WHERE 1=1 AND \(batch_id = \$1 OR id = \$1\) ORDER BY created_at DESC LIMIT`).
+		WithArgs("b1", 50, 0).WillReturnRows(driftRow(""))
+	if out, err := r.List(ctx, 0, 0, DriftRunFilter{BatchID: "b1"}); err != nil || len(out) != 1 {
+		t.Fatalf("List(BatchID): %v len=%d", err, len(out))
+	}
+
+	mock.ExpectQuery(`SELECT COUNT\(\*\) FROM drift_runs WHERE 1=1 AND \(batch_id = \$1 OR id = \$1\)`).
+		WithArgs("b1").WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(3))
+	if n, err := r.CountRuns(ctx, DriftRunFilter{BatchID: "b1"}); err != nil || n != 3 {
+		t.Fatalf("CountRuns(BatchID): %v n=%d", err, n)
+	}
+}
+
+// TestDriftList_FilterSourceState pins source_id/state_key filtering, both
+// bound after batch_id in the same builder.
+func TestDriftList_FilterSourceState(t *testing.T) {
+	db, mock := newMock(t)
+	r := NewDriftRepository(db)
+
+	mock.ExpectQuery(`SELECT .+ FROM drift_runs WHERE 1=1 AND source_id = \$1 AND state_key = \$2 ORDER BY created_at DESC LIMIT`).
+		WithArgs("s1", "app.tfstate", 50, 0).WillReturnRows(driftRow(""))
+	if _, err := r.List(ctx, 0, 0, DriftRunFilter{SourceID: "s1", StateKey: "app.tfstate"}); err != nil {
+		t.Fatalf("List(source+state): %v", err)
+	}
+}
+
+// TestCountRunsIn pins the scheduler pacing helper (Phase 2): a global,
+// unscoped count across the given statuses.
+func TestCountRunsIn(t *testing.T) {
+	db, mock := newMock(t)
+	r := NewDriftRepository(db)
+
+	mock.ExpectQuery(`SELECT COUNT\(\*\) FROM drift_runs WHERE status = ANY`).
+		WithArgs([]string{"dispatched", "running"}).
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(5))
+	if n, err := r.CountRunsIn(ctx, []string{"dispatched", "running"}); err != nil || n != 5 {
+		t.Fatalf("CountRunsIn: %v n=%d", err, n)
+	}
+}
+
+// TestSetCIRun_OnlyAffectsGivenBatch pins the (batch_id=$1 OR id=$1) update
+// shape SetCIRun shares with the batch/run filter.
+func TestSetCIRun_OnlyAffectsGivenBatch(t *testing.T) {
+	db, mock := newMock(t)
+	r := NewDriftRepository(db)
+
+	mock.ExpectExec(`UPDATE drift_runs SET ci_run_id=\$2, ci_run_url=\$3.+WHERE batch_id=\$1 OR id=\$1`).
+		WithArgs("b1", "12345", "https://dev.azure.com/corp/p/_build/results?buildId=12345").
+		WillReturnResult(sqlmock.NewResult(0, 3))
+	if err := r.SetCIRun(ctx, "b1", "12345", "https://dev.azure.com/corp/p/_build/results?buildId=12345"); err != nil {
+		t.Fatalf("SetCIRun: %v", err)
+	}
+}
+
+// TestFailBatch_OnlyDispatched pins that FailBatch is scoped to
+// status='dispatched', so it cannot clobber a sibling run whose own callback
+// already completed or failed by some other path.
+func TestFailBatch_OnlyDispatched(t *testing.T) {
+	db, mock := newMock(t)
+	r := NewDriftRepository(db)
+
+	mock.ExpectExec(`UPDATE drift_runs SET status='failed'.+WHERE batch_id=\$1 AND status='dispatched'`).
+		WithArgs("b1", "dispatch failed: no agent available").
+		WillReturnResult(sqlmock.NewResult(0, 2))
+	if err := r.FailBatch(ctx, "b1", "dispatch failed: no agent available"); err != nil {
+		t.Fatalf("FailBatch: %v", err)
 	}
 }
 
@@ -155,7 +284,8 @@ func TestDriftRepository_UpdateResultPersistsCompletenessMarkers(t *testing.T) {
 		WillReturnRows(sqlmock.NewRows(driftCols).
 			AddRow("d1", "p1", "s1", "app.tfstate", "", "", "completed",
 				0, 0, 0, false, nil, "", "", "alice", "2026-06-10", "2026-06-10",
-				true, 5, 9, true, true, "11111111-1111-4111-8111-111111111111"))
+				true, 5, 9, true, true, "11111111-1111-4111-8111-111111111111",
+				nil, "", ""))
 	got, err := r.GetByID(ctx, "d1")
 	if err != nil || got == nil {
 		t.Fatalf("GetByID: %v %+v", err, got)

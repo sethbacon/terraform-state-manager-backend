@@ -89,27 +89,20 @@ func runPage(limit, offset int) (int, int) {
 // optimisation: it states the fail-closed answer where a later edit cannot
 // change it by accident, because a query with an empty id list happens to match
 // nothing today and that is a fact about PostgreSQL rather than a decision.
-func (r *DriftRepository) ListInScope(ctx context.Context, limit, offset int, status string, scope tenantscope.Scope) ([]DriftRun, error) {
+func (r *DriftRepository) ListInScope(ctx context.Context, limit, offset int, f DriftRunFilter, scope tenantscope.Scope) ([]DriftRun, error) {
 	if scope.Empty() {
 		return []DriftRun{}, nil
 	}
 	if scope.PlatformAdmin {
-		return r.List(ctx, limit, offset, status)
+		return r.List(ctx, limit, offset, f)
 	}
 	limit, offset = runPage(limit, offset)
-	var (
-		rows *sql.Rows
-		err  error
-	)
-	if status != "" {
-		rows, err = r.db.QueryContext(ctx, `SELECT `+driftColumns+`
-			FROM drift_runs WHERE `+runOrgPredicate+` AND status = $2
-			ORDER BY created_at DESC LIMIT $3 OFFSET $4`, scope.OrgIDs, status, limit, offset)
-	} else {
-		rows, err = r.db.QueryContext(ctx, `SELECT `+driftColumns+`
-			FROM drift_runs WHERE `+runOrgPredicate+`
-			ORDER BY created_at DESC LIMIT $2 OFFSET $3`, scope.OrgIDs, limit, offset)
-	}
+	clause, args := driftRunFilterClause([]any{scope.OrgIDs}, f)
+	q := `SELECT ` + driftColumns + ` FROM drift_runs WHERE ` + runOrgPredicate + clause // #nosec G202 -- fixed SQL + placeholder-only clause from driftRunFilterClause; no interpolated values
+	args = append(args, limit, offset)
+	q += fmt.Sprintf(" ORDER BY created_at DESC LIMIT $%d OFFSET $%d", len(args)-1, len(args)) // #nosec G202 -- placeholder only
+
+	rows, err := r.db.QueryContext(ctx, q, args...) // #nosec G202 -- q is built from fixed SQL + placeholders above
 	if err != nil {
 		return nil, err
 	}
@@ -131,22 +124,17 @@ func (r *DriftRepository) ListInScope(ctx context.Context, limit, offset int, st
 // Scoped alongside the list rather than left alone: an unscoped total next to a
 // scoped page is a disclosure in its own right — "showing 3 of 47" tells a
 // tenant how many runs the other organizations in the deployment have.
-func (r *DriftRepository) CountRunsInScope(ctx context.Context, status string, scope tenantscope.Scope) (int, error) {
+func (r *DriftRepository) CountRunsInScope(ctx context.Context, f DriftRunFilter, scope tenantscope.Scope) (int, error) {
 	if scope.Empty() {
 		return 0, nil
 	}
 	if scope.PlatformAdmin {
-		return r.CountRuns(ctx, status)
+		return r.CountRuns(ctx, f)
 	}
+	clause, args := driftRunFilterClause([]any{scope.OrgIDs}, f)
 	var n int
-	var err error
-	if status != "" {
-		err = r.db.QueryRowContext(ctx,
-			`SELECT COUNT(*) FROM drift_runs WHERE `+runOrgPredicate+` AND status = $2`, scope.OrgIDs, status).Scan(&n)
-	} else {
-		err = r.db.QueryRowContext(ctx,
-			`SELECT COUNT(*) FROM drift_runs WHERE `+runOrgPredicate, scope.OrgIDs).Scan(&n)
-	}
+	// #nosec G202 -- clause is fixed SQL with positional placeholders; values bound via args
+	err := r.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM drift_runs WHERE `+runOrgPredicate+clause, args...).Scan(&n)
 	return n, err
 }
 

@@ -466,12 +466,15 @@ func (h *DriftHandlers) dispatchDrift(ctx context.Context, tgt DriftTarget, acto
 
 // ListRuns returns drift runs, newest first, with server-side pagination.
 // @Summary      List drift runs
-// @Description  Drift runs newest-first. Each run carries the drift contract's completeness markers (truncated, omitted_entries, omitted_attrs, unparseable, unmasked) describing what that run's own check did not do — zero counts alone cannot distinguish a verified-clean run from one that never finished checking.
+// @Description  Drift runs newest-first. Each run carries the drift contract's completeness markers (truncated, omitted_entries, omitted_attrs, unparseable, unmasked) describing what that run's own check did not do — zero counts alone cannot distinguish a verified-clean run from one that never finished checking. batch_id matches either a fan-out batch's shared id or a single run's own id, so a schedule's last_run_id works as a filter whether or not it fanned.
 // @Tags         Drift
 // @Produce      json
-// @Param        status  query  string  false  "filter by status (dispatched|running|completed|failed)"
-// @Param        limit   query  int     false  "page size (default 50, max 200)"
-// @Param        offset  query  int     false  "rows to skip"
+// @Param        status    query  string  false  "filter by status (dispatched|running|completed|failed)"
+// @Param        batch_id  query  string  false  "filter by batch id (or a single run's own id)"
+// @Param        source_id query  string  false  "filter by state source id"
+// @Param        state_key query  string  false  "filter by state key"
+// @Param        limit     query  int     false  "page size (default 50, max 200)"
+// @Param        offset    query  int     false  "rows to skip"
 // @Success      200  {object}  map[string]interface{}
 // @Security     BearerAuth
 // @Security     CookieAuth
@@ -485,6 +488,12 @@ func (h *DriftHandlers) ListRuns() gin.HandlerFunc {
 		default:
 			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid status filter"})
 			return
+		}
+		filter := repositories.DriftRunFilter{
+			Status:   status,
+			BatchID:  c.Query("batch_id"),
+			SourceID: c.Query("source_id"),
+			StateKey: c.Query("state_key"),
 		}
 		limit, _ := strconv.Atoi(c.Query("limit"))   // 0 -> repo default (50)
 		offset, _ := strconv.Atoi(c.Query("offset")) // 0 -> first page
@@ -501,7 +510,7 @@ func (h *DriftHandlers) ListRuns() gin.HandlerFunc {
 			serverError(c, errNoTenantScope, "the tenant scope was not resolved for this route")
 			return
 		}
-		runs, err := h.driftRepo.ListInScope(ctx, limit, offset, status, scope)
+		runs, err := h.driftRepo.ListInScope(ctx, limit, offset, filter, scope)
 		if err != nil {
 			serverError(c, err, "failed to list drift runs")
 			return
@@ -509,7 +518,7 @@ func (h *DriftHandlers) ListRuns() gin.HandlerFunc {
 		// The total is scoped with the page: "showing 3 of 47" beside a
 		// three-row list would report how many runs the rest of the deployment
 		// has.
-		total, err := h.driftRepo.CountRunsInScope(ctx, status, scope)
+		total, err := h.driftRepo.CountRunsInScope(ctx, filter, scope)
 		if err != nil {
 			serverError(c, err, "failed to count drift runs")
 			return
