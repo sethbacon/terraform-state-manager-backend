@@ -114,15 +114,104 @@ type ciSourceRequest struct {
 	Provider     string `json:"provider"`
 	Organization string `json:"organization"`
 	Project      string `json:"project"`
-	AuthMethod   string `json:"auth_method"` // "pat" (default) | "app"
+	AuthMethod   string `json:"auth_method"` // "pat" (default) | "app" | "workload_identity"
 	Token        string `json:"token"`       // pat
 	TenantID     string `json:"tenant_id"`   // app (Entra / ADO)
-	ClientID     string `json:"client_id"`   // app (Entra / ADO)
+	ClientID     string `json:"client_id"`   // app (Entra / ADO) or workload_identity (ADO)
 	ClientSecret string `json:"client_secret"`
 	// app (GitHub App)
 	GithubAppID          string `json:"github_app_id"`
 	GithubInstallationID string `json:"github_installation_id"`
 	AppPrivateKey        string `json:"app_private_key"`
+}
+
+// ciSourceAuthMethodError is what applyCISourceAuthMethod refuses with: either
+// a validation problem (the caller's fault, 400) or an encryption failure (the
+// server's fault, 500). Exactly one is ever set. A plain error/string return
+// would blur that distinction, and CreateCISource/UpdateCISource both need it
+// kept -- encrypting a client secret failing is not the same class of problem
+// as the client omitting one.
+type ciSourceAuthMethodError struct {
+	badRequest string
+	serverErr  error
+}
+
+// applyCISourceAuthMethod validates req's auth-method-specific fields against
+// its provider and sets EXACTLY the columns that method's shape needs on src,
+// leaving every other secret-bearing column at its Go zero value.
+//
+// Shared by CreateCISource and UpdateCISource so a new auth method (this
+// change adds "workload_identity") is validated and stored one way, not once
+// per handler. That matters doubly for UpdateCISource: it is a FULL replace
+// (see CISourceRepository.Update's comment), so `src` must come out of here
+// with every secret-bearing column set the way the NEW auth_method wants it --
+// including left at zero for the columns the new method does not use, which
+// is what makes moving a source from "app" to "workload_identity" actually
+// clear out the old Entra client secret instead of leaving it behind
+// alongside a client_id nothing decrypts it with.
+func applyCISourceAuthMethod(src *repositories.CISource, req *ciSourceRequest) *ciSourceAuthMethodError {
+	switch req.AuthMethod {
+	case "pat":
+		if req.Token == "" {
+			return &ciSourceAuthMethodError{badRequest: "token is required for auth_method 'pat'"}
+		}
+		enc, err := crypto.EncryptFor([]byte(req.Token), crypto.PurposeCISourcePAT)
+		if err != nil {
+			return &ciSourceAuthMethodError{serverErr: fmt.Errorf("failed to encrypt token: %w", err)}
+		}
+		src.EncryptedToken = enc
+	case "app":
+		switch req.Provider {
+		case "azure_devops":
+			req.TenantID = strings.TrimSpace(req.TenantID)
+			req.ClientID = strings.TrimSpace(req.ClientID)
+			if req.TenantID == "" || req.ClientID == "" || req.ClientSecret == "" {
+				return &ciSourceAuthMethodError{badRequest: "azure_devops app auth requires tenant_id, client_id, and client_secret"}
+			}
+			enc, err := crypto.EncryptFor([]byte(req.ClientSecret), crypto.PurposeCISourceClientSecret)
+			if err != nil {
+				return &ciSourceAuthMethodError{serverErr: fmt.Errorf("failed to encrypt client secret: %w", err)}
+			}
+			src.EncryptedClientSecret = enc
+			src.TenantID = &req.TenantID
+			src.ClientID = &req.ClientID
+		case "github_actions":
+			req.GithubAppID = strings.TrimSpace(req.GithubAppID)
+			req.GithubInstallationID = strings.TrimSpace(req.GithubInstallationID)
+			if req.GithubAppID == "" || req.GithubInstallationID == "" || strings.TrimSpace(req.AppPrivateKey) == "" {
+				return &ciSourceAuthMethodError{badRequest: "github app auth requires github_app_id, github_installation_id, and app_private_key"}
+			}
+			if !pipelines.ValidRSAPrivateKey(req.AppPrivateKey) {
+				return &ciSourceAuthMethodError{badRequest: "app_private_key must be a PEM-encoded RSA private key"}
+			}
+			enc, err := crypto.EncryptFor([]byte(req.AppPrivateKey), crypto.PurposeCISourceAppPrivateKey)
+			if err != nil {
+				return &ciSourceAuthMethodError{serverErr: fmt.Errorf("failed to encrypt app private key: %w", err)}
+			}
+			src.EncryptedAppPrivateKey = enc
+			src.GithubAppID = &req.GithubAppID
+			src.GithubInstallationID = &req.GithubInstallationID
+		default:
+			return &ciSourceAuthMethodError{badRequest: "app auth is not supported for this provider"}
+		}
+	case "workload_identity":
+		// AKS Workload Identity mints an Entra token for the fixed ADO resource
+		// id (pipelines.MintWorkloadIdentityADOToken) -- there is no GitHub
+		// equivalent, and no secret material at all: client_id is the only
+		// column this method needs (000038's shape CHECK requires exactly
+		// that and nothing else).
+		if req.Provider != "azure_devops" {
+			return &ciSourceAuthMethodError{badRequest: "workload_identity auth is only supported for azure_devops"}
+		}
+		req.ClientID = strings.TrimSpace(req.ClientID)
+		if req.ClientID == "" {
+			return &ciSourceAuthMethodError{badRequest: "workload_identity auth requires client_id"}
+		}
+		src.ClientID = &req.ClientID
+	default:
+		return &ciSourceAuthMethodError{badRequest: "auth_method must be pat, app, or workload_identity"}
+	}
+	return nil
 }
 
 // CreateCISource registers a CI source, encrypting its credential.
@@ -176,60 +265,12 @@ func (h *CISourceHandlers) CreateCISource() gin.HandlerFunc {
 			src.Project = &req.Project
 		}
 
-		switch req.AuthMethod {
-		case "pat":
-			if req.Token == "" {
-				c.JSON(http.StatusBadRequest, gin.H{"error": "token is required for auth_method 'pat'"})
+		if aerr := applyCISourceAuthMethod(src, &req); aerr != nil {
+			if aerr.serverErr != nil {
+				serverError(c, aerr.serverErr, "failed to prepare CI source credential")
 				return
 			}
-			enc, err := crypto.EncryptFor([]byte(req.Token), crypto.PurposeCISourcePAT)
-			if err != nil {
-				serverError(c, err, "failed to encrypt token")
-				return
-			}
-			src.EncryptedToken = enc
-		case "app":
-			switch req.Provider {
-			case "azure_devops":
-				req.TenantID = strings.TrimSpace(req.TenantID)
-				req.ClientID = strings.TrimSpace(req.ClientID)
-				if req.TenantID == "" || req.ClientID == "" || req.ClientSecret == "" {
-					c.JSON(http.StatusBadRequest, gin.H{"error": "azure_devops app auth requires tenant_id, client_id, and client_secret"})
-					return
-				}
-				enc, err := crypto.EncryptFor([]byte(req.ClientSecret), crypto.PurposeCISourceClientSecret)
-				if err != nil {
-					serverError(c, err, "failed to encrypt client secret")
-					return
-				}
-				src.EncryptedClientSecret = enc
-				src.TenantID = &req.TenantID
-				src.ClientID = &req.ClientID
-			case "github_actions":
-				req.GithubAppID = strings.TrimSpace(req.GithubAppID)
-				req.GithubInstallationID = strings.TrimSpace(req.GithubInstallationID)
-				if req.GithubAppID == "" || req.GithubInstallationID == "" || strings.TrimSpace(req.AppPrivateKey) == "" {
-					c.JSON(http.StatusBadRequest, gin.H{"error": "github app auth requires github_app_id, github_installation_id, and app_private_key"})
-					return
-				}
-				if !pipelines.ValidRSAPrivateKey(req.AppPrivateKey) {
-					c.JSON(http.StatusBadRequest, gin.H{"error": "app_private_key must be a PEM-encoded RSA private key"})
-					return
-				}
-				enc, err := crypto.EncryptFor([]byte(req.AppPrivateKey), crypto.PurposeCISourceAppPrivateKey)
-				if err != nil {
-					serverError(c, err, "failed to encrypt app private key")
-					return
-				}
-				src.EncryptedAppPrivateKey = enc
-				src.GithubAppID = &req.GithubAppID
-				src.GithubInstallationID = &req.GithubInstallationID
-			default:
-				c.JSON(http.StatusBadRequest, gin.H{"error": "app auth is not supported for this provider"})
-				return
-			}
-		default:
-			c.JSON(http.StatusBadRequest, gin.H{"error": "auth_method must be pat or app"})
+			c.JSON(http.StatusBadRequest, gin.H{"error": aerr.badRequest})
 			return
 		}
 
@@ -249,6 +290,131 @@ func (h *CISourceHandlers) CreateCISource() gin.HandlerFunc {
 		writeAuditEntry(c, h.audit, "ci_source.create", "ci_source", saved.ID,
 			map[string]interface{}{"name": saved.Name, "provider": saved.Provider, "auth_method": saved.AuthMethod})
 		c.JSON(http.StatusCreated, ciSourceJSON(saved))
+	}
+}
+
+// UpdateCISource replaces a CI source's connection coordinates and credential
+// in place -- the credential-replacement route Phase 1b adds so an operator
+// can move the org's Azure DevOps source from an Entra app registration to
+// AKS Workload Identity (or rotate a secret) WITHOUT deleting the row, which
+// would orphan every pipeline connection that borrows it via
+// config.ci_source_id. Requires the same sources:manage scope and tenant
+// scope as every other /ci-sources route (wired on the route, not the
+// handler: see router.go).
+//
+// Like Create, this never returns secret material -- ciSourceJSON renders only
+// has_token / has_client_secret / has_app_private_key. Unlike Create, it also
+// evicts whatever token is cached under the credential this call REPLACES
+// (evictCachedCIToken), computed from the row as it stood before this
+// request: a stale cached token surviving a credential change is exactly the
+// bug this route must not have.
+// @Summary      Update CI source
+// @Tags         Pipelines
+// @Accept       json
+// @Produce      json
+// @Success      200  {object}  map[string]interface{}
+// @Failure      400  {object}  map[string]interface{}
+// @Failure      404  {object}  map[string]interface{}
+// @Security     BearerAuth
+// @Security     CookieAuth
+// @Router       /ci-sources/{id} [put]
+func (h *CISourceHandlers) UpdateCISource() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		id := c.Param("id")
+		scope, resolved := tenantscope.FromContext(c)
+		if !resolved {
+			serverError(c, errNoTenantScope, "the tenant scope was not resolved for this route")
+			return
+		}
+		existing, err := h.repo.GetByIDInScope(c.Request.Context(), id, scope)
+		if err != nil {
+			serverError(c, err, "failed to load CI source")
+			return
+		}
+		if existing == nil {
+			c.JSON(http.StatusNotFound, gin.H{"error": "CI source not found"})
+			return
+		}
+
+		var req ciSourceRequest
+		if err := c.ShouldBindJSON(&req); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
+			return
+		}
+		req.Name = strings.TrimSpace(req.Name)
+		req.Organization = strings.TrimSpace(req.Organization)
+		req.Project = strings.TrimSpace(req.Project)
+		req.AuthMethod = strings.TrimSpace(req.AuthMethod)
+		if req.AuthMethod == "" {
+			req.AuthMethod = "pat"
+		}
+		if req.Name == "" || req.Organization == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "name and organization are required"})
+			return
+		}
+		// The provider is immutable: it names the remote system the credential
+		// is FOR, and repointing it here would silently redirect every
+		// discovery call (and the fan-out template lookup) that used to mean
+		// something else. Delete and recreate instead -- the same posture
+		// PipelineConnection.Update already takes on its own provider field.
+		if req.Provider != existing.Provider {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "provider cannot be changed; delete and recreate the source instead"})
+			return
+		}
+		switch req.Provider {
+		case "github_actions":
+			// project not used
+		case "azure_devops":
+			if req.Project == "" {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "azure_devops sources require a project"})
+				return
+			}
+		default:
+			c.JSON(http.StatusBadRequest, gin.H{"error": "provider must be github_actions or azure_devops"})
+			return
+		}
+
+		updated := &repositories.CISource{
+			ID:           id,
+			Name:         req.Name,
+			Provider:     req.Provider,
+			Organization: req.Organization,
+			AuthMethod:   req.AuthMethod,
+		}
+		if req.Project != "" {
+			updated.Project = &req.Project
+		}
+		if aerr := applyCISourceAuthMethod(updated, &req); aerr != nil {
+			if aerr.serverErr != nil {
+				serverError(c, aerr.serverErr, "failed to prepare CI source credential")
+				return
+			}
+			c.JSON(http.StatusBadRequest, gin.H{"error": aerr.badRequest})
+			return
+		}
+
+		saved, err := h.repo.UpdateInScope(c.Request.Context(), updated, scope)
+		if errors.Is(err, repositories.ErrNotInScope) || (err == nil && saved == nil) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "CI source not found"})
+			return
+		}
+		if err != nil {
+			serverError(c, err, "failed to update CI source")
+			return
+		}
+
+		// Evict whatever was cached under the credential THIS ROW USED TO
+		// CARRY -- computed from `existing`, the pre-update row, never from
+		// `saved`. Do this unconditionally rather than only when the
+		// credential actually changed: it costs one extra mint on the rare
+		// no-op update, and makes "no stale token outlives the credential it
+		// was minted under" an invariant of the route rather than a property
+		// that happens to fall out of the cache being keyed by fingerprint.
+		evictCachedCIToken(existing)
+
+		writeAuditEntry(c, h.audit, "ci_source.update", "ci_source", saved.ID,
+			map[string]interface{}{"name": saved.Name, "provider": saved.Provider, "auth_method": saved.AuthMethod})
+		c.JSON(http.StatusOK, ciSourceJSON(saved))
 	}
 }
 
@@ -306,7 +472,7 @@ func (h *CISourceHandlers) VerifyCISource() gin.HandlerFunc {
 		var err error
 		switch src.Provider {
 		case "azure_devops":
-			err = pipelines.VerifyAzureDevOps(c.Request.Context(), adoCred(token, src.AuthMethod == "app"), src.Organization)
+			err = pipelines.VerifyAzureDevOps(c.Request.Context(), adoCred(token, adoBearerMethod(src.AuthMethod)), src.Organization)
 		case "github_actions":
 			if src.AuthMethod == "app" {
 				err = pipelines.VerifyGitHubInstallation(c.Request.Context(), token)
@@ -326,11 +492,14 @@ func (h *CISourceHandlers) VerifyCISource() gin.HandlerFunc {
 }
 
 // sourceToken returns a usable Azure DevOps / GitHub credential value for a CI
-// source: the decrypted personal access token for auth_method "pat", or a freshly
+// source: the decrypted personal access token for auth_method "pat"; a freshly
 // minted (cached) app access token for "app" — a Microsoft Entra app token for
-// Azure DevOps, or a GitHub App installation token for GitHub.
+// Azure DevOps, or a GitHub App installation token for GitHub; or, for
+// "workload_identity" (Azure DevOps only), a token minted via AKS Workload
+// Identity's federated-token exchange, with no secret decryption at all.
 func sourceToken(ctx context.Context, src *repositories.CISource) (string, error) {
-	if src.AuthMethod == "app" {
+	switch src.AuthMethod {
+	case "app":
 		switch src.Provider {
 		case "azure_devops":
 			secret, err := crypto.DecryptFor(src.EncryptedClientSecret, crypto.PurposeCISourceClientSecret)
@@ -355,21 +524,87 @@ func sourceToken(ctx context.Context, src *repositories.CISource) (string, error
 		default:
 			return "", fmt.Errorf("app auth is not supported for provider %q", src.Provider)
 		}
+	case "workload_identity":
+		if src.Provider != "azure_devops" {
+			return "", fmt.Errorf("workload_identity auth is not supported for provider %q", src.Provider)
+		}
+		return pipelines.MintWorkloadIdentityADOToken(ctx, ptrStr(src.ClientID))
+	default:
+		pt, err := crypto.DecryptFor(src.EncryptedToken, crypto.PurposeCISourcePAT)
+		if err != nil {
+			return "", fmt.Errorf("decrypt CI source token: %w", err)
+		}
+		return string(pt), nil
 	}
-	pt, err := crypto.DecryptFor(src.EncryptedToken, crypto.PurposeCISourcePAT)
-	if err != nil {
-		return "", fmt.Errorf("decrypt CI source token: %w", err)
-	}
-	return string(pt), nil
+}
+
+// adoBearerMethod reports whether a CI source's auth method presents its
+// resolved token as a Bearer credential rather than Basic (a PAT): true for a
+// Microsoft Entra app access token ("app") and for an AKS Workload Identity
+// token ("workload_identity") -- both are minted Entra access tokens for the
+// same ADO resource id, just from a different credential source. One function
+// so every adoCred call site (and resolvePipelineToken's own bearer return)
+// gains a bearer-shaped auth method by editing this line instead of an
+// `|| src.AuthMethod == "..."` at each of them.
+func adoBearerMethod(authMethod string) bool {
+	return authMethod == "app" || authMethod == "workload_identity"
 }
 
 // adoCred wraps a resolved token in the right Azure DevOps auth scheme: Bearer
-// for Entra app access tokens, Basic for PATs.
+// for a minted Entra access token (app registration or Workload Identity),
+// Basic for a PAT.
 func adoCred(token string, bearer bool) pipelines.ADOToken {
 	if bearer {
 		return pipelines.ADOBearer(token)
 	}
 	return pipelines.ADOPAT(token)
+}
+
+// evictCachedCIToken removes whatever token is cached under src's CURRENT
+// credential, keyed the same way sourceToken's own minting calls compute it.
+// Call this with the PRE-update row (UpdateCISource does) so a credential
+// being replaced can never have its minted token served again.
+//
+// "pat" needs no entry: sourceToken decrypts and returns the token directly,
+// with nothing minted or cached for it. A source whose secret cannot be
+// decrypted (a corrupted ciphertext, or a key rotation that has not reached
+// this row) has nothing to evict either -- the cache could not have been
+// populated under a credential this can no longer reconstruct, and the
+// decrypt error itself is not this call's problem to report.
+func evictCachedCIToken(src *repositories.CISource) {
+	switch src.AuthMethod {
+	case "app":
+		switch src.Provider {
+		case "azure_devops":
+			if len(src.EncryptedClientSecret) == 0 {
+				return
+			}
+			secret, err := crypto.DecryptFor(src.EncryptedClientSecret, crypto.PurposeCISourceClientSecret)
+			if err != nil {
+				return
+			}
+			pipelines.EvictADOTokenCacheKey(pipelines.EntraCreds{
+				TenantID:     ptrStr(src.TenantID),
+				ClientID:     ptrStr(src.ClientID),
+				ClientSecret: string(secret),
+			}.Fingerprint())
+		case "github_actions":
+			if len(src.EncryptedAppPrivateKey) == 0 {
+				return
+			}
+			key, err := crypto.DecryptFor(src.EncryptedAppPrivateKey, crypto.PurposeCISourceAppPrivateKey)
+			if err != nil {
+				return
+			}
+			pipelines.EvictGitHubAppTokenCacheKey(pipelines.GitHubAppCreds{
+				AppID:          ptrStr(src.GithubAppID),
+				InstallationID: ptrStr(src.GithubInstallationID),
+				PrivateKeyPEM:  string(key),
+			}.Fingerprint())
+		}
+	case "workload_identity":
+		pipelines.EvictADOTokenCacheKey(pipelines.WorkloadIdentityCreds{ClientID: ptrStr(src.ClientID)}.Fingerprint())
+	}
 }
 
 func ptrStr(p *string) string {
@@ -428,7 +663,7 @@ func (h *CISourceHandlers) ListSourcePipelines() gin.HandlerFunc {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "pipeline discovery is only available for azure_devops sources"})
 			return
 		}
-		refs, err := pipelines.ListAzurePipelines(c.Request.Context(), adoCred(token, src.AuthMethod == "app"), src.Organization, *src.Project)
+		refs, err := pipelines.ListAzurePipelines(c.Request.Context(), adoCred(token, adoBearerMethod(src.AuthMethod)), src.Organization, *src.Project)
 		if err != nil {
 			c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
 			return
@@ -465,7 +700,7 @@ func (h *CISourceHandlers) ListSourceRepos() gin.HandlerFunc {
 				c.JSON(http.StatusBadRequest, gin.H{"error": "azure_devops source has no project"})
 				return
 			}
-			repos, err := pipelines.ListAzureRepos(c.Request.Context(), adoCred(token, src.AuthMethod == "app"), src.Organization, *src.Project)
+			repos, err := pipelines.ListAzureRepos(c.Request.Context(), adoCred(token, adoBearerMethod(src.AuthMethod)), src.Organization, *src.Project)
 			if err != nil {
 				c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
 				return
@@ -526,7 +761,7 @@ func (h *CISourceHandlers) ListSourceServiceConnections() gin.HandlerFunc {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "service connections are only available for azure_devops sources"})
 			return
 		}
-		scs, err := pipelines.ListAzureServiceConnections(c.Request.Context(), adoCred(token, src.AuthMethod == "app"), src.Organization, *src.Project)
+		scs, err := pipelines.ListAzureServiceConnections(c.Request.Context(), adoCred(token, adoBearerMethod(src.AuthMethod)), src.Organization, *src.Project)
 		if err != nil {
 			c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
 			return
@@ -574,7 +809,7 @@ func (h *CISourceHandlers) CreateSourcePipeline() gin.HandlerFunc {
 		if !strings.HasPrefix(yamlPath, "/") {
 			yamlPath = "/" + yamlPath
 		}
-		ref, err := pipelines.CreateAzurePipeline(c.Request.Context(), adoCred(token, src.AuthMethod == "app"),
+		ref, err := pipelines.CreateAzurePipeline(c.Request.Context(), adoCred(token, adoBearerMethod(src.AuthMethod)),
 			src.Organization, *src.Project, strings.TrimSpace(req.Name), yamlPath, c.Param("repo"))
 		if err != nil {
 			c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
@@ -622,7 +857,7 @@ func resolvePipelineToken(ctx context.Context, ciRepo *repositories.CISourceRepo
 	if tokErr != nil {
 		return "", false, tokErr
 	}
-	return tok, src.AuthMethod == "app", nil
+	return tok, adoBearerMethod(src.AuthMethod), nil
 }
 
 // callbackLooksUnreachable reports whether a callback base URL is unlikely to be
@@ -750,7 +985,7 @@ func (h *CISourceHandlers) SetupSourceWorkflow() gin.HandlerFunc {
 				c.JSON(http.StatusBadRequest, gin.H{"error": "azure_devops source has no project"})
 				return
 			}
-			result, err = pipelines.SetupAzureWorkflow(c.Request.Context(), adoCred(token, src.AuthMethod == "app"), src.Organization, *src.Project, repo, files)
+			result, err = pipelines.SetupAzureWorkflow(c.Request.Context(), adoCred(token, adoBearerMethod(src.AuthMethod)), src.Organization, *src.Project, repo, files)
 		case "github_actions":
 			result, err = pipelines.SetupGitHubWorkflow(c.Request.Context(), token, src.Organization, repo, files)
 		default:
@@ -796,7 +1031,7 @@ func (h *CISourceHandlers) GetSourcePRState() gin.HandlerFunc {
 				c.JSON(http.StatusBadRequest, gin.H{"error": "azure_devops source has no project"})
 				return
 			}
-			state, err = pipelines.AzurePRState(c.Request.Context(), adoCred(token, src.AuthMethod == "app"), src.Organization, *src.Project, repo, prID)
+			state, err = pipelines.AzurePRState(c.Request.Context(), adoCred(token, adoBearerMethod(src.AuthMethod)), src.Organization, *src.Project, repo, prID)
 		case "github_actions":
 			state, err = pipelines.GitHubPRState(c.Request.Context(), token, src.Organization, repo, prID)
 		default:
