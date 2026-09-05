@@ -255,6 +255,29 @@ certificate acts as, confirm they hold a carrier row (`GET
 mapping. Removing `admin` from the mapping is also a complete answer if the
 certificate did not need platform-wide reach.
 
+## One-time notice: `drift_runs` gains two indexes on upgrade
+
+Migration `000037_drift_runs_batch` adds `batch_id`/`ci_run_id`/`ci_run_url`
+(nullable, no default — catalog-only, no table rewrite) plus two plain
+`CREATE INDEX` statements. golang-migrate runs each migration file as one exec,
+and PostgreSQL runs a multi-statement exec inside an implicit transaction, so
+`CREATE INDEX CONCURRENTLY` — which cannot run inside a transaction — is not an
+option unless it is the only statement in its own file.
+
+For most installs this is a non-event: `drift_runs` is small and a plain
+`CREATE INDEX` takes a brief `SHARE` lock that blocks writes for the build's
+duration only. An operator with a **very large `drift_runs` (over roughly one
+million rows)** should pre-create both indexes `CONCURRENTLY` by hand before
+rolling this release, so the migration's own `CREATE INDEX IF NOT EXISTS` finds
+them already built and does nothing:
+
+```sql
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_drift_runs_batch
+    ON drift_runs (batch_id) WHERE batch_id IS NOT NULL;
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_drift_runs_state_created
+    ON drift_runs (source_id, state_key, created_at DESC);
+```
+
 ## Version pinning
 
 Always pin image tags in production (`v1.0.0`, never `latest`); the chart's
