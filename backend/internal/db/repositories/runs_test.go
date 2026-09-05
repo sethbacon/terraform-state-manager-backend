@@ -3,6 +3,7 @@ package repositories
 import (
 	"database/sql"
 	"testing"
+	"time"
 
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
 
@@ -160,6 +161,76 @@ func TestDriftList_FilterSourceState(t *testing.T) {
 		WithArgs("s1", "app.tfstate", 50, 0).WillReturnRows(driftRow(""))
 	if _, err := r.List(ctx, 0, 0, DriftRunFilter{SourceID: "s1", StateKey: "app.tfstate"}); err != nil {
 		t.Fatalf("List(source+state): %v", err)
+	}
+}
+
+// TestDriftList_FilterSince pins the Phase 4a time-window filter the drift
+// summary's runs_24h breakdown reuses List/CountRuns' shared builder for,
+// rather than a bespoke query: "AND created_at >= $n" binds after every other
+// filter, same as the rest of driftRunFilterClause.
+func TestDriftList_FilterSince(t *testing.T) {
+	db, mock := newMock(t)
+	r := NewDriftRepository(db)
+	since := time.Date(2026, 9, 3, 0, 0, 0, 0, time.UTC)
+
+	mock.ExpectQuery(`SELECT .+ FROM drift_runs WHERE 1=1 AND status = \$1 AND created_at >= \$2 ORDER BY created_at DESC LIMIT`).
+		WithArgs("completed", since, 50, 0).WillReturnRows(driftRow(""))
+	if _, err := r.List(ctx, 0, 0, DriftRunFilter{Status: "completed", Since: &since}); err != nil {
+		t.Fatalf("List(Since): %v", err)
+	}
+
+	mock.ExpectQuery(`SELECT COUNT\(\*\) FROM drift_runs WHERE 1=1 AND created_at >= \$1`).
+		WithArgs(since).WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(2))
+	if n, err := r.CountRuns(ctx, DriftRunFilter{Since: &since}); err != nil || n != 2 {
+		t.Fatalf("CountRuns(Since): %v n=%d", err, n)
+	}
+}
+
+// TestLatestPerState_DistinctOn pins the DISTINCT ON (state_key) shape the
+// coverage endpoint joins against: only the newest run per state_key, for one
+// source, keyed for a Go-side map lookup.
+func TestLatestPerState_DistinctOn(t *testing.T) {
+	db, mock := newMock(t)
+	r := NewDriftRepository(db)
+
+	mock.ExpectQuery(`SELECT DISTINCT ON \(state_key\) .+ FROM drift_runs WHERE source_id = \$1 ORDER BY state_key, created_at DESC`).
+		WithArgs("s1").WillReturnRows(driftRow(""))
+	out, err := r.LatestPerState(ctx, "s1")
+	if err != nil {
+		t.Fatalf("LatestPerState: %v", err)
+	}
+	if len(out) != 1 || out["app.tfstate"].ID != "d1" {
+		t.Fatalf("LatestPerState = %+v, want one row keyed by state_key", out)
+	}
+}
+
+// TestPruneRuns_KeepsNewestPerState mirrors StateEditRepository.PruneBackups'
+// window pattern exactly (partition by source_id, state_key; keep floor before
+// the age cap) -- deliberately the same shape, not a second pruning idiom.
+func TestPruneRuns_KeepsNewestPerState(t *testing.T) {
+	db, mock := newMock(t)
+	r := NewDriftRepository(db)
+
+	mock.ExpectExec(`DELETE FROM drift_runs r\s+USING \(\s*SELECT id, row_number\(\) OVER \(\s*PARTITION BY source_id, state_key ORDER BY created_at DESC\s*\) AS rn\s+FROM drift_runs\s*\) w\s+WHERE r\.id = w\.id\s+AND w\.rn > \$1\s+AND r\.created_at < now\(\) - make_interval\(secs => \$2\)`).
+		WithArgs(20, (90 * 24 * time.Hour).Seconds()).
+		WillReturnResult(sqlmock.NewResult(0, 7))
+	n, err := r.PruneRuns(ctx, 20, 90*24*time.Hour)
+	if err != nil || n != 7 {
+		t.Fatalf("PruneRuns: %v n=%d", err, n)
+	}
+}
+
+// TestPruneRuns_RejectsUnsafeKeep mirrors PruneBackups' own guard: a zero keep
+// floor would turn the age cap into a purge that can erase a state's only
+// drift-run history.
+func TestPruneRuns_RejectsUnsafeKeep(t *testing.T) {
+	db, _ := newMock(t)
+	r := NewDriftRepository(db)
+	if _, err := r.PruneRuns(ctx, 0, time.Hour); err == nil {
+		t.Error("PruneRuns must reject a keep floor of 0")
+	}
+	if _, err := r.PruneRuns(ctx, 1, 0); err == nil {
+		t.Error("PruneRuns must reject a non-positive max age")
 	}
 }
 

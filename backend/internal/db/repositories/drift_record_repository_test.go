@@ -180,6 +180,88 @@ func TestDriftRecordRepository_ListAndCounts(t *testing.T) {
 	}
 }
 
+// TestLiveByState pins the Phase 4a coverage join: only NON-resolved records for
+// one source, keyed by state_key so the handler can look one up per StateRef
+// without a second round trip.
+func TestLiveByState(t *testing.T) {
+	db, mock := newMock(t)
+	r := NewDriftRecordRepository(db)
+
+	mock.ExpectQuery(`FROM drift_records WHERE source_id = \$1 AND status <> 'resolved'`).
+		WithArgs("s1").WillReturnRows(driftRecordRow("r1", "open"))
+	out, err := r.LiveByState(ctx, "s1")
+	if err != nil {
+		t.Fatalf("LiveByState: %v", err)
+	}
+	if len(out) != 1 || out["app.tfstate"].ID != "r1" {
+		t.Fatalf("LiveByState = %+v, want one row keyed by state_key", out)
+	}
+}
+
+// TestPruneResolved pins the Phase 4a resolved-record sweep: an age-only
+// delete (no keep floor, unlike PruneRuns/PruneBackups) since a resolved
+// record has no "current" restore point to protect -- each one is already its
+// own closed history entry.
+func TestPruneResolved(t *testing.T) {
+	db, mock := newMock(t)
+	r := NewDriftRecordRepository(db)
+
+	mock.ExpectExec(`DELETE FROM drift_records WHERE status='resolved' AND resolved_at < now\(\) - make_interval\(secs => \$1\)`).
+		WithArgs((180 * 24 * time.Hour).Seconds()).
+		WillReturnResult(sqlmock.NewResult(0, 4))
+	n, err := r.PruneResolved(ctx, 180*24*time.Hour)
+	if err != nil || n != 4 {
+		t.Fatalf("PruneResolved: %v n=%d", err, n)
+	}
+
+	if _, err := r.PruneResolved(ctx, 0); err == nil {
+		t.Error("PruneResolved must reject a non-positive max age")
+	}
+}
+
+// TestCountOpenBySeverity pins the tsm_drift_records_open{severity} gauge's
+// query -- the metric Phase 2 deferred and this phase implements.
+func TestCountOpenBySeverity(t *testing.T) {
+	db, mock := newMock(t)
+	r := NewDriftRecordRepository(db)
+
+	mock.ExpectQuery(`SELECT severity, COUNT\(\*\) FROM drift_records WHERE status='open' GROUP BY severity`).
+		WillReturnRows(sqlmock.NewRows([]string{"severity", "count"}).AddRow("critical", 2).AddRow("warning", 5))
+	counts, err := r.CountOpenBySeverity(ctx)
+	if err != nil || counts["critical"] != 2 || counts["warning"] != 5 {
+		t.Fatalf("CountOpenBySeverity: %v %+v", err, counts)
+	}
+}
+
+// TestCountsBySource pins the drift summary's per-source breakdown: only LIVE
+// (non-resolved) records are grouped, and the join brings in the source name.
+func TestCountsBySource(t *testing.T) {
+	db, mock := newMock(t)
+	r := NewDriftRecordRepository(db)
+
+	mock.ExpectQuery(`FROM drift_records r\s+JOIN state_sources s ON s\.id = r\.source_id\s+WHERE r\.status <> 'resolved'\s+GROUP BY r\.source_id, s\.name`).
+		WillReturnRows(sqlmock.NewRows([]string{"source_id", "source_name", "open", "acknowledged", "critical"}).
+			AddRow("s1", "prod", 2, 1, 1))
+	out, err := r.CountsBySource(ctx)
+	if err != nil || len(out) != 1 || out[0].SourceID != "s1" || out[0].Open != 2 || out[0].Critical != 1 {
+		t.Fatalf("CountsBySource: %v %+v", err, out)
+	}
+}
+
+// TestCountIncomplete pins the drift summary's incomplete_records field: a
+// live record whose check did not finish (unparseable or truncated).
+func TestCountIncomplete(t *testing.T) {
+	db, mock := newMock(t)
+	r := NewDriftRecordRepository(db)
+
+	mock.ExpectQuery(`SELECT COUNT\(\*\) FROM drift_records WHERE status <> 'resolved' AND \(unparseable OR truncated\)`).
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(3))
+	n, err := r.CountIncomplete(ctx)
+	if err != nil || n != 3 {
+		t.Fatalf("CountIncomplete: %v n=%d", err, n)
+	}
+}
+
 func TestDriftRecordRepository_AcknowledgeAndResolve(t *testing.T) {
 	db, mock := newMock(t)
 	r := NewDriftRecordRepository(db)

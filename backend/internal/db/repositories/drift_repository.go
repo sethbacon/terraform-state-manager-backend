@@ -175,6 +175,10 @@ type DriftRunFilter struct {
 	BatchID  string
 	SourceID string
 	StateKey string
+	// Since narrows to runs created at or after the given time (Phase 4a's
+	// drift-summary "runs in the last 24h" breakdown). nil means no lower
+	// bound, exactly like every other zero field on this filter.
+	Since *time.Time
 }
 
 // driftRunFilterClause renders f as a `AND …`-prefixed SQL fragment, appending
@@ -199,6 +203,10 @@ func driftRunFilterClause(args []any, f DriftRunFilter) (string, []any) {
 	if f.StateKey != "" {
 		args = append(args, f.StateKey)
 		clause += fmt.Sprintf(" AND state_key = $%d", len(args)) // #nosec G202 -- placeholder only; value bound via args
+	}
+	if f.Since != nil {
+		args = append(args, *f.Since)
+		clause += fmt.Sprintf(" AND created_at >= $%d", len(args)) // #nosec G202 -- placeholder only; value bound via args
 	}
 	return clause, args
 }
@@ -332,6 +340,65 @@ func (r *DriftRepository) UpdateResult(ctx context.Context, id, status string, a
 		id, status, added, changed, destroyed, drifted, summaryArg, detail,
 		marks.Truncated, marks.OmittedEntries, marks.OmittedAttrs, marks.Unparseable, marks.Unmasked)
 	return err
+}
+
+// LatestPerState returns, for one source, the newest drift run for each
+// state_key it has ever dispatched -- keyed by state_key so the Phase 4a
+// coverage endpoint can join it against the connector's live state listing in
+// Go without a second round trip per state. Unscoped: callers join it against
+// a source_id that has already been verified in scope (LatestPerStateInScope),
+// exactly as List/CountRuns are unscoped beneath their own InScope twins.
+func (r *DriftRepository) LatestPerState(ctx context.Context, sourceID string) (map[string]DriftRun, error) {
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT DISTINCT ON (state_key) `+driftColumns+`
+		FROM drift_runs WHERE source_id = $1
+		ORDER BY state_key, created_at DESC`, sourceID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]DriftRun{}
+	for rows.Next() {
+		d, err := scanDrift(rows)
+		if err != nil {
+			return nil, err
+		}
+		d.CallbackToken = "" // never expose in a listing-shaped read
+		out[d.StateKey] = *d
+	}
+	return out, rows.Err()
+}
+
+// PruneRuns bounds drift_runs (Phase 4a, #567): it deletes runs older than
+// maxAge EXCEPT the newest keepPerState per (source_id, state_key). Copies
+// StateEditRepository.PruneBackups' window pattern exactly -- same keep-floor-
+// before-age-cap shape, same guard against a zero floor turning the sweep into
+// a purge that erases a state's entire drift-run history -- rather than a
+// second pruning idiom. Returns the number of runs removed.
+func (r *DriftRepository) PruneRuns(ctx context.Context, keepPerState int, maxAge time.Duration) (int64, error) {
+	if keepPerState < 1 {
+		return 0, fmt.Errorf("drift run retention keep must be >= 1, got %d", keepPerState)
+	}
+	if maxAge <= 0 {
+		return 0, fmt.Errorf("drift run retention max age must be > 0, got %s", maxAge)
+	}
+	res, err := r.db.ExecContext(ctx, `
+		DELETE FROM drift_runs r
+		USING (
+			SELECT id, row_number() OVER (
+				PARTITION BY source_id, state_key ORDER BY created_at DESC
+			) AS rn
+			FROM drift_runs
+		) w
+		WHERE r.id = w.id
+		  AND w.rn > $1
+		  AND r.created_at < now() - make_interval(secs => $2)`,
+		keepPerState, maxAge.Seconds())
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
 }
 
 // ListExpiredDispatched returns dispatched runs created before cutoff — runs
