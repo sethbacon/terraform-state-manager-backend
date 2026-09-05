@@ -56,6 +56,21 @@ type Reconciler struct {
 	now      func() time.Time // injected so tests control the cutoff without sleeping
 	stopCh   chan struct{}
 	logger   *slog.Logger
+
+	// records is optional (Phase 4a): when attached, every tick refreshes
+	// tsm_drift_records_open{severity} from it, and -- ONLY when retention is
+	// also enabled -- prunes resolved drift_records. Nil is the pre-Phase-4a
+	// behavior: no extra queries, exactly as every existing caller of New
+	// already assumes.
+	records *repositories.DriftRecordRepository
+	// retentionEnabled gates the prune sweep independently of records being
+	// attached, so a deployment can have the open-records gauge without the
+	// destructive prune (and vice versa is meaningless -- EnableRetention
+	// documents that it needs AttachDriftRecords for the records half).
+	retentionEnabled        bool
+	retentionKeepPerState   int
+	retentionMaxAge         time.Duration
+	retentionResolvedMaxAge time.Duration
 }
 
 // New constructs a Reconciler. ttl is how long a run may sit dispatched before it
@@ -100,11 +115,86 @@ func (r *Reconciler) Stop() {
 	telemetry.UnregisterWorker("driftreconcile")
 }
 
-// reconcile runs one sweep under a bounded context.
+// AttachDriftRecords wires the drift-record repository the reconciler needs
+// for two Phase 4a refreshes it runs once per tick, alongside the stuck-run
+// expiry above: the tsm_drift_records_open{severity} gauge (Phase 2's own
+// metric list, implemented here) and, only once EnableRetention is also
+// called, the resolved-record prune. Unset, neither runs -- reconcile()
+// behaves exactly as it did before this phase. Call before Start.
+func (r *Reconciler) AttachDriftRecords(records *repositories.DriftRecordRepository) {
+	r.records = records
+}
+
+// EnableRetention turns on the periodic drift_runs/drift_records prune
+// (Phase 4a, #567), copying StateEditRepository.PruneBackups' window pattern
+// via DriftRepository.PruneRuns/DriftRecordRepository.PruneResolved rather
+// than a second pruning idiom. Requires AttachDriftRecords for the resolved-
+// record half; unset, no prune runs -- the wiring layer calls this only when
+// drift_retention.enabled is true, mirroring EnableBackupRetention. Call
+// before Start.
+func (r *Reconciler) EnableRetention(keepPerState int, maxAge, resolvedMaxAge time.Duration) {
+	r.retentionEnabled = true
+	r.retentionKeepPerState = keepPerState
+	r.retentionMaxAge = maxAge
+	r.retentionResolvedMaxAge = resolvedMaxAge
+}
+
+// reconcile runs one sweep under a bounded context: the stuck-run expiry this
+// package exists for, plus the Phase 4a refreshes that ride the same tick when
+// they have been attached/enabled.
 func (r *Reconciler) reconcile() {
 	ctx, cancel := context.WithTimeout(context.Background(), reconcileTimeout)
 	defer cancel()
 	r.reconcileOnce(ctx)
+	r.refreshOpenRecordsMetric(ctx)
+	r.pruneRetention(ctx)
+}
+
+// refreshOpenRecordsMetric samples tsm_drift_records_open{severity}. A no-op
+// when no records repository is attached, and a query failure is logged and
+// swallowed like every other sweep step here -- a stale metric is not worth
+// failing the tick over.
+func (r *Reconciler) refreshOpenRecordsMetric(ctx context.Context) {
+	if r.records == nil {
+		return
+	}
+	counts, err := r.records.CountOpenBySeverity(ctx)
+	if err != nil {
+		r.logger.Error("failed to refresh open drift-record metric", "error", err)
+		return
+	}
+	// Both severities DriftSeverity ever assigns are set explicitly, including
+	// zero, so a severity that drops to none this tick does not leave the
+	// gauge at a stale prior value -- CountOpenBySeverity's GROUP BY simply
+	// omits a severity with no open records, it does not report it as zero.
+	for _, severity := range []string{"critical", "warning"} {
+		telemetry.SetDriftRecordsOpen(severity, counts[severity])
+	}
+}
+
+// pruneRetention bounds drift_runs and resolved drift_records once per tick,
+// only when EnableRetention has been called. A no-op otherwise (or without
+// AttachDriftRecords for the records half), and a failure on one table is
+// logged and does not skip the other.
+func (r *Reconciler) pruneRetention(ctx context.Context) {
+	if !r.retentionEnabled {
+		return
+	}
+	if n, err := r.repo.PruneRuns(ctx, r.retentionKeepPerState, r.retentionMaxAge); err != nil {
+		r.logger.Error("failed to prune drift runs", "error", err)
+	} else if n > 0 {
+		r.logger.Info("pruned drift runs",
+			"deleted", n, "keep_per_state", r.retentionKeepPerState, "max_age", r.retentionMaxAge.String())
+	}
+	if r.records == nil {
+		return
+	}
+	if n, err := r.records.PruneResolved(ctx, r.retentionResolvedMaxAge); err != nil {
+		r.logger.Error("failed to prune resolved drift records", "error", err)
+	} else if n > 0 {
+		r.logger.Info("pruned resolved drift records",
+			"deleted", n, "max_age", r.retentionResolvedMaxAge.String())
+	}
 }
 
 // reconcileOnce fails every dispatched run older than the TTL and fires its

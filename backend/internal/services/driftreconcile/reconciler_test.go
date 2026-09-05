@@ -2,6 +2,7 @@ package driftreconcile
 
 import (
 	"context"
+	"log/slog"
 	"strings"
 	"sync"
 	"testing"
@@ -12,6 +13,19 @@ import (
 	"github.com/terraform-state-manager/terraform-state-manager/internal/db/repositories"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/testsupport"
 )
+
+// captureLogs swaps in a buffering slog handler as the process default and
+// restores the previous one on cleanup. Reconciler.logger is built from
+// slog.With(...) in New, which resolves slog.Default() at construction time,
+// so this must be called BEFORE constructing the Reconciler under test.
+func captureLogs(t *testing.T) *strings.Builder {
+	t.Helper()
+	var buf strings.Builder
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	return &buf
+}
 
 // recordingNotifier captures the failure alerts the reconciler fires.
 // testRunOrganization is the organization the seeded run belongs to.
@@ -144,6 +158,127 @@ func TestReconciler_QueryFailureIsNonFatal(t *testing.T) {
 	r.reconcileOnce(context.Background())
 	if n.count() != 0 {
 		t.Errorf("nothing must fire when the select fails, got %d", n.count())
+	}
+}
+
+// newReconcilerWithRecords is newReconciler plus a DriftRecordRepository
+// attached over the SAME sqlmock database, so a test can expect queries
+// against both drift_runs (via the Reconciler's own repo) and drift_records
+// (via AttachDriftRecords) on one shared mock.
+func newReconcilerWithRecords(t *testing.T, n FailureNotifier) (*Reconciler, sqlmock.Sqlmock) {
+	t.Helper()
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+	r := New(repositories.NewDriftRepository(db), n, 2*time.Hour, 5*time.Minute)
+	r.now = func() time.Time { return frozenNow }
+	r.AttachDriftRecords(repositories.NewDriftRecordRepository(db))
+	return r, mock
+}
+
+// TestReconciler_RefreshesOpenRecordsMetric pins Phase 4a's leftover Phase 2
+// metric: once records are attached, EVERY tick queries
+// CountOpenBySeverity to refresh tsm_drift_records_open{severity},
+// unconditionally (no retention config required).
+func TestReconciler_RefreshesOpenRecordsMetric(t *testing.T) {
+	n := &recordingNotifier{}
+	r, mock := newReconcilerWithRecords(t, n)
+
+	mock.ExpectQuery("SELECT .+ FROM drift_runs WHERE status='dispatched'").
+		WillReturnRows(sqlmock.NewRows(testsupport.DriftRunColumns))
+	mock.ExpectQuery(`SELECT severity, COUNT\(\*\) FROM drift_records WHERE status='open' GROUP BY severity`).
+		WillReturnRows(sqlmock.NewRows([]string{"severity", "count"}).AddRow("critical", 2).AddRow("warning", 5))
+
+	r.reconcile()
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("the metric refresh must query the repository every tick: %v", err)
+	}
+}
+
+// TestReconciler_NoExtraQueriesWithoutAttachment: a Reconciler built the old
+// way (no AttachDriftRecords/EnableRetention call) behaves EXACTLY as before —
+// no extra queries on tick, same as every existing reconciler_test
+// expectation set already assumes.
+func TestReconciler_NoExtraQueriesWithoutAttachment(t *testing.T) {
+	n := &recordingNotifier{}
+	r, mock := newReconciler(t, n)
+
+	mock.ExpectQuery("SELECT .+ FROM drift_runs WHERE status='dispatched'").
+		WillReturnRows(sqlmock.NewRows(testsupport.DriftRunColumns))
+
+	r.reconcile()
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("no records repo attached must mean no extra queries: %v", err)
+	}
+}
+
+// TestReconciler_PrunesOnTickWhenRetentionEnabled pins the Phase 4a retention
+// sweep: once EnableRetention is called, every tick also prunes drift_runs and
+// resolved drift_records -- on the EXISTING reconciler tick, no new goroutine.
+func TestReconciler_PrunesOnTickWhenRetentionEnabled(t *testing.T) {
+	n := &recordingNotifier{}
+	r, mock := newReconcilerWithRecords(t, n)
+	r.EnableRetention(20, 90*24*time.Hour, 180*24*time.Hour)
+
+	mock.ExpectQuery("SELECT .+ FROM drift_runs WHERE status='dispatched'").
+		WillReturnRows(sqlmock.NewRows(testsupport.DriftRunColumns))
+	mock.ExpectQuery(`SELECT severity, COUNT\(\*\) FROM drift_records WHERE status='open' GROUP BY severity`).
+		WillReturnRows(sqlmock.NewRows([]string{"severity", "count"}))
+	mock.ExpectExec(`DELETE FROM drift_runs r`).
+		WithArgs(20, (90 * 24 * time.Hour).Seconds()).
+		WillReturnResult(sqlmock.NewResult(0, 3))
+	mock.ExpectExec(`DELETE FROM drift_records WHERE status='resolved'`).
+		WithArgs((180 * 24 * time.Hour).Seconds()).
+		WillReturnResult(sqlmock.NewResult(0, 9))
+
+	r.reconcile()
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("retention must prune both tables via the repositories: %v", err)
+	}
+}
+
+// TestReconciler_NoPruneWhenRetentionDisabled: records attached (for the open-
+// records metric) but EnableRetention never called -- no prune queries.
+//
+// The retention window fields are poked directly to valid, non-zero values
+// (this test is IN package driftreconcile, so it can) rather than left at
+// their zero defaults. Left at zero, DriftRepository.PruneRuns and
+// DriftRecordRepository.PruneResolved would refuse the call themselves before
+// any statement reached the mock, which would make this test pass whether or
+// not the reconciler's OWN retentionEnabled gate exists. Forcing valid values
+// means the only thing standing between this tick and two DELETEs is that
+// gate.
+func TestReconciler_NoPruneWhenRetentionDisabled(t *testing.T) {
+	logs := captureLogs(t)
+	n := &recordingNotifier{}
+	r, mock := newReconcilerWithRecords(t, n)
+	r.retentionKeepPerState = 20
+	r.retentionMaxAge = 90 * 24 * time.Hour
+	r.retentionResolvedMaxAge = 180 * 24 * time.Hour
+
+	mock.ExpectQuery("SELECT .+ FROM drift_runs WHERE status='dispatched'").
+		WillReturnRows(sqlmock.NewRows(testsupport.DriftRunColumns))
+	mock.ExpectQuery(`SELECT severity, COUNT\(\*\) FROM drift_records WHERE status='open' GROUP BY severity`).
+		WillReturnRows(sqlmock.NewRows([]string{"severity", "count"}))
+
+	r.reconcile()
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("no EnableRetention call must mean no prune queries even with a valid window configured: %v", err)
+	}
+	// The window fields above are deliberately non-zero, so PruneRuns/
+	// PruneResolved's own input guards cannot be what is stopping this: an
+	// attempted-but-unregistered DELETE would surface as a logged "failed to
+	// prune" error (sqlmock rejects a query it was never told to expect), so
+	// its absence is the actual proof the reconciler's retentionEnabled gate,
+	// not the repository's argument validation, is what kept this tick clean.
+	if strings.Contains(logs.String(), "failed to prune") {
+		t.Errorf("a prune was attempted even though EnableRetention was never called: %s", logs.String())
 	}
 }
 

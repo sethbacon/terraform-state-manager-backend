@@ -195,6 +195,21 @@ func (d backgroundWorkerDeps) startWorkers(syncer *statesync.Syncer) (stop func(
 		driftFailureNotifier{drift: d.drift},
 		d.cfg.Drift.RunTTL, d.cfg.Drift.ReconcileInterval,
 	)
+	// tsm_drift_records_open{severity} (Phase 2's own metric list, implemented
+	// in Phase 4a): attached unconditionally, independent of retention below,
+	// so the gauge is populated even on a deployment that never touches
+	// drift_retention config.
+	reconciler.AttachDriftRecords(repositories.NewDriftRecordRepository(d.database))
+	// Bound drift_runs/drift_records (Phase 4a, #567), on the SAME leader-gated
+	// periodic tick as the reconciler above -- no new goroutine. Gated on
+	// drift_retention.enabled exactly as BackupRetention is gated above.
+	if d.cfg.DriftRetention.Enabled {
+		reconciler.EnableRetention(
+			d.cfg.DriftRetention.KeepPerState,
+			d.cfg.DriftRetention.MaxAge,
+			d.cfg.DriftRetention.ResolvedMaxAge,
+		)
+	}
 	reconciler.Start()
 	// Same backstop for version-lab health runs, which carry the identical
 	// stuck-dispatched failure mode in a separate table and reuse the drift
