@@ -33,6 +33,13 @@ of `tsm_drift_dispatch_total{result="deferred"}`, means due work is arriving
 faster than the configured cap can drain it — raise `TSM_DRIFT_MAX_IN_FLIGHT`
 or the shared agent pool's capacity.
 
+Drift dashboard (Phase 4a fleet-scale drift): `tsm_drift_records_open{severity}`
+(gauge — open drift records right now, by `critical`/`warning` severity, as
+last sampled by the drift reconciler's tick — refreshed every
+`TSM_DRIFT_RECONCILE_INTERVAL` alongside the stuck-run sweep, deployment-wide
+rather than per-organization since this is an operational gauge, not a
+response to any tenant's request).
+
 - Kubernetes: `serviceMonitor.enabled=true` (+ `prometheusRule.enabled`,
   `grafanaDashboard.enabled`) in the chart; NetworkPolicy already admits the
   `monitoring` namespace on 9090.
