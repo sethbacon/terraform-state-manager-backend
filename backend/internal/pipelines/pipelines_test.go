@@ -14,10 +14,10 @@ func TestGitHubConfigFromMap(t *testing.T) {
 
 func TestDispatchGitHubValidates(t *testing.T) {
 	ctx := context.Background()
-	if err := DispatchGitHubDrift(ctx, "tok", GitHubConfig{Repo: "r", WorkflowID: "w"}, "", DriftInputs{}); err == nil {
+	if _, err := DispatchGitHubDrift(ctx, "tok", GitHubConfig{Repo: "r", WorkflowID: "w"}, "", DriftInputs{}); err == nil {
 		t.Error("expected error for missing owner")
 	}
-	if err := DispatchGitHubDrift(ctx, "", GitHubConfig{Owner: "o", Repo: "r", WorkflowID: "w"}, "", DriftInputs{}); err == nil {
+	if _, err := DispatchGitHubDrift(ctx, "", GitHubConfig{Owner: "o", Repo: "r", WorkflowID: "w"}, "", DriftInputs{}); err == nil {
 		t.Error("expected error for missing token")
 	}
 }
@@ -28,10 +28,10 @@ func TestAzureDevOpsConfigAndValidation(t *testing.T) {
 		t.Fatalf("unexpected config: %+v", cfg)
 	}
 	ctx := context.Background()
-	if err := DispatchAzureDevOpsDrift(ctx, ADOPAT("pat"), AzureDevOpsConfig{Project: "p", PipelineID: "1"}, "", DriftInputs{}); err == nil {
+	if _, err := DispatchAzureDevOpsDrift(ctx, ADOPAT("pat"), AzureDevOpsConfig{Project: "p", PipelineID: "1"}, "", DriftInputs{}); err == nil {
 		t.Error("expected error for missing organization")
 	}
-	if err := DispatchAzureDevOpsDrift(ctx, ADOPAT(""), AzureDevOpsConfig{Organization: "o", Project: "p", PipelineID: "1"}, "", DriftInputs{}); err == nil {
+	if _, err := DispatchAzureDevOpsDrift(ctx, ADOPAT(""), AzureDevOpsConfig{Organization: "o", Project: "p", PipelineID: "1"}, "", DriftInputs{}); err == nil {
 		t.Error("expected error for missing pat")
 	}
 }

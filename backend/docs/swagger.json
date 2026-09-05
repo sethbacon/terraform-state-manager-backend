@@ -2445,7 +2445,7 @@
                         "CookieAuth": []
                     }
                 ],
-                "description": "Drift runs newest-first. Each run carries the drift contract's completeness markers (truncated, omitted_entries, omitted_attrs, unparseable, unmasked) describing what that run's own check did not do — zero counts alone cannot distinguish a verified-clean run from one that never finished checking.",
+                "description": "Drift runs newest-first. Each run carries the drift contract's completeness markers (truncated, omitted_entries, omitted_attrs, unparseable, unmasked) describing what that run's own check did not do — zero counts alone cannot distinguish a verified-clean run from one that never finished checking. batch_id matches either a fan-out batch's shared id or a single run's own id, so a schedule's last_run_id works as a filter whether or not it fanned.",
                 "produces": [
                     "application/json"
                 ],
@@ -2458,6 +2458,24 @@
                         "type": "string",
                         "description": "filter by status (dispatched|running|completed|failed)",
                         "name": "status",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "filter by batch id (or a single run's own id)",
+                        "name": "batch_id",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "filter by state source id",
+                        "name": "source_id",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "filter by state key",
+                        "name": "state_key",
                         "in": "query"
                     },
                     {
@@ -2492,7 +2510,7 @@
                         "CookieAuth": []
                     }
                 ],
-                "description": "Dispatches a terraform-plan drift run on the chosen CI pipeline and records it. Inputs are validated server-side. Requires state:drift.",
+                "description": "Dispatches a terraform-plan drift run on the chosen CI pipeline and records it. Inputs are validated server-side. Requires state:drift. A request naming 2+ items in `targets` plans them all in one CI job (requires the pipeline connection's config.fan_out=true) and returns {batch_id, runs}; omitting `targets` (or naming exactly one) is the legacy single-target shape and returns a single run.",
                 "consumes": [
                     "application/json"
                 ],
@@ -2504,8 +2522,8 @@
                 ],
                 "summary": "Dispatch drift run",
                 "responses": {
-                    "200": {
-                        "description": "OK",
+                    "202": {
+                        "description": "Accepted",
                         "schema": {
                             "type": "object",
                             "additionalProperties": true
@@ -2513,6 +2531,20 @@
                     },
                     "400": {
                         "description": "Bad Request",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "502": {
+                        "description": "Bad Gateway",
                         "schema": {
                             "type": "object",
                             "additionalProperties": true

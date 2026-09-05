@@ -46,10 +46,13 @@ func (d driftDispatcher) Dispatch(ctx context.Context, targetType string, target
 		if uErr := json.Unmarshal(targetConfig, &t); uErr != nil {
 			return "", "failed", fmt.Errorf("invalid drift target config: %w", uErr)
 		}
-		run, dErr := d.drift.dispatchDrift(ctx, t, actor, systemAuthority(derived))
+		batch, dErr := d.drift.dispatchDriftBatch(ctx, t, actor, systemAuthority(derived))
 		id := ""
-		if run != nil {
-			id = run.ID
+		if batch != nil {
+			// The run id when the schedule never fanned out, the batch uuid when
+			// it did -- either way a real, non-empty id RecordRun can store as
+			// last_run_id (drift-fleet-scale.md Phase 1, task 1.3).
+			id = batch.BatchID
 		}
 		if dErr != nil {
 			return id, "failed", dErr
@@ -124,7 +127,12 @@ func (req *scheduleRequest) validate() error {
 	if t.PipelineConnectionID == "" {
 		return fmt.Errorf("target_config.pipeline_connection_id is required")
 	}
-	if err := validatePipelineInputs(t.WorkingDir, t.RepoRef, "", "", nil, nil); err != nil {
+	// repo_ref is shared by the whole schedule (not per-item); validated once,
+	// here, rather than once per item inside validateDriftTargets.
+	if err := validatePipelineInputs("", t.RepoRef, "", "", nil, nil); err != nil {
+		return err
+	}
+	if err := validateDriftTargets(t.items()); err != nil {
 		return err
 	}
 	return nil
@@ -403,9 +411,10 @@ func (h *ScheduleHandlers) RunSchedule() gin.HandlerFunc {
 
 // targetReferencesInOrganization enforces the write-side linkage invariant for
 // schedules (#393): every row the target references -- the pipeline connection
-// it fires, and the state source it aims at when one is named -- must belong to
-// organizationID. Writes the refusal itself and reports whether the caller may
-// proceed.
+// it fires, and every item's state source (t.items(), so a fan-out schedule's
+// 2+ targets are each checked, not just a top-level SourceID) -- must belong
+// to organizationID. Writes the refusal itself and reports whether the caller
+// may proceed.
 //
 // The refusals do not say whether an id exists elsewhere: "does not name X in
 // this schedule's organization" covers a typo and a crossing reference in the
@@ -433,8 +442,11 @@ func (h *ScheduleHandlers) targetReferencesInOrganization(c *gin.Context, target
 			return false
 		}
 	}
-	if t.SourceID != "" {
-		src, err := h.sources.GetByIDInScope(c.Request.Context(), t.SourceID, orgScope)
+	for _, item := range t.items() {
+		if item.SourceID == "" {
+			continue
+		}
+		src, err := h.sources.GetByIDInScope(c.Request.Context(), item.SourceID, orgScope)
 		if err != nil {
 			serverError(c, err, "failed to verify the schedule's target source")
 			return false
