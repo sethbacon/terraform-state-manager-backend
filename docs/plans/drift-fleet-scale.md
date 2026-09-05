@@ -1,6 +1,9 @@
 # Plan: TSM as the Fleet Drift Dashboard + Scheduler (repo-level fan-out)
 
-> **Status:** Proposed — plan approved for writing 2026-09-04; **execution not started**
+> **Status:** **Partially implemented 2026-09-05.** Phases 1, 1b, 2 and 4a landed in
+> sethbacon/terraform-state-manager-backend#569; Phase 4b in sethbacon/terraform-state-manager-frontend#416.
+> Phase 0 (ops), Phase 3 (tooling) and Phase 5 (contract) are **not started**.
+> See "Implementation status" below before working from this document.
 > **Repo:** `terraform-state-manager-backend` (primary) + `terraform-state-manager-frontend`,
 > the Brunswick drift templates (operator data in the TSM template registry), the Brunswick
 > onboarding tooling, and — Phase 5 only — `terraform-drift-contract`, `driftingest`,
@@ -13,6 +16,73 @@
 > **Audience:** implementing agents with less context. Every task names the files, the
 > shapes, the tests and a "done when". Do not redesign; if a seam listed here has moved,
 > stop and report.
+
+---
+
+## 0. Implementation status (2026-09-05)
+
+| Phase | Status | Where |
+| --- | --- | --- |
+| 0 — Environment prerequisites | **not started** | ops only, no code |
+| 1 — Repo-level fan-out dispatch | **done (backend)** | sethbacon/terraform-state-manager-backend#569 |
+| 1.4 — Brunswick operator templates | **not done** | templates live outside this repo |
+| 1b — Workload Identity | **done** | sethbacon/terraform-state-manager-backend#569 |
+| 2 — Scheduler pacing | **done** | sethbacon/terraform-state-manager-backend#569 |
+| 3 — Discovery-driven onboarding | **not started** | tooling host unreachable |
+| 4a — Dashboard read-path (backend) | **done** | sethbacon/terraform-state-manager-backend#569 |
+| 4b — Dashboard read-path (frontend) | **done** | sethbacon/terraform-state-manager-frontend#416 |
+| 5 — Contract: infra drift vs unapplied | **not started** | sequenced last by design |
+
+### Corrections — this document's §3 anchors were stale within a day
+
+Recorded because §3 presents itself as verified current state, and an implementer
+following it literally would have introduced a security regression.
+
+1. **The tenancy/authorization layer is missing from §3 entirely.** `dispatchDrift` is a
+   method on `*DriftHandlers` carrying an `auth dispatchAuthority` parameter, and
+   `driftDispatcher.Dispatch` carries `derived tenancy.SystemScope` — neither appears in
+   this plan. `dispatch_ownership.go` and `callback_root_scope.go` did not exist when §3
+   was written. **Following §5 Phase 1's stated signatures verbatim would have dropped
+   those parameters**, silently removing the InScope reads that keep a dispatch inside one
+   organization. The implementation preserved them and extended the source check into a
+   per-item loop, so every fan-out target's state source is now scope-verified.
+2. **Migration numbers.** §5 says `000033`/`000034`/`000035`. Those were taken
+   (`organization_partition`, `…_phase4`, `legal_holds`, `group_mappings`). Phase 1 used
+   **`000037`**, Phase 1b **`000038`**. Phase 4a needed no migration at all — the indexes
+   from `000037` and `000029` already serve its queries.
+3. **The coverage floor is 80, not 79.** `.github/workflows/ci.yml` sets `THRESHOLD=80`, a
+   documented ratchet raised on 2026-07-16. Filtered coverage after this work is 80.7 %,
+   so the margin is thin.
+4. **Line numbers throughout §3 are stale** — locate seams by name.
+5. **The two adjacent auth plans were already flipped to `Implemented`** in `3865d03`, the
+   same commit that added this document; §5 Phase 1b's housekeeping item was already done.
+6. **`GET /drift/summary` has no fleet-wide `stale` field**, so §5 Phase 4b's landing-card
+   list could not be built as written. Staleness is per-source on `/drift/coverage`, and
+   computing it fleet-wide would defeat that endpoint's 60 s cache. `in_flight` was
+   substituted.
+
+### Deviations worth knowing
+
+- **Retention** is `AttachDriftRecords`/`EnableRetention` methods on the reconciler,
+  mirroring `Syncer.EnableBackupRetention`, rather than the `Pruner` interface §5 Phase 4a
+  suggests. Same behaviour, existing idiom, no new goroutine.
+- **`createDriftRun` returns `DriftRun | DriftBatch`** — a single run for ≤1 target, a
+  batch for 2+. §5 did not spell the response type out.
+- **Coverage staleness is anchored on `created_at`** (dispatch time), matching the TTL
+  expiry semantics used elsewhere, not `updated_at`.
+
+### Verification gaps — read before rollout
+
+- **Spike 1.0 was never run** (see below). The `fan-out` template's `type: object`
+  coercion assumption is **unverified**; it needs a live ADO org. The documented string
+  fallback remains a small localised change.
+- **No live ADO or GitHub dispatch** was exercised anywhere; CI paths are covered by fake
+  HTTP servers. Workload Identity was verified against the handler's accepted request
+  shape, not a real federated-credential exchange.
+- Phase 4a's four organization-scoped readers **are** proven against real PostgreSQL: each
+  predicate was replaced with a tautology and each test failed by returning the other
+  organization's row. sqlmock alone could not have shown this — it matches query text and
+  never evaluates a predicate.
 
 ---
 
@@ -200,10 +270,17 @@ Phase 5 is independent but sequenced last.
 
 ### Spike results (fill in before Phase 1 code starts)
 
-- [ ] 1.0(a) ADO Runs API coerces a JSON string into a `type: object` parameter: **TBD**
-- [ ] 1.0(b) `${{ each }}` token exposure in the expanded YAML / Parameters view: **TBD**
+- [ ] 1.0(a) ADO Runs API coerces a JSON string into a `type: object` parameter: **STILL TBD**
+- [ ] 1.0(b) `${{ each }}` token exposure in the expanded YAML / Parameters view: **STILL TBD**
 
-### Phase 0 — Environment prerequisites (ops, no code)
+**Neither was run** — both need a live Azure DevOps organization. Phase 1 shipped the
+primary (`type: object`) design anyway, on the explicit decision that the documented
+fallback in 1.0(a) stays a small localised change if the assumption proves false. The
+built-in `fan-out` template and its commit both say so. **Run this spike before any fleet
+rollout**; a `dry_run: true` dispatch against one repo answers (a), and the run's expanded
+YAML answers (b).
+
+### Phase 0 — Environment prerequisites (ops, no code) — NOT STARTED
 
 - [ ] **Dedicated drift agent pool** (e.g. `ubuntu-drift-scale-set`, small SKU, own max),
   referenced via the templates' existing `pool` parameter. Isolates the nightly herd from
@@ -221,7 +298,7 @@ Phase 5 is independent but sequenced last.
 **Done when:** a manual dispatch from TSM to a pipeline on the new pool completes a callback
 with TLS verification on and no host pinning.
 
-### Phase 1 — Repo-level fan-out dispatch (backend + templates)
+### Phase 1 — Repo-level fan-out dispatch (backend + templates) — DONE, except 1.4's Brunswick templates
 
 #### 1.0 Spike (½ day; blocks 1.3/1.4) — one throwaway pipeline, two questions
 
@@ -385,7 +462,7 @@ by hand before upgrading. Update the stale "next migration" note in `CONTRIBUTIN
 `batch_id`, each `completed`/`failed` correctly, `ci_run_url` populated, and a request
 without `targets` produces a byte-identical wire body to today (golden test).
 
-### Phase 1b — Identity between TSM, Azure DevOps and the cloud (no PATs, no per-app rows)
+### Phase 1b — Identity between TSM, Azure DevOps and the cloud (no PATs, no per-app rows) — DONE
 
 **Entity model after Phase 1 (answers the "a source per app" objection):**
 
@@ -490,7 +567,7 @@ Entra/Workload-Identity option for the blob connector (mirroring the pipelines'
 "Test connection" passes, a dispatch succeeds with no secret material stored in TSM, and a
 `git grep -i pat` over the Brunswick onboarding scripts finds nothing.
 
-### Phase 2 — Scheduler pacing (backend)
+### Phase 2 — Scheduler pacing (backend) — DONE
 
 - Config: `DriftConfig` += `MaxInFlight int` (`TSM_DRIFT_MAX_IN_FLIGHT`, default `0` =
   unlimited); new `SchedulerConfig{BatchLimit int}` (`TSM_SCHEDULER_BATCH_LIMIT`, default
@@ -514,7 +591,7 @@ Entra/Workload-Identity option for the blob connector (mirroring the pipelines'
 are ever `dispatched|running` at once and all 60 fire within (60/20) × tick with every
 schedule's `last_run_at` advanced exactly once.
 
-### Phase 3 — Discovery-driven bulk onboarding (Brunswick tooling)
+### Phase 3 — Discovery-driven bulk onboarding (Brunswick tooling) — NOT STARTED
 
 New `C:\dev\ado\code\shared\scripts\python\Azure\migration_scripts\drift\onboard_drift.py`
 (+ `README.md`), dry-run by default, idempotent by name. Reuse `select_repos.py`
@@ -549,7 +626,7 @@ Per repo (input: repo names or `--all-tbd`):
 connections + 3 schedules, `--verify` is clean, and `POST /schedules/{id}/run` on each
 produces one batch with N completed runs.
 
-### Phase 4 — Dashboard read-path
+### Phase 4 — Dashboard read-path — DONE (4a + 4b)
 
 #### 4a Backend
 
@@ -609,7 +686,7 @@ produces one batch with N completed runs.
 schedule, which have not been checked in 24 h, and which last "clean" result was actually
 unparseable — and click through to the ADO run.
 
-### Phase 5 — Contract: separate infra drift from unapplied changes (coordinated, additive)
+### Phase 5 — Contract: separate infra drift from unapplied changes (coordinated, additive) — NOT STARTED
 
 Order is strict: contract → Go mirror → task/action → backend storage → frontend.
 
