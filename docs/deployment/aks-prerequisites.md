@@ -147,6 +147,11 @@ az identity federated-credential create -n tsm-chart-sa \
   --audiences api://AzureADTokenExchange
 ```
 
+> If you also dispatch drift pipelines to Azure DevOps, repeat this recipe with
+> a **separate** managed identity (`tsm-ado-dispatch`) so a Key Vault
+> compromise and an ADO-dispatch compromise stay independent blast radii —
+> see `docs/deployment/ado-app-registration.md` §5.
+
 ## 6. Application Gateway for Containers (AGfC)
 
 ```bash
