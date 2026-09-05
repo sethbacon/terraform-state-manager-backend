@@ -131,6 +131,58 @@ func (r *CISourceRepository) Delete(ctx context.Context, id string) error {
 	return err
 }
 
+// ciSourceUpdateSet is the SET list Update and UpdateInScope share. provider is
+// deliberately absent -- like PipelineConnection, it is immutable here: a CI
+// source names the remote system a credential is FOR, and repointing it in
+// place would silently redirect every discovery call (and the fan-out
+// template lookup) that used to mean something else. The handler refuses a
+// provider change up front; this omission is the repository's own backstop.
+const ciSourceUpdateSet = `
+	name = $2,
+	organization = $3,
+	project = $4,
+	auth_method = $5,
+	encrypted_token = $6,
+	tenant_id = $7,
+	client_id = $8,
+	encrypted_client_secret = $9,
+	github_app_id = $10,
+	github_installation_id = $11,
+	encrypted_app_private_key = $12,
+	updated_at = now()`
+
+// Update replaces a CI source's connection coordinates and credential in
+// place (the PUT route Phase 1b adds).
+//
+// This is a FULL replace of every secret-bearing column, unlike
+// PipelineConnection.Update's "keep the stored token unless told otherwise":
+// auth_method's shape CHECK ties client_id, encrypted_client_secret,
+// encrypted_token, the GitHub App triple and workload_identity's bare
+// client_id together, so a partial write that left a PRIOR auth method's
+// column sitting alongside a NEW one could either violate that CHECK or --
+// worse -- satisfy it while leaving stale credential material for
+// sourceToken to read. Callers build s with EXACTLY the columns the target
+// auth_method needs (see applyCISourceAuthMethod) and every other
+// secret-bearing field at its zero value, which this statement writes as
+// NULL -- the same "bind the Go zero value directly" convention Create
+// already uses for these columns.
+func (r *CISourceRepository) Update(ctx context.Context, s *CISource) (*CISource, error) {
+	row := r.db.QueryRowContext(ctx, `UPDATE ci_sources SET `+ciSourceUpdateSet+`
+		WHERE id = $1
+		RETURNING `+ciSourceColumns,
+		s.ID, s.Name, s.Organization, s.Project, s.AuthMethod,
+		s.EncryptedToken, s.TenantID, s.ClientID, s.EncryptedClientSecret,
+		s.GithubAppID, s.GithubInstallationID, s.EncryptedAppPrivateKey)
+	updated, err := scanCISource(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return updated, nil
+}
+
 // ===========================================================================
 // THE PHASE 3 READ FLIP FOR ci_sources -- #393.
 //
@@ -204,4 +256,38 @@ func (r *CISourceRepository) GetByIDInScope(ctx context.Context, id string, scop
 		return nil, err
 	}
 	return s, nil
+}
+
+// UpdateInScope replaces a CI source only when the caller's organization owns
+// it. This is the WRITE side of a row that holds a SHARED credential every
+// borrowing pipeline connection dispatches with (#393's write-side
+// invariant): an unscoped update here would let a caller in organization B
+// overwrite organization A's credential by id. Same full-replace posture as
+// Update -- see its comment -- scope is the only thing this adds.
+func (r *CISourceRepository) UpdateInScope(ctx context.Context, s *CISource, scope tenantscope.Scope) (*CISource, error) {
+	w := scopeWrite(scope)
+	if w.Deny {
+		return nil, ErrNotInScope
+	}
+	if w.Skip {
+		return r.Update(ctx, s)
+	}
+	// NOT ciSourceOrgPredicate: that constant hardcodes "$1" for the read-side
+	// statements above, where the organization list is bound first. Here it is
+	// bound LAST, after the twelve columns being written, so the predicate is
+	// written out with its own placeholder position rather than reused.
+	row := r.db.QueryRowContext(ctx, `UPDATE ci_sources SET `+ciSourceUpdateSet+`
+		WHERE id = $1 AND organization_id = ANY($13::uuid[])
+		RETURNING `+ciSourceColumns,
+		s.ID, s.Name, s.Organization, s.Project, s.AuthMethod,
+		s.EncryptedToken, s.TenantID, s.ClientID, s.EncryptedClientSecret,
+		s.GithubAppID, s.GithubInstallationID, s.EncryptedAppPrivateKey, w.OrgIDs)
+	updated, err := scanCISource(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return updated, nil
 }

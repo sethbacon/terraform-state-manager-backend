@@ -91,6 +91,10 @@ func TestScopedUpdates_RefuseAnEmptyScope(t *testing.T) {
 		context.Background(), &PipelineConnection{ID: "p1"}, false, tenantscope.Scope{}); !errors.Is(err, ErrNotInScope) {
 		t.Errorf("pipeline update: error = %v, want ErrNotInScope", err)
 	}
+	if _, err := NewCISourceRepository(db).UpdateInScope(
+		context.Background(), &CISource{ID: "c1"}, tenantscope.Scope{}); !errors.Is(err, ErrNotInScope) {
+		t.Errorf("ci_source update: error = %v, want ErrNotInScope", err)
+	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("an empty scope reached the database: %v", err)
 	}
@@ -110,6 +114,21 @@ func TestScopedUpdates_BindTheOrganizationLast(t *testing.T) {
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("the organization was not bound last: %v", err)
+	}
+
+	clientID := "wi-client"
+	mock.ExpectQuery(`UPDATE ci_sources[\s\S]*WHERE id = \$1 AND organization_id`).
+		WithArgs("c1", "corp-ado", "corp", (*string)(nil), "workload_identity",
+			[]byte(nil), (*string)(nil), &clientID, []byte(nil), (*string)(nil), (*string)(nil), []byte(nil),
+			rootScope().OrgIDs).
+		WillReturnRows(sqlmock.NewRows(ciCols))
+	if _, err := NewCISourceRepository(db).UpdateInScope(context.Background(),
+		&CISource{ID: "c1", Name: "corp-ado", Organization: "corp", AuthMethod: "workload_identity", ClientID: &clientID},
+		rootScope()); err != nil {
+		t.Fatalf("CI source UpdateInScope: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("the ci_source organization was not bound last: %v", err)
 	}
 }
 
