@@ -43,6 +43,9 @@ type Config struct {
 	// BackupRetention bounds the state_backups table (#257).
 	BackupRetention BackupRetentionConfig `mapstructure:"backup_retention"`
 	AuditRetention  AuditRetentionConfig  `mapstructure:"audit_retention"`
+	// DriftRetention bounds drift_runs/drift_records (Phase 4a fleet-scale
+	// drift, #567).
+	DriftRetention DriftRetentionConfig `mapstructure:"drift_retention"`
 }
 
 // AuthzConfig controls where authorization decisions read a principal's role
@@ -116,6 +119,27 @@ type DriftConfig struct {
 // Env: TSM_SCHEDULER_BATCH_LIMIT.
 type SchedulerConfig struct {
 	BatchLimit int `mapstructure:"batch_limit"`
+}
+
+// DriftRetentionConfig bounds drift_runs and drift_records (Phase 4a
+// fleet-scale drift, #567), which otherwise grow without limit for the
+// lifetime of a source -- same reasoning as BackupRetentionConfig, applied to
+// the drift tables. KeepPerState + MaxAge follow the identical keep-floor
+// -before-age-cap shape StateEditRepository.PruneBackups established, applied
+// via DriftRepository.PruneRuns; ResolvedMaxAge bounds drift_records via
+// DriftRecordRepository.PruneResolved, which has no keep floor of its own (a
+// resolved record is already a closed history entry, not a live restore
+// point). Enabled by default so an install that never touches config still
+// gets bounded tables; the sweep runs once per drift-reconciler tick (not a
+// new goroutine) and is therefore gated by Workers.Enabled like every other
+// periodic sweep.
+// Env: TSM_DRIFT_RETENTION_ENABLED, TSM_DRIFT_RETENTION_KEEP_PER_STATE,
+// TSM_DRIFT_RETENTION_MAX_AGE, TSM_DRIFT_RETENTION_RESOLVED_MAX_AGE.
+type DriftRetentionConfig struct {
+	Enabled        bool          `mapstructure:"enabled"`
+	KeepPerState   int           `mapstructure:"keep_per_state"`
+	MaxAge         time.Duration `mapstructure:"max_age"`
+	ResolvedMaxAge time.Duration `mapstructure:"resolved_max_age"`
 }
 
 // SecurityConfig groups defense-in-depth controls. Egress governs the SSRF guard
@@ -751,6 +775,25 @@ func (c *Config) Validate() error {
 			"scheduler.batch_limit must be > 0, got %d", c.Scheduler.BatchLimit))
 	}
 
+	// Same reasoning as backup_retention: a zero keep floor or non-positive age
+	// would turn the drift-run sweep into a purge that can erase a state's
+	// entire drift history, and PruneResolved has no floor of its own to fall
+	// back on if its age were left at zero.
+	if c.DriftRetention.Enabled {
+		if c.DriftRetention.KeepPerState < 1 {
+			problems = append(problems, fmt.Sprintf(
+				"drift_retention.keep_per_state must be >= 1 when drift_retention.enabled is true, got %d", c.DriftRetention.KeepPerState))
+		}
+		if c.DriftRetention.MaxAge <= 0 {
+			problems = append(problems, fmt.Sprintf(
+				"drift_retention.max_age must be > 0 when drift_retention.enabled is true, got %s", c.DriftRetention.MaxAge))
+		}
+		if c.DriftRetention.ResolvedMaxAge <= 0 {
+			problems = append(problems, fmt.Sprintf(
+				"drift_retention.resolved_max_age must be > 0 when drift_retention.enabled is true, got %s", c.DriftRetention.ResolvedMaxAge))
+		}
+	}
+
 	if _, ok := validSSLModes[c.Database.SSLMode]; !ok {
 		problems = append(problems, fmt.Sprintf(
 			"database.ssl_mode %q is invalid (want one of disable, allow, prefer, require, verify-ca, verify-full)", c.Database.SSLMode))
@@ -849,6 +892,15 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("backup_retention.enabled", true)
 	v.SetDefault("backup_retention.keep", 20)
 	v.SetDefault("backup_retention.max_age", 90*24*time.Hour)
+
+	// Drift retention (Phase 4a): keep the newest 20 runs per state regardless
+	// of age, drop runs older than 90 days beyond that floor, and drop
+	// resolved records older than 180 days (no keep floor -- see
+	// DriftRetentionConfig).
+	v.SetDefault("drift_retention.enabled", true)
+	v.SetDefault("drift_retention.keep_per_state", 20)
+	v.SetDefault("drift_retention.max_age", 90*24*time.Hour)
+	v.SetDefault("drift_retention.resolved_max_age", 180*24*time.Hour)
 
 	v.SetDefault("auth.oidc.enabled", false)
 	v.SetDefault("auth.oidc.issuer_url", "")

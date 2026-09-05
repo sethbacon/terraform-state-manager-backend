@@ -413,6 +413,86 @@ func TestSchedulerBatchLimitValidation(t *testing.T) {
 	}
 }
 
+// TestDriftRetentionDefaults: enabled out of the box, same shape as
+// BackupRetention's defaults -- an install that never touches config still
+// gets a bounded drift_runs/drift_records table (Phase 4a, #567).
+func TestDriftRetentionDefaults(t *testing.T) {
+	cfg, err := Load("")
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if !cfg.DriftRetention.Enabled {
+		t.Error("drift retention must default to enabled")
+	}
+	if cfg.DriftRetention.KeepPerState != 20 {
+		t.Errorf("default keep_per_state = %d, want 20", cfg.DriftRetention.KeepPerState)
+	}
+	if cfg.DriftRetention.MaxAge != 90*24*time.Hour {
+		t.Errorf("default max_age = %s, want 2160h", cfg.DriftRetention.MaxAge)
+	}
+	if cfg.DriftRetention.ResolvedMaxAge != 180*24*time.Hour {
+		t.Errorf("default resolved_max_age = %s, want 4320h", cfg.DriftRetention.ResolvedMaxAge)
+	}
+}
+
+func TestDriftRetentionEnvOverride(t *testing.T) {
+	t.Setenv("TSM_DRIFT_RETENTION_ENABLED", "false")
+	t.Setenv("TSM_DRIFT_RETENTION_KEEP_PER_STATE", "5")
+	t.Setenv("TSM_DRIFT_RETENTION_MAX_AGE", "24h")
+	t.Setenv("TSM_DRIFT_RETENTION_RESOLVED_MAX_AGE", "48h")
+	cfg, err := Load("")
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if cfg.DriftRetention.Enabled {
+		t.Error("TSM_DRIFT_RETENTION_ENABLED=false must disable the prune")
+	}
+	if cfg.DriftRetention.KeepPerState != 5 {
+		t.Errorf("keep_per_state = %d, want 5", cfg.DriftRetention.KeepPerState)
+	}
+	if cfg.DriftRetention.MaxAge != 24*time.Hour {
+		t.Errorf("max_age = %s, want 24h", cfg.DriftRetention.MaxAge)
+	}
+	if cfg.DriftRetention.ResolvedMaxAge != 48*time.Hour {
+		t.Errorf("resolved_max_age = %s, want 48h", cfg.DriftRetention.ResolvedMaxAge)
+	}
+}
+
+// A zero keep floor or non-positive max age would turn the sweep into a purge,
+// same reasoning as BackupRetention's validation.
+func TestDriftRetentionValidation(t *testing.T) {
+	cases := []struct {
+		name    string
+		mutate  func(*Config)
+		wantErr bool
+	}{
+		{"keep_per_state zero", func(c *Config) { c.DriftRetention.KeepPerState = 0 }, true},
+		{"keep_per_state negative", func(c *Config) { c.DriftRetention.KeepPerState = -1 }, true},
+		{"max_age zero", func(c *Config) { c.DriftRetention.MaxAge = 0 }, true},
+		{"resolved_max_age zero", func(c *Config) { c.DriftRetention.ResolvedMaxAge = 0 }, true},
+		{"keep_per_state one ok", func(c *Config) { c.DriftRetention.KeepPerState = 1 }, false},
+		{"disabled skips checks", func(c *Config) {
+			c.DriftRetention.Enabled = false
+			c.DriftRetention.KeepPerState = 0
+			c.DriftRetention.MaxAge = 0
+			c.DriftRetention.ResolvedMaxAge = 0
+		}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c, _ := Load("")
+			tc.mutate(c)
+			err := c.Validate()
+			if tc.wantErr && err == nil {
+				t.Error("expected a validation error, got nil")
+			}
+			if !tc.wantErr && err != nil {
+				t.Errorf("unexpected validation error: %v", err)
+			}
+		})
+	}
+}
+
 func TestStateSourceRootsEnvBinding(t *testing.T) {
 	// Default: no roots at all — the connectors that name a server-local path
 	// (local base_path, kubernetes kubeconfig) are unavailable until an operator
