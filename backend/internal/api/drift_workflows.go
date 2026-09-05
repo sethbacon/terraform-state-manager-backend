@@ -459,3 +459,164 @@ steps:
       callbackUrl: ${{ parameters.callback_url }}
       callbackToken: ${{ parameters.callback_token }}
 `
+
+// azureDriftPipelineFanOut is the repo-level fan-out profile
+// (drift-fleet-scale.md Phase 1, task 1.4): one ADO run plans N targets
+// (states) sequentially and reports each one's result to its OWN callback
+// url/token, so one broken app cannot stop the rest and a partial run still
+// reports what it managed. Built on the same Terraform-suite CI components as
+// the "suite" profile (PipelineTerraformInstaller@1, PipelineTerraformTask@5,
+// PipelineTerraformDriftReport@1) -- no jq dependency, works on Windows agents
+// too -- with the per-app loop this profile adds on top.
+//
+// `targets` is a `type: object` template parameter (design decision #4.3):
+// TSM sends it as one compact JSON array only when dispatching 2+ targets, and
+// ADO's Pipelines API coerces the JSON-string `templateParameters.targets`
+// value into this object parameter at compile time (spike 1.0(a), assumed --
+// NOT yet verified against a live ADO run; if that coercion turns out not to
+// hold, the documented fallback is `targets` as `type: string` plus a
+// runtime-parsed `working_dirs` companion, which only touches this file and
+// the dispatch-side `targets` JSON encoding, not the callback contract).
+//
+// FAILURE SEMANTICS (also stated in drift-fleet-scale.md 1.4): an app whose
+// own steps ran but failed gets an immediate `failed` via its failure-report
+// step below, using ITS OWN token. An app whose steps were never scheduled at
+// all (the job was cancelled or timed out after app k) stays "dispatched"
+// until the reconciler expires it at TSM_DRIFT_RUN_TTL (default 2h) -- that is
+// intentional, the reconciler is the backstop, and operators with short drift
+// jobs may lower TSM_DRIFT_RUN_TTL to ~1h rather than adding job-level cleanup
+// steps here.
+//
+// Empty `targets` (the default, and every non-fan-out dispatch) behaves
+// EXACTLY like the "suite" profile: one app, the legacy three parameters,
+// guarded by `${{ if eq(length(parameters.targets), 0) }}`.
+const azureDriftPipelineFanOut = `# azure-pipelines-tsm-drift-fanout.yml  (Azure DevOps — Terraform-suite extension, repo-level fan-out)
+parameters:
+  - name: callback_url
+    type: string
+  - name: callback_token
+    type: string
+  - name: working_dir
+    type: string
+    default: "."
+  - name: targets
+    type: object
+    default: []
+trigger: none
+pool:
+  vmImage: ubuntu-latest
+steps:
+  - checkout: self
+  - bash: echo "##vso[task.setvariable variable=TSM_CALLBACK_TOKEN;issecret=true]$CALLBACK_TOKEN"
+    displayName: Mask callback token in logs
+    env:
+      CALLBACK_TOKEN: ${{ parameters.callback_token }}
+  - task: PipelineTerraformInstaller@1
+    displayName: Install Terraform
+    inputs:
+      terraformVersion: latest          # ### EDIT: pin if the fleet needs it
+  # No targets supplied: behave EXACTLY like the non-fan-out drift pipeline --
+  # one app, the legacy three parameters. This is the byte-identical back-compat
+  # path every existing schedule and every hand-dispatched run takes today.
+  - ${{ if eq(length(parameters.targets), 0) }}:
+    - task: PipelineTerraformTask@5
+      displayName: terraform init
+      inputs:
+        provider: azurerm               # ### EDIT for your cloud (aws|gcp|oci)
+        command: init
+        workingDirectory: ${{ parameters.working_dir }}
+        # ### EDIT: configure your state backend (backendType + backend* inputs).
+    - task: PipelineTerraformTask@5
+      displayName: terraform plan
+      continueOnError: true             # exit code 2 (drift) must not fail the job
+      inputs:
+        provider: azurerm
+        command: plan
+        workingDirectory: ${{ parameters.working_dir }}
+        commandOptions: -detailed-exitcode -out=tfplan -input=false
+        # ### EDIT: environmentServiceNameAzureRM (or AWS/GCP/OCI) service connection.
+    - bash: terraform show -json tfplan > plan.json
+      displayName: terraform show -json
+      workingDirectory: ${{ parameters.working_dir }}
+    - task: PipelineTerraformDriftReport@1
+      displayName: Report drift to TSM
+      inputs:
+        planJsonFile: ${{ parameters.working_dir }}/plan.json
+        moduleManifest: ${{ parameters.working_dir }}/.terraform/modules/modules.json
+        detail: azdo build $(Build.BuildId)
+        callbackUrl: ${{ parameters.callback_url }}
+        callbackToken: ${{ parameters.callback_token }}
+  # 2+ targets: one job plans every app in sequence, each with its OWN
+  # callback url/token -- reported independently, so one broken app does not
+  # stop the rest. Every step below is continueOnError for exactly that reason.
+  - ${{ each t in parameters.targets }}:
+    - bash: echo "##vso[task.setvariable variable=cb_${{ replace(t.working_dir, '/', '_') }};issecret=true]$CB_TOKEN"
+      displayName: "Mask callback token: ${{ t.working_dir }}"
+      continueOnError: true
+      env:
+        CB_TOKEN: ${{ t.callback_token }}
+    - task: PipelineTerraformTask@5
+      displayName: "terraform init: ${{ t.working_dir }}"
+      continueOnError: true
+      inputs:
+        provider: azurerm                 # ### EDIT for your cloud (aws|gcp|oci)
+        command: init
+        workingDirectory: ${{ t.working_dir }}
+        # ### EDIT: configure your state backend; this app's state key is
+        # ${{ t.state_key }} -- wire it into the backend* inputs (e.g. backendAzureRmKey).
+    - task: PipelineTerraformTask@5
+      displayName: "terraform plan: ${{ t.working_dir }}"
+      continueOnError: true              # exit code 2 (drift) must not fail the job
+      inputs:
+        provider: azurerm
+        command: plan
+        workingDirectory: ${{ t.working_dir }}
+        commandOptions: -detailed-exitcode -out=tfplan -input=false
+        # ### EDIT: environmentServiceNameAzureRM (or AWS/GCP/OCI) service connection.
+    - bash: terraform show -json tfplan > plan.json
+      displayName: "terraform show -json: ${{ t.working_dir }}"
+      continueOnError: true
+      workingDirectory: ${{ t.working_dir }}
+    - task: PipelineTerraformDriftReport@1
+      displayName: "Report drift to TSM: ${{ t.working_dir }}"
+      continueOnError: true
+      inputs:
+        planJsonFile: ${{ t.working_dir }}/plan.json
+        moduleManifest: ${{ t.working_dir }}/.terraform/modules/modules.json
+        detail: azdo build $(Build.BuildId)
+        callbackUrl: ${{ t.callback_url }}
+        callbackToken: ${{ t.callback_token }}
+    # Marks this app reported so the failure step below (which runs on EVERY
+    # app, always()) does not double-report a happy path.
+    - bash: echo "##vso[task.setvariable variable=reported_${{ replace(t.working_dir, '/', '_') }}]true"
+      displayName: "Mark reported: ${{ t.working_dir }}"
+      condition: always()
+      continueOnError: true
+    # FAILURE SEMANTICS: this app's own steps ran but one of them failed (init,
+    # a plan failure that is NOT just drift, show, or the report task itself)
+    # before the marker above could run. Posts an explicit "failed" with THIS
+    # app's own one-shot token; a per-target variable condition (never a
+    # job-level "always failed" condition, which continueOnError above would
+    # prevent from ever firing) is what makes this per-app rather than
+    # per-job. HTTP 409 means this app's happy-path report already landed (a
+    # benign race); the code is only logged, not treated as an error.
+    - bash: |
+        PAYLOAD=$(jq -n --arg detail "azdo build $(Build.BuildId): step failed before reporting" \
+          '{status:"failed", detail:$detail}')
+        CODE=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$CB_URL" \
+          -H "Content-Type: application/json" \
+          -H "X-TSM-Callback-Token: $CB_TOKEN" \
+          -d "$PAYLOAD")
+        echo "failure report -> HTTP $CODE (200=recorded, 409=already reported)"
+      displayName: "Failure report: ${{ t.working_dir }}"
+      condition: and(always(), ne(variables['reported_${{ replace(t.working_dir, '/', '_') }}'], 'true'))
+      continueOnError: true
+      env:
+        CB_URL: ${{ t.callback_url }}
+        CB_TOKEN: ${{ t.callback_token }}
+    # Reset for the next app: keep the provider plugin cache (.terraform),
+    # drop everything else terraform init/plan wrote for this app.
+    - bash: git checkout -- . && git clean -fd -e .terraform
+      displayName: "Reset workspace: ${{ t.working_dir }}"
+      continueOnError: true
+`

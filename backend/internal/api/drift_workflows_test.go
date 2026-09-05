@@ -51,6 +51,8 @@ func TestBuiltinWorkflow_ProfileRouting(t *testing.T) {
 		{"github_actions", "drift", "suite", githubDriftWorkflowSuite},
 		{"azure_devops", "drift", "default", azureDriftPipeline},
 		{"azure_devops", "drift", "suite", azureDriftPipelineSuite},
+		{"azure_devops", "drift", "fan-out", azureDriftPipelineFanOut},
+		{"github_actions", "drift", "fan-out", githubDriftWorkflow}, // fan-out is azure_devops-only -> built-in
 		{"github_actions", "versionlab", "default", githubHealthWorkflow},
 		{"github_actions", "versionlab", "suite", githubHealthWorkflowSuite},
 		{"azure_devops", "versionlab", "default", azureHealthPipeline},
@@ -61,6 +63,57 @@ func TestBuiltinWorkflow_ProfileRouting(t *testing.T) {
 		if got := builtinWorkflow(c.provider, c.kind, c.profile); got != c.want {
 			t.Errorf("builtinWorkflow(%q,%q,%q) returned the wrong template", c.provider, c.kind, c.profile)
 		}
+	}
+}
+
+// TestAzureDriftPipelineFanOut_Conformance pins the fan-out profile's declared
+// shape (drift-fleet-scale.md Phase 1, task 1.4): it declares the three legacy
+// parameters PLUS `targets` as a `type: object` (the primary design, not the
+// documented string fallback), guards the empty-targets case to behave
+// EXACTLY like the non-fan-out profile, iterates every target and reports
+// each one independently, and fails a target via a per-target condition
+// rather than a job-level `condition: failed()` (which every prior step's
+// continueOnError would prevent from ever firing).
+func TestAzureDriftPipelineFanOut_Conformance(t *testing.T) {
+	tmpl := azureDriftPipelineFanOut
+
+	for _, want := range []string{
+		"- name: callback_url", "- name: callback_token", "- name: working_dir", "- name: targets",
+		"type: object", // the primary design: targets is an object parameter, not a string
+	} {
+		if !strings.Contains(tmpl, want) {
+			t.Errorf("template missing %q", want)
+		}
+	}
+
+	if !strings.Contains(tmpl, "${{ if eq(length(parameters.targets), 0) }}") {
+		t.Error("template missing the empty-targets legacy-shape guard")
+	}
+
+	for _, want := range []string{
+		"${{ each t in parameters.targets }}",
+		"${{ t.working_dir }}",
+		"${{ t.state_key }}",
+		"${{ t.callback_url }}",
+		"${{ t.callback_token }}",
+		"PipelineTerraformDriftReport@1",
+	} {
+		if !strings.Contains(tmpl, want) {
+			t.Errorf("template missing %q", want)
+		}
+	}
+
+	if !strings.Contains(tmpl, "condition: and(always(), ne(variables['reported_") {
+		t.Error("template missing the per-target failure-report condition (see design decision #4.3 / task 1.4)")
+	}
+	if strings.Contains(tmpl, "condition: failed()") {
+		t.Error("a job-level condition: failed() cannot fire per-target once every prior step is continueOnError")
+	}
+
+	// Every per-target step tolerates one app's failure without stopping the
+	// rest of the batch.
+	if got := strings.Count(tmpl, "continueOnError: true"); got < 5 {
+		t.Errorf("expected every per-target step to be continueOnError: true, found only %d instances", got)
 	}
 }
 
@@ -197,6 +250,7 @@ func TestWorkflowTemplates_MaskCallbackToken(t *testing.T) {
 	azure := map[string]string{
 		"azure drift":            azureDriftPipeline,
 		"azure drift suite":      azureDriftPipelineSuite,
+		"azure drift fan-out":    azureDriftPipelineFanOut,
 		"azure versionlab":       azureHealthPipeline,
 		"azure versionlab suite": azureHealthPipelineSuite,
 	}
@@ -516,6 +570,7 @@ func TestDriftWorkflowTemplates_AreValidYAML(t *testing.T) {
 		"azure drift":           azureDriftPipeline,
 		"github drift suite":    githubDriftWorkflowSuite,
 		"azure drift suite":     azureDriftPipelineSuite,
+		"azure drift fan-out":   azureDriftPipelineFanOut,
 		"github versionlab":     githubHealthWorkflow,
 		"azure versionlab":      azureHealthPipeline,
 		"github versionlab ste": githubHealthWorkflowSuite,

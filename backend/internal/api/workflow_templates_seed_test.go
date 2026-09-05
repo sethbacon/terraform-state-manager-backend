@@ -9,12 +9,17 @@ import (
 
 func TestBuiltinWorkflowSeeds(t *testing.T) {
 	seeds := builtinWorkflowSeeds()
-	if len(seeds) != 8 { // 4 default + 4 suite (drift/versionlab × github/azure)
-		t.Fatalf("want 8 built-in seeds, got %d", len(seeds))
+	// 4 default + 4 suite (drift/versionlab × github/azure) + 1 fan-out
+	// (drift, azure_devops only).
+	if len(seeds) != 9 {
+		t.Fatalf("want 9 built-in seeds, got %d", len(seeds))
 	}
 	for _, s := range seeds {
-		if s.Content == "" || !s.IsBuiltin || (s.Profile != "default" && s.Profile != "suite") {
+		if s.Content == "" || !s.IsBuiltin || (s.Profile != "default" && s.Profile != "suite" && s.Profile != "fan-out") {
 			t.Errorf("malformed seed: %+v", s)
+		}
+		if s.Profile == "fan-out" && (s.Provider != "azure_devops" || s.Kind != "drift") {
+			t.Errorf("fan-out is only defined for azure_devops/drift, got %+v", s)
 		}
 	}
 }
