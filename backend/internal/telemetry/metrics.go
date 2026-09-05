@@ -92,6 +92,20 @@ var (
 		},
 		[]string{"result"},
 	)
+
+	// driftRecordsOpen is the Phase 2 metric its own increment deferred and
+	// Phase 4a (fleet-scale drift dashboard) implements: how many OPEN drift
+	// records exist right now, by severity. Refreshed once per drift-reconciler
+	// tick from DriftRecordRepository.CountOpenBySeverity, which is deliberately
+	// unscoped -- this is an operational gauge describing the deployment, not a
+	// response to any single tenant's request.
+	driftRecordsOpen = promauto.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "tsm_drift_records_open",
+			Help: "Open drift records right now, by severity (critical, warning), as last sampled by the drift reconciler.",
+		},
+		[]string{"severity"},
+	)
 )
 
 // SetDriftRunsInFlight records the scheduler's most recent in-flight drift-run
@@ -105,6 +119,12 @@ func SetSchedulerDueBacklog(n int) { schedulerDueBacklog.Set(float64(n)) }
 // DriftDispatchResult increments the counter for one schedule firing's
 // terminal result ("ok", "failed", or "deferred").
 func DriftDispatchResult(result string) { driftDispatchTotal.WithLabelValues(result).Inc() }
+
+// SetDriftRecordsOpen records the open-drift-record count for one severity,
+// as most recently sampled by the drift reconciler's tick.
+func SetDriftRecordsOpen(severity string, n int) {
+	driftRecordsOpen.WithLabelValues(severity).Set(float64(n))
+}
 
 // StartDBStatsCollector polls the connection pool every 30 seconds and exports
 // its statistics as Prometheus gauges. It returns a stop function that halts the
