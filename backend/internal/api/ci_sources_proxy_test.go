@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
@@ -9,13 +10,26 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
 
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore/policy"
+
 	"github.com/terraform-state-manager/terraform-state-manager/internal/crypto"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/pipelines"
 )
+
+// fakeWorkloadIdentityCredential is a test double for
+// pipelines.ADOTokenCredential, standing in for a real AKS federated identity
+// in TestVerifyCISource_WorkloadIdentity.
+type fakeWorkloadIdentityCredential struct{ token string }
+
+func (f fakeWorkloadIdentityCredential) GetToken(context.Context, policy.TokenRequestOptions) (azcore.AccessToken, error) {
+	return azcore.AccessToken{Token: f.token}, nil
+}
 
 // fakeADO serves the minimal Azure DevOps surface the discovery/setup handlers
 // proxy to. The pipelines package's own tests cover the protocol details; these
@@ -73,6 +87,102 @@ func TestVerifyCISource_App(t *testing.T) {
 	}
 	if gotAuth != "Bearer minted" {
 		t.Errorf("ADO auth = %q, want Bearer minted (app token)", gotAuth)
+	}
+}
+
+// TestVerifyCISource_WorkloadIdentity: VerifyCISource on a workload_identity
+// source mints via AKS Workload Identity's federated-token exchange (no
+// decryption at all -- there is no secret column to decrypt) and presents it
+// to ADO as a Bearer credential, end to end.
+func TestVerifyCISource_WorkloadIdentity(t *testing.T) {
+	restoreFactory := pipelines.OverrideWorkloadIdentityCredentialFactoryForTest(
+		func(clientID string) (pipelines.ADOTokenCredential, error) {
+			return fakeWorkloadIdentityCredential{token: "wi-minted"}, nil
+		})
+	defer restoreFactory()
+
+	var gotAuth string
+	adoSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		fmt.Fprint(w, `{"count":0,"value":[]}`)
+	}))
+	t.Cleanup(adoSrv.Close)
+	defer pipelines.OverrideBaseURLsForTest(adoSrv.URL, "")()
+
+	e := newCISourcesEnv(t)
+	e.mock.ExpectQuery("FROM ci_sources WHERE organization_id = ANY").WithArgs([]string{testActingOrg}, "c1").
+		WillReturnRows(wiCiSrcRow(t, "the-wi-client"))
+	w := e.do(http.MethodPost, "/api/v1/ci-sources/c1/verify", "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("verify workload_identity: status = %d (%s)", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), `"ok":true`) {
+		t.Errorf("verify workload_identity body = %s", w.Body.String())
+	}
+	if gotAuth != "Bearer wi-minted" {
+		t.Errorf("ADO auth = %q, want Bearer wi-minted (workload identity token)", gotAuth)
+	}
+}
+
+// TestUpdateCISource_EvictsCachedADOToken is the second high-risk proof the
+// spec names directly: a token minted under the credential a PUT is
+// REPLACING must never be served again. Proving it against a request that
+// resends the SAME tenant/client/secret triple is what isolates "the route
+// evicts unconditionally" from "a different credential value happened to
+// hash to a different cache key" -- the latter would pass even if the
+// eviction call in UpdateCISource were deleted entirely.
+func TestUpdateCISource_EvictsCachedADOToken(t *testing.T) {
+	pipelines.ResetEntraTokenCacheForTest()
+
+	var mintCalls int32
+	entraSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		atomic.AddInt32(&mintCalls, 1)
+		fmt.Fprint(w, `{"access_token":"minted","expires_in":3600}`)
+	}))
+	t.Cleanup(entraSrv.Close)
+	defer pipelines.OverrideEntraLoginURLForTest(entraSrv.URL)()
+
+	adoSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(w, `{"count":0,"value":[]}`)
+	}))
+	t.Cleanup(adoSrv.Close)
+	defer pipelines.OverrideBaseURLsForTest(adoSrv.URL, "")()
+
+	e := newCISourcesEnv(t)
+
+	// 1) Verify mints and caches a token for the source's current credential.
+	e.mock.ExpectQuery("FROM ci_sources WHERE organization_id = ANY").WithArgs([]string{testActingOrg}, "c1").
+		WillReturnRows(appCiSrcRow(t))
+	if w := e.do(http.MethodPost, "/api/v1/ci-sources/c1/verify", ""); w.Code != http.StatusOK {
+		t.Fatalf("verify (priming): status = %d (%s)", w.Code, w.Body.String())
+	}
+	if got := atomic.LoadInt32(&mintCalls); got != 1 {
+		t.Fatalf("mint calls = %d after priming, want 1", got)
+	}
+
+	// 2) PUT re-sends the EXACT SAME tenant/client/secret -- a no-op rotation
+	// in terms of credential VALUE. If the route only evicted on a changed
+	// value, the primed cache entry would still be sitting there afterward.
+	e.mock.ExpectQuery("FROM ci_sources WHERE organization_id = ANY").WithArgs([]string{testActingOrg}, "c1").
+		WillReturnRows(appCiSrcRow(t))
+	e.mock.ExpectQuery("UPDATE ci_sources").WillReturnRows(appCiSrcRow(t))
+	e.idMock.ExpectQuery("INSERT INTO audit_logs").WillReturnRows(auditInsertReturn())
+	w := e.do(http.MethodPut, "/api/v1/ci-sources/c1",
+		`{"name":"corp","provider":"azure_devops","project":"Platform","organization":"corp-org","auth_method":"app","tenant_id":"the-tenant","client_id":"the-client","client_secret":"the-secret"}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("update: status = %d (%s)", w.Code, w.Body.String())
+	}
+
+	// 3) A subsequent Verify must mint AGAIN: the primed entry must be gone,
+	// not silently reused because the credential happens to be unchanged.
+	e.mock.ExpectQuery("FROM ci_sources WHERE organization_id = ANY").WithArgs([]string{testActingOrg}, "c1").
+		WillReturnRows(appCiSrcRow(t))
+	if w := e.do(http.MethodPost, "/api/v1/ci-sources/c1/verify", ""); w.Code != http.StatusOK {
+		t.Fatalf("verify (post-update): status = %d (%s)", w.Code, w.Body.String())
+	}
+	if got := atomic.LoadInt32(&mintCalls); got != 2 {
+		t.Fatalf("mint calls = %d after the update, want 2: the update must evict the cached token "+
+			"rather than let a token minted under the credential being replaced be served again", got)
 	}
 }
 

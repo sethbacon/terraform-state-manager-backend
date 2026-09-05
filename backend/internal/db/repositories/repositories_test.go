@@ -302,6 +302,44 @@ func TestCISourceRepository_CRUD(t *testing.T) {
 	}
 }
 
+// TestCISourceRepository_Update_FullReplace pins the shape #338 (Phase 1b)
+// depends on: Update rewrites EVERY secret-bearing column, not just the ones a
+// request happened to mention. auth_method's shape CHECK ties client_id,
+// encrypted_client_secret, encrypted_token, the GitHub App triple and (new)
+// workload_identity's bare client_id together, so a partial write that left a
+// PRIOR auth method's column in place could either violate that CHECK or --
+// worse -- satisfy it while combining stale credential material sourceToken
+// was never meant to see together. This asserts every one of those columns is
+// in the SET list, moving to workload_identity (client_id only) from a row
+// that used to be an Entra app source (which had a tenant_id and an encrypted
+// secret).
+func TestCISourceRepository_Update_FullReplace(t *testing.T) {
+	db, mock := newMock(t)
+	r := NewCISourceRepository(db)
+
+	clientID := "wi-client"
+	mock.ExpectQuery("UPDATE ci_sources").
+		WithArgs("c1", "corp-ado", "corp", (*string)(nil), "workload_identity",
+			[]byte(nil), (*string)(nil), &clientID, []byte(nil), (*string)(nil), (*string)(nil), []byte(nil)).
+		WillReturnRows(sqlmock.NewRows(ciCols).
+			AddRow("c1", "corp-ado", "azure_devops", "corp", nil, "workload_identity", nil, nil, clientID, nil, nil, nil, nil, "2026-09-04", "2026-09-04", testOrgID))
+	updated, err := r.Update(ctx, &CISource{
+		ID: "c1", Name: "corp-ado", Organization: "corp",
+		AuthMethod: "workload_identity", ClientID: &clientID,
+	})
+	if err != nil || updated == nil || updated.AuthMethod != "workload_identity" {
+		t.Fatalf("Update: %v %+v", err, updated)
+	}
+	if updated.ClientID == nil || *updated.ClientID != clientID {
+		t.Errorf("Update did not round-trip client_id: %+v", updated)
+	}
+
+	mock.ExpectQuery("UPDATE ci_sources").WillReturnError(sql.ErrNoRows)
+	if u, err := r.Update(ctx, &CISource{ID: "nope", Name: "x", AuthMethod: "pat"}); err != nil || u != nil {
+		t.Errorf("Update of missing row should be (nil, nil), got %+v %v", u, err)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // PipelineRepository
 // ---------------------------------------------------------------------------

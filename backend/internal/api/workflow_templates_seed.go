@@ -21,6 +21,8 @@ func builtinWorkflowSeeds() []repositories.WorkflowTemplate {
 		{Provider: "azure_devops", Kind: "drift", Profile: "suite", Name: "Azure DevOps — Drift (suite extension)", Content: azureDriftPipelineSuite, IsBuiltin: true},
 		{Provider: "github_actions", Kind: "versionlab", Profile: "suite", Name: "GitHub Actions — Version Lab (suite actions)", Content: githubHealthWorkflowSuite, IsBuiltin: true},
 		{Provider: "azure_devops", Kind: "versionlab", Profile: "suite", Name: "Azure DevOps — Version Lab (suite extension)", Content: azureHealthPipelineSuite, IsBuiltin: true},
+		// Repo-level fan-out (Azure DevOps only): plans 2+ targets in one job.
+		{Provider: "azure_devops", Kind: "drift", Profile: "fan-out", Name: "Azure DevOps — Drift (repo-level fan-out)", Content: azureDriftPipelineFanOut, IsBuiltin: true},
 	}
 }
 

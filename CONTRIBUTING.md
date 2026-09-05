@@ -276,7 +276,7 @@ subcommand.
 - **Never edit existing migration files.** The migration system treats file content as
   immutable.
 - Create a new numbered pair using the next sequential number after the highest existing
-  migration (currently `000018`, so the next is `000019`): `0000NN_description.up.sql`
+  migration (currently `000037`, so the next is `000038`): `0000NN_description.up.sql`
   and `0000NN_description.down.sql`.
 - The down migration must fully reverse the up migration.
 - Test both directions before submitting.

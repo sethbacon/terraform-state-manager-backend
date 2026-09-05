@@ -17,6 +17,10 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore/policy"
+	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
 )
 
 // azureDevOpsResourceID is the fixed Microsoft Entra resource (application) id
@@ -58,10 +62,13 @@ func (c EntraCreds) valid() bool {
 	return c.TenantID != "" && c.ClientID != "" && c.ClientSecret != ""
 }
 
-// fingerprint keys the token cache so rotating any credential field naturally
+// Fingerprint keys the token cache so rotating any credential field naturally
 // invalidates the cached token (a different key) without explicit eviction.
-func (c EntraCreds) fingerprint() string {
-	sum := sha256.Sum256([]byte(c.TenantID + "\x00" + c.ClientID + "\x00" + c.ClientSecret))
+// Exported so a credential UPDATE (PUT /ci-sources/:id) can compute the OLD
+// row's cache key and evict it explicitly via EvictADOTokenCacheKey, rather
+// than relying solely on this implicit "a different key" property.
+func (c EntraCreds) Fingerprint() string {
+	sum := sha256.Sum256([]byte("app\x00" + c.TenantID + "\x00" + c.ClientID + "\x00" + c.ClientSecret))
 	return hex.EncodeToString(sum[:])
 }
 
@@ -86,7 +93,7 @@ func MintEntraADOToken(ctx context.Context, creds EntraCreds) (string, error) {
 	if !creds.valid() {
 		return "", fmt.Errorf("entra app credentials require tenant_id, client_id, and client_secret")
 	}
-	key := creds.fingerprint()
+	key := creds.Fingerprint()
 
 	entraCacheMu.Lock()
 	if t, ok := entraCache[key]; ok && time.Until(t.expiresAt) > entraTokenRefreshMargin {
@@ -105,6 +112,113 @@ func MintEntraADOToken(ctx context.Context, creds EntraCreds) (string, error) {
 	entraCache[key] = entraCachedToken{token: token, expiresAt: expiresAt}
 	entraCacheMu.Unlock()
 	return token, nil
+}
+
+// EvictADOTokenCacheKey removes a single cached token, keyed by the same
+// Fingerprint EntraCreds and WorkloadIdentityCreds compute.
+//
+// ResetEntraTokenCacheForTest clears everything, for test isolation between
+// unrelated cases. This clears exactly one row, for a real credential
+// rotation: PUT /ci-sources/:id calls it with the fingerprint of the
+// credential a source USED TO carry, so a token minted under that credential
+// can never be served again once the row no longer has it. Rotating a
+// credential to a genuinely DIFFERENT value already gets this for free --
+// Fingerprint changes with it, so the old entry is simply never looked up
+// again -- but a route whose whole job is "replace this row's credential"
+// should not depend on that being true forever; an explicit evict makes it an
+// invariant of the route instead of a property that happens to fall out of
+// how the cache is keyed today.
+func EvictADOTokenCacheKey(key string) {
+	if key == "" {
+		return
+	}
+	entraCacheMu.Lock()
+	delete(entraCache, key)
+	entraCacheMu.Unlock()
+}
+
+// WorkloadIdentityCreds identifies an AKS Workload Identity used to mint Azure
+// DevOps access tokens: unlike EntraCreds there is no secret material at all --
+// just the federated user-assigned managed identity's client id. TenantID and
+// the path to the projected service-account token are resolved from the pod's
+// own environment (AZURE_TENANT_ID / AZURE_FEDERATED_TOKEN_FILE, set by the
+// AKS workload-identity webhook), not stored on the CI source.
+type WorkloadIdentityCreds struct {
+	ClientID string
+}
+
+func (c WorkloadIdentityCreds) valid() bool { return strings.TrimSpace(c.ClientID) != "" }
+
+// Fingerprint keys the token cache. Namespaced ("workload_identity\x00") so a
+// workload-identity client id can never collide with an EntraCreds fingerprint
+// in the shared cache map, even though the two share nothing else -- an
+// EntraCreds always folds in a tenant id and a secret, so an accidental
+// collision would need those to be empty, which EntraCreds.valid() already
+// refuses to mint against; the namespace makes that a non-issue regardless.
+func (c WorkloadIdentityCreds) Fingerprint() string {
+	sum := sha256.Sum256([]byte("workload_identity\x00" + c.ClientID))
+	return hex.EncodeToString(sum[:])
+}
+
+// ADOTokenCredential is the subset of azcore.TokenCredential
+// MintWorkloadIdentityADOToken needs, satisfied by
+// *azidentity.WorkloadIdentityCredential and by a fake in tests.
+type ADOTokenCredential interface {
+	GetToken(ctx context.Context, opts policy.TokenRequestOptions) (azcore.AccessToken, error)
+}
+
+// workloadIdentityCredentialFactory builds the azidentity credential for a
+// given managed identity client id. A package var so tests can substitute a
+// fake TokenCredential without a real AKS federated identity; production never
+// overrides it.
+var workloadIdentityCredentialFactory = func(clientID string) (ADOTokenCredential, error) {
+	return azidentity.NewWorkloadIdentityCredential(&azidentity.WorkloadIdentityCredentialOptions{
+		ClientID: clientID,
+	})
+}
+
+// OverrideWorkloadIdentityCredentialFactoryForTest points
+// MintWorkloadIdentityADOToken at a fake credential and returns a restore
+// func. Not safe for concurrent use with real traffic.
+func OverrideWorkloadIdentityCredentialFactoryForTest(f func(clientID string) (ADOTokenCredential, error)) (restore func()) {
+	old := workloadIdentityCredentialFactory
+	workloadIdentityCredentialFactory = f
+	return func() { workloadIdentityCredentialFactory = old }
+}
+
+// MintWorkloadIdentityADOToken returns a bearer access token for Azure DevOps,
+// minting via AKS Workload Identity's federated-token exchange and caching it
+// until shortly before expiry -- same cache, same refresh margin, same
+// concurrency guarantee as MintEntraADOToken, just a different credential
+// source (no client secret ever exists for this method).
+func MintWorkloadIdentityADOToken(ctx context.Context, clientID string) (string, error) {
+	creds := WorkloadIdentityCreds{ClientID: strings.TrimSpace(clientID)}
+	if !creds.valid() {
+		return "", fmt.Errorf("workload identity credentials require a client_id")
+	}
+	key := creds.Fingerprint()
+
+	entraCacheMu.Lock()
+	if t, ok := entraCache[key]; ok && time.Until(t.expiresAt) > entraTokenRefreshMargin {
+		token := t.token
+		entraCacheMu.Unlock()
+		return token, nil
+	}
+	entraCacheMu.Unlock()
+
+	cred, err := workloadIdentityCredentialFactory(creds.ClientID)
+	if err != nil {
+		return "", fmt.Errorf("build workload identity credential: %w", err)
+	}
+	tok, err := cred.GetToken(ctx, policy.TokenRequestOptions{Scopes: []string{azureDevOpsResourceID + "/.default"}})
+	if err != nil {
+		return "", fmt.Errorf("mint workload identity ADO token: %w", err)
+	}
+
+	entraCacheMu.Lock()
+	entraCache[key] = entraCachedToken{token: tok.Token, expiresAt: tok.ExpiresOn}
+	entraCacheMu.Unlock()
+	return tok.Token, nil
 }
 
 // requestEntraToken performs the client-credentials POST against the tenant's

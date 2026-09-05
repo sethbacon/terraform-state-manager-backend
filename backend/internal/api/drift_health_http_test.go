@@ -12,6 +12,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/terraform-state-manager/terraform-state-manager/internal/tenantscope"
+	"github.com/terraform-state-manager/terraform-state-manager/internal/testsupport"
 
 	"github.com/terraform-state-manager/terraform-state-manager/internal/config"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/crypto"
@@ -67,6 +68,8 @@ func newDriftEnvWithScope(t *testing.T, scope *tenantscope.Scope) *sourcesEnv {
 	v1.GET("/drift/records/:id", h.GetDriftRecord())
 	v1.POST("/drift/records/:id/acknowledge", h.AcknowledgeDriftRecord())
 	v1.POST("/drift/records/:id/resolve", h.ResolveDriftRecord())
+	v1.GET("/drift/coverage", h.Coverage())
+	v1.GET("/drift/summary", h.Summary())
 	v1.GET("/health-lab/runs", hh.ListRuns())
 	v1.POST("/health-lab/runs", hh.CreateRun())
 	v1.GET("/health-lab/runs/:id", hh.GetRun())
@@ -75,14 +78,10 @@ func newDriftEnvWithScope(t *testing.T, scope *tenantscope.Scope) *sourcesEnv {
 	return &sourcesEnv{r: r, mock: mock}
 }
 
-var driftCols = []string{"id", "pipeline_connection_id", "source_id", "state_key", "repo_ref", "working_dir",
-	"status", "added", "changed", "destroyed", "drifted", "summary", "detail", "callback_token", "actor",
-	"created_at", "updated_at", "truncated", "omitted_entries", "omitted_attrs", "unparseable", "unmasked", "organization_id"}
-
 func driftRow(token string) *sqlmock.Rows {
-	return sqlmock.NewRows(driftCols).
-		AddRow("d1", "p1", nil, "app.tfstate", "", "", "dispatched", nil, nil, nil, nil, nil, "", token, "alice",
-			"2026-06-10", "2026-06-10", false, 0, 0, false, false, "11111111-1111-4111-8111-111111111111")
+	return testsupport.DriftRunRow("d1", "p1", nil, "app.tfstate", "", "", "dispatched", nil, nil, nil, nil, nil, "", token, "alice",
+		"2026-06-10", "2026-06-10", false, 0, 0, false, false, "11111111-1111-4111-8111-111111111111",
+		nil, "", "")
 }
 
 var healthCols = []string{"id", "pipeline_connection_id", "repo_ref", "working_dir", "terraform_version",
@@ -261,7 +260,7 @@ func TestDriftRunsReadAndCallback(t *testing.T) {
 	}
 
 	e.mock.ExpectQuery("FROM drift_runs WHERE organization_id = ANY.+AND id").WithArgs([]string{testActingOrg}, "ghost").
-		WillReturnRows(sqlmock.NewRows(driftCols))
+		WillReturnRows(sqlmock.NewRows(testsupport.DriftRunColumns))
 	if w := e.do(http.MethodGet, "/api/v1/drift/runs/ghost", ""); w.Code != http.StatusNotFound {
 		t.Errorf("missing run: status = %d, want 404", w.Code)
 	}

@@ -420,3 +420,131 @@ func (r *DriftRecordRepository) CountsByStatus(ctx context.Context) (map[string]
 	}
 	return out, rows.Err()
 }
+
+// LiveByState returns, for one source, every NON-resolved drift record keyed
+// by state_key -- the Phase 4a coverage endpoint's other join, alongside
+// DriftRepository.LatestPerState. Unscoped: callers join it against a
+// source_id already verified in scope (LiveByStateInScope).
+func (r *DriftRecordRepository) LiveByState(ctx context.Context, sourceID string) (map[string]DriftRecord, error) {
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT `+driftRecordColumns+`
+		FROM drift_records WHERE source_id = $1 AND status <> 'resolved'`, sourceID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]DriftRecord{}
+	for rows.Next() {
+		rec, err := scanDriftRecord(rows)
+		if err != nil {
+			return nil, err
+		}
+		out[rec.StateKey] = *rec
+	}
+	return out, rows.Err()
+}
+
+// PruneResolved bounds drift_records (Phase 4a, #567): it deletes resolved
+// records older than maxAge. Unlike PruneRuns/PruneBackups this has no keep
+// floor -- a resolved record is already a closed history entry rather than a
+// live state's only restore point, so there is nothing an age cap alone could
+// take that mattered to today's coverage. Returns the number removed.
+func (r *DriftRecordRepository) PruneResolved(ctx context.Context, maxAge time.Duration) (int64, error) {
+	if maxAge <= 0 {
+		return 0, fmt.Errorf("drift record retention max age must be > 0, got %s", maxAge)
+	}
+	res, err := r.db.ExecContext(ctx, `
+		DELETE FROM drift_records WHERE status='resolved' AND resolved_at < now() - make_interval(secs => $1)`,
+		maxAge.Seconds())
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
+}
+
+// CountOpenBySeverity returns the number of OPEN drift records by severity,
+// deployment-wide. Backs tsm_drift_records_open{severity} (Phase 2's deferred
+// metric, implemented here), refreshed once per reconciler tick -- unscoped
+// for the same reason CountRunsIn is: it is an operational gauge, not a
+// response to any single tenant's request.
+func (r *DriftRecordRepository) CountOpenBySeverity(ctx context.Context) (map[string]int, error) {
+	rows, err := r.db.QueryContext(ctx, `SELECT severity, COUNT(*) FROM drift_records WHERE status='open' GROUP BY severity`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]int{}
+	for rows.Next() {
+		var severity string
+		var n int
+		if err := rows.Scan(&severity, &n); err != nil {
+			return nil, err
+		}
+		out[severity] = n
+	}
+	return out, rows.Err()
+}
+
+// SourceRecordCounts is one source's row in the drift summary's per-source
+// breakdown (GET /drift/summary's records_by_source).
+type SourceRecordCounts struct {
+	SourceID     string `json:"source_id"`
+	SourceName   string `json:"source_name"`
+	Open         int    `json:"open"`
+	Acknowledged int    `json:"acknowledged"`
+	Critical     int    `json:"critical"`
+}
+
+// countsBySourceQuery is the ONE statement CountsBySource and CountsBySource
+// InScope share, with an optional extra predicate appended (fixed SQL from
+// this package only, exactly as driftRecordFilter's callers do) so the two
+// cannot drift into disagreeing about what "live" or "critical" mean.
+//
+// Only LIVE (non-resolved) records are grouped: a resolved record contributes
+// zero to every one of the three counts, so including it would only add
+// meaningless all-zero rows for sources whose drift has all been closed.
+const countsBySourceQuery = `
+	SELECT r.source_id, COALESCE(s.name,''),
+		COUNT(*) FILTER (WHERE r.status='open'),
+		COUNT(*) FILTER (WHERE r.status='acknowledged'),
+		COUNT(*) FILTER (WHERE r.severity='critical' AND r.status<>'resolved')
+	FROM drift_records r
+	JOIN state_sources s ON s.id = r.source_id
+	WHERE r.status <> 'resolved'`
+
+func scanSourceRecordCounts(rows *sql.Rows) ([]SourceRecordCounts, error) {
+	out := []SourceRecordCounts{}
+	for rows.Next() {
+		var c SourceRecordCounts
+		if err := rows.Scan(&c.SourceID, &c.SourceName, &c.Open, &c.Acknowledged, &c.Critical); err != nil {
+			return nil, err
+		}
+		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
+// CountsBySource is the drift summary's per-source breakdown, deployment-wide.
+// Callers reach this only through CountsBySourceInScope's PlatformAdmin
+// branch; every other caller resolves a scope first.
+func (r *DriftRecordRepository) CountsBySource(ctx context.Context) ([]SourceRecordCounts, error) {
+	rows, err := r.db.QueryContext(ctx, countsBySourceQuery+`
+		GROUP BY r.source_id, s.name ORDER BY s.name`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanSourceRecordCounts(rows)
+}
+
+// CountIncomplete returns the number of LIVE drift records whose own check did
+// not finish (unparseable or truncated) -- the drift summary's
+// incomplete_records field, deployment-wide. Callers reach this only through
+// CountIncompleteInScope's PlatformAdmin branch.
+func (r *DriftRecordRepository) CountIncomplete(ctx context.Context) (int, error) {
+	var n int
+	err := r.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM drift_records WHERE status <> 'resolved' AND (unparseable OR truncated)`).Scan(&n)
+	return n, err
+}

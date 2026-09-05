@@ -21,6 +21,11 @@ import (
 // defaultInterval is how often the runner polls for due schedules.
 const defaultInterval = 60 * time.Second
 
+// defaultBatchLimit bounds how many due schedules one poll reads when Options
+// does not specify one (mirrors config.SchedulerConfig's own default so a
+// Runner built without a Config-derived Options behaves the same way).
+const defaultBatchLimit = 50
+
 // fireTimeout bounds one schedule's claim + dispatch + outcome write. Each
 // firing gets its own budget so a slow dispatch cannot exhaust the batch.
 const fireTimeout = 30 * time.Second
@@ -42,23 +47,61 @@ type Dispatcher interface {
 	Dispatch(ctx context.Context, targetType string, targetConfig json.RawMessage, actor string, derived tenancy.SystemScope) (runID, status string, err error)
 }
 
+// Options configures a Runner's pacing (Phase 2 — fleet-scale drift). Every
+// field is optional: Interval and BatchLimit fall back to a package default
+// when zero, and a zero MaxInFlight means "no cap" — the same "an install that
+// never touches this keeps today's behavior" contract as the Config fields
+// these are normally built from (config.SchedulerConfig, config.DriftConfig).
+type Options struct {
+	// Interval is how often the runner polls for due schedules. Zero uses
+	// defaultInterval.
+	Interval time.Duration
+	// BatchLimit bounds how many due schedules one poll reads (GetDue's LIMIT),
+	// so a large due cohort drains over several polls instead of landing on the
+	// agent pool as one herd. Zero uses defaultBatchLimit.
+	BatchLimit int
+	// MaxInFlight caps how many drift runs may be "dispatched" or "running" at
+	// once before fire defers further firings to a later poll. Zero (the
+	// default) means unlimited: InFlight, if set, is still sampled for the
+	// tsm_drift_runs_in_flight gauge, but the cap never defers.
+	MaxInFlight int
+	// InFlight reports the current in-flight drift-run count (e.g.
+	// DriftRepository.CountRunsIn over ["dispatched","running"]). May be nil,
+	// in which case neither the gauge nor the cap check runs.
+	InFlight func(ctx context.Context) (int, error)
+}
+
 // Runner polls for due schedules on an interval and fires each via the Dispatcher.
 type Runner struct {
-	repo       *repositories.ScheduleRepository
-	dispatcher Dispatcher
-	interval   time.Duration
-	stopCh     chan struct{}
-	logger     *slog.Logger
+	repo        *repositories.ScheduleRepository
+	dispatcher  Dispatcher
+	interval    time.Duration
+	batchLimit  int
+	maxInFlight int
+	inFlight    func(ctx context.Context) (int, error)
+	stopCh      chan struct{}
+	logger      *slog.Logger
 }
 
 // New constructs a Runner. Call Start to begin the background loop.
-func New(repo *repositories.ScheduleRepository, dispatcher Dispatcher) *Runner {
+func New(repo *repositories.ScheduleRepository, dispatcher Dispatcher, opts Options) *Runner {
+	interval := opts.Interval
+	if interval <= 0 {
+		interval = defaultInterval
+	}
+	batchLimit := opts.BatchLimit
+	if batchLimit <= 0 {
+		batchLimit = defaultBatchLimit
+	}
 	return &Runner{
-		repo:       repo,
-		dispatcher: dispatcher,
-		interval:   defaultInterval,
-		stopCh:     make(chan struct{}),
-		logger:     slog.With("component", "scheduler"),
+		repo:        repo,
+		dispatcher:  dispatcher,
+		interval:    interval,
+		batchLimit:  batchLimit,
+		maxInFlight: opts.MaxInFlight,
+		inFlight:    opts.InFlight,
+		stopCh:      make(chan struct{}),
+		logger:      slog.With("component", "scheduler"),
 	}
 }
 
@@ -66,7 +109,8 @@ func New(repo *repositories.ScheduleRepository, dispatcher Dispatcher) *Runner {
 func (r *Runner) Start() {
 	ticker := time.NewTicker(r.interval)
 	telemetry.RegisterWorker("scheduler", r.interval)
-	r.logger.Info("scheduler started", "interval", r.interval.String())
+	r.logger.Info("scheduler started", "interval", r.interval.String(),
+		"batch_limit", r.batchLimit, "max_in_flight", r.maxInFlight)
 	go func() {
 		r.checkDue() // immediate first check on startup
 		for {
@@ -94,15 +138,23 @@ func (r *Runner) Stop() {
 
 func (r *Runner) checkDue() {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	due, err := r.repo.GetDue(ctx, time.Now())
+	due, err := r.repo.GetDue(ctx, time.Now(), r.batchLimit)
 	cancel()
 	if err != nil {
 		r.logger.Error("failed to query due schedules", "error", err)
 		return
 	}
+	// unclaimed tallies this tick's due-but-not-claimed schedules -- deferred
+	// under the in-flight cap, or a claim that genuinely failed -- and backs
+	// tsm_scheduler_due_backlog. A schedule another replica/poll claimed first
+	// does NOT count: it is handled, just not by this call.
+	unclaimed := 0
 	for i := range due {
-		r.fire(&due[i])
+		if !r.fire(&due[i]) {
+			unclaimed++
+		}
 	}
+	telemetry.SetSchedulerDueBacklog(unclaimed)
 }
 
 // fire claims one due schedule (atomically advancing next_run_at), dispatches
@@ -111,24 +163,57 @@ func (r *Runner) checkDue() {
 // due and re-fire a real CI run on the next poll; a lost claim means another
 // poll or replica took this firing. A schedule that is overdue (e.g. the server
 // was down) fires once and is rescheduled from now — there is no catch-up storm.
-func (r *Runner) fire(s *repositories.Schedule) {
+//
+// The in-flight cap (Phase 2 fleet-scale pacing) is checked BEFORE ClaimDue,
+// and checked FRESH on every call rather than once per poll: a cohort
+// dispatched earlier in the SAME poll raises the true in-flight count, so a
+// stale snapshot would let an entire batch through together instead of
+// draining it under the cap. A deferral returns without claiming, so
+// next_run_at is untouched and the row is retried on a later poll — checking
+// the cap AFTER the claim would still bound concurrency, but it would also
+// burn the claim, forcing the schedule to wait a full cron cycle instead of
+// the next poll.
+//
+// The return value says whether the row was claimed THIS call (by this
+// replica) or is already claimed (by a concurrent one) — i.e. whether it is
+// still due-and-unclaimed afterward. It backs tsm_scheduler_due_backlog;
+// callers other than checkDue have no use for it.
+func (r *Runner) fire(s *repositories.Schedule) (claimed bool) {
 	logger := r.logger.With("schedule_id", s.ID, "name", s.Name, "target", s.TargetType)
 	// Own budget per firing, independent of the poll and of other schedules.
 	ctx, cancel := context.WithTimeout(context.Background(), fireTimeout)
 	defer cancel()
 
 	if s.NextRunAt == nil { // GetDue filters these out; defensive
-		return
+		return true
 	}
+
+	if r.inFlight != nil {
+		n, err := r.inFlight(ctx)
+		if err != nil {
+			logger.Error("failed to read in-flight drift run count; proceeding without the cap this firing", "error", err)
+		} else {
+			telemetry.SetDriftRunsInFlight(n)
+			if r.maxInFlight > 0 && n >= r.maxInFlight {
+				logger.Info("in-flight cap reached; deferring", "in_flight", n, "max_in_flight", r.maxInFlight)
+				telemetry.DriftDispatchResult("deferred")
+				return false
+			}
+		}
+	}
+
 	next := ComputeNextRun(s.CronExpr, time.Now())
-	claimed, err := r.repo.ClaimDue(ctx, s.ID, *s.NextRunAt, time.Now(), next)
+	claimedRow, err := r.repo.ClaimDue(ctx, s.ID, *s.NextRunAt, time.Now(), next)
 	if err != nil {
 		logger.Error("failed to claim schedule", "error", err)
-		return
+		telemetry.DriftDispatchResult("failed")
+		return false
 	}
-	if !claimed {
+	if !claimedRow {
 		logger.Info("schedule already claimed elsewhere; skipping")
-		return
+		// Not a backlog item: another replica/poll already owns this firing, so
+		// no dispatch-result outcome is this replica's to report.
+		return true
 	}
 
 	// THE WORKER HAS NO PRINCIPAL, so its authority is DERIVED from the
@@ -151,7 +236,8 @@ func (r *Runner) fire(s *repositories.Schedule) {
 		if recErr := r.repo.RecordOutcome(ctx, s.ID, "failed", nil); recErr != nil {
 			logger.Error("failed to record schedule outcome", "error", recErr)
 		}
-		return
+		telemetry.DriftDispatchResult("failed")
+		return true
 	}
 
 	runID, status, err := r.dispatcher.Dispatch(ctx, s.TargetType, s.TargetConfig, "scheduler", sysScope)
@@ -160,8 +246,10 @@ func (r *Runner) fire(s *repositories.Schedule) {
 		if status == "" {
 			status = "failed"
 		}
+		telemetry.DriftDispatchResult("failed")
 	} else {
 		logger.Info("schedule fired", "run_id", runID, "status", status)
+		telemetry.DriftDispatchResult("ok")
 	}
 
 	var runIDPtr *string
@@ -171,6 +259,7 @@ func (r *Runner) fire(s *repositories.Schedule) {
 	if recErr := r.repo.RecordOutcome(ctx, s.ID, status, runIDPtr); recErr != nil {
 		logger.Error("failed to record schedule outcome", "error", recErr)
 	}
+	return true
 }
 
 // ComputeNextRun returns the next fire time for a schedule expression, or nil if

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -44,7 +45,7 @@ func TestDispatchGitHub_SendsWorkflowDispatch(t *testing.T) {
 	defer func() { githubAPIBaseURL = old }()
 
 	cfg := GitHubConfig{Owner: "org", Repo: "infra", WorkflowID: "tsm-drift.yml", Ref: "develop"}
-	err := DispatchGitHubDrift(context.Background(), "ghp_tok", cfg, "",
+	_, err := DispatchGitHubDrift(context.Background(), "ghp_tok", cfg, "",
 		DriftInputs{CallbackURL: "https://tsm/cb", CallbackToken: "cbt", WorkingDir: "envs/prod"})
 	if err != nil {
 		t.Fatalf("dispatch: %v", err)
@@ -127,7 +128,7 @@ func TestDispatchAzureDevOps_NormalizesRefAndAuth(t *testing.T) {
 	defer func() { azureDevOpsBaseURL = old }()
 
 	cfg := AzureDevOpsConfig{Organization: "corp", Project: "Platform", PipelineID: "42"}
-	err := DispatchAzureDevOpsDrift(context.Background(), ADOPAT("pat-secret"), cfg, "feature/x",
+	_, err := DispatchAzureDevOpsDrift(context.Background(), ADOPAT("pat-secret"), cfg, "feature/x",
 		DriftInputs{CallbackURL: "https://tsm/cb", CallbackToken: "cbt"})
 	if err != nil {
 		t.Fatalf("dispatch: %v", err)
@@ -174,6 +175,145 @@ func TestDispatchAzureDevOps_OmitsRefWhenUnset(t *testing.T) {
 	}
 	if got.Resources == nil || got.Resources.Repositories.Self.RefName != "refs/tags/v1" {
 		t.Errorf("qualified ref must pass through: %+v", got.Resources)
+	}
+}
+
+// TestDispatchAzureDevOps_WireBody_NoTargets_MatchesTodayExactly is the golden
+// test for the fan-out dispatch change (drift-fleet-scale.md Phase 1, design
+// decision #3: "wire back-compat is absolute"). Written and run against the
+// UNMODIFIED dispatch code before any of it changed, it proves that a
+// no-targets request sends EXACTLY the three keys it sends today --
+// callback_url, callback_token, working_dir -- and nothing else. Any later
+// change that starts sending a fourth key (e.g. "targets") for this shape
+// breaks ADO pipelines that declare only the three legacy parameters
+// ("Unexpected parameter").
+func TestDispatchAzureDevOps_WireBody_NoTargets_MatchesTodayExactly(t *testing.T) {
+	var gotBody map[string]json.RawMessage
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+	old := azureDevOpsBaseURL
+	azureDevOpsBaseURL = srv.URL
+	defer func() { azureDevOpsBaseURL = old }()
+
+	cfg := AzureDevOpsConfig{Organization: "corp", Project: "Platform", PipelineID: "42"}
+	_, err := DispatchAzureDevOpsDrift(context.Background(), ADOPAT("pat-secret"), cfg, "",
+		DriftInputs{CallbackURL: "https://tsm/cb", CallbackToken: "cbt", WorkingDir: "infra/"})
+	if err != nil {
+		t.Fatalf("dispatch: %v", err)
+	}
+
+	var params map[string]string
+	if err := json.Unmarshal(gotBody["templateParameters"], &params); err != nil {
+		t.Fatalf("templateParameters did not decode: %v", err)
+	}
+	want := map[string]string{
+		"callback_url":   "https://tsm/cb",
+		"callback_token": "cbt",
+		"working_dir":    "infra/",
+	}
+	if !reflect.DeepEqual(params, want) {
+		t.Fatalf("templateParameters = %v, want EXACTLY %v (no more, no fewer keys)", params, want)
+	}
+}
+
+// TestDispatchAzureDevOps_WireBody_WithTargets_AddsParam is the fan-out twin of
+// the golden test above: when the caller fills TargetsJSON (2+ targets), the
+// wire body gains a FOURTH key, "targets", carrying that JSON verbatim --
+// alongside the same three legacy keys, taken from the first target, so a
+// pipeline that has not adopted `targets` yet still gets a request it
+// understands.
+func TestDispatchAzureDevOps_WireBody_WithTargets_AddsParam(t *testing.T) {
+	var gotBody map[string]json.RawMessage
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+	old := azureDevOpsBaseURL
+	azureDevOpsBaseURL = srv.URL
+	defer func() { azureDevOpsBaseURL = old }()
+
+	const targetsJSON = `[{"working_dir":"app1/","state_key":"app1.tfstate","callback_url":"https://tsm/r1","callback_token":"t1"},` +
+		`{"working_dir":"app2/","state_key":"app2.tfstate","callback_url":"https://tsm/r2","callback_token":"t2"}]`
+
+	cfg := AzureDevOpsConfig{Organization: "corp", Project: "Platform", PipelineID: "42"}
+	_, err := DispatchAzureDevOpsDrift(context.Background(), ADOPAT("pat-secret"), cfg, "",
+		DriftInputs{CallbackURL: "https://tsm/r1", CallbackToken: "t1", WorkingDir: "app1/", TargetsJSON: targetsJSON})
+	if err != nil {
+		t.Fatalf("dispatch: %v", err)
+	}
+
+	var params map[string]string
+	if err := json.Unmarshal(gotBody["templateParameters"], &params); err != nil {
+		t.Fatalf("templateParameters did not decode: %v", err)
+	}
+	want := map[string]string{
+		"callback_url":   "https://tsm/r1",
+		"callback_token": "t1",
+		"working_dir":    "app1/",
+		"targets":        targetsJSON,
+	}
+	if !reflect.DeepEqual(params, want) {
+		t.Fatalf("templateParameters = %v, want EXACTLY %v", params, want)
+	}
+}
+
+// TestDispatchAzureDevOpsRun_DecodesRunIDAndWebLink_On201 pins the response
+// decode DispatchAzureDevOpsRun adds: a 201 body carrying an id and a web link
+// yields a populated CIRunRef.
+func TestDispatchAzureDevOpsRun_DecodesRunIDAndWebLink_On201(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{"id":12345,"_links":{"web":{"href":"https://dev.azure.com/corp/p/_build/results?buildId=12345"}}}`))
+	}))
+	defer srv.Close()
+	old := azureDevOpsBaseURL
+	azureDevOpsBaseURL = srv.URL
+	defer func() { azureDevOpsBaseURL = old }()
+
+	cfg := AzureDevOpsConfig{Organization: "corp", Project: "P", PipelineID: "1"}
+	ref, err := DispatchAzureDevOpsRun(context.Background(), ADOPAT("pat"), cfg, "", map[string]string{"a": "b"})
+	if err != nil {
+		t.Fatalf("dispatch: %v", err)
+	}
+	if ref == nil || ref.ID != "12345" || ref.WebURL != "https://dev.azure.com/corp/p/_build/results?buildId=12345" {
+		t.Fatalf("CIRunRef = %+v, want id=12345 and the web link", ref)
+	}
+}
+
+// TestDispatchAzureDevOpsRun_MalformedBody_NilRefNoError pins that a missing or
+// malformed response body on a 200/201 is NOT an error -- the dispatch itself
+// already succeeded, and the run id/link are best-effort.
+func TestDispatchAzureDevOpsRun_MalformedBody_NilRefNoError(t *testing.T) {
+	cfg := AzureDevOpsConfig{Organization: "corp", Project: "P", PipelineID: "1"}
+
+	for name, body := range map[string]string{
+		"empty body":       "",
+		"not json":         "not json at all",
+		"json but no id":   `{"name":"whatever"}`,
+		"id present as ''": `{"id":""}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte(body))
+			}))
+			defer srv.Close()
+			old := azureDevOpsBaseURL
+			azureDevOpsBaseURL = srv.URL
+			defer func() { azureDevOpsBaseURL = old }()
+
+			ref, err := DispatchAzureDevOpsRun(context.Background(), ADOPAT("pat"), cfg, "", nil)
+			if err != nil {
+				t.Fatalf("a malformed success body must not be an error: %v", err)
+			}
+			if ref != nil {
+				t.Fatalf("expected a nil CIRunRef, got %+v", ref)
+			}
+		})
 	}
 }
 

@@ -8,9 +8,12 @@ import "github.com/terraform-state-manager/terraform-state-manager/internal/serv
 // produced, reusing notifyDriftResult (nil-notifier safe, detached send).
 type driftFailureNotifier struct{ drift *DriftHandlers }
 
-// NotifyRunFailed implements driftreconcile.FailureNotifier.
+// NotifyRunFailed implements driftreconcile.FailureNotifier. The reconciler's
+// interface carries no state_key/ci_run_url (an expired run may never have
+// gotten far enough to record either), so both ride through empty -- exactly
+// as absent as they were before notifyDriftResult grew the parameters.
 func (n driftFailureNotifier) NotifyRunFailed(organizationID, runID, detail string) {
-	n.drift.notifyDriftResult(organizationID, runID, "failed", 0, 0, 0, false, detail)
+	n.drift.notifyDriftResult(organizationID, runID, "", "failed", 0, 0, 0, false, detail, "")
 }
 
 var _ driftreconcile.FailureNotifier = driftFailureNotifier{}

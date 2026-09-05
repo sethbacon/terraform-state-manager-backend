@@ -208,7 +208,7 @@ func TestIntegration_ScopedCallbackRootReads_AreEquivalentInOneOrganization(t *t
 	health := repositories.NewHealthRepository(db)
 	records := repositories.NewDriftRecordRepository(db)
 
-	unscopedRuns, err := drift.List(ctx, 0, 0, "")
+	unscopedRuns, err := drift.List(ctx, 0, 0, repositories.DriftRunFilter{})
 	if err != nil {
 		t.Fatalf("drift List: %v", err)
 	}
@@ -216,7 +216,7 @@ func TestIntegration_ScopedCallbackRootReads_AreEquivalentInOneOrganization(t *t
 		t.Fatalf("drift List returned %d runs, want 1 — the fixture is wrong, not the system", len(unscopedRuns))
 	}
 	assertDriftRunFixtureIsNotVacuous(t, unscopedRuns)
-	scopedRuns, err := drift.ListInScope(ctx, 0, 0, "", scope)
+	scopedRuns, err := drift.ListInScope(ctx, 0, 0, repositories.DriftRunFilter{}, scope)
 	if err != nil {
 		t.Fatalf("drift ListInScope: %v", err)
 	}
@@ -315,14 +315,14 @@ func TestIntegration_ScopedCallbackRootReads_WithholdAnotherOrganization(t *test
 	health := repositories.NewHealthRepository(db)
 	records := repositories.NewDriftRecordRepository(db)
 
-	runs, err := drift.ListInScope(ctx, 0, 0, "", scopeA)
+	runs, err := drift.ListInScope(ctx, 0, 0, repositories.DriftRunFilter{}, scopeA)
 	if err != nil {
 		t.Fatalf("drift ListInScope: %v", err)
 	}
 	if len(runs) != 1 || runs[0].ID != runA {
 		t.Fatalf("drift ListInScope returned %v, want exactly Alpha's run %s", driftRunIDs(runs), runA)
 	}
-	if n, err := drift.CountRunsInScope(ctx, "", scopeA); err != nil || n != 1 {
+	if n, err := drift.CountRunsInScope(ctx, repositories.DriftRunFilter{}, scopeA); err != nil || n != 1 {
 		t.Fatalf("drift CountRunsInScope = %d, %v; want 1. An unscoped total beside a scoped page "+
 			"reports how many runs the rest of the deployment has.", n, err)
 	}
@@ -399,7 +399,10 @@ func TestIntegration_ScopedCallbackRootReads_WithholdAnotherOrganization(t *test
 
 // TestIntegration_ScopedCallbackRootReads_FailClosed covers the direction that
 // matters when something has gone wrong: a caller whose tenancy could not be
-// established reads NOTHING, not everything.
+// established reads NOTHING, not everything. It also covers the four Phase 4a
+// coverage/summary readers (LatestPerStateInScope, LiveByStateInScope,
+// CountsBySourceInScope, CountIncompleteInScope), reusing the source and
+// record already seeded below.
 func TestIntegration_ScopedCallbackRootReads_FailClosed(t *testing.T) {
 	db := newTestDB(t)
 	ctx := context.Background()
@@ -425,7 +428,7 @@ func TestIntegration_ScopedCallbackRootReads_FailClosed(t *testing.T) {
 		{"an organization with no rows", tenantscope.Scope{OrgIDs: []string{"33333333-3333-4333-8333-333333333333"}}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if rows, err := drift.ListInScope(ctx, 0, 0, "", tc.scope); err != nil || len(rows) != 0 {
+			if rows, err := drift.ListInScope(ctx, 0, 0, repositories.DriftRunFilter{}, tc.scope); err != nil || len(rows) != 0 {
 				t.Errorf("drift ListInScope returned %v (%v) for a scope that permits nothing", driftRunIDs(rows), err)
 			}
 			if got, err := drift.GetByIDInScope(ctx, runA, tc.scope); err != nil || got != nil {
@@ -442,6 +445,18 @@ func TestIntegration_ScopedCallbackRootReads_FailClosed(t *testing.T) {
 			}
 			if got, err := records.GetByIDInScope(ctx, recA, tc.scope); err != nil || got != nil {
 				t.Errorf("records GetByIDInScope returned %+v (%v) for a scope that permits nothing", got, err)
+			}
+			if out, err := drift.LatestPerStateInScope(ctx, srcA, tc.scope); err != nil || len(out) != 0 {
+				t.Errorf("drift LatestPerStateInScope returned %v (%v) for a scope that permits nothing", out, err)
+			}
+			if out, err := records.LiveByStateInScope(ctx, srcA, tc.scope); err != nil || len(out) != 0 {
+				t.Errorf("records LiveByStateInScope returned %v (%v) for a scope that permits nothing", out, err)
+			}
+			if out, err := records.CountsBySourceInScope(ctx, tc.scope); err != nil || len(out) != 0 {
+				t.Errorf("records CountsBySourceInScope returned %v (%v) for a scope that permits nothing", out, err)
+			}
+			if n, err := records.CountIncompleteInScope(ctx, tc.scope); err != nil || n != 0 {
+				t.Errorf("records CountIncompleteInScope returned %d (%v) for a scope that permits nothing", n, err)
 			}
 		})
 	}
@@ -541,6 +556,222 @@ func TestIntegration_ScopedCallbackRootReads_UnownedRowsBelongToNoTenant(t *test
 			t.Errorf("a platform admin could not see the unstamped %s. They are the only principal "+
 				"who can, so this row would be invisible to everybody and unfixable through the API.", tc.name)
 		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Phase 4a: the coverage and summary readers (LatestPerStateInScope,
+// LiveByStateInScope, CountsBySourceInScope, CountIncompleteInScope), which
+// back GET /drift/coverage and GET /drift/summary.
+//
+// internal/db/repositories/callback_root_scope_test.go proves these bind the
+// organization array as $1 -- against sqlmock, which matches SQL text and
+// never evaluates a WHERE clause, so it can say the array was bound and it
+// cannot say a row in another organization was refused. The four tests below
+// answer that question against real PostgreSQL, each with the platform-admin
+// control TestIntegration_ScopedCallbackRootReads_WithholdAnotherOrganization
+// establishes above: the withholding is the predicate excluding a row, not a
+// query that returns nothing to anybody.
+// ---------------------------------------------------------------------------
+
+// TestIntegration_LatestPerStateInScope_WithholdsMismatchedOrganization covers
+// LatestPerStateInScope. Its own doc comment in callback_root_scope.go names
+// the collision worth proving: the caller has already verified sourceID is in
+// scope, so the organization predicate here is defense in depth against a run
+// that names Alpha's source yet is itself stamped organization_id = Beta.
+// Removing that predicate leaves a query keyed on source_id alone, which would
+// return both state keys below instead of only the one that agrees.
+func TestIntegration_LatestPerStateInScope_WithholdsMismatchedOrganization(t *testing.T) {
+	db := newTestDB(t)
+	ctx := context.Background()
+
+	srcA := seedSourceInOrg(t, db, orgAlpha, "alpha-coverage")
+	seedDriftRunInOrg(t, db, orgAlpha, srcA, "envs/alpha.tfstate", "tok-a")
+	// Names Alpha's source but is stamped Beta's organization -- the
+	// disagreement the predicate exists to catch.
+	seedDriftRunInOrg(t, db, orgBeta, srcA, "envs/beta.tfstate", "tok-b")
+
+	drift := repositories.NewDriftRepository(db)
+	scopeAlpha := tenantscope.Scope{OrgIDs: []string{orgAlpha}}
+	scopeBeta := tenantscope.Scope{OrgIDs: []string{orgBeta}}
+	admin := tenantscope.Scope{PlatformAdmin: true}
+
+	latest, err := drift.LatestPerStateInScope(ctx, srcA, scopeAlpha)
+	if err != nil {
+		t.Fatalf("LatestPerStateInScope under Alpha: %v", err)
+	}
+	if _, present := latest["envs/beta.tfstate"]; present {
+		t.Error("LatestPerStateInScope under Alpha's scope returned the mismatched Beta run")
+	}
+	if _, present := latest["envs/alpha.tfstate"]; !present {
+		t.Error("LatestPerStateInScope under Alpha's scope withheld Alpha's own run")
+	}
+
+	// CONTROL: Beta's own scope reaches the row stamped as its own, on the same
+	// source id -- without this the withholding above could just as well be a
+	// reader that returns nothing to anybody.
+	latestBeta, err := drift.LatestPerStateInScope(ctx, srcA, scopeBeta)
+	if err != nil {
+		t.Fatalf("LatestPerStateInScope under Beta: %v", err)
+	}
+	if _, present := latestBeta["envs/beta.tfstate"]; !present {
+		t.Fatal("CONTROL FAILED: Beta's own scope cannot read the run stamped as its own")
+	}
+
+	// CONTROL: the platform admin sees both state keys for this source, so the
+	// withholding above is the organization predicate at work, not the
+	// source_id filter matching only one row.
+	latestAdmin, err := drift.LatestPerStateInScope(ctx, srcA, admin)
+	if err != nil {
+		t.Fatalf("LatestPerStateInScope under admin: %v", err)
+	}
+	if len(latestAdmin) != 2 {
+		t.Fatalf("CONTROL FAILED: platform admin saw %d state(s) for source %s, want 2", len(latestAdmin), srcA)
+	}
+}
+
+// TestIntegration_LiveByStateInScope_WithholdsMismatchedOrganization is
+// LiveByStateInScope's half of the same defense-in-depth claim, on
+// drift_records rather than drift_runs.
+func TestIntegration_LiveByStateInScope_WithholdsMismatchedOrganization(t *testing.T) {
+	db := newTestDB(t)
+	ctx := context.Background()
+
+	srcA := seedSourceInOrg(t, db, orgAlpha, "alpha-live-coverage")
+	seedDriftRecordInOrg(t, db, orgAlpha, srcA, "envs/alpha.tfstate")
+	// Names Alpha's source but is stamped Beta's organization.
+	seedDriftRecordInOrg(t, db, orgBeta, srcA, "envs/beta.tfstate")
+
+	records := repositories.NewDriftRecordRepository(db)
+	scopeAlpha := tenantscope.Scope{OrgIDs: []string{orgAlpha}}
+	scopeBeta := tenantscope.Scope{OrgIDs: []string{orgBeta}}
+	admin := tenantscope.Scope{PlatformAdmin: true}
+
+	live, err := records.LiveByStateInScope(ctx, srcA, scopeAlpha)
+	if err != nil {
+		t.Fatalf("LiveByStateInScope under Alpha: %v", err)
+	}
+	if _, present := live["envs/beta.tfstate"]; present {
+		t.Error("LiveByStateInScope under Alpha's scope returned the mismatched Beta record")
+	}
+	if _, present := live["envs/alpha.tfstate"]; !present {
+		t.Error("LiveByStateInScope under Alpha's scope withheld Alpha's own record")
+	}
+
+	// CONTROL: Beta's own scope reaches the record stamped as its own.
+	liveBeta, err := records.LiveByStateInScope(ctx, srcA, scopeBeta)
+	if err != nil {
+		t.Fatalf("LiveByStateInScope under Beta: %v", err)
+	}
+	if _, present := liveBeta["envs/beta.tfstate"]; !present {
+		t.Fatal("CONTROL FAILED: Beta's own scope cannot read the record stamped as its own")
+	}
+
+	// CONTROL: the platform admin sees both state keys for this source.
+	liveAdmin, err := records.LiveByStateInScope(ctx, srcA, admin)
+	if err != nil {
+		t.Fatalf("LiveByStateInScope under admin: %v", err)
+	}
+	if len(liveAdmin) != 2 {
+		t.Fatalf("CONTROL FAILED: platform admin saw %d record(s) for source %s, want 2", len(liveAdmin), srcA)
+	}
+}
+
+// TestIntegration_CountsBySourceInScope_WithholdsAnotherOrganization covers
+// the drift summary's per-source breakdown. Unlike the two tests above this
+// one names no single source up front, so the collision is the ordinary one:
+// two organizations each own a source named "prod" holding an identically
+// shaped record (same state key, same severity, same status -- both written
+// through seedDriftRecordInOrg).
+func TestIntegration_CountsBySourceInScope_WithholdsAnotherOrganization(t *testing.T) {
+	db := newTestDB(t)
+	ctx := context.Background()
+
+	srcA := seedSourceInOrg(t, db, orgAlpha, "prod")
+	srcB := seedSourceInOrg(t, db, orgBeta, "prod")
+	seedDriftRecordInOrg(t, db, orgAlpha, srcA, "envs/prod.tfstate")
+	seedDriftRecordInOrg(t, db, orgBeta, srcB, "envs/prod.tfstate")
+
+	records := repositories.NewDriftRecordRepository(db)
+	scopeAlpha := tenantscope.Scope{OrgIDs: []string{orgAlpha}}
+	scopeBeta := tenantscope.Scope{OrgIDs: []string{orgBeta}}
+	admin := tenantscope.Scope{PlatformAdmin: true}
+
+	countsAlpha, err := records.CountsBySourceInScope(ctx, scopeAlpha)
+	if err != nil {
+		t.Fatalf("CountsBySourceInScope under Alpha: %v", err)
+	}
+	if len(countsAlpha) != 1 || countsAlpha[0].SourceID != srcA {
+		t.Fatalf("CountsBySourceInScope under Alpha = %+v, want exactly source %s (\"prod\"); "+
+			"Beta's identically named source must not be folded in", countsAlpha, srcA)
+	}
+	if countsAlpha[0].Open != 1 || countsAlpha[0].Critical != 1 {
+		t.Fatalf("CountsBySourceInScope under Alpha = %+v, want 1 open and 1 critical, not the "+
+			"deployment's total across both organizations", countsAlpha)
+	}
+
+	// CONTROL: Beta's own scope reaches its own identically-named source.
+	countsBeta, err := records.CountsBySourceInScope(ctx, scopeBeta)
+	if err != nil {
+		t.Fatalf("CountsBySourceInScope under Beta: %v", err)
+	}
+	if len(countsBeta) != 1 || countsBeta[0].SourceID != srcB {
+		t.Fatalf("CONTROL FAILED: CountsBySourceInScope under Beta = %+v, want exactly source %s", countsBeta, srcB)
+	}
+
+	// CONTROL: the platform admin sees both organizations' "prod" source.
+	countsAdmin, err := records.CountsBySourceInScope(ctx, admin)
+	if err != nil {
+		t.Fatalf("CountsBySourceInScope under admin: %v", err)
+	}
+	if len(countsAdmin) != 2 {
+		t.Fatalf("CONTROL FAILED: platform admin saw %d source(s), want 2 (same name, two organizations)", len(countsAdmin))
+	}
+}
+
+// TestIntegration_CountIncompleteInScope_WithholdsAnotherOrganization covers
+// the drift summary's incomplete_records field. seedDriftRecordInOrg always
+// writes truncated=true and status='open' -- exactly what this reader counts
+// -- so the collision worth seeding is the identical state key and source
+// shape, not the incompleteness marker itself.
+func TestIntegration_CountIncompleteInScope_WithholdsAnotherOrganization(t *testing.T) {
+	db := newTestDB(t)
+	ctx := context.Background()
+
+	srcA := seedSourceInOrg(t, db, orgAlpha, "alpha-incomplete")
+	srcB := seedSourceInOrg(t, db, orgBeta, "beta-incomplete")
+	seedDriftRecordInOrg(t, db, orgAlpha, srcA, "envs/prod.tfstate")
+	seedDriftRecordInOrg(t, db, orgBeta, srcB, "envs/prod.tfstate")
+
+	records := repositories.NewDriftRecordRepository(db)
+	scopeAlpha := tenantscope.Scope{OrgIDs: []string{orgAlpha}}
+	scopeBeta := tenantscope.Scope{OrgIDs: []string{orgBeta}}
+	admin := tenantscope.Scope{PlatformAdmin: true}
+
+	nAlpha, err := records.CountIncompleteInScope(ctx, scopeAlpha)
+	if err != nil {
+		t.Fatalf("CountIncompleteInScope under Alpha: %v", err)
+	}
+	if nAlpha != 1 {
+		t.Fatalf("CountIncompleteInScope under Alpha = %d, want 1 -- not the deployment's total of 2", nAlpha)
+	}
+
+	// CONTROL: Beta counts its own.
+	nBeta, err := records.CountIncompleteInScope(ctx, scopeBeta)
+	if err != nil {
+		t.Fatalf("CountIncompleteInScope under Beta: %v", err)
+	}
+	if nBeta != 1 {
+		t.Fatalf("CONTROL FAILED: CountIncompleteInScope under Beta = %d, want 1", nBeta)
+	}
+
+	// CONTROL: the platform admin sees the deployment's total.
+	nAdmin, err := records.CountIncompleteInScope(ctx, admin)
+	if err != nil {
+		t.Fatalf("CountIncompleteInScope under admin: %v", err)
+	}
+	if nAdmin != 2 {
+		t.Fatalf("CONTROL FAILED: platform admin counted %d incomplete record(s), want 2", nAdmin)
 	}
 }
 

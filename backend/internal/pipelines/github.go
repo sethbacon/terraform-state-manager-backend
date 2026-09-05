@@ -36,6 +36,32 @@ type DriftInputs struct {
 	CallbackURL   string
 	CallbackToken string
 	WorkingDir    string
+	// TargetsJSON is the JSON-encoded per-target list (working_dir, state_key,
+	// callback_url, callback_token) for a repo-level fan-out dispatch of 2+
+	// targets. Sent as the "targets" template parameter/workflow input ONLY
+	// when non-empty -- a request that never fanned out must send exactly
+	// today's three keys (drift-fleet-scale.md Phase 1, design decision #3).
+	TargetsJSON string
+}
+
+// CIRunRef identifies the CI run a dispatch started: an opaque provider run id
+// and a human-facing web link. Populated from the dispatch API's OWN response
+// -- never from a callback body, which is input the CI job controls -- so it
+// is always populated (or nil) before any run row is created from it.
+type CIRunRef struct {
+	ID     string
+	WebURL string
+}
+
+// FanOutFromMap reads config.fan_out from a pipeline connection's config map
+// with a STRICT bool type-assert: anything absent or not a JSON boolean reads
+// as false. Write-time validation (CreatePipeline/UpdatePipeline) rejects a
+// fan_out that is present but not a boolean before it can reach a stored row,
+// so by the time this is read at dispatch, "false" and "not a bool" cannot be
+// confused with an operator's deliberate opt-in.
+func FanOutFromMap(m map[string]any) bool {
+	b, _ := m["fan_out"].(bool)
+	return b
 }
 
 var httpClient = &http.Client{Timeout: 20 * time.Second}
@@ -80,11 +106,20 @@ func DispatchGitHub(ctx context.Context, token string, cfg GitHubConfig, ref str
 	return nil
 }
 
-// DispatchGitHubDrift dispatches the drift workflow with its standard inputs.
-func DispatchGitHubDrift(ctx context.Context, token string, cfg GitHubConfig, ref string, inputs DriftInputs) error {
-	return DispatchGitHub(ctx, token, cfg, ref, map[string]string{
+// DispatchGitHubDrift dispatches the drift workflow with its standard inputs,
+// plus "targets" when the caller filled DriftInputs.TargetsJSON (a fan-out
+// dispatch of 2+ targets). GitHub's workflow_dispatch API returns 204 with no
+// run id in the body, so the CIRunRef is always nil -- callers must not treat
+// that as an error (see DispatchGitHub, which already tolerates 204 as
+// success).
+func DispatchGitHubDrift(ctx context.Context, token string, cfg GitHubConfig, ref string, inputs DriftInputs) (*CIRunRef, error) {
+	wfInputs := map[string]string{
 		"callback_url":   inputs.CallbackURL,
 		"callback_token": inputs.CallbackToken,
 		"working_dir":    inputs.WorkingDir,
-	})
+	}
+	if inputs.TargetsJSON != "" {
+		wfInputs["targets"] = inputs.TargetsJSON
+	}
+	return nil, DispatchGitHub(ctx, token, cfg, ref, wfInputs)
 }
