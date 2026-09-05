@@ -35,9 +35,13 @@ func (c GitHubAppCreds) valid() bool {
 	return c.AppID != "" && c.InstallationID != "" && c.PrivateKeyPEM != ""
 }
 
-// fingerprint keys the token cache so rotating any credential field invalidates
-// the cached token (a different key) without explicit eviction.
-func (c GitHubAppCreds) fingerprint() string {
+// Fingerprint keys the token cache so rotating any credential field
+// invalidates the cached token (a different key) without explicit eviction.
+// Exported for the same reason as EntraCreds.Fingerprint: PUT /ci-sources/:id
+// (Phase 1b) uses it to evict the OLD row's cache entry explicitly via
+// EvictGitHubAppTokenCacheKey rather than relying solely on rotation
+// happening to produce a different key.
+func (c GitHubAppCreds) Fingerprint() string {
 	sum := sha256.Sum256([]byte(c.AppID + "\x00" + c.InstallationID + "\x00" + c.PrivateKeyPEM))
 	return string(sum[:])
 }
@@ -59,7 +63,7 @@ func MintGitHubInstallationToken(ctx context.Context, creds GitHubAppCreds) (str
 	if !creds.valid() {
 		return "", fmt.Errorf("github app credentials require app_id, installation_id, and a private key")
 	}
-	key := creds.fingerprint()
+	key := creds.Fingerprint()
 
 	ghAppCacheMu.Lock()
 	if t, ok := ghAppCache[key]; ok && time.Until(t.expiresAt) > entraTokenRefreshMargin {
@@ -194,5 +198,19 @@ func urlPathSegment(s string) string {
 func ResetGitHubAppTokenCacheForTest() {
 	ghAppCacheMu.Lock()
 	ghAppCache = map[string]ghAppCachedToken{}
+	ghAppCacheMu.Unlock()
+}
+
+// EvictGitHubAppTokenCacheKey removes a single cached token, keyed by
+// GitHubAppCreds.Fingerprint -- the GitHub-App twin of
+// pipelines.EvictADOTokenCacheKey, used by the same PUT /ci-sources/:id route
+// for a GitHub App source's credential rotation. See EvictADOTokenCacheKey's
+// comment for why this is explicit rather than left to rotation alone.
+func EvictGitHubAppTokenCacheKey(key string) {
+	if key == "" {
+		return
+	}
+	ghAppCacheMu.Lock()
+	delete(ghAppCache, key)
 	ghAppCacheMu.Unlock()
 }
