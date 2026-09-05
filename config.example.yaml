@@ -49,6 +49,21 @@ drift:
   # are reaped by their own reconciler using these same knobs.
   run_ttl: 2h
   reconcile_interval: 5m
+  # Fleet-scale scheduler pacing: caps how many drift runs may be
+  # dispatched/running at once before the scheduler defers further firings to a
+  # later poll. 0 (default) is unlimited -- every due schedule fires the moment
+  # it's due, today's behavior for a small deployment. Set it to the shared CI
+  # agent pool's capacity so a large nightly cohort drains the pool instead of
+  # landing on it as one herd. Override via TSM_DRIFT_MAX_IN_FLIGHT.
+  max_in_flight: 0
+
+# Scheduler poll pacing (Phase 2 fleet-scale drift), paired with
+# drift.max_in_flight above.
+scheduler:
+  # How many due schedules one poll reads and claims work for. Raise alongside
+  # drift.max_in_flight for a fleet-scale deployment. Override via
+  # TSM_SCHEDULER_BATCH_LIMIT.
+  batch_limit: 50
 
 # Audit log retention (#373). DISABLED BY DEFAULT, and deliberately so: an
 # enabled sweep would delete audit history on the first boot after an upgrade,

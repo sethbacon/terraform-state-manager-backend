@@ -19,6 +19,20 @@ fails when any registered loop stops ticking past its staleness budget
 (3 intervals, 2-minute floor), so Kubernetes surfaces a stalled worker
 without any Prometheus rule.
 
+Fleet-scale scheduler pacing (`TSM_DRIFT_MAX_IN_FLIGHT`,
+`TSM_SCHEDULER_BATCH_LIMIT` — see [configuration.md](configuration.md#workers)):
+`tsm_drift_runs_in_flight` (gauge — the scheduler's most recent
+sample of drift runs currently `dispatched`/`running`, the same count its
+in-flight cap checks before claiming each due schedule), `tsm_scheduler_due_backlog`
+(gauge — due schedules the most recent poll read but did not claim, whether
+deferred under the cap or a failed claim attempt; a schedule claimed by a
+concurrent replica does not count towards it), and `tsm_drift_dispatch_total{result}`
+(counter — every schedule firing's terminal result: `ok`, `failed`, or
+`deferred`). A sustained non-zero `tsm_scheduler_due_backlog`, or a rising rate
+of `tsm_drift_dispatch_total{result="deferred"}`, means due work is arriving
+faster than the configured cap can drain it — raise `TSM_DRIFT_MAX_IN_FLIGHT`
+or the shared agent pool's capacity.
+
 - Kubernetes: `serviceMonitor.enabled=true` (+ `prometheusRule.enabled`,
   `grafanaDashboard.enabled`) in the chart; NetworkPolicy already admits the
   `monitoring` namespace on 9090.
