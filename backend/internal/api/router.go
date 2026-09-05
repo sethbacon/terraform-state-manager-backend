@@ -619,6 +619,13 @@ func NewRouter(cfg *config.Config, database *sql.DB, identityDB *sql.DB) (*gin.E
 			d.GET("/records/:id", middleware.RequireScope(auth.ScopeStateRead), tenantScopeStateRead, drift.GetDriftRecord())
 			d.POST("/records/:id/acknowledge", middleware.RequireScope(auth.ScopeStateDrift), tenantScopeStateDrift, drift.AcknowledgeDriftRecord())
 			d.POST("/records/:id/resolve", middleware.RequireScope(auth.ScopeStateDrift), tenantScopeStateDrift, drift.ResolveDriftRecord())
+
+			// Phase 4a dashboard read-path (#567): coverage joins one source's
+			// live states against its latest runs/records/schedules; summary is
+			// the fleet-wide rollup. Same scope/verb as the run and record reads
+			// above -- both are read-only aggregates over the same two roots.
+			d.GET("/coverage", middleware.RequireScope(auth.ScopeStateRead), tenantScopeStateRead, drift.Coverage())
+			d.GET("/summary", middleware.RequireScope(auth.ScopeStateRead), tenantScopeStateRead, drift.Summary())
 		}
 		// Machine callback (authenticated by the per-run token, not a user
 		// session), and DELIBERATELY WITHOUT middleware.TenantScope: a CI job

@@ -68,6 +68,8 @@ func newDriftEnvWithScope(t *testing.T, scope *tenantscope.Scope) *sourcesEnv {
 	v1.GET("/drift/records/:id", h.GetDriftRecord())
 	v1.POST("/drift/records/:id/acknowledge", h.AcknowledgeDriftRecord())
 	v1.POST("/drift/records/:id/resolve", h.ResolveDriftRecord())
+	v1.GET("/drift/coverage", h.Coverage())
+	v1.GET("/drift/summary", h.Summary())
 	v1.GET("/health-lab/runs", hh.ListRuns())
 	v1.POST("/health-lab/runs", hh.CreateRun())
 	v1.GET("/health-lab/runs/:id", hh.GetRun())

@@ -38,8 +38,17 @@ type DriftHandlers struct {
 	recordRepo    *repositories.DriftRecordRepository
 	sourceRepo    *repositories.SourceRepository
 	moduleRefRepo *repositories.StateModuleRefRepository
-	audit         auditor
-	notifier      *notify.Notifier // may be nil (notifications disabled / no DB)
+	// scheduleRepo backs the Phase 4a coverage endpoint's schedule-membership
+	// join (drift-fleet-scale.md #567): which states a schedule's target_config
+	// already names, so the dashboard can tell "no schedule reaches this state"
+	// from "checked but nothing due yet".
+	scheduleRepo *repositories.ScheduleRepository
+	// coverage caches the coverage endpoint's expensive per-source join inputs
+	// for 60s (see drift_coverage.go); never consulted for the source lookup
+	// itself, which is re-verified in scope on every request.
+	coverage *coverageCache
+	audit    auditor
+	notifier *notify.Notifier // may be nil (notifications disabled / no DB)
 	// orgs verifies that an acting organization exists before a row is stamped
 	// with it. Wired by the router from its single approles.Members; nil is
 	// refused rather than skipped (see actingOrganization).
@@ -64,6 +73,8 @@ func NewDriftHandlers(cfg *config.Config, database, identityDB *sql.DB, notifier
 		recordRepo:    repositories.NewDriftRecordRepository(database),
 		sourceRepo:    repositories.NewSourceRepository(database),
 		moduleRefRepo: repositories.NewStateModuleRefRepository(database),
+		scheduleRepo:  repositories.NewScheduleRepository(database),
+		coverage:      newCoverageCache(),
 		audit:         newAuditor(identityDB),
 		notifier:      notifier,
 	}

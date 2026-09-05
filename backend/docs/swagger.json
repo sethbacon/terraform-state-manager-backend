@@ -2276,6 +2276,64 @@
                 }
             }
         },
+        "/drift/coverage": {
+            "get": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    },
+                    {
+                        "CookieAuth": []
+                    }
+                ],
+                "description": "For each state the connector currently lists: whether a schedule already targets it, its latest run (status, drifted, completeness, CI link), and its live (non-resolved) drift record, if any. summary gives the same chip counts the states array would produce if counted by hand.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Drift"
+                ],
+                "summary": "Drift coverage for one source",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "state source id",
+                        "name": "source_id",
+                        "in": "query",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "duration a state may go unchecked before it counts as stale (default 24h)",
+                        "name": "stale_after",
+                        "in": "query"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    }
+                }
+            }
+        },
         "/drift/ingest": {
             "post": {
                 "security": [
@@ -2597,6 +2655,35 @@
                     },
                     "409": {
                         "description": "callback already processed",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    }
+                }
+            }
+        },
+        "/drift/summary": {
+            "get": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    },
+                    {
+                        "CookieAuth": []
+                    }
+                ],
+                "description": "Per-source open/acknowledged/critical drift-record counts, the last 24h of drift runs by terminal status, how many live records are incomplete (unparseable or truncated), and how many runs are currently in flight -- all scoped to the caller's organization(s).",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Drift"
+                ],
+                "summary": "Drift summary",
+                "responses": {
+                    "200": {
+                        "description": "OK",
                         "schema": {
                             "type": "object",
                             "additionalProperties": true
