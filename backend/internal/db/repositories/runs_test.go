@@ -5,32 +5,27 @@ import (
 	"testing"
 
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
+
+	"github.com/terraform-state-manager/terraform-state-manager/internal/testsupport"
 )
 
 // ---------------------------------------------------------------------------
 // DriftRepository
 // ---------------------------------------------------------------------------
 
-var driftCols = []string{"id", "pipeline_connection_id", "source_id", "state_key", "repo_ref", "working_dir",
-	"status", "added", "changed", "destroyed", "drifted", "summary", "detail", "callback_token", "actor",
-	"created_at", "updated_at", "truncated", "omitted_entries", "omitted_attrs", "unparseable", "unmasked", "organization_id",
-	"batch_id", "ci_run_id", "ci_run_url"}
-
 func driftRow(token string) *sqlmock.Rows {
-	return sqlmock.NewRows(driftCols).
-		AddRow("d1", "p1", "s1", "app.tfstate", "refs/heads/main", "infra/",
-			"completed", 1, 2, 0, true, []byte(`{"resources":[]}`), "", token, "alice",
-			"2026-06-10", "2026-06-10", false, 0, 0, false, false, "11111111-1111-4111-8111-111111111111",
-			nil, "", "")
+	return testsupport.DriftRunRow("d1", "p1", "s1", "app.tfstate", "refs/heads/main", "infra/",
+		"completed", 1, 2, 0, true, []byte(`{"resources":[]}`), "", token, "alice",
+		"2026-06-10", "2026-06-10", false, 0, 0, false, false, "11111111-1111-4111-8111-111111111111",
+		nil, "", "")
 }
 
 // driftRowWithBatch is driftRow with a non-NULL batch_id, for the fan-out shape.
 func driftRowWithBatch(token, batchID string) *sqlmock.Rows {
-	return sqlmock.NewRows(driftCols).
-		AddRow("d1", "p1", "s1", "app.tfstate", "refs/heads/main", "infra/",
-			"dispatched", nil, nil, nil, nil, nil, "", token, "alice",
-			"2026-06-10", "2026-06-10", false, 0, 0, false, false, "11111111-1111-4111-8111-111111111111",
-			batchID, "", "")
+	return testsupport.DriftRunRow("d1", "p1", "s1", "app.tfstate", "refs/heads/main", "infra/",
+		"dispatched", nil, nil, nil, nil, nil, "", token, "alice",
+		"2026-06-10", "2026-06-10", false, 0, 0, false, false, "11111111-1111-4111-8111-111111111111",
+		batchID, "", "")
 }
 
 func TestDriftRepository_CreateAndGet(t *testing.T) {
@@ -281,11 +276,10 @@ func TestDriftRepository_UpdateResultPersistsCompletenessMarkers(t *testing.T) {
 
 	// ...and back out again, so per-run history can actually report them.
 	mock.ExpectQuery("SELECT .+ FROM drift_runs WHERE id").WithArgs("d1").
-		WillReturnRows(sqlmock.NewRows(driftCols).
-			AddRow("d1", "p1", "s1", "app.tfstate", "", "", "completed",
-				0, 0, 0, false, nil, "", "", "alice", "2026-06-10", "2026-06-10",
-				true, 5, 9, true, true, "11111111-1111-4111-8111-111111111111",
-				nil, "", ""))
+		WillReturnRows(testsupport.DriftRunRow("d1", "p1", "s1", "app.tfstate", "", "", "completed",
+			0, 0, 0, false, nil, "", "", "alice", "2026-06-10", "2026-06-10",
+			true, 5, 9, true, true, "11111111-1111-4111-8111-111111111111",
+			nil, "", ""))
 	got, err := r.GetByID(ctx, "d1")
 	if err != nil || got == nil {
 		t.Fatalf("GetByID: %v %+v", err, got)

@@ -16,6 +16,7 @@ import (
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
 
 	"github.com/terraform-state-manager/terraform-state-manager/internal/pipelines"
+	"github.com/terraform-state-manager/terraform-state-manager/internal/testsupport"
 )
 
 // ---------------------------------------------------------------------------
@@ -33,19 +34,17 @@ func driftRunInsertRow(id, sourceID, stateKey, token string, batchID *string) *s
 	if sourceID != "" {
 		srcVal = sourceID
 	}
-	return sqlmock.NewRows(driftCols).
-		AddRow(id, "p1", srcVal, stateKey, "", "", "dispatched", nil, nil, nil, nil, nil, "", token, "alice",
-			"2026-06-11", "2026-06-11", false, 0, 0, false, false, testActingOrg,
-			batchVal, "", "")
+	return testsupport.DriftRunRow(id, "p1", srcVal, stateKey, "", "", "dispatched", nil, nil, nil, nil, nil, "", token, "alice",
+		"2026-06-11", "2026-06-11", false, 0, 0, false, false, testActingOrg,
+		batchVal, "", "")
 }
 
 // driftRowWithBatchAndCI is a GetByID/GetByIDInScope RETURNING row carrying a
 // non-NULL batch_id and CI run id/link, for GetRun/ListRuns assertions.
 func driftRowWithBatchAndCI(id, token, batchID, ciRunID, ciRunURL string) *sqlmock.Rows {
-	return sqlmock.NewRows(driftCols).
-		AddRow(id, "p1", "s1", "app.tfstate", "", "", "completed",
-			nil, nil, nil, nil, nil, "", token, "alice", "2026-06-11", "2026-06-11",
-			false, 0, 0, false, false, testActingOrg, batchID, ciRunID, ciRunURL)
+	return testsupport.DriftRunRow(id, "p1", "s1", "app.tfstate", "", "", "completed",
+		nil, nil, nil, nil, nil, "", token, "alice", "2026-06-11", "2026-06-11",
+		false, 0, 0, false, false, testActingOrg, batchID, ciRunID, ciRunURL)
 }
 
 // fakeGitHubDispatch stands in for the GitHub workflow_dispatch endpoint: 204,
@@ -463,6 +462,76 @@ func TestCreateRun_DispatchFails_AllRunsInBatchFailed(t *testing.T) {
 	}
 }
 
+// TestCreateRun_TargetsJSON_MarshalFailure_FailsWholeBatch pins that a
+// failure encoding the "targets" JSON payload -- unreachable in production
+// (every driftFanOutTarget field is a validated string), forced here via the
+// marshalFanOutTargets seam -- fails the whole batch exactly like a real
+// dispatch failure, rather than silently sending a body with no "targets"
+// (which would create N runs, dispatch only item 0, and leave N-1 stuck
+// "dispatched" until the reconciler expires them at TTL). No fake CI server
+// is registered at all: if the implementation regressed to dispatching
+// anyway, this test would hang or fail against a real network call instead
+// of matching the scripted SQL below.
+func TestCreateRun_TargetsJSON_MarshalFailure_FailsWholeBatch(t *testing.T) {
+	e := newDriftEnv(t)
+	old := marshalFanOutTargets
+	marshalFanOutTargets = func(any) ([]byte, error) { return nil, fmt.Errorf("boom") }
+	defer func() { marshalFanOutTargets = old }()
+
+	e.mock.ExpectQuery("FROM pipeline_connections WHERE organization_id = ANY").
+		WithArgs([]string{testActingOrg}, "p1").
+		WillReturnRows(pipelineHTTPRow(t, "azure_devops", "pat", map[string]any{
+			"organization": "corp", "project": "P", "pipeline_id": "7", "fan_out": true,
+		}))
+	e.mock.ExpectQuery("FROM state_sources WHERE organization_id = ANY").
+		WithArgs([]string{testActingOrg}, "s1").
+		WillReturnRows(sqlmock.NewRows(apiSourceCols).
+			AddRow("s1", "app1", "local", "", []byte(`{"base_path":"/tmp"}`), []byte(`{}`), nil, "2026-06-11", "2026-06-11", testActingOrg))
+	e.mock.ExpectQuery("FROM state_sources WHERE organization_id = ANY").
+		WithArgs([]string{testActingOrg}, "s2").
+		WillReturnRows(sqlmock.NewRows(apiSourceCols).
+			AddRow("s2", "app2", "local", "", []byte(`{"base_path":"/tmp"}`), []byte(`{}`), nil, "2026-06-11", "2026-06-11", testActingOrg))
+	e.mock.ExpectQuery("INSERT INTO drift_runs").
+		WillReturnRows(driftRunInsertRow("d1", "s1", "app1.tfstate", "tok-a", nil))
+	e.mock.ExpectQuery("INSERT INTO drift_runs").
+		WillReturnRows(driftRunInsertRow("d2", "s2", "app2.tfstate", "tok-b", nil))
+	e.mock.ExpectExec(`UPDATE drift_runs SET status='failed'`).
+		WithArgs(sqlmock.AnyArg(), containsArg("encode fan-out targets")).
+		WillReturnResult(sqlmock.NewResult(0, 2))
+
+	body := `{"pipeline_connection_id":"p1","targets":[
+		{"source_id":"s1","state_key":"app1.tfstate","working_dir":"app1/"},
+		{"source_id":"s2","state_key":"app2.tfstate","working_dir":"app2/"}
+	]}`
+	w := e.do(http.MethodPost, "/api/v1/drift/runs", body)
+	if w.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502 (%s)", w.Code, w.Body.String())
+	}
+	if err := e.mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("FailBatch must run once for the whole batch, and no dispatch attempted: %v", err)
+	}
+	var got struct {
+		Runs []struct {
+			Status string `json:"status"`
+			Detail string `json:"detail"`
+		} `json:"runs"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatalf("response is not valid JSON: %v", err)
+	}
+	if len(got.Runs) != 2 {
+		t.Fatalf("runs = %+v, want 2", got.Runs)
+	}
+	for i, r := range got.Runs {
+		if r.Status != "failed" || !strings.Contains(r.Detail, "encode fan-out targets") {
+			t.Errorf("runs[%d] = %+v, want status=failed with an encode-failure detail", i, r)
+		}
+	}
+	if strings.Contains(w.Body.String(), "tok-a") || strings.Contains(w.Body.String(), "tok-b") {
+		t.Error("response leaked a callback token")
+	}
+}
+
 // TestCreateRun_SetCIRunError_StillAccepted pins that SetCIRun is best-effort:
 // a DB error recording the CI run id/link must not fail an otherwise
 // successful dispatch. The CI job is already running by that point.
@@ -513,10 +582,9 @@ func TestRunResults_PerRun_AfterBatchDispatch(t *testing.T) {
 		{"d2", "tok-b", "app2.tfstate"},
 	} {
 		e.mock.ExpectQuery("FROM drift_runs WHERE id").WithArgs(run.id).
-			WillReturnRows(sqlmock.NewRows(driftCols).
-				AddRow(run.id, "p1", "s1", run.stateKey, "", "", "dispatched",
-					nil, nil, nil, nil, nil, "", run.token, "alice", "2026-06-11", "2026-06-11",
-					false, 0, 0, false, false, testActingOrg, batchID, "", ""))
+			WillReturnRows(testsupport.DriftRunRow(run.id, "p1", "s1", run.stateKey, "", "", "dispatched",
+				nil, nil, nil, nil, nil, "", run.token, "alice", "2026-06-11", "2026-06-11",
+				false, 0, 0, false, false, testActingOrg, batchID, "", ""))
 		e.mock.ExpectExec("UPDATE drift_runs SET callback_token=''").WithArgs(run.id, run.token).
 			WillReturnResult(sqlmock.NewResult(0, 1))
 		e.mock.ExpectExec("UPDATE drift_runs").WillReturnResult(sqlmock.NewResult(0, 1))

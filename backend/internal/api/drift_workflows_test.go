@@ -15,6 +15,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/terraform-state-manager/terraform-state-manager/internal/services/driftingest"
+	"github.com/terraform-state-manager/terraform-state-manager/internal/testsupport"
 )
 
 // TestDriftWorkflowTemplates_CaptureModuleProvenance guards that BOTH dispatched
@@ -155,11 +156,10 @@ func TestSuiteWorkflowTemplates_UsePublishedComponents(t *testing.T) {
 func TestRunResults_CapturesModuleProvenance(t *testing.T) {
 	e := newDriftEnv(t)
 
-	runRow := sqlmock.NewRows(driftCols).
-		AddRow("d1", "p1", "s1", "envs/prod.tfstate", "", "", "dispatched",
-			nil, nil, nil, nil, nil, "", "tokX", "alice", "2026-06-11", "2026-06-11",
-			false, 0, 0, false, false, "11111111-1111-4111-8111-111111111111",
-			nil, "", "")
+	runRow := testsupport.DriftRunRow("d1", "p1", "s1", "envs/prod.tfstate", "", "", "dispatched",
+		nil, nil, nil, nil, nil, "", "tokX", "alice", "2026-06-11", "2026-06-11",
+		false, 0, 0, false, false, "11111111-1111-4111-8111-111111111111",
+		nil, "", "")
 	e.mock.ExpectQuery("FROM drift_runs WHERE id").WithArgs("d1").WillReturnRows(runRow)
 	e.mock.ExpectExec("UPDATE drift_runs SET callback_token=''").WithArgs("d1", "tokX").
 		WillReturnResult(sqlmock.NewResult(0, 1))

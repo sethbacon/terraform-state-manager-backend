@@ -10,6 +10,7 @@ import (
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
 
 	"github.com/terraform-state-manager/terraform-state-manager/internal/db/repositories"
+	"github.com/terraform-state-manager/terraform-state-manager/internal/testsupport"
 )
 
 // recordingNotifier captures the failure alerts the reconciler fires.
@@ -37,16 +38,10 @@ func (n *recordingNotifier) count() int {
 	return len(n.calls)
 }
 
-var driftCols = []string{"id", "pipeline_connection_id", "source_id", "state_key", "repo_ref", "working_dir",
-	"status", "added", "changed", "destroyed", "drifted", "summary", "detail", "callback_token", "actor",
-	"created_at", "updated_at", "truncated", "omitted_entries", "omitted_attrs", "unparseable", "unmasked", "organization_id",
-	"batch_id", "ci_run_id", "ci_run_url"}
-
 func dispatchedRow(id, token string) *sqlmock.Rows {
-	return sqlmock.NewRows(driftCols).
-		AddRow(id, "p1", nil, "app.tfstate", "", "", "dispatched", nil, nil, nil, nil, nil, "", token, "alice",
-			"2026-06-21 10:00:00", "2026-06-21 10:00:00", false, 0, 0, false, false, "11111111-1111-4111-8111-111111111111",
-			nil, "", "")
+	return testsupport.DriftRunRow(id, "p1", nil, "app.tfstate", "", "", "dispatched", nil, nil, nil, nil, nil, "", token, "alice",
+		"2026-06-21 10:00:00", "2026-06-21 10:00:00", false, 0, 0, false, false, "11111111-1111-4111-8111-111111111111",
+		nil, "", "")
 }
 
 // frozenNow is the reconciler's injected clock so the cutoff is deterministic and
@@ -107,7 +102,7 @@ func TestReconciler_NotYetExpiredIsNoop(t *testing.T) {
 	r, mock := newReconciler(t, n)
 
 	mock.ExpectQuery("SELECT .+ FROM drift_runs WHERE status='dispatched' AND created_at <").
-		WillReturnRows(sqlmock.NewRows(driftCols)) // nothing past the cutoff
+		WillReturnRows(sqlmock.NewRows(testsupport.DriftRunColumns)) // nothing past the cutoff
 
 	r.reconcileOnce(context.Background())
 
@@ -160,7 +155,7 @@ func TestReconciler_StartStop(t *testing.T) {
 	// Startup sweep + at least one tick; every sweep finds nothing to expire.
 	for range [8]struct{}{} {
 		mock.ExpectQuery("SELECT .+ FROM drift_runs WHERE status='dispatched'").
-			WillReturnRows(sqlmock.NewRows(driftCols))
+			WillReturnRows(sqlmock.NewRows(testsupport.DriftRunColumns))
 	}
 
 	r.Start()

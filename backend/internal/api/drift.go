@@ -502,6 +502,35 @@ type driftFanOutTarget struct {
 	CallbackToken string `json:"callback_token"`
 }
 
+// marshalFanOutTargets is json.Marshal, exposed as a package var so a test
+// can force the encode-failure branch below without needing a real
+// unmarshalable value -- every driftFanOutTarget field is a plain string
+// that has already passed validateDriftTargets, so this realistically never
+// fails in production; the seam exists so that fact is proven by a test
+// rather than assumed.
+var marshalFanOutTargets = json.Marshal
+
+// failBatch marks every run in batch "failed" with detail, persisting it the
+// same way dispatchDriftBatch's own dispatch-failure branch always has: a
+// fanned batch through FailBatch (keyed on the shared batch_id), a single
+// unfanned run through UpdateStatus (keyed on its own id, since its batch_id
+// column is NULL and FailBatch's predicate could never match it). Shared by
+// both dispatch failure and target-encoding failure so a pre-dispatch failure
+// degrades identically to a real one rather than through a second, easier
+// to miss code path.
+func (h *DriftHandlers) failBatch(ctx context.Context, batch *DriftBatch, batchIDCol *string, detail string) {
+	if batchIDCol != nil {
+		_ = h.driftRepo.FailBatch(ctx, batch.BatchID, detail)
+	} else {
+		_ = h.driftRepo.UpdateStatus(ctx, batch.Runs[0].ID, "failed", detail)
+	}
+	for _, r := range batch.Runs {
+		r.Status = "failed"
+		r.Detail = detail
+		r.CallbackToken = ""
+	}
+}
+
 // dispatchDriftBatch loads the pipeline, records one drift run per target,
 // and triggers ONE CI job to plan them all. tgt.items() is the single code
 // path for both shapes: a request without `targets` (or with exactly one)
@@ -635,7 +664,19 @@ func (h *DriftHandlers) dispatchDriftBatch(ctx context.Context, tgt DriftTarget,
 		WorkingDir:    items[0].WorkingDir,
 	}
 	if len(items) > 1 {
-		targetsJSON, _ := json.Marshal(fanOutTargets)
+		targetsJSON, marshalErr := marshalFanOutTargets(fanOutTargets)
+		if marshalErr != nil {
+			// Every run already exists at this point (the batch's rows are
+			// real), so silently sending a body with no "targets" -- only
+			// item 0's legacy three params -- would create N runs and
+			// dispatch only the first: N-1 stuck "dispatched" until the
+			// reconciler expires them at TSM_DRIFT_RUN_TTL. Fail the whole
+			// batch instead, exactly like a real dispatch failure below,
+			// rather than silently degrading the wire body.
+			failErr := fmt.Errorf("encode fan-out targets: %w", marshalErr)
+			h.failBatch(ctx, batch, batchIDCol, failErr.Error())
+			return batch, failErr
+		}
 		inputs.TargetsJSON = string(targetsJSON)
 	}
 
@@ -650,16 +691,7 @@ func (h *DriftHandlers) dispatchDriftBatch(ctx context.Context, tgt DriftTarget,
 		dispatchErr = errUnsupportedProvider(conn.Provider)
 	}
 	if dispatchErr != nil {
-		if batchIDCol != nil {
-			_ = h.driftRepo.FailBatch(ctx, batchID, dispatchErr.Error())
-		} else {
-			_ = h.driftRepo.UpdateStatus(ctx, first.ID, "failed", dispatchErr.Error())
-		}
-		for _, r := range runs {
-			r.Status = "failed"
-			r.Detail = dispatchErr.Error()
-			r.CallbackToken = ""
-		}
+		h.failBatch(ctx, batch, batchIDCol, dispatchErr.Error())
 		return batch, dispatchErr
 	}
 
