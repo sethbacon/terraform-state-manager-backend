@@ -89,27 +89,20 @@ func runPage(limit, offset int) (int, int) {
 // optimisation: it states the fail-closed answer where a later edit cannot
 // change it by accident, because a query with an empty id list happens to match
 // nothing today and that is a fact about PostgreSQL rather than a decision.
-func (r *DriftRepository) ListInScope(ctx context.Context, limit, offset int, status string, scope tenantscope.Scope) ([]DriftRun, error) {
+func (r *DriftRepository) ListInScope(ctx context.Context, limit, offset int, f DriftRunFilter, scope tenantscope.Scope) ([]DriftRun, error) {
 	if scope.Empty() {
 		return []DriftRun{}, nil
 	}
 	if scope.PlatformAdmin {
-		return r.List(ctx, limit, offset, status)
+		return r.List(ctx, limit, offset, f)
 	}
 	limit, offset = runPage(limit, offset)
-	var (
-		rows *sql.Rows
-		err  error
-	)
-	if status != "" {
-		rows, err = r.db.QueryContext(ctx, `SELECT `+driftColumns+`
-			FROM drift_runs WHERE `+runOrgPredicate+` AND status = $2
-			ORDER BY created_at DESC LIMIT $3 OFFSET $4`, scope.OrgIDs, status, limit, offset)
-	} else {
-		rows, err = r.db.QueryContext(ctx, `SELECT `+driftColumns+`
-			FROM drift_runs WHERE `+runOrgPredicate+`
-			ORDER BY created_at DESC LIMIT $2 OFFSET $3`, scope.OrgIDs, limit, offset)
-	}
+	clause, args := driftRunFilterClause([]any{scope.OrgIDs}, f)
+	q := `SELECT ` + driftColumns + ` FROM drift_runs WHERE ` + runOrgPredicate + clause // #nosec G202 -- fixed SQL + placeholder-only clause from driftRunFilterClause; no interpolated values
+	args = append(args, limit, offset)
+	q += fmt.Sprintf(" ORDER BY created_at DESC LIMIT $%d OFFSET $%d", len(args)-1, len(args)) // #nosec G202 -- placeholder only
+
+	rows, err := r.db.QueryContext(ctx, q, args...) // #nosec G202 -- q is built from fixed SQL + placeholders above
 	if err != nil {
 		return nil, err
 	}
@@ -131,22 +124,17 @@ func (r *DriftRepository) ListInScope(ctx context.Context, limit, offset int, st
 // Scoped alongside the list rather than left alone: an unscoped total next to a
 // scoped page is a disclosure in its own right — "showing 3 of 47" tells a
 // tenant how many runs the other organizations in the deployment have.
-func (r *DriftRepository) CountRunsInScope(ctx context.Context, status string, scope tenantscope.Scope) (int, error) {
+func (r *DriftRepository) CountRunsInScope(ctx context.Context, f DriftRunFilter, scope tenantscope.Scope) (int, error) {
 	if scope.Empty() {
 		return 0, nil
 	}
 	if scope.PlatformAdmin {
-		return r.CountRuns(ctx, status)
+		return r.CountRuns(ctx, f)
 	}
+	clause, args := driftRunFilterClause([]any{scope.OrgIDs}, f)
 	var n int
-	var err error
-	if status != "" {
-		err = r.db.QueryRowContext(ctx,
-			`SELECT COUNT(*) FROM drift_runs WHERE `+runOrgPredicate+` AND status = $2`, scope.OrgIDs, status).Scan(&n)
-	} else {
-		err = r.db.QueryRowContext(ctx,
-			`SELECT COUNT(*) FROM drift_runs WHERE `+runOrgPredicate, scope.OrgIDs).Scan(&n)
-	}
+	// #nosec G202 -- clause is fixed SQL with positional placeholders; values bound via args
+	err := r.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM drift_runs WHERE `+runOrgPredicate+clause, args...).Scan(&n)
 	return n, err
 }
 
@@ -174,6 +162,39 @@ func (r *DriftRepository) GetByIDInScope(ctx context.Context, id string, scope t
 		return nil, err
 	}
 	return d, nil
+}
+
+// LatestPerStateInScope is DriftRepository.LatestPerState, scoped: the newest
+// run per state_key for one source, restricted to organizations the scope
+// reaches. Backs the Phase 4a coverage endpoint, which has already verified
+// the source itself is in scope (SourceRepository.GetByIDInScope) before
+// calling this -- the organization predicate here is defense in depth against
+// a run whose own organization_id ever disagreed with its source's.
+func (r *DriftRepository) LatestPerStateInScope(ctx context.Context, sourceID string, scope tenantscope.Scope) (map[string]DriftRun, error) {
+	if scope.Empty() {
+		return map[string]DriftRun{}, nil
+	}
+	if scope.PlatformAdmin {
+		return r.LatestPerState(ctx, sourceID)
+	}
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT DISTINCT ON (state_key) `+driftColumns+`
+		FROM drift_runs WHERE `+runOrgPredicate+` AND source_id = $2
+		ORDER BY state_key, created_at DESC`, scope.OrgIDs, sourceID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]DriftRun{}
+	for rows.Next() {
+		d, err := scanDrift(rows)
+		if err != nil {
+			return nil, err
+		}
+		d.CallbackToken = ""
+		out[d.StateKey] = *d
+	}
+	return out, rows.Err()
 }
 
 // UpdateResultInScope records a drift outcome only when the scope reaches the
@@ -400,6 +421,79 @@ func (r *DriftRecordRepository) CountsByStatusInScope(ctx context.Context, scope
 		out[status] = n
 	}
 	return out, rows.Err()
+}
+
+// LiveByStateInScope is DriftRecordRepository.LiveByState, scoped: every
+// non-resolved record for one source, restricted to organizations the scope
+// reaches. Backs the Phase 4a coverage endpoint alongside
+// DriftRepository.LatestPerStateInScope, for the same defense-in-depth reason
+// given there.
+func (r *DriftRecordRepository) LiveByStateInScope(ctx context.Context, sourceID string, scope tenantscope.Scope) (map[string]DriftRecord, error) {
+	if scope.Empty() {
+		return map[string]DriftRecord{}, nil
+	}
+	if scope.PlatformAdmin {
+		return r.LiveByState(ctx, sourceID)
+	}
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT `+driftRecordColumns+`
+		FROM drift_records WHERE `+driftRecordOrgPredicate+` AND source_id = $2 AND status <> 'resolved'`,
+		scope.OrgIDs, sourceID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]DriftRecord{}
+	for rows.Next() {
+		rec, err := scanDriftRecord(rows)
+		if err != nil {
+			return nil, err
+		}
+		out[rec.StateKey] = *rec
+	}
+	return out, rows.Err()
+}
+
+// CountsBySourceInScope is the drift summary's per-source breakdown (GET
+// /drift/summary), restricted to organizations the scope reaches. The
+// organization predicate is bound on BOTH sides of the join — the record's own
+// column and the source's — belt and suspenders around the same join
+// UpsertDetectionInScope makes on the write side, for the case those two ever
+// disagreed.
+func (r *DriftRecordRepository) CountsBySourceInScope(ctx context.Context, scope tenantscope.Scope) ([]SourceRecordCounts, error) {
+	if scope.Empty() {
+		return []SourceRecordCounts{}, nil
+	}
+	if scope.PlatformAdmin {
+		return r.CountsBySource(ctx)
+	}
+	rows, err := r.db.QueryContext(ctx, countsBySourceQuery+`
+		AND r.organization_id = ANY($1::uuid[]) AND s.organization_id = ANY($1::uuid[])
+		GROUP BY r.source_id, s.name ORDER BY s.name`, scope.OrgIDs)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanSourceRecordCounts(rows)
+}
+
+// CountIncompleteInScope is the drift summary's incomplete_records field,
+// restricted to organizations the scope reaches. An unscoped count here would
+// tell a tenant how many checks failed to finish across the WHOLE deployment,
+// which is the same class of disclosure CountRecordsInScope's total guards
+// against.
+func (r *DriftRecordRepository) CountIncompleteInScope(ctx context.Context, scope tenantscope.Scope) (int, error) {
+	if scope.Empty() {
+		return 0, nil
+	}
+	if scope.PlatformAdmin {
+		return r.CountIncomplete(ctx)
+	}
+	var n int
+	err := r.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM drift_records WHERE `+driftRecordOrgPredicate+`
+		 AND status <> 'resolved' AND (unparseable OR truncated)`, scope.OrgIDs).Scan(&n)
+	return n, err
 }
 
 // GetByIDInScope returns one drift record when the scope permits it.

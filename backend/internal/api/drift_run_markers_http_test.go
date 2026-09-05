@@ -6,6 +6,8 @@ import (
 	"testing"
 
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
+
+	"github.com/terraform-state-manager/terraform-state-manager/internal/testsupport"
 )
 
 // The record-level twins of these tests live in drift_markers_http_test.go.
@@ -30,10 +32,10 @@ import (
 // driftRecRowMarked on the record side. The counts are the same on every row —
 // the markers are what these tests vary.
 func driftRunRowMarked(status, token string, truncated bool, omittedEntries, omittedAttrs int, unparseable, unmasked bool) *sqlmock.Rows {
-	return sqlmock.NewRows(driftCols).
-		AddRow("d1", "p1", "s1", "envs/prod.tfstate", "", "", status,
-			0, 0, 0, false, nil, "", token, "alice", "2026-06-11", "2026-06-11",
-			truncated, omittedEntries, omittedAttrs, unparseable, unmasked, "11111111-1111-4111-8111-111111111111")
+	return testsupport.DriftRunRow("d1", "p1", "s1", "envs/prod.tfstate", "", "", status,
+		0, 0, 0, false, nil, "", token, "alice", "2026-06-11", "2026-06-11",
+		truncated, omittedEntries, omittedAttrs, unparseable, unmasked, "11111111-1111-4111-8111-111111111111",
+		nil, "", "")
 }
 
 // TestRunResults_UnparseableCleanRunRoundTripsMarkersOnTheRun is the headline

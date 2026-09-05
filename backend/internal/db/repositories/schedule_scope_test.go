@@ -162,9 +162,9 @@ func TestScheduleRepository_GetDueStaysUnscoped(t *testing.T) {
 
 	now := time.Now()
 	mock.ExpectQuery("FROM schedules WHERE enabled AND next_run_at IS NOT NULL").
-		WithArgs(now).
+		WithArgs(now, 50).
 		WillReturnRows(scheduleRow())
-	due, err := r.GetDue(ctx, now)
+	due, err := r.GetDue(ctx, now, 50)
 	if err != nil {
 		t.Fatalf("GetDue: %v", err)
 	}

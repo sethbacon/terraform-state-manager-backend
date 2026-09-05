@@ -329,6 +329,170 @@ func TestBackupRetentionValidation(t *testing.T) {
 	}
 }
 
+// TestDriftMaxInFlightDefault: unlimited out of the box, matching every
+// existing deployment's behavior before Phase 2 pacing existed — a config that
+// never touches this key must not suddenly start deferring dispatches.
+func TestDriftMaxInFlightDefault(t *testing.T) {
+	cfg, err := Load("")
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if cfg.Drift.MaxInFlight != 0 {
+		t.Errorf("default drift.max_in_flight = %d, want 0 (unlimited)", cfg.Drift.MaxInFlight)
+	}
+}
+
+func TestDriftMaxInFlightEnvOverride(t *testing.T) {
+	t.Setenv("TSM_DRIFT_MAX_IN_FLIGHT", "20")
+	cfg, err := Load("")
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if cfg.Drift.MaxInFlight != 20 {
+		t.Errorf("drift.max_in_flight = %d, want 20", cfg.Drift.MaxInFlight)
+	}
+}
+
+// A negative cap fits neither meaning the field supports (0 = unlimited, N>0 =
+// bounded), so Validate rejects it rather than silently behaving as unlimited
+// or as a cap of zero.
+func TestDriftMaxInFlightValidation(t *testing.T) {
+	c, _ := Load("")
+	c.Drift.MaxInFlight = -1
+	if err := c.Validate(); err == nil {
+		t.Error("expected a validation error for a negative drift.max_in_flight")
+	}
+}
+
+func TestSchedulerBatchLimitDefault(t *testing.T) {
+	cfg, err := Load("")
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if cfg.Scheduler.BatchLimit != 50 {
+		t.Errorf("default scheduler.batch_limit = %d, want 50", cfg.Scheduler.BatchLimit)
+	}
+}
+
+func TestSchedulerBatchLimitEnvOverride(t *testing.T) {
+	t.Setenv("TSM_SCHEDULER_BATCH_LIMIT", "10")
+	cfg, err := Load("")
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if cfg.Scheduler.BatchLimit != 10 {
+		t.Errorf("scheduler.batch_limit = %d, want 10", cfg.Scheduler.BatchLimit)
+	}
+}
+
+// A non-positive batch limit would either starve every schedule (0, if it were
+// sent to the database literally) or is simply nonsensical (negative), so
+// Validate rejects both.
+func TestSchedulerBatchLimitValidation(t *testing.T) {
+	cases := []struct {
+		name    string
+		limit   int
+		wantErr bool
+	}{
+		{"zero", 0, true},
+		{"negative", -5, true},
+		{"positive", 1, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c, _ := Load("")
+			c.Scheduler.BatchLimit = tc.limit
+			err := c.Validate()
+			if tc.wantErr && err == nil {
+				t.Error("expected a validation error, got nil")
+			}
+			if !tc.wantErr && err != nil {
+				t.Errorf("unexpected validation error: %v", err)
+			}
+		})
+	}
+}
+
+// TestDriftRetentionDefaults: enabled out of the box, same shape as
+// BackupRetention's defaults -- an install that never touches config still
+// gets a bounded drift_runs/drift_records table (Phase 4a, #567).
+func TestDriftRetentionDefaults(t *testing.T) {
+	cfg, err := Load("")
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if !cfg.DriftRetention.Enabled {
+		t.Error("drift retention must default to enabled")
+	}
+	if cfg.DriftRetention.KeepPerState != 20 {
+		t.Errorf("default keep_per_state = %d, want 20", cfg.DriftRetention.KeepPerState)
+	}
+	if cfg.DriftRetention.MaxAge != 90*24*time.Hour {
+		t.Errorf("default max_age = %s, want 2160h", cfg.DriftRetention.MaxAge)
+	}
+	if cfg.DriftRetention.ResolvedMaxAge != 180*24*time.Hour {
+		t.Errorf("default resolved_max_age = %s, want 4320h", cfg.DriftRetention.ResolvedMaxAge)
+	}
+}
+
+func TestDriftRetentionEnvOverride(t *testing.T) {
+	t.Setenv("TSM_DRIFT_RETENTION_ENABLED", "false")
+	t.Setenv("TSM_DRIFT_RETENTION_KEEP_PER_STATE", "5")
+	t.Setenv("TSM_DRIFT_RETENTION_MAX_AGE", "24h")
+	t.Setenv("TSM_DRIFT_RETENTION_RESOLVED_MAX_AGE", "48h")
+	cfg, err := Load("")
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if cfg.DriftRetention.Enabled {
+		t.Error("TSM_DRIFT_RETENTION_ENABLED=false must disable the prune")
+	}
+	if cfg.DriftRetention.KeepPerState != 5 {
+		t.Errorf("keep_per_state = %d, want 5", cfg.DriftRetention.KeepPerState)
+	}
+	if cfg.DriftRetention.MaxAge != 24*time.Hour {
+		t.Errorf("max_age = %s, want 24h", cfg.DriftRetention.MaxAge)
+	}
+	if cfg.DriftRetention.ResolvedMaxAge != 48*time.Hour {
+		t.Errorf("resolved_max_age = %s, want 48h", cfg.DriftRetention.ResolvedMaxAge)
+	}
+}
+
+// A zero keep floor or non-positive max age would turn the sweep into a purge,
+// same reasoning as BackupRetention's validation.
+func TestDriftRetentionValidation(t *testing.T) {
+	cases := []struct {
+		name    string
+		mutate  func(*Config)
+		wantErr bool
+	}{
+		{"keep_per_state zero", func(c *Config) { c.DriftRetention.KeepPerState = 0 }, true},
+		{"keep_per_state negative", func(c *Config) { c.DriftRetention.KeepPerState = -1 }, true},
+		{"max_age zero", func(c *Config) { c.DriftRetention.MaxAge = 0 }, true},
+		{"resolved_max_age zero", func(c *Config) { c.DriftRetention.ResolvedMaxAge = 0 }, true},
+		{"keep_per_state one ok", func(c *Config) { c.DriftRetention.KeepPerState = 1 }, false},
+		{"disabled skips checks", func(c *Config) {
+			c.DriftRetention.Enabled = false
+			c.DriftRetention.KeepPerState = 0
+			c.DriftRetention.MaxAge = 0
+			c.DriftRetention.ResolvedMaxAge = 0
+		}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c, _ := Load("")
+			tc.mutate(c)
+			err := c.Validate()
+			if tc.wantErr && err == nil {
+				t.Error("expected a validation error, got nil")
+			}
+			if !tc.wantErr && err != nil {
+				t.Errorf("unexpected validation error: %v", err)
+			}
+		})
+	}
+}
+
 func TestStateSourceRootsEnvBinding(t *testing.T) {
 	// Default: no roots at all — the connectors that name a server-local path
 	// (local base_path, kubernetes kubeconfig) are unavailable until an operator

@@ -163,7 +163,19 @@ func (d backgroundWorkerDeps) startAuditRelay() (stop func()) {
 // replica wins leadership; the elector invokes the returned stop on leadership
 // loss or shutdown.
 func (d backgroundWorkerDeps) startWorkers(syncer *statesync.Syncer) (stop func()) {
-	runner := scheduler.New(repositories.NewScheduleRepository(d.database), d.driftDisp)
+	// InFlight backs the scheduler's fleet-scale pacing (Phase 2): the same
+	// deployment-wide count of "dispatched"/"running" drift runs CountRunsIn
+	// documents itself as existing for. Wired unconditionally (not only when
+	// MaxInFlight is set) so the in-flight gauge is populated even before an
+	// operator configures a cap.
+	driftRepo := repositories.NewDriftRepository(d.database)
+	runner := scheduler.New(repositories.NewScheduleRepository(d.database), d.driftDisp, scheduler.Options{
+		BatchLimit:  d.cfg.Scheduler.BatchLimit,
+		MaxInFlight: d.cfg.Drift.MaxInFlight,
+		InFlight: func(ctx context.Context) (int, error) {
+			return driftRepo.CountRunsIn(ctx, []string{"dispatched", "running"})
+		},
+	})
 	runner.Start()
 	// Bound audit_logs (#373). LEADER-GATED like everything else here, so a
 	// multi-replica deployment has exactly one process deleting.
@@ -183,6 +195,21 @@ func (d backgroundWorkerDeps) startWorkers(syncer *statesync.Syncer) (stop func(
 		driftFailureNotifier{drift: d.drift},
 		d.cfg.Drift.RunTTL, d.cfg.Drift.ReconcileInterval,
 	)
+	// tsm_drift_records_open{severity} (Phase 2's own metric list, implemented
+	// in Phase 4a): attached unconditionally, independent of retention below,
+	// so the gauge is populated even on a deployment that never touches
+	// drift_retention config.
+	reconciler.AttachDriftRecords(repositories.NewDriftRecordRepository(d.database))
+	// Bound drift_runs/drift_records (Phase 4a, #567), on the SAME leader-gated
+	// periodic tick as the reconciler above -- no new goroutine. Gated on
+	// drift_retention.enabled exactly as BackupRetention is gated above.
+	if d.cfg.DriftRetention.Enabled {
+		reconciler.EnableRetention(
+			d.cfg.DriftRetention.KeepPerState,
+			d.cfg.DriftRetention.MaxAge,
+			d.cfg.DriftRetention.ResolvedMaxAge,
+		)
+	}
 	reconciler.Start()
 	// Same backstop for version-lab health runs, which carry the identical
 	// stuck-dispatched failure mode in a separate table and reuse the drift

@@ -12,8 +12,9 @@ import (
 // profile) triple — the fallback served when no operator override exists in the
 // store. profile "suite" returns the variants that use the published
 // Terraform-suite CI components (the drift-report action / PipelineTerraformDriftReport
-// task, the hardened installer, the provider-mirror action); any other profile
-// returns the dependency-free built-ins.
+// task, the hardened installer, the provider-mirror action); profile "fan-out"
+// (drift, azure_devops only) additionally plans 2+ targets in one job; any
+// other profile returns the dependency-free built-ins.
 func builtinWorkflow(provider, kind, profile string) string {
 	suite := profile == "suite"
 	switch kind {
@@ -30,6 +31,8 @@ func builtinWorkflow(provider, kind, profile string) string {
 		}
 	default: // "drift"
 		switch {
+		case provider == "azure_devops" && profile == "fan-out":
+			return azureDriftPipelineFanOut
 		case provider == "azure_devops" && suite:
 			return azureDriftPipelineSuite
 		case provider == "azure_devops":

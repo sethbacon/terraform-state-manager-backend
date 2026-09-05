@@ -5,15 +5,17 @@ import (
 	"time"
 
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
+
+	"github.com/terraform-state-manager/terraform-state-manager/internal/testsupport"
 )
 
 // dispatchedDriftRow is a drift_runs row still sitting in "dispatched" with a
 // live callback token — what the reconciler selects and then expires. Reuses the
-// shared driftCols column set from runs_test.go.
+// shared testsupport.DriftRunColumns column set.
 func dispatchedDriftRow(id, token string) *sqlmock.Rows {
-	return sqlmock.NewRows(driftCols).
-		AddRow(id, "p1", nil, "app.tfstate", "", "", "dispatched", nil, nil, nil, nil, nil, "", token, "alice",
-			"2026-06-21 10:00:00", "2026-06-21 10:00:00", false, 0, 0, false, false, "11111111-1111-4111-8111-111111111111")
+	return testsupport.DriftRunRow(id, "p1", nil, "app.tfstate", "", "", "dispatched", nil, nil, nil, nil, nil, "", token, "alice",
+		"2026-06-21 10:00:00", "2026-06-21 10:00:00", false, 0, 0, false, false, "11111111-1111-4111-8111-111111111111",
+		nil, "", "")
 }
 
 func TestDriftRepository_ListExpiredDispatched(t *testing.T) {

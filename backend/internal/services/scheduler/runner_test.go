@@ -62,19 +62,19 @@ func dueRow() *sqlmock.Rows {
 			nil, "2026-06-10 00:00:00", nil, nil, "2026-06-09", "2026-06-09", testScheduleOrg)
 }
 
-func newRunner(t *testing.T, d Dispatcher) (*Runner, sqlmock.Sqlmock) {
+func newRunner(t *testing.T, d Dispatcher, opts Options) (*Runner, sqlmock.Sqlmock) {
 	t.Helper()
 	db, mock, err := sqlmock.New()
 	if err != nil {
 		t.Fatalf("sqlmock.New: %v", err)
 	}
 	t.Cleanup(func() { db.Close() })
-	return New(repositories.NewScheduleRepository(db), d), mock
+	return New(repositories.NewScheduleRepository(db), d, opts), mock
 }
 
 func TestRunner_FiresDueScheduleAndReschedules(t *testing.T) {
 	d := &recordingDispatcher{runID: "run-1", status: "success"}
-	r, mock := newRunner(t, d)
+	r, mock := newRunner(t, d, Options{})
 
 	mock.ExpectQuery("FROM schedules WHERE enabled").WillReturnRows(dueRow())
 	// The claim advances next_run_at (rescheduled from now — an overdue
@@ -106,7 +106,7 @@ func TestRunner_FiresDueScheduleAndReschedules(t *testing.T) {
 // CI dispatch this flow exists to prevent.
 func TestRunner_LostClaimSkipsDispatch(t *testing.T) {
 	d := &recordingDispatcher{runID: "run-1", status: "success"}
-	r, mock := newRunner(t, d)
+	r, mock := newRunner(t, d, Options{})
 
 	mock.ExpectQuery("FROM schedules WHERE enabled").WillReturnRows(dueRow())
 	mock.ExpectExec("UPDATE schedules").
@@ -127,7 +127,7 @@ func TestRunner_LostClaimSkipsDispatch(t *testing.T) {
 // dispatch either — without the claim recorded, a dispatch would re-fire later.
 func TestRunner_ClaimErrorSkipsDispatch(t *testing.T) {
 	d := &recordingDispatcher{}
-	r, mock := newRunner(t, d)
+	r, mock := newRunner(t, d, Options{})
 
 	mock.ExpectQuery("FROM schedules WHERE enabled").WillReturnRows(dueRow())
 	mock.ExpectExec("UPDATE schedules").WillReturnError(errors.New("db down"))
@@ -140,7 +140,7 @@ func TestRunner_ClaimErrorSkipsDispatch(t *testing.T) {
 
 func TestRunner_RecordsDispatchFailure(t *testing.T) {
 	d := &recordingDispatcher{status: "", err: errors.New("provider down")}
-	r, mock := newRunner(t, d)
+	r, mock := newRunner(t, d, Options{})
 
 	mock.ExpectQuery("FROM schedules WHERE enabled").WillReturnRows(dueRow())
 	mock.ExpectExec("UPDATE schedules").
@@ -158,7 +158,7 @@ func TestRunner_RecordsDispatchFailure(t *testing.T) {
 
 func TestRunner_QueryFailureIsNonFatal(t *testing.T) {
 	d := &recordingDispatcher{}
-	r, _ := newRunner(t, d) // no expectations → GetDue errors
+	r, _ := newRunner(t, d, Options{}) // no expectations → GetDue errors
 	r.checkDue()
 	if d.callCount() != 0 {
 		t.Error("nothing must fire when the due query fails")
@@ -167,7 +167,7 @@ func TestRunner_QueryFailureIsNonFatal(t *testing.T) {
 
 func TestRunner_StartStop(t *testing.T) {
 	d := &recordingDispatcher{runID: "run-1", status: "success"}
-	r, mock := newRunner(t, d)
+	r, mock := newRunner(t, d, Options{})
 	r.interval = 10 * time.Millisecond
 
 	// Startup check + at least one tick; every poll returns no due rows.
@@ -202,7 +202,7 @@ func TestRunner_StartStop(t *testing.T) {
 // join back along afterwards: if it is not carried here, it is gone.
 func TestRunner_DerivesTheDispatchScopeFromTheScheduleRow(t *testing.T) {
 	d := &recordingDispatcher{runID: "run-1", status: "success"}
-	r, mock := newRunner(t, d)
+	r, mock := newRunner(t, d, Options{})
 
 	mock.ExpectQuery("FROM schedules WHERE enabled").WillReturnRows(dueRow())
 	mock.ExpectExec("UPDATE schedules").WillReturnResult(sqlmock.NewResult(0, 1))
@@ -241,7 +241,7 @@ func TestRunner_DerivesTheDispatchScopeFromTheScheduleRow(t *testing.T) {
 // as last_status=failed on the schedule itself rather than as an absence.
 func TestRunner_RefusesToDispatchAnUnownedSchedule(t *testing.T) {
 	d := &recordingDispatcher{runID: "run-1", status: "success"}
-	r, mock := newRunner(t, d)
+	r, mock := newRunner(t, d, Options{})
 
 	unowned := sqlmock.NewRows(schedCols).
 		AddRow("sc1", "nightly", "daily", "drift", []byte(`{"pipeline_connection_id":"p1"}`), true,

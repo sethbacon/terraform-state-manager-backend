@@ -277,11 +277,14 @@ func (r *ScheduleRepository) Delete(ctx context.Context, id string) error {
 	return err
 }
 
-// GetDue returns enabled schedules whose next_run_at is at or before now.
-func (r *ScheduleRepository) GetDue(ctx context.Context, now time.Time) ([]Schedule, error) {
+// GetDue returns up to limit enabled schedules whose next_run_at is at or
+// before now, oldest-due first. limit bounds how much work one scheduler poll
+// reads (Phase 2 fleet-scale pacing) so a large due cohort drains over several
+// polls instead of landing on the agent pool as one herd.
+func (r *ScheduleRepository) GetDue(ctx context.Context, now time.Time, limit int) ([]Schedule, error) {
 	rows, err := r.db.QueryContext(ctx, `SELECT `+scheduleColumns+`
 		FROM schedules WHERE enabled AND next_run_at IS NOT NULL AND next_run_at <= $1
-		ORDER BY next_run_at`, now)
+		ORDER BY next_run_at LIMIT $2`, now, limit)
 	if err != nil {
 		return nil, err
 	}

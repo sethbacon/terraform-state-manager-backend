@@ -57,7 +57,74 @@ var (
 		Name: "db_connections_idle",
 		Help: "Number of idle database connections.",
 	})
+
+	// driftRunsInFlight exports the scheduler's live view of drift runs
+	// currently "dispatched" or "running" -- the same count its in-flight cap
+	// (Phase 2 fleet-scale pacing, TSM_DRIFT_MAX_IN_FLIGHT) checks before
+	// claiming each due schedule. Sampled once per firing that consults it, so
+	// it reflects the freshest count seen during the most recent scheduler
+	// poll, whether or not a cap is actually configured.
+	driftRunsInFlight = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "tsm_drift_runs_in_flight",
+		Help: "Drift runs currently dispatched or running, as last sampled by the scheduler.",
+	})
+
+	// schedulerDueBacklog exports, at the end of each scheduler poll, how many
+	// of the due schedules that poll read were left unclaimed -- deferred under
+	// the in-flight cap, or a claim attempt that failed outright. A schedule
+	// claimed by a concurrent replica/poll does not count: it is handled, just
+	// not by this poll. A sustained non-zero value means due work is arriving
+	// faster than the configured cap can drain it.
+	schedulerDueBacklog = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "tsm_scheduler_due_backlog",
+		Help: "Due schedules read by the most recent scheduler poll that were not claimed.",
+	})
+
+	// driftDispatchTotal counts each schedule firing's terminal result: "ok"
+	// (claimed and dispatched successfully), "failed" (claimed but the dispatch
+	// itself -- or the row's derived authority -- failed, or the claim attempt
+	// errored), or "deferred" (the in-flight cap was reached, so the schedule
+	// was never claimed and remains due for a later poll).
+	driftDispatchTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "tsm_drift_dispatch_total",
+			Help: "Scheduler firings by terminal result: ok, failed, or deferred.",
+		},
+		[]string{"result"},
+	)
+
+	// driftRecordsOpen is the Phase 2 metric its own increment deferred and
+	// Phase 4a (fleet-scale drift dashboard) implements: how many OPEN drift
+	// records exist right now, by severity. Refreshed once per drift-reconciler
+	// tick from DriftRecordRepository.CountOpenBySeverity, which is deliberately
+	// unscoped -- this is an operational gauge describing the deployment, not a
+	// response to any single tenant's request.
+	driftRecordsOpen = promauto.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "tsm_drift_records_open",
+			Help: "Open drift records right now, by severity (critical, warning), as last sampled by the drift reconciler.",
+		},
+		[]string{"severity"},
+	)
 )
+
+// SetDriftRunsInFlight records the scheduler's most recent in-flight drift-run
+// sample.
+func SetDriftRunsInFlight(n int) { driftRunsInFlight.Set(float64(n)) }
+
+// SetSchedulerDueBacklog records how many due schedules the most recent
+// scheduler poll left unclaimed.
+func SetSchedulerDueBacklog(n int) { schedulerDueBacklog.Set(float64(n)) }
+
+// DriftDispatchResult increments the counter for one schedule firing's
+// terminal result ("ok", "failed", or "deferred").
+func DriftDispatchResult(result string) { driftDispatchTotal.WithLabelValues(result).Inc() }
+
+// SetDriftRecordsOpen records the open-drift-record count for one severity,
+// as most recently sampled by the drift reconciler's tick.
+func SetDriftRecordsOpen(severity string, n int) {
+	driftRecordsOpen.WithLabelValues(severity).Set(float64(n))
+}
 
 // StartDBStatsCollector polls the connection pool every 30 seconds and exports
 // its statistics as Prometheus gauges. It returns a stop function that halts the

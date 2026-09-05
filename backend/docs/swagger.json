@@ -1811,6 +1811,49 @@
             }
         },
         "/ci-sources/{id}": {
+            "put": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    },
+                    {
+                        "CookieAuth": []
+                    }
+                ],
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Pipelines"
+                ],
+                "summary": "Update CI source",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    }
+                }
+            },
             "delete": {
                 "security": [
                     {
@@ -2276,6 +2319,64 @@
                 }
             }
         },
+        "/drift/coverage": {
+            "get": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    },
+                    {
+                        "CookieAuth": []
+                    }
+                ],
+                "description": "For each state the connector currently lists: whether a schedule already targets it, its latest run (status, drifted, completeness, CI link), and its live (non-resolved) drift record, if any. summary gives the same chip counts the states array would produce if counted by hand.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Drift"
+                ],
+                "summary": "Drift coverage for one source",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "state source id",
+                        "name": "source_id",
+                        "in": "query",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "duration a state may go unchecked before it counts as stale (default 24h)",
+                        "name": "stale_after",
+                        "in": "query"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    }
+                }
+            }
+        },
         "/drift/ingest": {
             "post": {
                 "security": [
@@ -2445,7 +2546,7 @@
                         "CookieAuth": []
                     }
                 ],
-                "description": "Drift runs newest-first. Each run carries the drift contract's completeness markers (truncated, omitted_entries, omitted_attrs, unparseable, unmasked) describing what that run's own check did not do — zero counts alone cannot distinguish a verified-clean run from one that never finished checking.",
+                "description": "Drift runs newest-first. Each run carries the drift contract's completeness markers (truncated, omitted_entries, omitted_attrs, unparseable, unmasked) describing what that run's own check did not do — zero counts alone cannot distinguish a verified-clean run from one that never finished checking. batch_id matches either a fan-out batch's shared id or a single run's own id, so a schedule's last_run_id works as a filter whether or not it fanned.",
                 "produces": [
                     "application/json"
                 ],
@@ -2458,6 +2559,24 @@
                         "type": "string",
                         "description": "filter by status (dispatched|running|completed|failed)",
                         "name": "status",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "filter by batch id (or a single run's own id)",
+                        "name": "batch_id",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "filter by state source id",
+                        "name": "source_id",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "filter by state key",
+                        "name": "state_key",
                         "in": "query"
                     },
                     {
@@ -2492,7 +2611,7 @@
                         "CookieAuth": []
                     }
                 ],
-                "description": "Dispatches a terraform-plan drift run on the chosen CI pipeline and records it. Inputs are validated server-side. Requires state:drift.",
+                "description": "Dispatches a terraform-plan drift run on the chosen CI pipeline and records it. Inputs are validated server-side. Requires state:drift. A request naming 2+ items in `targets` plans them all in one CI job (requires the pipeline connection's config.fan_out=true) and returns {batch_id, runs}; omitting `targets` (or naming exactly one) is the legacy single-target shape and returns a single run.",
                 "consumes": [
                     "application/json"
                 ],
@@ -2504,8 +2623,8 @@
                 ],
                 "summary": "Dispatch drift run",
                 "responses": {
-                    "200": {
-                        "description": "OK",
+                    "202": {
+                        "description": "Accepted",
                         "schema": {
                             "type": "object",
                             "additionalProperties": true
@@ -2513,6 +2632,20 @@
                     },
                     "400": {
                         "description": "Bad Request",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "502": {
+                        "description": "Bad Gateway",
                         "schema": {
                             "type": "object",
                             "additionalProperties": true
@@ -2565,6 +2698,35 @@
                     },
                     "409": {
                         "description": "callback already processed",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    }
+                }
+            }
+        },
+        "/drift/summary": {
+            "get": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    },
+                    {
+                        "CookieAuth": []
+                    }
+                ],
+                "description": "Per-source open/acknowledged/critical drift-record counts, the last 24h of drift runs by terminal status, how many live records are incomplete (unparseable or truncated), and how many runs are currently in flight -- all scoped to the caller's organization(s).",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Drift"
+                ],
+                "summary": "Drift summary",
+                "responses": {
+                    "200": {
+                        "description": "OK",
                         "schema": {
                             "type": "object",
                             "additionalProperties": true

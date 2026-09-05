@@ -46,6 +46,10 @@ type sourcesEnv struct {
 	mock   sqlmock.Sqlmock
 	dir    string
 	scopes []string // caller scopes injected into the gin context (nil = none)
+	// idMock is the identity-DB mock backing a handler's audit writes, set only
+	// by rigs (e.g. newCISourcesEnv) whose tests assert on what an audit entry's
+	// metadata actually contains rather than treating the write as fire-and-forget.
+	idMock sqlmock.Sqlmock
 }
 
 func newSourcesEnv(t *testing.T) *sourcesEnv {

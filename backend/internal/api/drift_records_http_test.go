@@ -7,6 +7,8 @@ import (
 	"testing"
 
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
+
+	"github.com/terraform-state-manager/terraform-state-manager/internal/testsupport"
 )
 
 // sourceRowFor queues a state_sources GetByID row (local type; the ingest path
@@ -129,10 +131,10 @@ func TestRunResults_DriftCreatesRecord_CleanResolves(t *testing.T) {
 
 	// Run rows must carry a source_id — that's the record identity.
 	runRow := func(token string) *sqlmock.Rows {
-		return sqlmock.NewRows(driftCols).
-			AddRow("d1", "p1", "s1", "envs/prod.tfstate", "", "", "dispatched",
-				nil, nil, nil, nil, nil, "", token, "alice", "2026-06-11", "2026-06-11",
-				false, 0, 0, false, false, "11111111-1111-4111-8111-111111111111")
+		return testsupport.DriftRunRow("d1", "p1", "s1", "envs/prod.tfstate", "", "", "dispatched",
+			nil, nil, nil, nil, nil, "", token, "alice", "2026-06-11", "2026-06-11",
+			false, 0, 0, false, false, "11111111-1111-4111-8111-111111111111",
+			nil, "", "")
 	}
 
 	// Drifted callback: consume token → store result → upsert record.
@@ -327,9 +329,10 @@ func TestRunResults_RefusesRecordMaintenanceWhenTheRunsSourceIsNotItsOwn(t *test
 	e := newDriftEnv(t)
 
 	e.mock.ExpectQuery("FROM drift_runs WHERE id").WithArgs("d1").WillReturnRows(
-		sqlmock.NewRows(driftCols).AddRow("d1", "p1", "s-elsewhere", "envs/prod.tfstate", "", "", "dispatched",
+		testsupport.DriftRunRow("d1", "p1", "s-elsewhere", "envs/prod.tfstate", "", "", "dispatched",
 			nil, nil, nil, nil, nil, "", "tok1", "alice", "2026-06-11", "2026-06-11",
-			false, 0, 0, false, false, testActingOrg))
+			false, 0, 0, false, false, testActingOrg,
+			nil, "", ""))
 	e.mock.ExpectExec("UPDATE drift_runs SET callback_token=''").WithArgs("d1", "tok1").
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	e.mock.ExpectExec("UPDATE drift_runs").WillReturnResult(sqlmock.NewResult(0, 1))

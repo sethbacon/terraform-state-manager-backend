@@ -5,6 +5,7 @@ import (
 
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 )
 
 func TestMetricRegistration(t *testing.T) {
@@ -38,6 +39,19 @@ func TestHTTPRequestDurationLabels(t *testing.T) {
 
 func TestAppInfoLabels(t *testing.T) {
 	AppInfo.WithLabelValues("1.0.0", "go1.26", "2026-01-01").Set(1)
+}
+
+// TestSetDriftRecordsOpen pins the Phase 2 metric Phase 4a implements:
+// tsm_drift_records_open{severity}, refreshed on the reconciler tick.
+func TestSetDriftRecordsOpen(t *testing.T) {
+	SetDriftRecordsOpen("critical", 2)
+	SetDriftRecordsOpen("warning", 5)
+	if got := testutil.ToFloat64(driftRecordsOpen.WithLabelValues("critical")); got != 2 {
+		t.Errorf("tsm_drift_records_open{severity=critical} = %v, want 2", got)
+	}
+	if got := testutil.ToFloat64(driftRecordsOpen.WithLabelValues("warning")); got != 5 {
+		t.Errorf("tsm_drift_records_open{severity=warning} = %v, want 5", got)
+	}
 }
 
 func TestStartDBStatsCollector(t *testing.T) {

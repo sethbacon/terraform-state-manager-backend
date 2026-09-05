@@ -19,6 +19,10 @@ backend/vendor/
 # one file per open pull request when the scheduled re-grade runs.
 release-pr-body*.md
 backend/coverage.out
+# Produced by the coverage gate's own filter step (ci.yml runs
+# `go run ./scripts/coverfilter`), so it appears for anyone who reproduces
+# that gate locally -- it was the one sibling of coverage.out left untracked.
+backend/coverage.filtered.out
 backend/coverage.html
 backend/gosec-results.json
 backend/dist/

@@ -38,10 +38,10 @@ func TestCallbackRoots_ScopedReadsOnAnEmptyScopeTouchNothing(t *testing.T) {
 	t.Run("drift_runs", func(t *testing.T) {
 		db, mock := newMock(t)
 		r := NewDriftRepository(db)
-		if out, err := r.ListInScope(ctx, 0, 0, "", tenantscope.Scope{}); err != nil || len(out) != 0 {
+		if out, err := r.ListInScope(ctx, 0, 0, DriftRunFilter{}, tenantscope.Scope{}); err != nil || len(out) != 0 {
 			t.Errorf("ListInScope on an empty scope = %v, %v; want no runs", out, err)
 		}
-		if n, err := r.CountRunsInScope(ctx, "", tenantscope.Scope{}); err != nil || n != 0 {
+		if n, err := r.CountRunsInScope(ctx, DriftRunFilter{}, tenantscope.Scope{}); err != nil || n != 0 {
 			t.Errorf("CountRunsInScope on an empty scope = %d, %v; want 0", n, err)
 		}
 		if got, err := r.GetByIDInScope(ctx, "d1", tenantscope.Scope{}); err != nil || got != nil {
@@ -49,6 +49,9 @@ func TestCallbackRoots_ScopedReadsOnAnEmptyScopeTouchNothing(t *testing.T) {
 		}
 		if err := r.UpdateResultInScope(ctx, "d1", "completed", 0, 0, 0, false, nil, "", Completeness{}, tenantscope.Scope{}); !errors.Is(err, ErrNotInScope) {
 			t.Errorf("UpdateResultInScope on an empty scope = %v; want ErrNotInScope", err)
+		}
+		if out, err := r.LatestPerStateInScope(ctx, "s1", tenantscope.Scope{}); err != nil || len(out) != 0 {
+			t.Errorf("LatestPerStateInScope on an empty scope = %v, %v; want no runs", out, err)
 		}
 		if err := mock.ExpectationsWereMet(); err != nil {
 			t.Error(err)
@@ -102,6 +105,15 @@ func TestCallbackRoots_ScopedReadsOnAnEmptyScopeTouchNothing(t *testing.T) {
 		if _, err := r.UpsertDetectionInScope(ctx, &Detection{SourceID: "s1", StateKey: "k"}, tenantscope.Scope{}); !errors.Is(err, ErrNotInScope) {
 			t.Errorf("UpsertDetectionInScope on an empty scope = %v; want ErrNotInScope", err)
 		}
+		if out, err := r.LiveByStateInScope(ctx, "s1", tenantscope.Scope{}); err != nil || len(out) != 0 {
+			t.Errorf("LiveByStateInScope on an empty scope = %v, %v; want no records", out, err)
+		}
+		if out, err := r.CountsBySourceInScope(ctx, tenantscope.Scope{}); err != nil || len(out) != 0 {
+			t.Errorf("CountsBySourceInScope on an empty scope = %v, %v; want no rows", out, err)
+		}
+		if n, err := r.CountIncompleteInScope(ctx, tenantscope.Scope{}); err != nil || n != 0 {
+			t.Errorf("CountIncompleteInScope on an empty scope = %d, %v; want 0", n, err)
+		}
 		if err := mock.ExpectationsWereMet(); err != nil {
 			t.Error(err)
 		}
@@ -121,7 +133,7 @@ func TestCallbackRoots_ScopedReads_BindTheOrganization(t *testing.T) {
 
 		mock.ExpectQuery("FROM drift_runs WHERE organization_id = ANY").
 			WithArgs([]string{scopeOrgA}, 50, 0).WillReturnRows(driftRow("secret"))
-		out, err := r.ListInScope(ctx, 0, 0, "", scope)
+		out, err := r.ListInScope(ctx, 0, 0, DriftRunFilter{}, scope)
 		if err != nil || len(out) != 1 {
 			t.Fatalf("ListInScope: %v %+v", err, out)
 		}
@@ -131,7 +143,7 @@ func TestCallbackRoots_ScopedReads_BindTheOrganization(t *testing.T) {
 
 		mock.ExpectQuery(`SELECT COUNT\(\*\) FROM drift_runs WHERE organization_id = ANY`).
 			WithArgs([]string{scopeOrgA}).WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(3))
-		if n, err := r.CountRunsInScope(ctx, "", scope); err != nil || n != 3 {
+		if n, err := r.CountRunsInScope(ctx, DriftRunFilter{}, scope); err != nil || n != 3 {
 			t.Fatalf("CountRunsInScope = %d, %v", n, err)
 		}
 
@@ -155,6 +167,16 @@ func TestCallbackRoots_ScopedReads_BindTheOrganization(t *testing.T) {
 			WillReturnResult(sqlmock.NewResult(0, 1))
 		if err := r.UpdateResultInScope(ctx, "d1", "completed", 1, 2, 3, true, nil, "detail", Completeness{}, scope); err != nil {
 			t.Fatalf("UpdateResultInScope: %v", err)
+		}
+
+		// Phase 4a coverage join: the source_id predicate is unchanged, and the
+		// organization array is bound alongside it, same as every other reader
+		// on this root.
+		mock.ExpectQuery(`SELECT DISTINCT ON \(state_key\) .+ FROM drift_runs WHERE organization_id = ANY.+AND source_id = \$2`).
+			WithArgs([]string{scopeOrgA}, "s1").WillReturnRows(driftRow("secret"))
+		latest, err := r.LatestPerStateInScope(ctx, "s1", scope)
+		if err != nil || len(latest) != 1 {
+			t.Fatalf("LatestPerStateInScope: %v %+v", err, latest)
 		}
 
 		if err := mock.ExpectationsWereMet(); err != nil {
@@ -269,6 +291,29 @@ func TestCallbackRoots_ScopedReads_BindTheOrganization(t *testing.T) {
 			t.Fatalf("UpsertDetectionInScope: %v", err)
 		}
 
+		// Phase 4a coverage/summary reads.
+		mock.ExpectQuery(`FROM drift_records WHERE organization_id = ANY.+AND source_id = \$2.+AND status <> 'resolved'`).
+			WithArgs([]string{scopeOrgA}, "s1").WillReturnRows(driftRecordRow("r1", "open"))
+		live, err := r.LiveByStateInScope(ctx, "s1", scope)
+		if err != nil || len(live) != 1 {
+			t.Fatalf("LiveByStateInScope: %v %+v", err, live)
+		}
+
+		mock.ExpectQuery(`FROM drift_records r\s+JOIN state_sources s ON s\.id = r\.source_id\s+WHERE r\.status <> 'resolved' AND r\.organization_id = ANY.+AND s\.organization_id = ANY`).
+			WithArgs([]string{scopeOrgA}).
+			WillReturnRows(sqlmock.NewRows([]string{"source_id", "source_name", "open", "acknowledged", "critical"}).
+				AddRow("s1", "prod", 2, 0, 1))
+		bySource, err := r.CountsBySourceInScope(ctx, scope)
+		if err != nil || len(bySource) != 1 || bySource[0].SourceID != "s1" {
+			t.Fatalf("CountsBySourceInScope: %v %+v", err, bySource)
+		}
+
+		mock.ExpectQuery(`SELECT COUNT\(\*\) FROM drift_records WHERE organization_id = ANY.+AND status <> 'resolved' AND \(unparseable OR truncated\)`).
+			WithArgs([]string{scopeOrgA}).WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(2))
+		if n, err := r.CountIncompleteInScope(ctx, scope); err != nil || n != 2 {
+			t.Fatalf("CountIncompleteInScope: %v n=%d", err, n)
+		}
+
 		if err := mock.ExpectationsWereMet(); err != nil {
 			t.Error(err)
 		}
@@ -290,13 +335,18 @@ func TestCallbackRoots_ScopedReads_PlatformAdminIsUnfiltered(t *testing.T) {
 	health := NewHealthRepository(db)
 	records := NewDriftRecordRepository(db)
 
-	mock.ExpectQuery("FROM drift_runs ORDER BY").WithArgs(50, 0).WillReturnRows(driftRow(""))
-	if _, err := drift.ListInScope(ctx, 0, 0, "", admin); err != nil {
+	mock.ExpectQuery("FROM drift_runs WHERE 1=1 ORDER BY").WithArgs(50, 0).WillReturnRows(driftRow(""))
+	if _, err := drift.ListInScope(ctx, 0, 0, DriftRunFilter{}, admin); err != nil {
 		t.Fatalf("drift ListInScope(platform admin): %v", err)
 	}
 	mock.ExpectQuery("FROM drift_runs WHERE id").WithArgs("d1").WillReturnRows(driftRow(""))
 	if _, err := drift.GetByIDInScope(ctx, "d1", admin); err != nil {
 		t.Fatalf("drift GetByIDInScope(platform admin): %v", err)
+	}
+	mock.ExpectQuery(`SELECT DISTINCT ON \(state_key\) .+ FROM drift_runs WHERE source_id = \$1`).
+		WithArgs("s1").WillReturnRows(driftRow(""))
+	if _, err := drift.LatestPerStateInScope(ctx, "s1", admin); err != nil {
+		t.Fatalf("drift LatestPerStateInScope(platform admin): %v", err)
 	}
 
 	mock.ExpectQuery("FROM health_runs ORDER BY").WithArgs(50, 0).WillReturnRows(healthRow(""))
@@ -320,6 +370,21 @@ func TestCallbackRoots_ScopedReads_PlatformAdminIsUnfiltered(t *testing.T) {
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	if _, err := records.ResolveCleanInScope(ctx, "s1", "k", admin); err != nil {
 		t.Fatalf("records ResolveCleanInScope(platform admin): %v", err)
+	}
+	mock.ExpectQuery(`FROM drift_records WHERE source_id = \$1 AND status <> 'resolved'`).
+		WithArgs("s1").WillReturnRows(driftRecordRow("r1", "open"))
+	if _, err := records.LiveByStateInScope(ctx, "s1", admin); err != nil {
+		t.Fatalf("records LiveByStateInScope(platform admin): %v", err)
+	}
+	mock.ExpectQuery(`FROM drift_records r\s+JOIN state_sources s ON s\.id = r\.source_id\s+WHERE r\.status <> 'resolved'\s+GROUP BY`).
+		WillReturnRows(sqlmock.NewRows([]string{"source_id", "source_name", "open", "acknowledged", "critical"}))
+	if _, err := records.CountsBySourceInScope(ctx, admin); err != nil {
+		t.Fatalf("records CountsBySourceInScope(platform admin): %v", err)
+	}
+	mock.ExpectQuery(`SELECT COUNT\(\*\) FROM drift_records WHERE status <> 'resolved' AND \(unparseable OR truncated\)`).
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
+	if _, err := records.CountIncompleteInScope(ctx, admin); err != nil {
+		t.Fatalf("records CountIncompleteInScope(platform admin): %v", err)
 	}
 
 	if err := mock.ExpectationsWereMet(); err != nil {
@@ -442,15 +507,15 @@ func TestCallbackRoots_ScopedReaders_ReportQueryErrors(t *testing.T) {
 	records := NewDriftRecordRepository(db)
 
 	mock.ExpectQuery("FROM drift_runs WHERE organization_id = ANY").WillReturnError(errDB)
-	if _, err := drift.ListInScope(ctx, 0, 0, "", scope); err == nil {
+	if _, err := drift.ListInScope(ctx, 0, 0, DriftRunFilter{}, scope); err == nil {
 		t.Error("drift ListInScope swallowed the query error")
 	}
 	mock.ExpectQuery("FROM drift_runs WHERE organization_id = ANY").WillReturnError(errDB)
-	if _, err := drift.ListInScope(ctx, 0, 0, "failed", scope); err == nil {
+	if _, err := drift.ListInScope(ctx, 0, 0, DriftRunFilter{Status: "failed"}, scope); err == nil {
 		t.Error("drift ListInScope (status filter) swallowed the query error")
 	}
 	mock.ExpectQuery(`SELECT COUNT\(\*\) FROM drift_runs`).WillReturnError(errDB)
-	if _, err := drift.CountRunsInScope(ctx, "failed", scope); err == nil {
+	if _, err := drift.CountRunsInScope(ctx, DriftRunFilter{Status: "failed"}, scope); err == nil {
 		t.Error("drift CountRunsInScope swallowed the query error")
 	}
 	mock.ExpectQuery("FROM drift_runs WHERE organization_id = ANY").WillReturnError(errDB)
