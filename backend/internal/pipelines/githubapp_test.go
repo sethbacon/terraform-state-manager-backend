@@ -107,6 +107,35 @@ func TestMintGitHubInstallationToken_MapsErrorStatus(t *testing.T) {
 	}
 }
 
+// TestEvictGitHubAppTokenCacheKey_RemovesOnlyThatEntry is the GitHub-App twin
+// of TestEvictADOTokenCacheKey_RemovesOnlyThatEntry: PUT /ci-sources/:id
+// (Phase 1b) evicts one credential's cached token without touching any other
+// GitHub App source's cache entry.
+func TestEvictGitHubAppTokenCacheKey_RemovesOnlyThatEntry(t *testing.T) {
+	ResetGitHubAppTokenCacheForTest()
+	a := GitHubAppCreds{AppID: "1", InstallationID: "10", PrivateKeyPEM: "key-a"}
+	b := GitHubAppCreds{AppID: "2", InstallationID: "20", PrivateKeyPEM: "key-b"}
+
+	ghAppCacheMu.Lock()
+	ghAppCache[a.Fingerprint()] = ghAppCachedToken{token: "tok-a"}
+	ghAppCache[b.Fingerprint()] = ghAppCachedToken{token: "tok-b"}
+	ghAppCacheMu.Unlock()
+
+	EvictGitHubAppTokenCacheKey(a.Fingerprint())
+
+	ghAppCacheMu.Lock()
+	_, aStillCached := ghAppCache[a.Fingerprint()]
+	_, bStillCached := ghAppCache[b.Fingerprint()]
+	ghAppCacheMu.Unlock()
+
+	if aStillCached {
+		t.Error("EvictGitHubAppTokenCacheKey did not remove the entry it was given")
+	}
+	if !bStillCached {
+		t.Error("EvictGitHubAppTokenCacheKey removed an unrelated entry -- it must evict only the given key")
+	}
+}
+
 func TestValidRSAPrivateKey(t *testing.T) {
 	if !ValidRSAPrivateKey(testRSAKeyPEM(t)) {
 		t.Error("valid PKCS#1 RSA key reported invalid")

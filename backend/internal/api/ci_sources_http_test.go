@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
+	"database/sql/driver"
 	"encoding/json"
 	"encoding/pem"
 	"net/http"
@@ -37,7 +38,7 @@ func newCISourcesEnv(t *testing.T) *sourcesEnv {
 	// Unlike the auditor-wrapped handlers, CISourceHandlers writes audits via
 	// the raw identity repo, which requires a non-nil DB. Audit INSERTs are
 	// best-effort, so this mock needs no expectations.
-	idDB, _, err := sqlmock.New()
+	idDB, idMock, err := sqlmock.New()
 	if err != nil {
 		t.Fatalf("sqlmock.New (identity): %v", err)
 	}
@@ -56,6 +57,7 @@ func newCISourcesEnv(t *testing.T) *sourcesEnv {
 	v1 := r.Group("/api/v1/ci-sources")
 	v1.GET("", h.ListCISources())
 	v1.POST("", h.CreateCISource())
+	v1.PUT("/:id", h.UpdateCISource())
 	v1.DELETE("/:id", h.DeleteCISource())
 	v1.POST("/:id/verify", h.VerifyCISource())
 	v1.GET("/:id/pipelines", h.ListSourcePipelines())
@@ -65,7 +67,7 @@ func newCISourcesEnv(t *testing.T) *sourcesEnv {
 	v1.POST("/:id/repos/:repo/pipelines", h.CreateSourcePipeline())
 	v1.POST("/:id/repos/:repo/workflow-setup", h.SetupSourceWorkflow())
 	v1.GET("/:id/repos/:repo/prs/:pr", h.GetSourcePRState())
-	return &sourcesEnv{r: r, mock: mock}
+	return &sourcesEnv{r: r, mock: mock, idMock: idMock}
 }
 
 var ciSrcCols = []string{"id", "name", "provider", "organization", "project", "auth_method", "encrypted_token", "tenant_id", "client_id", "encrypted_client_secret", "github_app_id", "github_installation_id", "encrypted_app_private_key", "created_at", "updated_at", "organization_id"}
@@ -301,5 +303,141 @@ func TestGetSourcePRState_Validation(t *testing.T) {
 		if w := e.do(http.MethodGet, "/api/v1/ci-sources/c1/repos/r1/prs/"+pr, ""); w.Code != http.StatusBadRequest {
 			t.Errorf("pr=%s: status = %d, want 400", pr, w.Code)
 		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// UpdateCISource (PUT /ci-sources/:id) -- Phase 1b's credential-replacement
+// route: an operator moves a source between auth methods (or rotates a
+// secret) without deleting it and orphaning every pipeline connection that
+// borrows it via config.ci_source_id.
+// ---------------------------------------------------------------------------
+
+// wiCiSrcRow builds a workload_identity Azure DevOps source row.
+func wiCiSrcRow(t *testing.T, clientID string) *sqlmock.Rows {
+	t.Helper()
+	proj := "Platform"
+	return sqlmock.NewRows(ciSrcCols).
+		AddRow("c1", "corp", "azure_devops", "corp-org", &proj, "workload_identity", nil, nil, clientID, nil, nil, nil, nil, "2026-06-10", "2026-06-10", testActingOrg)
+}
+
+// TestUpdateCISource_MovesAppToWorkloadIdentity is the primary scenario the
+// route exists for: the bconline source moves auth_method app -> workload_identity
+// in place, keeping its id (and everything that references it by id) intact.
+func TestUpdateCISource_MovesAppToWorkloadIdentity(t *testing.T) {
+	e := newCISourcesEnv(t)
+
+	e.mock.ExpectQuery("FROM ci_sources WHERE organization_id = ANY").WithArgs([]string{testActingOrg}, "c1").
+		WillReturnRows(appCiSrcRow(t))
+	e.mock.ExpectQuery("UPDATE ci_sources").WillReturnRows(wiCiSrcRow(t, "the-new-client"))
+	e.idMock.ExpectQuery("INSERT INTO audit_logs").WillReturnRows(auditInsertReturn())
+
+	w := e.do(http.MethodPut, "/api/v1/ci-sources/c1",
+		`{"name":"corp","provider":"azure_devops","project":"Platform","organization":"corp-org","auth_method":"workload_identity","client_id":"the-new-client"}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("update: status = %d (%s)", w.Code, w.Body.String())
+	}
+	body := w.Body.String()
+	for _, want := range []string{`"auth_method":"workload_identity"`, `"client_id":"the-new-client"`, `"has_client_secret":false`, `"has_token":false`} {
+		if !strings.Contains(body, want) {
+			t.Errorf("update response missing %s: %s", want, body)
+		}
+	}
+}
+
+// TestUpdateCISource_Validation covers the request-shape refusals: a route
+// that mutates a shared credential must reject every one of these BEFORE
+// touching the database, matching CreateCISource's posture.
+func TestUpdateCISource_Validation(t *testing.T) {
+	e := newCISourcesEnv(t)
+	proj := "Platform"
+
+	// Not found (also covers a cross-organization row: GetByIDInScope reports
+	// both identically, by design -- see loadWithToken's comment).
+	e.mock.ExpectQuery("FROM ci_sources WHERE organization_id = ANY").WithArgs([]string{testActingOrg}, "ghost").
+		WillReturnRows(sqlmock.NewRows(ciSrcCols))
+	if w := e.do(http.MethodPut, "/api/v1/ci-sources/ghost",
+		`{"name":"x","provider":"azure_devops","project":"P","organization":"o","auth_method":"pat","token":"t"}`); w.Code != http.StatusNotFound {
+		t.Errorf("missing source: status = %d, want 404", w.Code)
+	}
+
+	// The provider is immutable.
+	e.mock.ExpectQuery("FROM ci_sources WHERE organization_id = ANY").WithArgs([]string{testActingOrg}, "c1").
+		WillReturnRows(ciSrcRow(t, "azure_devops", &proj, "pat"))
+	if w := e.do(http.MethodPut, "/api/v1/ci-sources/c1",
+		`{"name":"x","provider":"github_actions","organization":"o","auth_method":"pat","token":"t"}`); w.Code != http.StatusBadRequest {
+		t.Errorf("provider change: status = %d, want 400", w.Code)
+	}
+
+	// workload_identity requires client_id.
+	e.mock.ExpectQuery("FROM ci_sources WHERE organization_id = ANY").WithArgs([]string{testActingOrg}, "c1").
+		WillReturnRows(ciSrcRow(t, "azure_devops", &proj, "pat"))
+	if w := e.do(http.MethodPut, "/api/v1/ci-sources/c1",
+		`{"name":"x","provider":"azure_devops","project":"P","organization":"o","auth_method":"workload_identity"}`); w.Code != http.StatusBadRequest {
+		t.Errorf("workload_identity missing client_id: status = %d, want 400", w.Code)
+	}
+
+	// workload_identity is Azure DevOps only.
+	e.mock.ExpectQuery("FROM ci_sources WHERE organization_id = ANY").WithArgs([]string{testActingOrg}, "c2").
+		WillReturnRows(ciSrcRow(t, "github_actions", nil, "ghp"))
+	if w := e.do(http.MethodPut, "/api/v1/ci-sources/c2",
+		`{"name":"x","provider":"github_actions","organization":"o","auth_method":"workload_identity","client_id":"c"}`); w.Code != http.StatusBadRequest {
+		t.Errorf("workload_identity on github_actions: status = %d, want 400", w.Code)
+	}
+
+	// Invalid JSON.
+	e.mock.ExpectQuery("FROM ci_sources WHERE organization_id = ANY").WithArgs([]string{testActingOrg}, "c1").
+		WillReturnRows(ciSrcRow(t, "azure_devops", &proj, "pat"))
+	if w := e.do(http.MethodPut, "/api/v1/ci-sources/c1", `{`); w.Code != http.StatusBadRequest {
+		t.Errorf("invalid JSON: status = %d, want 400", w.Code)
+	}
+}
+
+// capturedBytesArg records a bind argument that may arrive as either a string
+// or []byte (a JSONB column's marshalled bytes), for assertions on content the
+// test does not want to pin byte-for-byte.
+type capturedBytesArg struct{ got *string }
+
+func (c capturedBytesArg) Match(v driver.Value) bool {
+	switch b := v.(type) {
+	case []byte:
+		*c.got = string(b)
+	case string:
+		*c.got = b
+	}
+	return true
+}
+
+// TestUpdateCISource_NeverReturnsOrLogsSecret is the guard the risk-owning
+// spec names directly: a route that re-encrypts a credential must never let
+// the plaintext reach the response OR the audit trail. The response leak is
+// the obvious one; the audit leak is easy to miss because writeAuditEntry's
+// metadata map is built by the HANDLER, not by anything that already
+// redacts -- so an incautious "audit everything in the request" would leak it
+// silently into audit_logs, readable by anyone with audit-log access.
+func TestUpdateCISource_NeverReturnsOrLogsSecret(t *testing.T) {
+	e := newCISourcesEnv(t)
+	const secret = "super-secret-client-value"
+
+	e.mock.ExpectQuery("FROM ci_sources WHERE organization_id = ANY").WithArgs([]string{testActingOrg}, "c1").
+		WillReturnRows(appCiSrcRow(t))
+	e.mock.ExpectQuery("UPDATE ci_sources").WillReturnRows(appCiSrcRow(t))
+
+	var gotMetadata string
+	e.idMock.ExpectQuery("INSERT INTO audit_logs").
+		WithArgs(sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), "ci_source.update", "ci_source", "c1",
+			capturedBytesArg{&gotMetadata}, sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg()).
+		WillReturnRows(auditInsertReturn())
+
+	w := e.do(http.MethodPut, "/api/v1/ci-sources/c1",
+		`{"name":"corp","provider":"azure_devops","project":"Platform","organization":"corp-org","auth_method":"app","tenant_id":"the-tenant","client_id":"the-client","client_secret":"`+secret+`"}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("update: status = %d (%s)", w.Code, w.Body.String())
+	}
+	if strings.Contains(w.Body.String(), secret) {
+		t.Error("update response leaked the client secret")
+	}
+	if strings.Contains(gotMetadata, secret) {
+		t.Errorf("audit metadata leaked the client secret: %s", gotMetadata)
 	}
 }

@@ -86,7 +86,11 @@ var unsweptAADContexts = map[string]string{}
 // Keyed by file and enclosing function, which is what the scan can see and what
 // stays stable across edits inside the function.
 var unboundEncryptSites = map[string]string{
-	"internal/api/ci_sources.go:CreateCISource": "ci_sources.encrypted_token / encrypted_client_secret / " +
+	// Shared by CreateCISource and UpdateCISource (Phase 1b, drift-fleet-scale.md):
+	// the scan keys by enclosing function, not caller, so moving the encrypt
+	// calls into one function both handlers call is one entry, not two.
+	// workload_identity stores no encrypted column, so it adds nothing here.
+	"internal/api/ci_sources.go:applyCISourceAuthMethod": "ci_sources.encrypted_token / encrypted_client_secret / " +
 		"encrypted_app_private_key -- CI provider credentials",
 	"internal/api/drift.go:CreatePipeline":        "drift pipeline_connections.encrypted_token",
 	"internal/api/drift.go:UpdatePipeline":        "drift pipeline_connections.encrypted_token",
