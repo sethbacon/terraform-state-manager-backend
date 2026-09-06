@@ -315,9 +315,9 @@ func TestDriftRepository_Updates(t *testing.T) {
 	}
 
 	mock.ExpectExec("UPDATE drift_runs").
-		WithArgs("d1", "completed", 1, 2, 0, true, `{"x":1}`, "done", false, 0, 0, false, false).
+		WithArgs("d1", "completed", 1, 2, 0, true, `{"x":1}`, "done", false, 0, 0, false, false, 0, 0, 0, nil).
 		WillReturnResult(sqlmock.NewResult(0, 1))
-	if err := r.UpdateResult(ctx, "d1", "completed", 1, 2, 0, true, []byte(`{"x":1}`), "done", Completeness{}); err != nil {
+	if err := r.UpdateResult(ctx, "d1", "completed", 1, 2, 0, true, []byte(`{"x":1}`), "done", Completeness{}, InfraDrift{}); err != nil {
 		t.Errorf("UpdateResult: %v", err)
 	}
 }
@@ -334,10 +334,10 @@ func TestDriftRepository_UpdateResultPersistsCompletenessMarkers(t *testing.T) {
 	r := NewDriftRepository(db)
 
 	mock.ExpectExec("UPDATE drift_runs").
-		WithArgs("d1", "completed", 0, 0, 0, false, nil, "", true, 5, 9, true, true).
+		WithArgs("d1", "completed", 0, 0, 0, false, nil, "", true, 5, 9, true, true, 0, 0, 0, nil).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	err := r.UpdateResult(ctx, "d1", "completed", 0, 0, 0, false, nil, "",
-		Completeness{Truncated: true, OmittedEntries: 5, OmittedAttrs: 9, Unparseable: true, Unmasked: true})
+		Completeness{Truncated: true, OmittedEntries: 5, OmittedAttrs: 9, Unparseable: true, Unmasked: true}, InfraDrift{})
 	if err != nil {
 		t.Fatalf("UpdateResult: %v", err)
 	}
@@ -360,6 +360,53 @@ func TestDriftRepository_UpdateResultPersistsCompletenessMarkers(t *testing.T) {
 	}
 }
 
+// TestDriftRepository_UpdateResultPersistsInfraDrift is the run twin of
+// TestDriftRecordRepository_PersistsInfraDrift: the contract's second triplet
+// (resource_drift, migration 000039) must bind into the UPDATE alongside the
+// existing resource_changes counts, not merely be accepted by the InfraDrift
+// parameter.
+func TestDriftRepository_UpdateResultPersistsInfraDrift(t *testing.T) {
+	db, mock := newMock(t)
+	r := NewDriftRepository(db)
+
+	mock.ExpectExec("UPDATE drift_runs").
+		WithArgs("d1", "completed", 0, 0, 0, false, nil, "", false, 0, 0, false, false,
+			3, 1, 0, `[{"address":"aws_instance.hand_edited","actions":["update"]}]`).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	err := r.UpdateResult(ctx, "d1", "completed", 0, 0, 0, false, nil, "", Completeness{},
+		InfraDrift{Added: 3, Changed: 1, Destroyed: 0,
+			Summary: []byte(`[{"address":"aws_instance.hand_edited","actions":["update"]}]`)})
+	if err != nil {
+		t.Fatalf("UpdateResult: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("infra drift counts must be bound into the UPDATE: %v", err)
+	}
+}
+
+// TestDriftRepository_ZeroInfraDrift_BindsExactlyZeroNotSilentlyDropped is the
+// back-compat property on the run side: a callback from a runner that predates
+// terraform-drift-contract 1.3.0 supplies a zero-value InfraDrift, and the
+// statement must still bind explicit 0/0/0/nil for the four new columns rather
+// than omitting them -- proving the change is additive to every argument the
+// statement already bound.
+func TestDriftRepository_ZeroInfraDrift_BindsExactlyZeroNotSilentlyDropped(t *testing.T) {
+	db, mock := newMock(t)
+	r := NewDriftRepository(db)
+
+	mock.ExpectExec("UPDATE drift_runs").
+		WithArgs("d1", "completed", 1, 2, 0, true, `{"x":1}`, "done", false, 0, 0, false, false,
+			0, 0, 0, nil).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	if err := r.UpdateResult(ctx, "d1", "completed", 1, 2, 0, true, []byte(`{"x":1}`), "done",
+		Completeness{}, InfraDrift{}); err != nil {
+		t.Fatalf("UpdateResult: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("an unset InfraDrift must still bind explicit zeros/nil: %v", err)
+	}
+}
+
 // TestDriftRepository_UpdateResultWidensTruncated is the run twin of the record
 // path's one-way widening. Both storage paths share MarkTruncation precisely so
 // a single callback cannot leave the run row saying the summary was complete
@@ -370,10 +417,10 @@ func TestDriftRepository_UpdateResultWidensTruncated(t *testing.T) {
 
 	// truncated=false is overruled by the omission count beside it.
 	mock.ExpectExec("UPDATE drift_runs").
-		WithArgs("d1", "completed", 0, 0, 0, false, nil, "", true, 4, 0, false, false).
+		WithArgs("d1", "completed", 0, 0, 0, false, nil, "", true, 4, 0, false, false, 0, 0, 0, nil).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	if err := r.UpdateResult(ctx, "d1", "completed", 0, 0, 0, false, nil, "",
-		Completeness{Truncated: false, OmittedEntries: 4}); err != nil {
+		Completeness{Truncated: false, OmittedEntries: 4}, InfraDrift{}); err != nil {
 		t.Fatalf("UpdateResult: %v", err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {

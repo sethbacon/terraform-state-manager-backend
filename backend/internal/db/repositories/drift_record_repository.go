@@ -126,6 +126,12 @@ type Detection struct {
 	// beside them: the record describes the LATEST observation, so a later
 	// complete check must be able to clear an earlier truncated one.
 	Completeness
+
+	// Infra is the contract's second triplet -- drift outside Terraform
+	// (resource_drift), as opposed to Added/Changed/Destroyed above (a plan's
+	// resource_changes). Zero value on a producer that predates
+	// terraform-drift-contract 1.3.0. See migration 000039.
+	Infra InfraDrift
 }
 
 // UpsertDetection records a drift observation: it updates the live
@@ -183,11 +189,16 @@ func (r *DriftRecordRepository) upsertDetection(ctx context.Context, d *Detectio
 	if len(d.Summary) > 0 {
 		summaryArg = string(d.Summary)
 	}
+	var infraSummaryArg any
+	if len(d.Infra.Summary) > 0 {
+		infraSummaryArg = string(d.Infra.Summary)
+	}
 	d.MarkTruncation()
 	args := []any{
 		d.SourceID, d.StateKey, d.PipelineConnectionID, d.RunID, d.Origin, DriftSeverity(d.Destroyed),
 		d.Added, d.Changed, d.Destroyed, summaryArg, d.ExternalRef,
 		d.Truncated, d.OmittedEntries, d.OmittedAttrs, d.Unparseable, d.Unmasked,
+		d.Infra.Added, d.Infra.Changed, d.Infra.Destroyed, infraSummaryArg,
 	}
 	args = append(args, extra...)
 	// #nosec G202 -- sourceFilter is fixed SQL from this package (a bound
@@ -196,9 +207,11 @@ func (r *DriftRecordRepository) upsertDetection(ctx context.Context, d *Detectio
 		INSERT INTO drift_records
 			(source_id, state_key, pipeline_connection_id, last_run_id, origin, severity,
 			 added, changed, destroyed, summary, external_ref,
-			 truncated, omitted_entries, omitted_attrs, unparseable, unmasked, organization_id)
+			 truncated, omitted_entries, omitted_attrs, unparseable, unmasked,
+			 drift_added, drift_changed, drift_destroyed, drift_summary, organization_id)
 		SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, COALESCE($10::jsonb,'[]'::jsonb), $11,
-			 $12, $13, $14, $15, $16, s.organization_id
+			 $12, $13, $14, $15, $16,
+			 $17, $18, $19, $20::jsonb, s.organization_id
 		FROM state_sources s
 		WHERE s.id = $1 AND s.organization_id IS NOT NULL` + sourceFilter + `
 		ON CONFLICT (source_id, state_key) WHERE status <> 'resolved'
@@ -217,6 +230,10 @@ func (r *DriftRecordRepository) upsertDetection(ctx context.Context, d *Detectio
 			omitted_attrs    = EXCLUDED.omitted_attrs,
 			unparseable      = EXCLUDED.unparseable,
 			unmasked         = EXCLUDED.unmasked,
+			drift_added      = EXCLUDED.drift_added,
+			drift_changed    = EXCLUDED.drift_changed,
+			drift_destroyed  = EXCLUDED.drift_destroyed,
+			drift_summary    = EXCLUDED.drift_summary,
 			detections       = drift_records.detections + 1,
 			last_detected_at = now()
 		RETURNING ` + driftRecordColumns

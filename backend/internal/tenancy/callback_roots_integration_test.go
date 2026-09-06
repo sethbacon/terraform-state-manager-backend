@@ -972,14 +972,14 @@ func TestIntegration_CallbackAuthority_CannotReachAnotherOrganizationsRows(t *te
 			t.Errorf("Alpha's callback read Beta's drift run %s: %+v %v", runB, got, err)
 		}
 		if err := drift.UpdateResultInScope(ctx, runB, "failed", 0, 0, 0, false, nil, "poisoned by alpha",
-			repositories.Completeness{}, authA); err != nil {
+			repositories.Completeness{}, repositories.InfraDrift{}, authA); err != nil {
 			t.Fatalf("UpdateResultInScope under Alpha: %v", err)
 		}
 		if detail := driftDetail(t, db, runB); detail == "poisoned by alpha" {
 			t.Error("Alpha's callback overwrote Beta's drift-run result")
 		}
 		if err := drift.UpdateResultInScope(ctx, runB, "failed", 0, 0, 0, false, nil, "beta's own result",
-			repositories.Completeness{}, authB); err != nil {
+			repositories.Completeness{}, repositories.InfraDrift{}, authB); err != nil {
 			t.Fatalf("CONTROL: UpdateResultInScope under Beta: %v", err)
 		}
 		if detail := driftDetail(t, db, runB); detail != "beta's own result" {
