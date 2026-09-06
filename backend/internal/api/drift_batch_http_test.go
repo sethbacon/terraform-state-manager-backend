@@ -70,13 +70,25 @@ func fakeGitHubDispatch(t *testing.T, capture *map[string]string) *httptest.Serv
 // from runID.
 func fakeADODispatch(t *testing.T, runID int, capture *map[string]string) *httptest.Server {
 	t.Helper()
+	return fakeADODispatchCapture(t, runID, capture, nil)
+}
+
+// fakeADODispatchCapture is fakeADODispatch plus a second capture for the
+// Runs API's "variables" bag (drift-fleet-scale.md Phase 1b item 3), for
+// tests that assert on the secret-run-variable half of the fan-out wire body.
+func fakeADODispatchCapture(t *testing.T, runID int, capture *map[string]string, variables *map[string]pipelines.ADORunVariable) *httptest.Server {
+	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var body struct {
-			TemplateParameters map[string]string `json:"templateParameters"`
+			TemplateParameters map[string]string                   `json:"templateParameters"`
+			Variables          map[string]pipelines.ADORunVariable `json:"variables"`
 		}
 		_ = json.NewDecoder(r.Body).Decode(&body)
 		if capture != nil {
 			*capture = body.TemplateParameters
+		}
+		if variables != nil {
+			*variables = body.Variables
 		}
 		w.WriteHeader(http.StatusCreated)
 		fmt.Fprintf(w, `{"id":%d,"_links":{"web":{"href":"https://dev.azure.com/corp/p/_build/results?buildId=%d"}}}`, runID, runID)
@@ -309,11 +321,15 @@ func TestCreateRun_TargetsMultiple_FanOutFalse_400(t *testing.T) {
 // end-to-end happy path: 2 targets, one ADO dispatch call carrying BOTH the
 // legacy 3 params (from item 0) AND "targets" (both items), one row per
 // target under a shared batch_id, and the CI run id/link captured from ADO's
-// own response.
+// own response. Per drift-fleet-scale.md Phase 1b item 3, each target's
+// callback token travels as a secret Runs API VARIABLE keyed by
+// FanOutCallbackTokenVariableName -- NOT inside the "targets" JSON, which is
+// compiled verbatim into finalYaml (spike 1.0(b)).
 func TestCreateRun_TargetsMultiple_FanOutTrue_202BatchShape_OneDispatch(t *testing.T) {
 	e := newDriftEnv(t)
 	var gotParams map[string]string
-	srv := fakeADODispatch(t, 555, &gotParams)
+	var gotVariables map[string]pipelines.ADORunVariable
+	srv := fakeADODispatchCapture(t, 555, &gotParams, &gotVariables)
 	defer pipelines.OverrideBaseURLsForTest(srv.URL, "")()
 
 	e.mock.ExpectQuery("FROM pipeline_connections WHERE organization_id = ANY").
@@ -367,11 +383,29 @@ func TestCreateRun_TargetsMultiple_FanOutTrue_202BatchShape_OneDispatch(t *testi
 		if targets[i]["working_dir"] != want.workingDir || targets[i]["state_key"] != want.stateKey {
 			t.Errorf("targets[%d] = %v, want working_dir=%s state_key=%s", i, targets[i], want.workingDir, want.stateKey)
 		}
-		if !strings.HasSuffix(targets[i]["callback_url"], "/results") || targets[i]["callback_token"] == "" {
-			t.Errorf("targets[%d] missing callback_url/callback_token: %v", i, targets[i])
+		if !strings.HasSuffix(targets[i]["callback_url"], "/results") {
+			t.Errorf("targets[%d] missing callback_url: %v", i, targets[i])
+		}
+		if _, hasToken := targets[i]["callback_token"]; hasToken {
+			t.Errorf("targets[%d] must NOT carry callback_token -- it is compiled verbatim into finalYaml (spike 1.0(b)); got %v", i, targets[i])
 		}
 	}
-	if targets[0]["callback_token"] == targets[1]["callback_token"] {
+
+	// The security fix under test: each target's callback token instead
+	// travels as its OWN secret Runs API variable, resolved at run time.
+	wantVar1, wantVar2 := FanOutCallbackTokenVariableName("app1/"), FanOutCallbackTokenVariableName("app2/")
+	v1, ok1 := gotVariables[wantVar1]
+	v2, ok2 := gotVariables[wantVar2]
+	if !ok1 || !ok2 {
+		t.Fatalf("variables = %+v, want keys %q and %q", gotVariables, wantVar1, wantVar2)
+	}
+	if !v1.IsSecret || !v2.IsSecret {
+		t.Errorf("both callback-token variables must be isSecret: %+v", gotVariables)
+	}
+	if v1.Value == "" || v2.Value == "" {
+		t.Errorf("both callback-token variables must carry a value: %+v", gotVariables)
+	}
+	if v1.Value == v2.Value {
 		t.Error("each target must carry its OWN one-shot callback token")
 	}
 
@@ -396,6 +430,104 @@ func TestCreateRun_TargetsMultiple_FanOutTrue_202BatchShape_OneDispatch(t *testi
 	}
 	if strings.Contains(w.Body.String(), "tok-a") || strings.Contains(w.Body.String(), "tok-b") {
 		t.Error("response leaked a callback token")
+	}
+}
+
+// TestCreateRun_LegacySingle_ADO_NoVariablesKey is the ADO-provider twin of
+// TestCreateRun_LegacySingle_ResponseKeysUnchangedPlusNullBatchID: a
+// no-targets (single-item) dispatch through an Azure DevOps connection must
+// send NO "variables" key at all -- fanOutVariables is only ever populated
+// for len(items) > 1 (drift-fleet-scale.md Phase 1b item 3) -- alongside the
+// legacy 3-key templateParameters body the pipelines-package golden test
+// already pins.
+func TestCreateRun_LegacySingle_ADO_NoVariablesKey(t *testing.T) {
+	e := newDriftEnv(t)
+	var gotParams map[string]string
+	var gotVariables map[string]pipelines.ADORunVariable
+	srv := fakeADODispatchCapture(t, 1, &gotParams, &gotVariables)
+	defer pipelines.OverrideBaseURLsForTest(srv.URL, "")()
+
+	e.mock.ExpectQuery("FROM pipeline_connections WHERE organization_id = ANY").
+		WithArgs([]string{testActingOrg}, "p1").
+		WillReturnRows(pipelineHTTPRow(t, "azure_devops", "pat", map[string]any{
+			"organization": "corp", "project": "P", "pipeline_id": "7",
+		}))
+	e.mock.ExpectQuery("FROM state_sources WHERE organization_id = ANY").
+		WithArgs([]string{testActingOrg}, "s1").
+		WillReturnRows(sqlmock.NewRows(apiSourceCols).
+			AddRow("s1", "app1", "local", "", []byte(`{"base_path":"/tmp"}`), []byte(`{}`), nil, "2026-06-11", "2026-06-11", testActingOrg))
+	e.mock.ExpectQuery("INSERT INTO drift_runs").
+		WillReturnRows(driftRunInsertRow("d1", "s1", "app1.tfstate", "tok-a", nil))
+	e.mock.ExpectExec(`UPDATE drift_runs SET ci_run_id=\$2, ci_run_url=\$3`).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+
+	body := `{"pipeline_connection_id":"p1","source_id":"s1","state_key":"app1.tfstate","working_dir":"app1/"}`
+	w := e.do(http.MethodPost, "/api/v1/drift/runs", body)
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202 (%s)", w.Code, w.Body.String())
+	}
+	if len(gotParams) != 3 || gotParams["callback_token"] == "" {
+		t.Errorf("templateParameters = %v, want EXACTLY the 3 legacy keys", gotParams)
+	}
+	if len(gotVariables) != 0 {
+		t.Errorf("a single-target ADO dispatch must send no variables at all, got: %+v", gotVariables)
+	}
+}
+
+// TestCreateRun_TargetsMultiple_ParamsPassThrough pins Item A
+// (drift-fleet-scale.md Phase 1b item 3): each target's Params travels
+// unchanged into its "targets" JSON entry, so the fan-out template's
+// ${{ t.params.service_connection }} binding has something to read.
+func TestCreateRun_TargetsMultiple_ParamsPassThrough(t *testing.T) {
+	e := newDriftEnv(t)
+	var gotParams map[string]string
+	srv := fakeADODispatchCapture(t, 777, &gotParams, nil)
+	defer pipelines.OverrideBaseURLsForTest(srv.URL, "")()
+
+	e.mock.ExpectQuery("FROM pipeline_connections WHERE organization_id = ANY").
+		WithArgs([]string{testActingOrg}, "p1").
+		WillReturnRows(pipelineHTTPRow(t, "azure_devops", "pat", map[string]any{
+			"organization": "corp", "project": "P", "pipeline_id": "7", "fan_out": true,
+		}))
+	e.mock.ExpectQuery("FROM state_sources WHERE organization_id = ANY").
+		WithArgs([]string{testActingOrg}, "s1").
+		WillReturnRows(sqlmock.NewRows(apiSourceCols).
+			AddRow("s1", "app1", "local", "", []byte(`{"base_path":"/tmp"}`), []byte(`{}`), nil, "2026-06-11", "2026-06-11", testActingOrg))
+	e.mock.ExpectQuery("FROM state_sources WHERE organization_id = ANY").
+		WithArgs([]string{testActingOrg}, "s2").
+		WillReturnRows(sqlmock.NewRows(apiSourceCols).
+			AddRow("s2", "app2", "local", "", []byte(`{"base_path":"/tmp"}`), []byte(`{}`), nil, "2026-06-11", "2026-06-11", testActingOrg))
+	e.mock.ExpectQuery("INSERT INTO drift_runs").
+		WillReturnRows(driftRunInsertRow("d1", "s1", "app1.tfstate", "tok-a", nil))
+	e.mock.ExpectQuery("INSERT INTO drift_runs").
+		WillReturnRows(driftRunInsertRow("d2", "s2", "app2.tfstate", "tok-b", nil))
+	e.mock.ExpectExec(`UPDATE drift_runs SET ci_run_id=\$2, ci_run_url=\$3`).
+		WillReturnResult(sqlmock.NewResult(0, 2))
+
+	body := `{"pipeline_connection_id":"p1","targets":[
+		{"source_id":"s1","state_key":"app1.tfstate","working_dir":"app1/","params":{"service_connection":"sc-app1"}},
+		{"source_id":"s2","state_key":"app2.tfstate","working_dir":"app2/","params":{"service_connection":"sc-app2"}}
+	]}`
+	w := e.do(http.MethodPost, "/api/v1/drift/runs", body)
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202 (%s)", w.Code, w.Body.String())
+	}
+
+	var targets []struct {
+		WorkingDir string            `json:"working_dir"`
+		Params     map[string]string `json:"params"`
+	}
+	if err := json.Unmarshal([]byte(gotParams["targets"]), &targets); err != nil {
+		t.Fatalf("targets did not decode: %v (%s)", err, gotParams["targets"])
+	}
+	if len(targets) != 2 {
+		t.Fatalf("targets has %d entries, want 2: %v", len(targets), targets)
+	}
+	if targets[0].Params["service_connection"] != "sc-app1" {
+		t.Errorf("targets[0].params = %v, want service_connection=sc-app1", targets[0].Params)
+	}
+	if targets[1].Params["service_connection"] != "sc-app2" {
+		t.Errorf("targets[1].params = %v, want service_connection=sc-app2", targets[1].Params)
 	}
 }
 

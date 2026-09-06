@@ -417,6 +417,17 @@ type DriftTargetItem struct {
 	SourceID   string `json:"source_id"`
 	StateKey   string `json:"state_key"`
 	WorkingDir string `json:"working_dir"`
+	// Params is an opaque pass-through of compile-time-resolvable pipeline
+	// inputs a fan-out template needs per app -- the per-app WIF service
+	// connection name being the motivating case (drift-fleet-scale.md
+	// Phase 1b item 3: "Pipeline -> cloud" travels inside the target object
+	// because ADO service-connection inputs must resolve at compile time, not
+	// through TSM). Validated the same way and in the same place as every
+	// other target field (validateDriftTargets), carried through items() like
+	// the rest of DriftTargetItem, and marshaled verbatim into the "targets"
+	// CI template parameter (driftFanOutTarget.Params) -- TSM never
+	// interprets a key or value, it only bounds and character-checks them.
+	Params map[string]string `json:"params,omitempty"`
 }
 
 // items returns the targets to dispatch: t.Targets when it carries 1+ items,
@@ -505,12 +516,52 @@ var errFanOutNotCapable = errors.New("pipeline connection is not fan-out capable
 
 // driftFanOutTarget is one entry of the "targets" template parameter/workflow
 // input sent to a fan-out-capable pipeline: everything its per-target loop
-// needs to plan that state and report its own callback.
+// needs to plan that state and report its own callback -- EXCEPT the
+// callback token, deliberately. Every other field here is compiled verbatim
+// into the pipeline's finalYaml (spike 1.0(a)/(b)), which is fine for these
+// (none are secret) but is exactly what made a callback token unsafe to carry
+// here: spike 1.0(b) found `${{ t.callback_token }}` expanded into finalYaml
+// in the clear. The token instead travels as an Azure DevOps secret RUN
+// VARIABLE (drift-fleet-scale.md Phase 1b item 3) -- see
+// FanOutCallbackTokenVariableName and dispatchDriftBatch's fanOutVariables --
+// resolved at run time, never compiled, and referenced by the "fan-out"
+// template via the `$(cb_token_<safe_dir>)` macro rather than a `t.*` field.
 type driftFanOutTarget struct {
-	WorkingDir    string `json:"working_dir"`
-	StateKey      string `json:"state_key"`
-	CallbackURL   string `json:"callback_url"`
-	CallbackToken string `json:"callback_token"`
+	WorkingDir  string `json:"working_dir"`
+	StateKey    string `json:"state_key"`
+	CallbackURL string `json:"callback_url"`
+	// Params is item.Params, carried through unchanged (drift-fleet-scale.md
+	// Phase 1b item 3): the fan-out template binds
+	// `${{ t.params.service_connection }}` from this.
+	Params map[string]string `json:"params,omitempty"`
+}
+
+// FanOutCallbackTokenVariableName derives the Azure DevOps secret run-variable
+// name that carries one fan-out target's callback token, from that target's
+// working_dir. This is the Go half of a derivation that MUST agree, byte for
+// byte, with the fan-out template's compile-time macro-name expression
+// `$(cb_token_${{ replace(t.working_dir, '/', '_') }})` (drift-fleet-scale.md
+// Phase 1b item 3) -- see
+// TestFanOutCallbackTokenVariableTemplateExpression_MatchesGoFunction in
+// drift_workflows_test.go, which pins the template's literal expression text,
+// and TestFanOutCallbackTokenVariableName in validate_test.go, which tables
+// this function over every working_dir shape the input validators permit.
+//
+// If the two halves ever disagree, the macro resolves to no run variable at
+// all: the drift task receives an EMPTY callbackToken input, no callback ever
+// arrives, and that run sits "dispatched" until the reconciler expires it at
+// TSM_DRIFT_RUN_TTL -- a silent, delayed failure indistinguishable from an
+// agent dying. That is why the transform is kept to EXACTLY what ADO's
+// replace(a, b, c) expression can do (a literal, all-occurrences substring
+// replace -- Microsoft Learn's Azure Pipelines expressions reference: "returns
+// a new string in which all instances of a string ... are replaced") rather
+// than anything richer Go could express but YAML could not.
+//
+// validateDriftTargets refuses two items whose working_dir derives the same
+// name (see its doc comment) before dispatch ever reaches this function's
+// caller, so a collision here is a validation bug, not a runtime one.
+func FanOutCallbackTokenVariableName(workingDir string) string {
+	return "cb_token_" + strings.ReplaceAll(workingDir, "/", "_")
 }
 
 // marshalFanOutTargets is json.Marshal, exposed as a package var so a test
@@ -632,6 +683,17 @@ func (h *DriftHandlers) dispatchDriftBatch(ctx context.Context, tgt DriftTarget,
 
 	runs := make([]*repositories.DriftRun, 0, len(items))
 	fanOutTargets := make([]driftFanOutTarget, 0, len(items))
+	// fanOutVariables carries each target's callback token as an Azure DevOps
+	// secret RUN variable (drift-fleet-scale.md Phase 1b item 3), keyed by
+	// FanOutCallbackTokenVariableName(item.WorkingDir) -- the same name the
+	// "fan-out" template's `$(cb_token_${{ replace(t.working_dir,'/','_') }})`
+	// macro composes at compile time. nil (never populated) for len(items)==1
+	// so the legacy dispatch sends no "variables" key at all -- see the
+	// len(items) > 1 guard below, matching TargetsJSON's own gate.
+	var fanOutVariables map[string]pipelines.ADORunVariable
+	if len(items) > 1 {
+		fanOutVariables = make(map[string]pipelines.ADORunVariable, len(items))
+	}
 	for _, item := range items {
 		run := &repositories.DriftRun{
 			PipelineConnectionID: &conn.ID,
@@ -664,11 +726,17 @@ func (h *DriftHandlers) dispatchDriftBatch(ctx context.Context, tgt DriftTarget,
 		}
 		runs = append(runs, saved)
 		fanOutTargets = append(fanOutTargets, driftFanOutTarget{
-			WorkingDir:    item.WorkingDir,
-			StateKey:      item.StateKey,
-			CallbackURL:   callbackBase + saved.ID + "/results",
-			CallbackToken: run.CallbackToken,
+			WorkingDir:  item.WorkingDir,
+			StateKey:    item.StateKey,
+			CallbackURL: callbackBase + saved.ID + "/results",
+			Params:      item.Params,
 		})
+		if fanOutVariables != nil {
+			fanOutVariables[FanOutCallbackTokenVariableName(item.WorkingDir)] = pipelines.ADORunVariable{
+				Value:    run.CallbackToken,
+				IsSecret: true,
+			}
+		}
 	}
 
 	batchID := runs[0].ID
@@ -709,7 +777,7 @@ func (h *DriftHandlers) dispatchDriftBatch(ctx context.Context, tgt DriftTarget,
 	case "github_actions":
 		ciRef, dispatchErr = pipelines.DispatchGitHubDrift(ctx, token, pipelines.GitHubConfigFromMap(conn.Config), tgt.RepoRef, inputs)
 	case "azure_devops":
-		ciRef, dispatchErr = pipelines.DispatchAzureDevOpsDrift(ctx, adoCred(token, bearer), pipelines.AzureDevOpsConfigFromMap(conn.Config), tgt.RepoRef, inputs)
+		ciRef, dispatchErr = pipelines.DispatchAzureDevOpsDrift(ctx, adoCred(token, bearer), pipelines.AzureDevOpsConfigFromMap(conn.Config), tgt.RepoRef, inputs, fanOutVariables)
 	default:
 		dispatchErr = errUnsupportedProvider(conn.Provider)
 	}

