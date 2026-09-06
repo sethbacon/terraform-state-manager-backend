@@ -1,5 +1,22 @@
 # Changelog
 
+## [3.22.0](https://github.com/sethbacon/terraform-state-manager-backend/compare/v3.21.0...v3.22.0) (2026-09-06)
+
+
+### Features
+
+* **drift:** expose infra drift counts on the read path ([#582](https://github.com/sethbacon/terraform-state-manager-backend/issues/582)) ([e2088f4](https://github.com/sethbacon/terraform-state-manager-backend/commit/e2088f486ffa09a48c6bb55b5853701c31efca00))
+* **driftingest:** mirror resource_drift counts from contract v1.4.0 ([#578](https://github.com/sethbacon/terraform-state-manager-backend/issues/578)) ([4fc0334](https://github.com/sethbacon/terraform-state-manager-backend/commit/4fc03348c2334aabf36d051df262891e8b308a8f))
+* **drift:** persist infra drift counts and recompute them on ingest ([#579](https://github.com/sethbacon/terraform-state-manager-backend/issues/579)) ([f3439bd](https://github.com/sethbacon/terraform-state-manager-backend/commit/f3439bd4f812aaf5d4519c66a61a7564a4945c89))
+
+
+### Documentation
+
+* **plans:** Phase 1 accepted end to end; spike 1.0(b) confirmed; Brunswick templates ported ([#575](https://github.com/sethbacon/terraform-state-manager-backend/issues/575)) ([2120c14](https://github.com/sethbacon/terraform-state-manager-backend/commit/2120c14150ec610e95f1c99b7fd34166f3a88d42))
+* **plans:** Phase 3 done and proven; fleet discovery results; environment status refresh ([#581](https://github.com/sethbacon/terraform-state-manager-backend/issues/581)) ([1ca7aa5](https://github.com/sethbacon/terraform-state-manager-backend/commit/1ca7aa57445c0354255bb570968f4a677e0c27cd))
+* **plans:** Phase 5 is four of five steps done; correct the action pin claim ([#580](https://github.com/sethbacon/terraform-state-manager-backend/issues/580)) ([0b0441c](https://github.com/sethbacon/terraform-state-manager-backend/commit/0b0441ce27c87765106fb16f0cae31f2fe32cb8a))
+* **plans:** record Phase 5 step 1 as done and correct the version target ([#577](https://github.com/sethbacon/terraform-state-manager-backend/issues/577)) ([492ff8d](https://github.com/sethbacon/terraform-state-manager-backend/commit/492ff8dd2cfbee748770e76eb2cafa3318f58017))
+
 ## [3.21.0](https://github.com/sethbacon/terraform-state-manager-backend/compare/v3.20.1...v3.21.0) (2026-09-06)
 
 
