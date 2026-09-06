@@ -24,8 +24,8 @@
 | Phase | Status | Where |
 | --- | --- | --- |
 | 0 — Environment prerequisites | **verified 2026-09-06 — partially met**: CA-in-image and callback base already OK; drift pool, ADO identity and the 3.21 deployment outstanding (see Phase 0) | ops only, no code |
-| 1 — Repo-level fan-out dispatch | **done (backend)** | sethbacon/terraform-state-manager-backend#569 |
-| 1.4 — Brunswick operator templates | **not done — no longer blocked**; item 3 landed in #573 | templates live outside this repo |
+| 1 — Repo-level fan-out dispatch | **done — accepted end to end 2026-09-06** (live TSM 3.21.0 → one ADO run → 3 runs under one batch, real callbacks; see "Done when" evidence) | sethbacon/terraform-state-manager-backend#569, #573 |
+| 1.4 — Brunswick operator templates | **done for Azure** (validated on TBD4330); SQL and OCI variants ported — see 1.4 results for their per-repo caveats | `C:\dev\ado\.drift-assess\templates\` + TSM template registry |
 | 1b — Workload Identity | **done** (item 3 landed separately) | sethbacon/terraform-state-manager-backend#569, #573 |
 | 2 — Scheduler pacing | **done** | sethbacon/terraform-state-manager-backend#569 |
 | 3 — Discovery-driven onboarding | **not started** | tooling host unreachable |
@@ -77,9 +77,12 @@ following it literally would have introduced a security regression.
   The `type: object` coercion **holds**; the token-exposure result changes the
   recommendation for the fan-out template (secret run variables, not template
   parameters). The "string fallback" is **not** an exposure mitigation.
-- **No live ADO or GitHub dispatch** was exercised anywhere; CI paths are covered by fake
-  HTTP servers. Workload Identity was verified against the handler's accepted request
-  shape, not a real federated-credential exchange.
+- **Live Azure DevOps dispatch has now been exercised** (2026-09-06, Phase 1 "Done when"
+  evidence below): TSM 3.21.0 dispatched a 3-target fan-out to `bconline/Brunswick`
+  definition 3642 and received all three callbacks (two `completed`, one `failed` via the
+  per-app failure step). GitHub dispatch remains covered only by fake HTTP servers.
+  Workload Identity was verified against the handler's accepted request shape, not a real
+  federated-credential exchange (the managed identity is not yet an ADO org user).
 - Phase 4a's four organization-scoped readers **are** proven against real PostgreSQL: each
   predicate was replaced with a tautology and each test failed by returning the other
   organization's row. sqlmock alone could not have shown this — it matches query text and
@@ -310,8 +313,11 @@ written in different languages and a divergence would hand the task an empty
 it. Two working dirs that derive the same variable name (`a/b` vs `a_b`) are **refused** at
 validation rather than disambiguated.
 
-**Still needs one real run** to confirm the task actually receives the value through
-`$(cb_token_…)`. Nothing in #573 changes that.
+**Confirmed by a real run (2026-09-06, TBD4330 build 370343 on `ubuntu-minimal-scale-set`):**
+a fan-out dry run queued through the Runs API with `variables: {cb_token_APP5849/50/51:
+{value, isSecret: true}}` resolved `$(cb_token_<dir>)` inside the job for all three apps
+("resolved, 47 chars, value masked"); the compiled `finalYaml` carried only the macro
+references. The secret-run-variable design is closed end to end.
 
 **New constraint, recorded because it is not in §4:** a fan-out dispatch (2+ targets) is now
 **refused for any provider without per-target secret variables** — today that means
@@ -396,7 +402,7 @@ Managed Identity), and the TSM API at `tfstate.brunswick.com` with the admin key
 a callback with TLS verification on and no host pinning. **Gating today: the drift pool, the
 ADO identity, and the 3.21 deployment.**
 
-### Phase 1 — Repo-level fan-out dispatch (backend + templates) — DONE, except 1.4's Brunswick templates
+### Phase 1 — Repo-level fan-out dispatch (backend + templates) — DONE, accepted end to end 2026-09-06
 
 #### 1.0 Spike (½ day; blocks 1.3/1.4) — one throwaway pipeline, two questions
 
@@ -556,9 +562,98 @@ by hand before upgrading. Update the stale "next migration" note in `CONTRIBUTIN
   `dry_run: true` dispatch against TBD4330 (def 3642) using two apps (APP5849 clean +
   APP5848 drift) and one deliberately broken app to prove per-target isolation.
 
+#### 1.4 results — Brunswick Azure template ported and exercised (2026-09-06)
+
+`C:\dev\ado\.drift-assess\templates\azure-pipelines-tsm-drift.brunswick-azure-ext.yml` is
+now the fan-out version (the single-app original is kept beside it as
+`…brunswick-azure-ext.single.yml`); it is deployed on TBD4330 branch `tsm/drift-test-ext`
+as `azure-pipelines-tsm-drift-ext.yml` (definition 3642). Design points that differ from
+the built-in `fan-out` profile, each forced by a Brunswick specific:
+
+- **Shared prep once, then the loop**: provider mirror, azurerm pin, Universal-Package
+  module downloads and the installer run once; each target then assembles its app
+  (move-to-root), inits with `backendAzureRmKey: ${{ t.state_key }}`, plans, reports.
+- **Per-target plan files** (`$(Build.ArtifactStagingDirectory)/<APP>.tfplan|.plan.json`)
+  and a `rm` of them at the start of each app, so a failed plan can never report the
+  *previous* app's JSON.
+- **The report task's own output variable is the "reported" marker**
+  (`name: report_<dir>`, condition on `variables['report_<dir>.summaryFilePath']`). The
+  built-in's `always()` marker step would also run after a failed report and suppress the
+  failure callback; keying on the task output means an init/plan/show failure (no
+  plan.json) leaves it empty and the per-app failure report fires.
+- **Reset removes only what assembly created** (`./<APP>*.tf`, `zz_drift_backend.tf`,
+  backend state, `.terraform/modules`). A `git clean -fd` — the built-in's reset — also
+  deletes the untracked module downloads in the shared root, which is exactly what
+  the first dry run proved: apps 2..N failed `init` with "Unreadable module directory".
+- **The azurerm pin stays within the major the repo's constraint names.** Brunswick
+  repos declare `>= 4.0` with no lock file; the mirror now serves 5.1–5.3 and the
+  first dry run pinned **5.3.0**, so every plan failed inside
+  `terraform_standard_application_module` on removed provider arguments
+  (`enable_rbac_authorization`, `service_endpoints`, `local_authentication_disabled`)
+  — a config error that would have been recorded as a failed drift check. **Fleet
+  finding, outside this plan:** the real builds (`terraform_download_script` +
+  `>= 4.0`, no lock) will break the same way the next time they resolve providers;
+  the module set needs a 5.x-compatible release or the repos need an upper bound.
+- `${{ coalesce(t.params.service_connection, parameters.azure_service_connection) }}` —
+  a target may name its own service connection; absent `params` (the `omitempty` case)
+  falls back to the repo default. Preview-compiled both ways.
+- A dry-run-only diagnostic step per target reports whether `$(cb_token_<dir>)` resolved
+  (length only, value masked) — the evidence behind spike 1.0(b)'s closure above.
+
+Two more defects surfaced by the second and third dry runs, both fixed in the same file:
+the reset step ran without `APP` in its `env` (so `rm -f ./$APP*.tf` became `rm ./*.tf`
+and took `variables.tf`/`versions.tf` with it — now guarded), and **Azure DevOps
+auto-exports pipeline variables as upper-cased environment variables**, so the pipeline
+variables `plan_file`/`plan_json` shadowed the loop's step-level `PLAN_FILE`/`PLAN_JSON`
+env — the loop now uses `FANOUT_PLAN_FILE`/`FANOUT_PLAN_JSON`. Never reuse a pipeline
+variable's name for a step env var.
+
+Validation runs on TBD4330 (definition 3642, `ubuntu-minimal-scale-set`): 370343 → 370345
+→ 370346 → **370347 (dry run, full pass)**: APP5849 `No changes` → reported
+`drifted=false`, failure step *skipped*; APP5850 `0 to add, 1 to change` → reported
+`drifted=true changed=1`; APP5851 (the disabled, stale app) fails at `init` on its old
+module interface → no plan JSON → the per-app failure step *runs* with its own token.
+
+**SQL variant** (`azure-pipelines-tsm-drift.TBD4826-ext.yml`, generated from the Azure
+base + the SQL module download, `TF_VAR_dbadminsec_env`, `azure_tenant_id`; on TBD4826
+definition 3643): the loop, isolation and secret variables behave identically, but **both
+apps fail at `init`** — `APP6816-SQL.tf` passes `sqldbEdition`, which
+`$(latest_sqldb_module)` no longer accepts. The repo's own build downloads the same
+`$(latest_sqldb_module)`, so **TBD4826's build is broken today** for the same reason —
+the second instance of the module-interface drift noted above; not a template defect.
+
+**OCI variant** (`azure-pipelines-tsm-drift.brunswick-oci-ext.yml`, hand-ported: secure
+files, `wget` terraform 1.0.11 and the OCI module artifacts staged once, then a per-app
+resolve/assemble/init/plan/show step with the same report/failure/reset mechanics; on
+TBD728 definition 3645): the first run failed pipeline validation on invented secure-file
+variable names; corrected to the repo's (`$(production_backend)`,
+`$(non_production_backend)`, `$(oci_ashburn-1_sp_cred)`, `$(oci_brn_key)`), **run 370352
+passed**: APP1958 (dev) `0 to add, 1 to change` → reported `drifted=true changed=1`;
+APP1961 (test) `No changes` → `drifted=false`; secret variables resolved; both failure
+steps skipped; 121 s for two apps including the terraform download and module artifacts.
+
+**Template registry upload is an operator step:** `upload-templates-to-tsm.ps1` (profiles
+`brunswick-azure-ext`, `brunswick-azure-sql-ext`, `brunswick-oci-ext`) was refused with
+`403 Required scope: admin` — the stored API key has `allowed_scopes: []` and reaches the
+instance only through its org memberships (`admin` role in `aceo` and `default`), which
+`/admin/*` does not accept. Mint an API key with the `admin` scope and re-run the uploader;
+the validated files are in `C:\devdo\.drift-assess	emplates\` and on the three test
+branches meanwhile.
+
 **Done when:** one ADO run for TBD4330 with 3 targets produces 3 `drift_runs` rows under one
 `batch_id`, each `completed`/`failed` correctly, `ci_run_url` populated, and a request
 without `targets` produces a byte-identical wire body to today (golden test).
+
+**MET — 2026-09-06.** From the live `tfstate.brunswick.com` (3.21.0): `POST /drift/runs`
+with three targets on pipeline connection `6c2596bd…` (fan_out, definition 3642, branch
+`tsm/drift-test-ext`) returned `202 {batch_id: fbacd03a-8632-4239-a20c-8dcc22f68103,
+runs: [3]}` and started **one** ADO run, 370350. Real callbacks: `APP5849.tfstate`
+`completed drifted=false`; `APP5850.tfstate` `completed drifted=true +0 ~1 -0` — a live
+drift record (`warning`) opened; `APP5851.tfstate` `failed` with detail "pipeline step
+failed before reporting" from the per-app failure step. `ci_run_id=370350` on all three;
+`/drift/coverage` shows the three states with the matching last status, the open record
+on APP5850 and CI links. The no-`targets` wire body is pinned by
+`TestDispatchAzureDevOps_WireBody_NoTargets_MatchesTodayExactly`.
 
 ### Phase 1b — Identity between TSM, Azure DevOps and the cloud (no PATs, no per-app rows) — DONE
 
