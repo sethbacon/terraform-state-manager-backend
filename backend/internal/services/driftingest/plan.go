@@ -31,7 +31,16 @@ import (
 // needs; all other top-level keys are ignored.
 type Plan struct {
 	ResourceChanges []ResourceChange `json:"resource_changes"`
-	Configuration   Configuration    `json:"configuration"`
+	// ResourceDrift is infra drift — hand-edits or other out-of-band changes —
+	// as distinct from the unapplied config changes in ResourceChanges. It is
+	// optional and purely additive: absent or nil reports zero drift counts
+	// and an empty DriftSummary, and never affects ResourceChanges handling,
+	// Unparseable, Drifted(), Summary, Unmasked, OmittedEntries or
+	// OmittedAttrs. Run through the identical skip/count/mask/bound rules as
+	// ResourceChanges via the shared processChanges. Mirrors resource_drift in
+	// the canonical @4cloudguru/terraform-drift-contract summarize.ts.
+	ResourceDrift []ResourceChange `json:"resource_drift"`
+	Configuration Configuration    `json:"configuration"`
 }
 
 // Configuration is the subset of the plan's `configuration` block used to
@@ -111,6 +120,22 @@ type Result struct {
 	Destroyed int
 	Summary   []SummaryEntry
 
+	// DriftAdded/DriftChanged/DriftDestroyed mirror Added/Changed/Destroyed,
+	// computed from Plan.ResourceDrift (infra drift) instead of
+	// Plan.ResourceChanges (unapplied config changes) via the identical
+	// skip/count/bound rules (see processChanges). Zero when ResourceDrift is
+	// absent. Purely additive: never affects Drifted(), Summary, Unmasked,
+	// OmittedEntries or OmittedAttrs above. Matches drift_added/drift_changed/
+	// drift_destroyed in the canonical contract's Result.
+	DriftAdded     int
+	DriftChanged   int
+	DriftDestroyed int
+	// DriftSummary is the ResourceDrift-derived parallel to Summary, rendered
+	// through the same rules (skip, attrs, masking, MaxEntries/
+	// MaxAttrsPerEntry). Empty, never nil, when ResourceDrift is absent.
+	// Matches drift_summary.
+	DriftSummary []SummaryEntry
+
 	// Unparseable reports that the document did not have the shape of a plan:
 	// no resource_changes array. Without it a truncated `terraform show -json`,
 	// the wrong file, or an empty {} produced the identical answer as a verified
@@ -143,28 +168,29 @@ func (r *Result) Drifted() bool {
 	return r.Added+r.Changed+r.Destroyed > 0
 }
 
-// Summarize classifies each resource change, reconciled with the canonical
-// contract (summarize.ts in @4cloudguru/terraform-drift-contract, plus its test
-// vectors — see the package comment): resource changes whose actions are
-// exactly ["no-op"] or ["read"] are skipped entirely; for in-place updates and
-// replacements (before and after both JSON objects) the per-attribute diff is
-// captured with sensitive masking. Counts are replace-aware and not mutually
-// exclusive (a replacement counts as both added and destroyed).
-func Summarize(plan *Plan) *Result {
-	res := &Result{Summary: []SummaryEntry{}}
-	if plan == nil {
-		res.Unparseable = true
-		return res
-	}
-	// nil vs empty slice is the whole signal here and is load-bearing:
-	// encoding/json leaves the field nil for an absent key and for an explicit
-	// null, and allocates an empty non-nil slice for []. So a genuinely clean
-	// plan is distinguishable from a document that is not a plan at all —
-	// which is what Unparseable reports. Pinned by conformance vectors
-	// shape/not-a-plan-document and clean/empty-resource-changes; do not
-	// "simplify" this to len() == 0.
-	res.Unparseable = plan.ResourceChanges == nil
-	for _, rc := range plan.ResourceChanges {
+// processedChanges is the count/summary/masking output of running one array of
+// resource changes through the shared skip/count/mask/bound rules — mirrors
+// ProcessedChanges in the canonical @4cloudguru/terraform-drift-contract
+// summarize.ts.
+type processedChanges struct {
+	Added          int
+	Changed        int
+	Destroyed      int
+	Summary        []SummaryEntry
+	Unmasked       bool
+	OmittedEntries int
+	OmittedAttrs   int
+}
+
+// processChanges is the per-item loop shared by Plan.ResourceChanges and
+// Plan.ResourceDrift: count, skip, mask and bound. Extracted so the two paths
+// run through IDENTICAL logic rather than a parallel copy — a second copy is
+// exactly how the two would drift apart, which is the bug drift counting
+// exists to avoid (mirrors the extraction of processChanges() in the
+// canonical summarize.ts, made for the same reason).
+func processChanges(changes []ResourceChange, maxEntries, maxAttrsPerEntry int) processedChanges {
+	res := processedChanges{Summary: []SummaryEntry{}}
+	for _, rc := range changes {
 		actions := rc.Change.Actions
 		if len(actions) == 1 && (actions[0] == "no-op" || actions[0] == "read") {
 			continue
@@ -181,13 +207,13 @@ func Summarize(plan *Plan) *Result {
 			res.Destroyed++
 		}
 
-		attrs, omitted, inPlace := changedAttrs(rc.Change, MaxAttrsPerEntry)
+		attrs, omitted, inPlace := changedAttrs(rc.Change, maxAttrsPerEntry)
 		// A property of the PLAN, not of how much of it fit in the summary, so it
 		// is evaluated for capped entries too.
 		if inPlace && canon(rc.Change.BeforeSensitive) == "null" && canon(rc.Change.AfterSensitive) == "null" {
 			res.Unmasked = true
 		}
-		if len(res.Summary) >= MaxEntries {
+		if len(res.Summary) >= maxEntries {
 			res.OmittedEntries++
 			continue
 		}
@@ -199,6 +225,55 @@ func Summarize(plan *Plan) *Result {
 		}
 		res.Summary = append(res.Summary, entry)
 	}
+	return res
+}
+
+// Summarize classifies each resource change, reconciled with the canonical
+// contract (summarize.ts in @4cloudguru/terraform-drift-contract, plus its test
+// vectors — see the package comment): resource changes whose actions are
+// exactly ["no-op"] or ["read"] are skipped entirely; for in-place updates and
+// replacements (before and after both JSON objects) the per-attribute diff is
+// captured with sensitive masking. Counts are replace-aware and not mutually
+// exclusive (a replacement counts as both added and destroyed).
+//
+// Plan.ResourceDrift runs through the identical rules (via processChanges) to
+// produce the parallel DriftAdded/DriftChanged/DriftDestroyed/DriftSummary,
+// but — matching the canonical contract exactly — its Unmasked,
+// OmittedEntries and OmittedAttrs are computed and then discarded: those three
+// fields, along with Drifted() and Summary, describe Plan.ResourceChanges
+// only. This is deliberate, not an oversight: resource_drift is purely
+// additive, so it must not be able to flip Drifted() or Truncated() for a
+// plan whose ResourceChanges alone would report clean.
+func Summarize(plan *Plan) *Result {
+	res := &Result{Summary: []SummaryEntry{}, DriftSummary: []SummaryEntry{}}
+	if plan == nil {
+		res.Unparseable = true
+		return res
+	}
+	// nil vs empty slice is the whole signal here and is load-bearing:
+	// encoding/json leaves the field nil for an absent key and for an explicit
+	// null, and allocates an empty non-nil slice for []. So a genuinely clean
+	// plan is distinguishable from a document that is not a plan at all —
+	// which is what Unparseable reports. Pinned by conformance vectors
+	// shape/not-a-plan-document and clean/empty-resource-changes; do not
+	// "simplify" this to len() == 0.
+	res.Unparseable = plan.ResourceChanges == nil
+
+	primary := processChanges(plan.ResourceChanges, MaxEntries, MaxAttrsPerEntry)
+	res.Added = primary.Added
+	res.Changed = primary.Changed
+	res.Destroyed = primary.Destroyed
+	res.Summary = primary.Summary
+	res.Unmasked = primary.Unmasked
+	res.OmittedEntries = primary.OmittedEntries
+	res.OmittedAttrs = primary.OmittedAttrs
+
+	drift := processChanges(plan.ResourceDrift, MaxEntries, MaxAttrsPerEntry)
+	res.DriftAdded = drift.Added
+	res.DriftChanged = drift.Changed
+	res.DriftDestroyed = drift.Destroyed
+	res.DriftSummary = drift.Summary
+
 	return res
 }
 

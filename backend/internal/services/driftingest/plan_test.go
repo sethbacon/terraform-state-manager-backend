@@ -78,6 +78,141 @@ func TestSummarize_NoOpReadAndNilPlans(t *testing.T) {
 	}
 }
 
+// TestSummarize_ResourceDrift_IndependentTracks mirrors the contract's
+// conformance vector drift/both: resource_changes and resource_drift are
+// counted and summarised on independent tracks. An unapplied update never
+// touches drift_added/drift_summary, and a drifted create/delete pair never
+// touches added/changed/destroyed/summary/Drifted().
+func TestSummarize_ResourceDrift_IndependentTracks(t *testing.T) {
+	planJSON := `{
+		"resource_changes": [
+			{"address": "aws_instance.unapplied", "change": {"actions": ["update"], "before": {"size": 1}, "after": {"size": 2}}}
+		],
+		"resource_drift": [
+			{"address": "aws_s3_bucket.drifted_new", "change": {"actions": ["create"], "before": null, "after": {"bucket": "a"}}},
+			{"address": "aws_instance.drifted_gone", "change": {"actions": ["delete"], "before": {"id": "i-1"}, "after": null}}
+		]
+	}`
+	var plan Plan
+	if err := json.Unmarshal([]byte(planJSON), &plan); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	res := Summarize(&plan)
+
+	if res.Added != 0 || res.Changed != 1 || res.Destroyed != 0 {
+		t.Errorf("primary counts = +%d ~%d -%d, want +0 ~1 -0", res.Added, res.Changed, res.Destroyed)
+	}
+	if !res.Drifted() {
+		t.Error("the unapplied update must still report drifted")
+	}
+	if len(res.Summary) != 1 || res.Summary[0].Address != "aws_instance.unapplied" {
+		t.Errorf("summary must contain only the resource_changes entry, got %+v", res.Summary)
+	}
+
+	if res.DriftAdded != 1 || res.DriftChanged != 0 || res.DriftDestroyed != 1 {
+		t.Errorf("drift counts = +%d ~%d -%d, want +1 ~0 -1", res.DriftAdded, res.DriftChanged, res.DriftDestroyed)
+	}
+	if len(res.DriftSummary) != 2 {
+		t.Fatalf("drift_summary must contain both resource_drift entries, got %+v", res.DriftSummary)
+	}
+	gotAddrs := map[string]bool{res.DriftSummary[0].Address: true, res.DriftSummary[1].Address: true}
+	if !gotAddrs["aws_s3_bucket.drifted_new"] || !gotAddrs["aws_instance.drifted_gone"] {
+		t.Errorf("drift_summary addresses = %v, want both drift entries", gotAddrs)
+	}
+}
+
+// TestSummarize_ResourceDrift_OnlyDriftNeverSetsDrifted mirrors the contract's
+// conformance vector drift/only-resource-drift: a plan with no unapplied
+// changes but one hand-edited resource reports drifted=false — resource_drift
+// is purely additive and never influences Drifted() or Summary.
+func TestSummarize_ResourceDrift_OnlyDriftNeverSetsDrifted(t *testing.T) {
+	res := Summarize(&Plan{
+		ResourceChanges: []ResourceChange{},
+		ResourceDrift: []ResourceChange{
+			{Address: "aws_instance.hand_edited", Change: Change{Actions: []string{"create"}, Before: json.RawMessage(`null`), After: json.RawMessage(`{"instance_type":"t3.micro"}`)}},
+		},
+	})
+	if res.Drifted() {
+		t.Error("resource_drift alone must not set Drifted()")
+	}
+	if len(res.Summary) != 0 {
+		t.Errorf("resource_drift must not appear in Summary, got %+v", res.Summary)
+	}
+	if res.DriftAdded != 1 || len(res.DriftSummary) != 1 {
+		t.Errorf("drift_added=%d drift_summary=%+v, want 1/[hand_edited]", res.DriftAdded, res.DriftSummary)
+	}
+}
+
+// TestSummarize_ResourceDrift_SkipRuleShared mirrors the contract's
+// conformance vector drift/skip-read: resource_drift honours the IDENTICAL
+// skip rule as resource_changes — exactly ["no-op"] or ["read"] entries are
+// skipped from both drift counts and drift_summary — via the same shared
+// processChanges rather than a parallel copy.
+func TestSummarize_ResourceDrift_SkipRuleShared(t *testing.T) {
+	res := Summarize(&Plan{
+		ResourceDrift: []ResourceChange{
+			{Address: "aws_instance.unchanged", Change: Change{Actions: []string{"no-op"}, Before: json.RawMessage(`{"a":1}`), After: json.RawMessage(`{"a":1}`)}},
+			{Address: "data.aws_ami.refreshed", Change: Change{Actions: []string{"read"}, Before: json.RawMessage(`null`), After: json.RawMessage(`{"id":"ami-1"}`)}},
+			{Address: "aws_instance.really_drifted", Change: Change{Actions: []string{"update"}, Before: json.RawMessage(`{"size":1}`), After: json.RawMessage(`{"size":3}`)}},
+		},
+	})
+	if res.DriftAdded != 0 || res.DriftChanged != 1 || res.DriftDestroyed != 0 {
+		t.Errorf("drift counts = +%d ~%d -%d, want +0 ~1 -0 (no-op/read skipped)", res.DriftAdded, res.DriftChanged, res.DriftDestroyed)
+	}
+	if len(res.DriftSummary) != 1 || res.DriftSummary[0].Address != "aws_instance.really_drifted" {
+		t.Errorf("drift_summary must contain only the non-skipped entry, got %+v", res.DriftSummary)
+	}
+}
+
+// TestSummarize_ResourceDrift_MaskingAndBoundsIndependent mirrors the
+// contract's drift/masking and drift/truncation vectors: resource_drift's
+// attrs go through the identical masking/bound rules as resource_changes, but
+// its Unmasked/OmittedEntries/OmittedAttrs never surface on the top-level
+// Result — those track resource_changes only.
+func TestSummarize_ResourceDrift_MaskingAndBoundsIndependent(t *testing.T) {
+	res := Summarize(&Plan{
+		ResourceDrift: []ResourceChange{
+			{Address: "aws_instance.rotated_secret", Change: Change{
+				Actions:         []string{"update"},
+				Before:          json.RawMessage(`{"pw":"old-secret"}`),
+				After:           json.RawMessage(`{"pw":"new-secret"}`),
+				BeforeSensitive: json.RawMessage(`{"pw":true}`),
+				AfterSensitive:  json.RawMessage(`{}`),
+			}},
+		},
+	})
+	if res.Unmasked {
+		t.Error("a masked resource_drift attr must not set the top-level Unmasked")
+	}
+	if len(res.DriftSummary) != 1 || len(res.DriftSummary[0].Attrs) != 1 {
+		t.Fatalf("drift_summary = %+v", res.DriftSummary)
+	}
+	attr := res.DriftSummary[0].Attrs[0]
+	if attr.Before == nil || *attr.Before != "(sensitive)" || attr.After == nil || *attr.After != "(sensitive)" {
+		t.Errorf("drift attr masking = %+v, want both sides (sensitive)", attr)
+	}
+
+	wide := func(n, bump int) json.RawMessage {
+		parts := make([]string, 0, n)
+		for i := 0; i < n; i++ {
+			parts = append(parts, fmt.Sprintf("%q:%d", fmt.Sprintf("k%03d", i), i+bump))
+		}
+		return json.RawMessage("{" + strings.Join(parts, ",") + "}")
+	}
+	res = Summarize(&Plan{
+		ResourceDrift: []ResourceChange{
+			{Address: "aws_instance.many_attrs", Change: Change{Actions: []string{"update"}, Before: wide(51, 0), After: wide(51, 1)}},
+		},
+	})
+	if res.Truncated() || res.OmittedAttrs != 0 {
+		t.Errorf("resource_drift's own attr cap must not surface on the top-level Truncated/OmittedAttrs, got truncated=%v omittedAttrs=%d",
+			res.Truncated(), res.OmittedAttrs)
+	}
+	if len(res.DriftSummary) != 1 || len(res.DriftSummary[0].Attrs) != MaxAttrsPerEntry {
+		t.Errorf("drift_summary attrs must still be capped at %d, got %d", MaxAttrsPerEntry, len(res.DriftSummary[0].Attrs))
+	}
+}
+
 func TestSummarize_AttrsAndSensitiveMasking(t *testing.T) {
 	// In-place update: a normal attribute is formatted, a sensitive one is
 	// masked, and an unchanged nested object is omitted (deep equality).
@@ -544,6 +679,17 @@ func TestSummarize_BoundsAndMarkers(t *testing.T) {
 		}
 		if !Summarize(nil).Unparseable {
 			t.Error("a nil plan must report unparseable")
+		}
+	})
+
+	t.Run("resource_drift is absent by default: zero counts, empty summary, never nil", func(t *testing.T) {
+		res := Summarize(&Plan{ResourceChanges: []ResourceChange{}})
+		if res.DriftAdded != 0 || res.DriftChanged != 0 || res.DriftDestroyed != 0 {
+			t.Errorf("absent resource_drift must report zero counts, got +%d ~%d -%d",
+				res.DriftAdded, res.DriftChanged, res.DriftDestroyed)
+		}
+		if res.DriftSummary == nil || len(res.DriftSummary) != 0 {
+			t.Errorf("DriftSummary must be an empty, non-nil slice, got %#v", res.DriftSummary)
 		}
 	})
 
