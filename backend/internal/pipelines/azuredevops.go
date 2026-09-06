@@ -28,18 +28,39 @@ func AzureDevOpsConfigFromMap(m map[string]any) AzureDevOpsConfig {
 	return AzureDevOpsConfig{Organization: s("organization"), Project: s("project"), PipelineID: s("pipeline_id"), Ref: s("ref")}
 }
 
+// ADORunVariable is one entry of the Azure DevOps Runs API "variables" bag: a
+// value plus whether the run should register it as a secret (masked in logs,
+// never shown in the Parameters view). Used only for the fan-out path's
+// per-target callback tokens (drift-fleet-scale.md Phase 1b item 3 / spike
+// 1.0(b)): unlike templateParameters, a run variable is resolved at RUN time,
+// not compiled into finalYaml, so this is what actually keeps a one-shot
+// callback token out of the compiled YAML the spike found every
+// `${{ t.callback_token }}` reference exposed. The legacy 3-parameter
+// dispatch never populates this, so its wire body carries no "variables" key
+// at all -- see TestDispatchAzureDevOps_WireBody_NoTargets_MatchesTodayExactly.
+type ADORunVariable struct {
+	Value    string `json:"value"`
+	IsSecret bool   `json:"isSecret"`
+}
+
 // DispatchAzureDevOpsRun triggers an Azure DevOps pipeline run via the
-// Pipelines REST API, passing the given template parameters, and decodes the
-// started run's id and web link from the response body. Auth is either a PAT
-// (Basic) or an Entra app access token (Bearer), per the ADOToken. The run
-// reports its result back through the callback, not through this response.
+// Pipelines REST API, passing the given template parameters (compiled into
+// finalYaml -- never put a secret here) and run variables (resolved at run
+// time, never compiled), and decodes the started run's id and web link from
+// the response body. Auth is either a PAT (Basic) or an Entra app access
+// token (Bearer), per the ADOToken. The run reports its result back through
+// the callback, not through this response.
+//
+// variables is nil for every dispatch that never fans out (or has not yet
+// been given any secret run variables to carry) -- the "variables" key is
+// then omitted from the request body entirely, rather than sent as `{}`.
 //
 // A missing or malformed body on a 200/201 is NOT an error and yields
 // (nil, nil): the dispatch itself already succeeded by that point (the CI job
 // is running), and the run id/link are used only best-effort, to populate
 // ci_run_id/ci_run_url -- failing the whole dispatch over a response-shape
 // change would desync run status from reality for no benefit.
-func DispatchAzureDevOpsRun(ctx context.Context, cred ADOToken, cfg AzureDevOpsConfig, ref string, params map[string]string) (*CIRunRef, error) {
+func DispatchAzureDevOpsRun(ctx context.Context, cred ADOToken, cfg AzureDevOpsConfig, ref string, params map[string]string, variables map[string]ADORunVariable) (*CIRunRef, error) {
 	if cfg.Organization == "" || cfg.Project == "" || cfg.PipelineID == "" {
 		return nil, fmt.Errorf("azure devops connection requires config.organization, config.project, and config.pipeline_id")
 	}
@@ -53,6 +74,12 @@ func DispatchAzureDevOpsRun(ctx context.Context, cred ADOToken, cfg AzureDevOpsC
 	// branch configured on the pipeline definition. Guessing one (e.g. main)
 	// fails validation on repos whose default branch is named differently.
 	payload := map[string]any{"templateParameters": params}
+	// Omitted entirely when empty (never sent as {}) so a dispatch that never
+	// fans out produces exactly today's wire body -- see
+	// TestDispatchAzureDevOps_WireBody_NoTargets_MatchesTodayExactly.
+	if len(variables) > 0 {
+		payload["variables"] = variables
+	}
 	if ref != "" {
 		if !strings.HasPrefix(ref, "refs/") {
 			ref = "refs/heads/" + ref
@@ -111,15 +138,20 @@ func DispatchAzureDevOpsRun(ctx context.Context, cred ADOToken, cfg AzureDevOpsC
 // was -- it is shared with Version Lab (internal/api/health.go) -- so this is a
 // thin wrapper rather than the entry point growing a new return value.
 func DispatchAzureDevOps(ctx context.Context, cred ADOToken, cfg AzureDevOpsConfig, ref string, params map[string]string) error {
-	_, err := DispatchAzureDevOpsRun(ctx, cred, cfg, ref, params)
+	_, err := DispatchAzureDevOpsRun(ctx, cred, cfg, ref, params, nil)
 	return err
 }
 
 // DispatchAzureDevOpsDrift dispatches a pipeline with the standard drift
 // parameters, plus "targets" when the caller filled DriftInputs.TargetsJSON (a
 // fan-out dispatch of 2+ targets) -- omitted entirely otherwise, so a
-// no-targets request sends exactly today's three keys.
-func DispatchAzureDevOpsDrift(ctx context.Context, cred ADOToken, cfg AzureDevOpsConfig, ref string, inputs DriftInputs) (*CIRunRef, error) {
+// no-targets request sends exactly today's three keys. variables carries the
+// fan-out path's per-target secret callback tokens (drift-fleet-scale.md
+// Phase 1b item 3), keyed by the same name the "fan-out" template's
+// `$(cb_token_${{ replace(t.working_dir, '/', '_') }})` macro composes at
+// compile time (see FanOutCallbackTokenVariableName in internal/api); nil for
+// every dispatch that never fans out.
+func DispatchAzureDevOpsDrift(ctx context.Context, cred ADOToken, cfg AzureDevOpsConfig, ref string, inputs DriftInputs, variables map[string]ADORunVariable) (*CIRunRef, error) {
 	params := map[string]string{
 		"callback_url":   inputs.CallbackURL,
 		"callback_token": inputs.CallbackToken,
@@ -128,5 +160,5 @@ func DispatchAzureDevOpsDrift(ctx context.Context, cred ADOToken, cfg AzureDevOp
 	if inputs.TargetsJSON != "" {
 		params["targets"] = inputs.TargetsJSON
 	}
-	return DispatchAzureDevOpsRun(ctx, cred, cfg, ref, params)
+	return DispatchAzureDevOpsRun(ctx, cred, cfg, ref, params, variables)
 }

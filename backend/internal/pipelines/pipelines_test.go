@@ -28,10 +28,10 @@ func TestAzureDevOpsConfigAndValidation(t *testing.T) {
 		t.Fatalf("unexpected config: %+v", cfg)
 	}
 	ctx := context.Background()
-	if _, err := DispatchAzureDevOpsDrift(ctx, ADOPAT("pat"), AzureDevOpsConfig{Project: "p", PipelineID: "1"}, "", DriftInputs{}); err == nil {
+	if _, err := DispatchAzureDevOpsDrift(ctx, ADOPAT("pat"), AzureDevOpsConfig{Project: "p", PipelineID: "1"}, "", DriftInputs{}, nil); err == nil {
 		t.Error("expected error for missing organization")
 	}
-	if _, err := DispatchAzureDevOpsDrift(ctx, ADOPAT(""), AzureDevOpsConfig{Organization: "o", Project: "p", PipelineID: "1"}, "", DriftInputs{}); err == nil {
+	if _, err := DispatchAzureDevOpsDrift(ctx, ADOPAT(""), AzureDevOpsConfig{Organization: "o", Project: "p", PipelineID: "1"}, "", DriftInputs{}, nil); err == nil {
 		t.Error("expected error for missing pat")
 	}
 }
