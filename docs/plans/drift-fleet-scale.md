@@ -23,7 +23,7 @@
 
 | Phase | Status | Where |
 | --- | --- | --- |
-| 0 — Environment prerequisites | **not started** | ops only, no code |
+| 0 — Environment prerequisites | **verified 2026-09-06 — partially met**: CA-in-image and callback base already OK; drift pool, ADO identity and the 3.21 deployment outstanding (see Phase 0) | ops only, no code |
 | 1 — Repo-level fan-out dispatch | **done (backend)** | sethbacon/terraform-state-manager-backend#569 |
 | 1.4 — Brunswick operator templates | **not done** | templates live outside this repo |
 | 1b — Workload Identity | **done, except item 3** — per-target `Params` (per-app service connection) is not implemented and gates 1.4 | sethbacon/terraform-state-manager-backend#569 |
@@ -119,6 +119,9 @@ onboarding is a script driven by ADO/blob discovery.
 Capacity, illustrative (`agent-min ≈ jobs × (overhead + apps × plan)`, 2 min overhead,
 1 min/plan): per-app jobs 1,500 × 3 = **4,500** agent-min (~3.75 h on 20 agents);
 per-repo fan-out 300 × (2 + 5) = **2,100** agent-min (~1.75 h) and 5× fewer queue entries.
+*Verified 2026-09-06 (Phase 0): the shared Linux pool's real ceiling is **4 agents**, which
+turns those into ~19 h and ~8.75 h — a dedicated drift pool is a prerequisite, not an
+optimisation.*
 
 ## 2. Goals / Non-goals
 
@@ -304,23 +307,74 @@ org-wide. `seth.bacon@brunswick.com` (the identity behind the cached Git credent
 repo access. Name the identity the onboarding script runs as, and grant it Code Read +
 Contribute explicitly — pipeline rights do not imply repo rights.
 
-### Phase 0 — Environment prerequisites (ops, no code) — NOT STARTED
+### Phase 0 — Environment prerequisites (ops, no code) — VERIFIED 2026-09-06, PARTIALLY MET
 
-- [ ] **Dedicated drift agent pool** (e.g. `ubuntu-drift-scale-set`, small SKU, own max),
-  referenced via the templates' existing `pool` parameter. Isolates the nightly herd from
-  deploys in both directions.
-- [ ] **Internal CA in the agent image**: add the BC root/intermediate to the Image Builder
-  component that bakes the scale-set image so `PipelineTerraformDriftReport@1` keeps
-  `rejectUnauthorized: true` with no `/etc/hosts` or TLS workarounds.
-- [ ] **TSM callback base** = private FQDN (`TSM_SERVER_CALLBACK_URL` or
-  `TSM_SERVER_BASE_URL`). The wizard preflight heuristic (`ci_sources.go:568-592`) flags
-  `.internal`/private IPs — advisory only for a private deployment.
-- [ ] **Credentials**: admin-scoped TSM API key for the onboarding script; ADO identity with
-  `Build (read & execute)` + repo contribute; confirm the drift pipelines' queue / service
-  connection / variable-group `pipelinePermissions` are authorized.
+Verified by live reads on 2026-09-06: Azure DevOps REST as `seth.bacon` (Agent Pools,
+Elastic Pools, Queues, Entitlements), Azure as `sbacon_ca` (Resource Graph, Compute Gallery,
+Managed Identity), and the TSM API at `tfstate.brunswick.com` with the admin key.
 
-**Done when:** a manual dispatch from TSM to a pipeline on the new pool completes a callback
-with TLS verification on and no host pinning.
+- [ ] **Dedicated drift agent pool — NOT MET, and now known to be mandatory.** The pool
+  every template uses, `ubuntu-minimal-scale-set` (ADO pool **68**, Brunswick queue
+  **1358**), is an elastic pool over `VMSS-ENT-APP2975-P-CUS07` (subscription
+  `be7ae9c6-…`, `RG-ENT-APP2975-P-CUS01`, `Standard_D2ds_v5`, **maxCapacity 4**,
+  desiredIdle 2, recycle-after-each-use, TTL 30 min). Siblings: `ubuntu-scale-set` (pool 51
+  → CUS05, max 4), `windows-scale-set` (43 → CUS03, max 8), `windows-scale-set-custom`
+  (64 → CUS06, max 3). With the real ceiling of **4 Linux agents**, the capacity math in §1
+  becomes: per-app jobs ≈ 4,500 agent-min ≈ **19 h**; per-repo fan-out ≈ 2,100 agent-min ≈
+  **8.75 h** — neither fits a night, and either would starve every deploy that shares the
+  pool. Action: create `ubuntu-drift-scale-set` — a new VMSS from the **same gallery image
+  definition** (below), its own elastic pool with `recycleAfterEachUse`, desiredIdle 0,
+  TTL 30, max sized to the nightly window (max 20 ⇒ fan-out ≈ 1.75 h), plus a Brunswick
+  queue — and point the drift templates at it via `pool`.
+- [x] **Internal CA in the agent image — ALREADY MET.** The agent image is Compute Gallery
+  `ACG_ENT_APP6030_P_CUS01` (`RG-ENT-APP6030-P-CUS01`, the image factory) definition
+  `Canonical-UbuntuMinimal-24_04-LTS-gen2`, version `2026.08.26` (three versions in
+  August 2026 — `2026.08.17/.25/.26` — each published from a managed image
+  `ubuntu-24_04-lts-minimal-<date>` in the same resource group, i.e. a dated image
+  pipeline, not hand-built). `BCROOT` is in that image's trust store: the June end-to-end callback
+  validated `tfstate.brunswick.com` with TLS verification on (no `-k`, no
+  `rejectUnauthorized:false`) once the *server* chain carried the 2024 `BCIssuingCA1`. The
+  served chain was re-checked today: leaf ← `BCIssuingCA1` ← `BCROOT`, leaf valid to
+  2028-06-15. No image change needed; the drift VMSS must use this same definition.
+- [x] **TSM callback base — MET.** `GET /api/v1/pipelines/callback-preflight` returns
+  `{"callback_base":"https://tfstate.brunswick.com","likely_unreachable":false}`, and the
+  private DNS record resolves on the scale-set agents (the templates' `/etc/hosts` pin is a
+  no-op). The preflight heuristic (`ci_sources.go:568-592`) is advisory only for a private
+  deployment.
+- [ ] **Credentials — PARTIAL.**
+  - TSM admin API key for tooling: present (used for these reads). ✓
+  - ADO identity for TSM dispatch (Phase 1b): the pod identity
+    `terraform-state-manager-identity` (`RG-ENT-APP6637-N-CUS01`, client id
+    `0c48ae6c-…`) is federated to **`AKS-ENT-APP663701-N-CUS01`** (OIDC issuer +
+    Workload Identity enabled; subject
+    `system:serviceaccount:terraform-suite:terraform-state-manager`), so
+    `auth_method: workload_identity` is deployable as designed. But **no managed identity
+    is an Azure DevOps org user yet** (entitlement search for it: 0 matches). Action: create
+    `tsm-ado-dispatch` (UAMI + federated credential on the same subject) or reuse the pod
+    identity; add it to `bconline` (Basic); grant Build *Read & execute*, Project and Team
+    *Read*, Code *Read* on Brunswick.
+  - Operator identity split (confirmed by the owner): **`sbacon_ca` = Azure (`az`)**,
+    **`seth.bacon` = Azure DevOps**. Two traps found: the Git Credential Manager token for
+    `seth.bacon` is *Git-scoped* (repos work; Pipelines/Agent Pools/Entitlements 401), and
+    an Entra token minted under `sbacon_ca` reaches Pipelines but sees no repos. The
+    onboarding script (Phase 3) therefore needs a `seth.bacon` PAT with Build + Code +
+    Agent Pools (read) scopes — or `az login` as `seth.bacon` — until the Phase 1b identity
+    exists.
+  - Resource authorization (queue 1358, service connection, variable groups) was granted to
+    the three test definitions (3642/3643/3645) and still holds; every new definition needs
+    the same `pipelinePermissions` grant — that is the onboarding script's job.
+- [ ] **TSM deployment — NOT MET (new item).** `tfstate.brunswick.com` runs **3.20.1**
+  (built 2026-09-02), which predates fan-out / workload identity (#569) and the follow-ups
+  (#571); release 3.21.0 (release-please #568) is not merged or deployed. The instance is
+  also **empty** — 0 state sources, CI sources, pipeline connections, schedules, runs — so
+  the June test wiring was lost in a redeploy. Action: merge #568, deploy 3.21.x through
+  pipeline 3632 (`terraform-state-manager-aks`), then re-register one state source
+  ("Azure Non-Prod", `crpnonprdtrrfrmstaterepo/terraformbackend`), the CI source (Phase 1b
+  identity, `workload_identity`) and one fan-out connection before the acceptance dispatch.
+
+**Done when** (unchanged): a manual dispatch from TSM to a pipeline on the new pool completes
+a callback with TLS verification on and no host pinning. **Gating today: the drift pool, the
+ADO identity, and the 3.21 deployment.**
 
 ### Phase 1 — Repo-level fan-out dispatch (backend + templates) — DONE, except 1.4's Brunswick templates
 
