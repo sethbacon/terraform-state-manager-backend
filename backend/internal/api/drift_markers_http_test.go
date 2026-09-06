@@ -132,7 +132,7 @@ func TestIngestDrift_ServerParsedPlanOverridesClaimedMarkers(t *testing.T) {
 	// unmasked=TRUE — the exact inverse of every claim in the body below.
 	e.mock.ExpectQuery("INSERT INTO drift_records").
 		WithArgs("s1", "k", nil, nil, "ingest", "warning", 0, 1, 0, sqlmock.AnyArg(), nil,
-			false, 0, 0, false, true, 0, 0, 0, nil, []string{testActingOrg}).
+			false, 0, 0, false, true, 0, 0, 0, "[]", []string{testActingOrg}). // drift_summary recomputed to "[]": the plan carries no resource_drift
 		WillReturnRows(driftRecRowMarked("r1", "open", "warning", false, 0, 0, false, true))
 
 	body := `{"source_id":"s1","state_key":"k",

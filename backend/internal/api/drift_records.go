@@ -122,11 +122,15 @@ type driftIngestPayload struct {
 	repositories.Completeness
 	// DriftAdded/Changed/Destroyed/Summary are the contract's second triplet
 	// (resource_drift) -- see driftRunResultPayload for what they mean and why
-	// their absence decodes to the zero value rather than an error. Unlike
-	// Added/Changed/Destroyed above, a raw plan supplied here does NOT yet
-	// override these: driftingest.Result gains the mirrored fields in a
-	// separate change (Phase 5 item 2), so until then a sender's own reported
-	// values are what gets stored, exactly as if no plan had been supplied.
+	// their absence decodes to the zero value rather than an error. A raw
+	// plan supplied here recomputes these from driftingest.Result exactly as
+	// it recomputes Added/Changed/Destroyed above -- EXCEPT that an explicit,
+	// non-zero/non-empty value supplied here wins over the recompute, the
+	// reverse of the primary triplet's precedence (see IngestDrift's
+	// explicitInfra). Recomputing these never touches `drifted`: infra drift
+	// alone must not report drifted (driftingest.Result.Drifted() enforces
+	// the same rule) -- see IngestDrift's hasFinding for how an infra-only
+	// plan still reaches storage without it.
 	DriftAdded     int             `json:"drift_added"`
 	DriftChanged   int             `json:"drift_changed"`
 	DriftDestroyed int             `json:"drift_destroyed"`
@@ -205,15 +209,23 @@ func (h *DriftHandlers) IngestDrift() gin.HandlerFunc {
 
 		added, changed, destroyed := req.Added, req.Changed, req.Destroyed
 		summary := req.Summary
-		// Infra counts also count as drift here, unlike on the run callback
-		// (recordDriftOutcome): a run always has a drift_runs row to persist
-		// infra_* onto regardless of this branch, but ingest has no such row --
-		// the record IS the only durable place these values can land, so a
-		// sender that reports ONLY infra drift (resource_drift, no
-		// resource_changes) must still take the upsert path below, or the
-		// values it sent are accepted and then silently discarded.
-		drifted := added+changed+destroyed > 0 || len(summary) > 2 || // "[]" is clean
-			req.DriftAdded+req.DriftChanged+req.DriftDestroyed > 0
+		infraAdded, infraChanged, infraDestroyed := req.DriftAdded, req.DriftChanged, req.DriftDestroyed
+		infraSummary := req.DriftSummary
+		// Precedence when a raw plan is ALSO supplied: an explicit, non-zero/
+		// non-empty top-level drift_* value the caller sent WINS over the
+		// plan-derived one -- the reverse of added/changed/destroyed below,
+		// which the plan branch always overrides unconditionally. Those have
+		// always been recomputed unconditionally because a raw plan here means
+		// "we read it ourselves, so our answer replaces whatever the sender
+		// claimed" (see the completeness-marker override a few lines down).
+		// The infra triplet is additive and new: a caller may have computed it
+		// some other way (or copied it forward from a prior detection) and
+		// handed it to this endpoint directly, and silently discarding that the
+		// first time this field exists would be worse than honouring it. A
+		// caller that sends nothing here is relying entirely on the plan,
+		// exactly like one that predates this field.
+		explicitInfra := infraAdded != 0 || infraChanged != 0 || infraDestroyed != 0 || len(infraSummary) > 0
+		drifted := added+changed+destroyed > 0 || len(summary) > 2 // "[]" is clean
 		if len(req.Plan) > 0 {
 			var plan driftingest.Plan
 			if err := json.Unmarshal(req.Plan, &plan); err != nil {
@@ -234,10 +246,19 @@ func (h *DriftHandlers) IngestDrift() gin.HandlerFunc {
 			}
 			added, changed, destroyed = res.Added, res.Changed, res.Destroyed
 			summary, _ = json.Marshal(res.Summary)
+			// Matches driftingest.Result.Drifted() exactly: resource_drift alone
+			// must never flip this, the identical separation
+			// TestSummarize_ResourceDrift_OnlyDriftNeverSetsDrifted pins on the
+			// mirror this reads. Infra-only drift is handled below by
+			// hasFinding, WITHOUT touching drifted.
 			drifted = res.Drifted()
 			// We read the plan ourselves, so our markers replace whatever the
 			// sender claimed about it.
 			req.Completeness = completenessFromResult(res)
+			if !explicitInfra {
+				infraAdded, infraChanged, infraDestroyed = res.DriftAdded, res.DriftChanged, res.DriftDestroyed
+				infraSummary, _ = json.Marshal(res.DriftSummary)
+			}
 			// Best-effort: capture registry-module provenance from the plan's
 			// configuration block. Never fails the ingest — the drift record is the
 			// primary product; provenance powers the optional "modules in use" /
@@ -253,7 +274,22 @@ func (h *DriftHandlers) IngestDrift() gin.HandlerFunc {
 			extRef = &req.ExternalRef
 		}
 
-		if !drifted {
+		// hasFinding decides whether this observation is worth an open,
+		// acknowledgeable record at all: drifted (an unapplied change) OR
+		// infra drift (resource_drift with no resource_changes), either one.
+		// drifted itself is deliberately left out of this widening -- it is
+		// the resource_changes signal this endpoint has always reported, and
+		// "infra drift is not an unapplied change" is the separation the
+		// whole contract keeps (driftingest.Result.Drifted() enforces the
+		// identical rule). Ingest has no run row the way the dispatched
+		// callback does (recordDriftOutcome persists infra_* onto drift_runs
+		// unconditionally, regardless of this same branch decision one layer
+		// up) -- drift_records IS the only durable place infra-only drift can
+		// land here, so resolving it clean would accept the values and
+		// discard them.
+		hasFinding := drifted || infraAdded+infraChanged+infraDestroyed > 0
+
+		if !hasFinding {
 			// A sender that could not read its own plan has reported ignorance,
 			// not cleanliness. Resolving the live record on that would let an
 			// unreadable plan close an open finding — indistinguishable, once
@@ -291,7 +327,7 @@ func (h *DriftHandlers) IngestDrift() gin.HandlerFunc {
 			ExternalRef:  extRef,
 			Completeness: req.Completeness,
 			Infra: repositories.InfraDrift{
-				Added: req.DriftAdded, Changed: req.DriftChanged, Destroyed: req.DriftDestroyed, Summary: req.DriftSummary,
+				Added: infraAdded, Changed: infraChanged, Destroyed: infraDestroyed, Summary: infraSummary,
 			},
 		}
 		rec, err := h.recordRepo.UpsertDetectionInScope(ctx, det, scope)
@@ -299,8 +335,12 @@ func (h *DriftHandlers) IngestDrift() gin.HandlerFunc {
 			serverError(c, err, "failed to record drift")
 			return
 		}
+		// drifted here is the real value, not a hardcoded true: hasFinding can
+		// take this branch on infra drift alone, and the audit trail must say
+		// so accurately rather than claim an unapplied change that did not
+		// happen.
 		h.audit.write(c, "drift.ingest", "drift_record", rec.ID,
-			map[string]interface{}{"state_key": req.StateKey, "drifted": true, "severity": rec.Severity, "external_ref": req.ExternalRef})
+			map[string]interface{}{"state_key": req.StateKey, "drifted": drifted, "severity": rec.Severity, "external_ref": req.ExternalRef})
 		h.notifyIngestedDrift(src.OrganizationID, src.Name, req.StateKey, added, changed, destroyed)
 		c.JSON(http.StatusOK, gin.H{"record": rec})
 	}

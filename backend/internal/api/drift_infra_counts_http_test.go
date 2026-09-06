@@ -5,7 +5,10 @@ import (
 	"testing"
 
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
+	"github.com/gin-gonic/gin"
 
+	"github.com/terraform-state-manager/terraform-state-manager/internal/config"
+	"github.com/terraform-state-manager/terraform-state-manager/internal/tenantscope"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/testsupport"
 )
 
@@ -133,5 +136,150 @@ func TestRunResults_NoDriftFields_BackCompatUnaffected(t *testing.T) {
 	}
 	if err := e.mock.ExpectationsWereMet(); err != nil {
 		t.Errorf("an old-shaped payload must still round-trip: %v", err)
+	}
+}
+
+// --- Recompute from a submitted plan (raw-plan ingest), added after the
+// driftingest mirror gained DriftAdded/DriftChanged/DriftDestroyed/
+// DriftSummary (terraform-drift-contract 1.4.0). ---
+
+// newDriftEnvWithAudit is newDriftEnv plus a real (mocked) identity DB, so a
+// test can assert on what an audit entry's metadata actually contains rather
+// than treating the write as fire-and-forget — the established pattern
+// documented on sourcesEnv.idMock and used by newCISourcesEnv. Needed here,
+// and only here, because "drifted must stay false for an infra-only plan" has
+// no OTHER observable surface on the ingest path: drift_records has no
+// `drifted` column (a record's mere existence IS the signal), so the audit
+// trail is the one place this endpoint states the claim in words.
+func newDriftEnvWithAudit(t *testing.T) *sourcesEnv {
+	t.Helper()
+	t.Setenv("TSM_ENCRYPTION_KEY", "0123456789abcdef0123456789abcdef")
+	db, mock, err := newSQLMock()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+	idDB, idMock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New (identity): %v", err)
+	}
+	t.Cleanup(func() { idDB.Close() })
+
+	cfg := &config.Config{}
+	h := NewDriftHandlers(cfg, db, idDB, nil)
+
+	r := gin.New()
+	r.Use(func(c *gin.Context) {
+		tenantscope.Store(c, tenantscope.Scope{OrgIDs: []string{testActingOrg}})
+		c.Next()
+	})
+	v1 := r.Group("/api/v1")
+	v1.POST("/drift/ingest", h.IngestDrift())
+	return &sourcesEnv{r: r, mock: mock, idMock: idMock}
+}
+
+// onlyResourceDriftPlanBody is the conformance corpus's drift/only-resource-
+// drift vector, as an /drift/ingest body: no unapplied changes, one
+// hand-edited resource. resource_changes is an explicit empty array (not
+// absent), matching Summarize's nil-vs-empty distinction -- an absent key
+// would report Unparseable instead of a clean, driftful plan.
+const onlyResourceDriftPlanBody = `{"source_id":"s1","state_key":"k","plan":{
+	"resource_changes": [],
+	"resource_drift": [
+		{"address":"aws_instance.hand_edited","change":{"actions":["create"],"before":null,"after":{"instance_type":"t3.micro"}}}
+	]
+}}`
+
+// TestIngestDrift_RawPlan_RecomputesInfraDriftOnly is the ingest half of
+// Phase 5's "done when": a plan whose only changes are in resource_drift must
+// report drifted:false, drift_added>0 end to end. added/changed/destroyed
+// stay 0 (nothing unapplied), drift_added/summary are recomputed from the
+// plan via driftingest.Summarize (never reimplemented here), the record is
+// still upserted (hasFinding, not resolved clean -- ingest has no run row to
+// fall back on), and the audit trail reports drifted:false rather than the
+// hardcoded true this branch used to claim unconditionally.
+func TestIngestDrift_RawPlan_RecomputesInfraDriftOnly(t *testing.T) {
+	e := newDriftEnvWithAudit(t)
+	sourceRowFor(e, "s1")
+	e.mock.ExpectQuery("INSERT INTO drift_records").
+		WithArgs("s1", "k", nil, nil, "ingest", "warning", 0, 0, 0, "[]", nil,
+			false, 0, 0, false, false,
+			1, 0, 0, `[{"address":"aws_instance.hand_edited","actions":["create"]}]`,
+			[]string{testActingOrg}).
+		WillReturnRows(driftRecRow("r1", "open", "warning"))
+	e.idMock.ExpectQuery("INSERT INTO audit_logs").WithArgs(
+		sqlmock.AnyArg(), nil, nil, "drift.ingest", "drift_record", "r1",
+		[]byte(`{"drifted":false,"external_ref":"","severity":"warning","state_key":"k"}`),
+		sqlmock.AnyArg(), sqlmock.AnyArg(), nil,
+	).WillReturnRows(auditInsertReturn())
+
+	w := e.do(http.MethodPost, "/api/v1/drift/ingest", onlyResourceDriftPlanBody)
+	if w.Code != http.StatusOK {
+		t.Fatalf("ingest: %d (%s)", w.Code, w.Body.String())
+	}
+	if err := e.mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("infra-only drift must still reach the INSERT: %v", err)
+	}
+	if err := e.idMock.ExpectationsWereMet(); err != nil {
+		t.Errorf("the audit trail must report drifted:false for infra-only drift: %v", err)
+	}
+}
+
+// TestIngestDrift_ExplicitInfraFieldsWinOverPlanRecompute is the precedence
+// rule's first direction: a caller that supplies BOTH a raw plan and explicit
+// top-level drift_* fields gets the explicit values stored, not the ones
+// recomputed from the plan -- the reverse of how added/changed/destroyed
+// behave (always recomputed, never honouring a claimed value). The plan here
+// would recompute to drift_added=1/drift_changed=0/drift_destroyed=0; the
+// explicit fields claim 9/9/9 and must survive.
+func TestIngestDrift_ExplicitInfraFieldsWinOverPlanRecompute(t *testing.T) {
+	e := newDriftEnv(t)
+	sourceRowFor(e, "s1")
+	e.mock.ExpectQuery("INSERT INTO drift_records").
+		WithArgs("s1", "k", nil, nil, "ingest", "warning", 0, 0, 0, "[]", nil,
+			false, 0, 0, false, false,
+			9, 9, 9, `[{"address":"explicit.override","actions":["delete"]}]`,
+			[]string{testActingOrg}).
+		WillReturnRows(driftRecRow("r1", "open", "critical"))
+
+	body := `{"source_id":"s1","state_key":"k",
+		"drift_added":9,"drift_changed":9,"drift_destroyed":9,
+		"drift_summary":[{"address":"explicit.override","actions":["delete"]}],
+		"plan":{
+			"resource_changes": [],
+			"resource_drift": [
+				{"address":"aws_instance.hand_edited","change":{"actions":["create"],"before":null,"after":{"instance_type":"t3.micro"}}}
+			]
+		}}`
+	w := e.do(http.MethodPost, "/api/v1/drift/ingest", body)
+	if w.Code != http.StatusOK {
+		t.Fatalf("ingest: %d (%s)", w.Code, w.Body.String())
+	}
+	if err := e.mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("explicit top-level drift_* fields must win over the plan recompute: %v", err)
+	}
+}
+
+// TestIngestDrift_NoExplicitInfraFields_PlanRecomputeApplies is the
+// precedence rule's other direction: a caller supplying a raw plan and NO
+// top-level drift_* fields gets the plan-derived values -- proving the
+// "explicit wins" branch above is a real precedence choice and not simply
+// "the plan is ignored."
+func TestIngestDrift_NoExplicitInfraFields_PlanRecomputeApplies(t *testing.T) {
+	e := newDriftEnv(t)
+	sourceRowFor(e, "s1")
+	e.mock.ExpectQuery("INSERT INTO drift_records").
+		WithArgs("s1", "k", nil, nil, "ingest", "warning", 0, 0, 0, "[]", nil,
+			false, 0, 0, false, false,
+			1, 0, 0, `[{"address":"aws_instance.hand_edited","actions":["create"]}]`,
+			[]string{testActingOrg}).
+		WillReturnRows(driftRecRow("r1", "open", "warning"))
+
+	w := e.do(http.MethodPost, "/api/v1/drift/ingest", onlyResourceDriftPlanBody)
+	if w.Code != http.StatusOK {
+		t.Fatalf("ingest: %d (%s)", w.Code, w.Body.String())
+	}
+	if err := e.mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("with no explicit drift_* fields the plan recompute must apply: %v", err)
 	}
 }
