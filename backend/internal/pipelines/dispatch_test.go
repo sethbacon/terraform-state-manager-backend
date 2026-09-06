@@ -129,7 +129,7 @@ func TestDispatchAzureDevOps_NormalizesRefAndAuth(t *testing.T) {
 
 	cfg := AzureDevOpsConfig{Organization: "corp", Project: "Platform", PipelineID: "42"}
 	_, err := DispatchAzureDevOpsDrift(context.Background(), ADOPAT("pat-secret"), cfg, "feature/x",
-		DriftInputs{CallbackURL: "https://tsm/cb", CallbackToken: "cbt"})
+		DriftInputs{CallbackURL: "https://tsm/cb", CallbackToken: "cbt"}, nil)
 	if err != nil {
 		t.Fatalf("dispatch: %v", err)
 	}
@@ -200,7 +200,7 @@ func TestDispatchAzureDevOps_WireBody_NoTargets_MatchesTodayExactly(t *testing.T
 
 	cfg := AzureDevOpsConfig{Organization: "corp", Project: "Platform", PipelineID: "42"}
 	_, err := DispatchAzureDevOpsDrift(context.Background(), ADOPAT("pat-secret"), cfg, "",
-		DriftInputs{CallbackURL: "https://tsm/cb", CallbackToken: "cbt", WorkingDir: "infra/"})
+		DriftInputs{CallbackURL: "https://tsm/cb", CallbackToken: "cbt", WorkingDir: "infra/"}, nil)
 	if err != nil {
 		t.Fatalf("dispatch: %v", err)
 	}
@@ -241,7 +241,7 @@ func TestDispatchAzureDevOps_WireBody_WithTargets_AddsParam(t *testing.T) {
 
 	cfg := AzureDevOpsConfig{Organization: "corp", Project: "Platform", PipelineID: "42"}
 	_, err := DispatchAzureDevOpsDrift(context.Background(), ADOPAT("pat-secret"), cfg, "",
-		DriftInputs{CallbackURL: "https://tsm/r1", CallbackToken: "t1", WorkingDir: "app1/", TargetsJSON: targetsJSON})
+		DriftInputs{CallbackURL: "https://tsm/r1", CallbackToken: "t1", WorkingDir: "app1/", TargetsJSON: targetsJSON}, nil)
 	if err != nil {
 		t.Fatalf("dispatch: %v", err)
 	}
@@ -261,6 +261,47 @@ func TestDispatchAzureDevOps_WireBody_WithTargets_AddsParam(t *testing.T) {
 	}
 }
 
+// TestDispatchAzureDevOpsRun_AddsVariablesKey_OnlyWhenNonEmpty pins the wire
+// shape of the OTHER half of the Phase 1b item 3 fix, at the pipelines-package
+// level: a non-empty variables map adds a "variables" key alongside
+// templateParameters (never merged into it -- a run variable and a template
+// parameter are resolved at different times), and a nil/empty one omits the
+// key entirely rather than sending "variables":{}.
+func TestDispatchAzureDevOpsRun_AddsVariablesKey_OnlyWhenNonEmpty(t *testing.T) {
+	var gotBody map[string]json.RawMessage
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+	old := azureDevOpsBaseURL
+	azureDevOpsBaseURL = srv.URL
+	defer func() { azureDevOpsBaseURL = old }()
+
+	cfg := AzureDevOpsConfig{Organization: "corp", Project: "Platform", PipelineID: "42"}
+
+	// Nil variables: no "variables" key at all.
+	if _, err := DispatchAzureDevOpsRun(context.Background(), ADOPAT("pat"), cfg, "", map[string]string{"working_dir": "."}, nil); err != nil {
+		t.Fatalf("dispatch: %v", err)
+	}
+	if _, hasVariables := gotBody["variables"]; hasVariables {
+		t.Fatalf("nil variables must omit the key entirely, got: %v", gotBody)
+	}
+
+	// Populated variables: the key appears, verbatim, alongside templateParameters.
+	vars := map[string]ADORunVariable{"cb_token_app1_": {Value: "secret-tok", IsSecret: true}}
+	if _, err := DispatchAzureDevOpsRun(context.Background(), ADOPAT("pat"), cfg, "", map[string]string{"working_dir": "."}, vars); err != nil {
+		t.Fatalf("dispatch: %v", err)
+	}
+	var gotVars map[string]ADORunVariable
+	if err := json.Unmarshal(gotBody["variables"], &gotVars); err != nil {
+		t.Fatalf("variables did not decode: %v", err)
+	}
+	if !reflect.DeepEqual(gotVars, vars) {
+		t.Fatalf("variables = %+v, want %+v", gotVars, vars)
+	}
+}
+
 // TestDispatchAzureDevOpsRun_DecodesRunIDAndWebLink_On201 pins the response
 // decode DispatchAzureDevOpsRun adds: a 201 body carrying an id and a web link
 // yields a populated CIRunRef.
@@ -275,7 +316,7 @@ func TestDispatchAzureDevOpsRun_DecodesRunIDAndWebLink_On201(t *testing.T) {
 	defer func() { azureDevOpsBaseURL = old }()
 
 	cfg := AzureDevOpsConfig{Organization: "corp", Project: "P", PipelineID: "1"}
-	ref, err := DispatchAzureDevOpsRun(context.Background(), ADOPAT("pat"), cfg, "", map[string]string{"a": "b"})
+	ref, err := DispatchAzureDevOpsRun(context.Background(), ADOPAT("pat"), cfg, "", map[string]string{"a": "b"}, nil)
 	if err != nil {
 		t.Fatalf("dispatch: %v", err)
 	}
@@ -306,7 +347,7 @@ func TestDispatchAzureDevOpsRun_MalformedBody_NilRefNoError(t *testing.T) {
 			azureDevOpsBaseURL = srv.URL
 			defer func() { azureDevOpsBaseURL = old }()
 
-			ref, err := DispatchAzureDevOpsRun(context.Background(), ADOPAT("pat"), cfg, "", nil)
+			ref, err := DispatchAzureDevOpsRun(context.Background(), ADOPAT("pat"), cfg, "", nil, nil)
 			if err != nil {
 				t.Fatalf("a malformed success body must not be an error: %v", err)
 			}

@@ -56,6 +56,13 @@ const maxDriftTargets = 100
 // characters, and the whole targets list has to fit an ADO template parameter.
 const maxStateKeyLen = 512
 
+// maxDriftTargetParams bounds how many entries a single target's Params map
+// may carry (drift-fleet-scale.md Phase 1b item 3: the per-app service
+// connection and any other compile-time-resolvable pipeline input a template
+// needs). A handful of named inputs is the whole use case; an unbounded map
+// would grow the "targets" CI template parameter without limit.
+const maxDriftTargetParams = 8
+
 // validateDriftTargets is the write-time validation for a dispatch's
 // items() -- called from CreateRun and scheduleRequest.validate() so a
 // malformed request or schedule is refused before it can ever reach dispatch,
@@ -72,11 +79,27 @@ const maxStateKeyLen = 512
 // detection identity to collide on, so it is exempt -- several untracked
 // targets (no source_id/state_key, only a working_dir) are not duplicates of
 // each other.
+//
+// It also validates Params (drift-fleet-scale.md Phase 1b item 3: the
+// per-app service connection and any other compile-time-resolvable pipeline
+// input a fan-out template needs) with the SAME allowlist regex every other
+// pipeline input gets -- reWorkingDir, applied to both the key and the value,
+// since Params travels into the "targets" CI template parameter exactly like
+// working_dir does -- and bounds its size at maxDriftTargetParams.
+//
+// Finally, it refuses two items whose working_dir derives the SAME Azure
+// DevOps secret-run-variable name (FanOutCallbackTokenVariableName): the
+// fan-out template composes that name from working_dir alone, so a collision
+// there would make one target's callback-token variable silently carry
+// whichever item's Create() ran last, handing that app's one-shot token to
+// the OTHER app's drift-report step. Refusing it here, at write time, is
+// strictly better than a report task that succeeds against the wrong run.
 func validateDriftTargets(items []DriftTargetItem) error {
 	if len(items) > maxDriftTargets {
 		return fmt.Errorf("too many targets (%d); the maximum is %d", len(items), maxDriftTargets)
 	}
 	seen := make(map[[2]string]bool, len(items))
+	varNames := make(map[string]string, len(items))
 	for _, item := range items {
 		if err := validatePipelineInputs(item.WorkingDir, "", "", "", nil, nil); err != nil {
 			return err
@@ -90,6 +113,22 @@ func validateDriftTargets(items []DriftTargetItem) error {
 		if reStateKeyForbidden.MatchString(item.StateKey) {
 			return fmt.Errorf("state_key %q contains a character that is not allowed in a CI parameter", item.StateKey)
 		}
+		if len(item.Params) > maxDriftTargetParams {
+			return fmt.Errorf("too many params (%d) for target %q; the maximum is %d", len(item.Params), item.WorkingDir, maxDriftTargetParams)
+		}
+		for k, v := range item.Params {
+			if !reWorkingDir.MatchString(k) {
+				return fmt.Errorf("invalid params key %q (allowed: letters, digits, . _ / -)", k)
+			}
+			if !reWorkingDir.MatchString(v) {
+				return fmt.Errorf("invalid params value %q for key %q (allowed: letters, digits, . _ / -)", v, k)
+			}
+		}
+		varName := FanOutCallbackTokenVariableName(item.WorkingDir)
+		if other, collides := varNames[varName]; collides {
+			return fmt.Errorf("targets %q and %q both derive the callback-token variable name %q; use working_dir values that remain distinct after '/' is replaced with '_'", other, item.WorkingDir, varName)
+		}
+		varNames[varName] = item.WorkingDir
 		if item.SourceID == "" && item.StateKey == "" {
 			continue
 		}

@@ -96,12 +96,23 @@ func TestAzureDriftPipelineFanOut_Conformance(t *testing.T) {
 		"${{ t.working_dir }}",
 		"${{ t.state_key }}",
 		"${{ t.callback_url }}",
-		"${{ t.callback_token }}",
+		"${{ t.params.service_connection }}", // Phase 1b item 3: per-app service connection
+		"$(cb_token_${{ replace(t.working_dir, '/', '_') }})",
 		"PipelineTerraformDriftReport@1",
 	} {
 		if !strings.Contains(tmpl, want) {
 			t.Errorf("template missing %q", want)
 		}
+	}
+
+	// THE MUTATION-VERIFIABLE GUARD for the Phase 1b item 3 security fix
+	// (spike 1.0(b)): a per-target callback token must NEVER be a `t.*`
+	// field again -- every `t.*` reference is compiled verbatim into
+	// finalYaml, which is exactly what exposed it before. If this ever
+	// reappears, the token is compiled into the clear again regardless of
+	// what else changed.
+	if strings.Contains(tmpl, "${{ t.callback_token }}") {
+		t.Error("template must not expand a per-target callback token at compile time -- it must be the cb_token_<safe_dir> secret run variable instead")
 	}
 
 	if !strings.Contains(tmpl, "condition: and(always(), ne(variables['reported_") {
@@ -115,6 +126,41 @@ func TestAzureDriftPipelineFanOut_Conformance(t *testing.T) {
 	// rest of the batch.
 	if got := strings.Count(tmpl, "continueOnError: true"); got < 5 {
 		t.Errorf("expected every per-target step to be continueOnError: true, found only %d instances", got)
+	}
+}
+
+// TestFanOutCallbackTokenVariableTemplateExpression_MatchesGoFunction is the
+// YAML half of the Phase 1b item 3 equivalence proof (the Go half is
+// TestFanOutCallbackTokenVariableName in validate_test.go): it pins that the
+// fan-out template's callbackToken/CB_TOKEN references are built from EXACTLY
+// the transform FanOutCallbackTokenVariableName implements --
+// "cb_token_" + replace(working_dir, "/", "_") -- so the two halves cannot
+// silently drift apart. Per Microsoft Learn's Azure Pipelines expressions
+// reference, replace(a, b, c) "returns a new string in which all instances of
+// a string ... are replaced" -- an unconditional, all-occurrences substring
+// replace, which is exactly strings.ReplaceAll's contract; if a future edit
+// to either side changes the prefix, the join character, or introduces any
+// transform ADO's replace() cannot express, this test -- not a live ADO run
+// -- is what catches it before the macro silently resolves to nothing (an
+// EMPTY callbackToken input, no callback ever arriving, and the run sitting
+// "dispatched" until the reconciler expires it at TTL).
+func TestFanOutCallbackTokenVariableTemplateExpression_MatchesGoFunction(t *testing.T) {
+	const wantMacro = "$(cb_token_${{ replace(t.working_dir, '/', '_') }})"
+	// Each functional call site is checked individually (not just an aggregate
+	// substring count): a mutation at EITHER site alone -- e.g. a typo'd
+	// prefix on just the report task -- must fail this test even though the
+	// other site, and an in-template comment mentioning the same macro, still
+	// contain the correct text.
+	for _, wantLine := range []string{
+		"callbackToken: " + wantMacro, // PipelineTerraformDriftReport@1's input
+		"CB_TOKEN: " + wantMacro,      // the failure-report step's env
+	} {
+		if !strings.Contains(azureDriftPipelineFanOut, wantLine) {
+			t.Errorf("template missing %q", wantLine)
+		}
+	}
+	if strings.Contains(azureDriftPipelineFanOut, "${{ t.callback_token }}") {
+		t.Fatal("template still expands a per-target callback token at compile time (spike 1.0(b) exposure)")
 	}
 }
 

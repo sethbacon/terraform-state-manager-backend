@@ -490,6 +490,26 @@ steps:
 // Empty `targets` (the default, and every non-fan-out dispatch) behaves
 // EXACTLY like the "suite" profile: one app, the legacy three parameters,
 // guarded by `${{ if eq(length(parameters.targets), 0) }}`.
+//
+// PER-TARGET CALLBACK TOKEN (drift-fleet-scale.md Phase 1b item 3; spike
+// 1.0(b), run 2026-09-05): each target's callback token is NOT a `t.*` field
+// -- every `t.*` reference here is compiled verbatim into finalYaml, which is
+// exactly how the spike found `${{ t.callback_token }}` exposed (a `type:
+// string` parameter is compiled identically, so that is not a fallback
+// either). Instead each token arrives as an Azure DevOps secret RUN variable
+// named `cb_token_<safe_dir>` in the Runs API request's "variables" bag
+// (dispatchDriftBatch's fanOutVariables), resolved only at RUN time and
+// referenced here via the `$(cb_token_${{ replace(t.working_dir, '/', '_') }})`
+// macro -- ADO compiles only the variable NAME (from working_dir, which is
+// not secret); the VALUE is substituted by the agent, never compiled. See
+// FanOutCallbackTokenVariableName in drift.go for the Go half of that name
+// derivation, which must agree with this template's `replace(...)`
+// expression byte for byte.
+//
+// PER-TARGET SERVICE CONNECTION (drift-fleet-scale.md Phase 1b item 3): the
+// per-app WIF service connection also has to resolve at compile time, so it
+// travels inside `t.params` (DriftTargetItem.Params, an opaque validated
+// pass-through) and is bound here as `${{ t.params.service_connection }}`.
 const azureDriftPipelineFanOut = `# azure-pipelines-tsm-drift-fanout.yml  (Azure DevOps — Terraform-suite extension, repo-level fan-out)
 parameters:
   - name: callback_url
@@ -549,12 +569,17 @@ steps:
   # 2+ targets: one job plans every app in sequence, each with its OWN
   # callback url/token -- reported independently, so one broken app does not
   # stop the rest. Every step below is continueOnError for exactly that reason.
+  #
+  # Each target's callback token is never a t.* field (those compile into
+  # finalYaml verbatim -- see the header comment). It is instead the secret
+  # run variable cb_token_<safe_dir>, set by TSM in the Runs API request that
+  # started this run, and referenced below only via the
+  # $(cb_token_${{ replace(t.working_dir, '/', '_') }}) macro -- resolved by
+  # the agent at run time, with masking already registered, so no separate
+  # "mask this token" step is needed here (unlike the top-level
+  # parameters.callback_token above, which IS a compile-time value and so
+  # still needs one).
   - ${{ each t in parameters.targets }}:
-    - bash: echo "##vso[task.setvariable variable=cb_${{ replace(t.working_dir, '/', '_') }};issecret=true]$CB_TOKEN"
-      displayName: "Mask callback token: ${{ t.working_dir }}"
-      continueOnError: true
-      env:
-        CB_TOKEN: ${{ t.callback_token }}
     - task: PipelineTerraformTask@5
       displayName: "terraform init: ${{ t.working_dir }}"
       continueOnError: true
@@ -562,6 +587,7 @@ steps:
         provider: azurerm                 # ### EDIT for your cloud (aws|gcp|oci)
         command: init
         workingDirectory: ${{ t.working_dir }}
+        environmentServiceNameAzureRM: ${{ t.params.service_connection }}
         # ### EDIT: configure your state backend; this app's state key is
         # ${{ t.state_key }} -- wire it into the backend* inputs (e.g. backendAzureRmKey).
     - task: PipelineTerraformTask@5
@@ -572,7 +598,7 @@ steps:
         command: plan
         workingDirectory: ${{ t.working_dir }}
         commandOptions: -detailed-exitcode -out=tfplan -input=false
-        # ### EDIT: environmentServiceNameAzureRM (or AWS/GCP/OCI) service connection.
+        environmentServiceNameAzureRM: ${{ t.params.service_connection }}
     - bash: terraform show -json tfplan > plan.json
       displayName: "terraform show -json: ${{ t.working_dir }}"
       continueOnError: true
@@ -585,7 +611,7 @@ steps:
         moduleManifest: ${{ t.working_dir }}/.terraform/modules/modules.json
         detail: azdo build $(Build.BuildId)
         callbackUrl: ${{ t.callback_url }}
-        callbackToken: ${{ t.callback_token }}
+        callbackToken: $(cb_token_${{ replace(t.working_dir, '/', '_') }})
     # Marks this app reported so the failure step below (which runs on EVERY
     # app, always()) does not double-report a happy path.
     - bash: echo "##vso[task.setvariable variable=reported_${{ replace(t.working_dir, '/', '_') }}]true"
@@ -613,7 +639,7 @@ steps:
       continueOnError: true
       env:
         CB_URL: ${{ t.callback_url }}
-        CB_TOKEN: ${{ t.callback_token }}
+        CB_TOKEN: $(cb_token_${{ replace(t.working_dir, '/', '_') }})
     # Reset for the next app: keep the provider plugin cache (.terraform),
     # drop everything else terraform init/plan wrote for this app.
     - bash: git checkout -- . && git clean -fd -e .terraform
