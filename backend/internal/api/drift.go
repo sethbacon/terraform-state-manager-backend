@@ -371,6 +371,8 @@ func (h *DriftHandlers) CreateRun() gin.HandlerFunc {
 			c.JSON(http.StatusNotFound, gin.H{"error": "pipeline connection not found"})
 		case errors.Is(err, errFanOutNotCapable):
 			c.JSON(http.StatusBadRequest, gin.H{"error": errFanOutNotCapable.Error()})
+		case errors.Is(err, errFanOutRequiresSecretVariables):
+			c.JSON(http.StatusBadRequest, gin.H{"error": errFanOutRequiresSecretVariables.Error()})
 		case err != nil && batch != nil:
 			// The run(s) were recorded but the CI dispatch failed; return the detail.
 			c.JSON(http.StatusBadGateway, driftBatchResponse(batch))
@@ -514,6 +516,30 @@ type DriftBatch struct {
 // called with more than one item to gate).
 var errFanOutNotCapable = errors.New("pipeline connection is not fan-out capable")
 
+// errFanOutRequiresSecretVariables reports a 2+-target dispatch aimed at a
+// provider with no per-target secret mechanism. A fan-out target's callback
+// token travels only as an Azure DevOps secret RUN VARIABLE
+// (drift-fleet-scale.md Phase 1b item 3, dispatchDriftBatch's
+// fanOutVariables) -- DriftInputs/driftFanOutTarget carry no per-target token
+// at all any more, for any provider, because that field is what spike 1.0(b)
+// found compiled into finalYaml in the clear. GitHub Actions'
+// workflow_dispatch API has no equivalent of a run-scoped secret variable, so
+// without this gate a 2+-target GitHub dispatch would create N run rows,
+// dispatch "successfully", and return 202 -- while NO target could ever post
+// a callback, because none carries a token anywhere. Every one of those runs
+// would then sit "dispatched" until the reconciler expires it at
+// TSM_DRIFT_RUN_TTL: the same silent, delayed failure a dropped
+// marshalFanOutTargets error would have produced, discovered hours later with
+// nothing pointing at the cause. Refusing it here -- before any run row
+// exists -- fails immediately and names the real reason instead.
+//
+// A one-item targets array never reaches this check, same as
+// errFanOutNotCapable: the legacy single-target path carries its one
+// callback_token as a plain (already-existing, already-accepted) template
+// parameter, not through this mechanism, so it is unaffected regardless of
+// provider.
+var errFanOutRequiresSecretVariables = errors.New("fan-out dispatch requires a provider with per-target secret variables for the callback token; only azure_devops implements this today")
+
 // driftFanOutTarget is one entry of the "targets" template parameter/workflow
 // input sent to a fan-out-capable pipeline: everything its per-target loop
 // needs to plan that state and report its own callback -- EXCEPT the
@@ -650,6 +676,15 @@ func (h *DriftHandlers) dispatchDriftBatch(ctx context.Context, tgt DriftTarget,
 	// reaches this branch, regardless of the connection's fan_out setting.
 	if len(items) > 1 && !pipelines.FanOutFromMap(conn.Config) {
 		return nil, errFanOutNotCapable
+	}
+	// THE PROVIDER GATE, right beside the opt-in gate above so there is ONE
+	// place that decides whether a fan-out dispatch may proceed: opting in
+	// (config.fan_out) is necessary but not sufficient. Only azure_devops
+	// carries a fan-out target's callback token as a secret run variable
+	// (see errFanOutRequiresSecretVariables); every other provider would
+	// create N runs with no way for any of them to ever receive a callback.
+	if len(items) > 1 && conn.Provider != "azure_devops" {
+		return nil, errFanOutRequiresSecretVariables
 	}
 	// ...and every item's state source, for the same reason pipeline
 	// connection is scoped: a target naming another organization's source aims

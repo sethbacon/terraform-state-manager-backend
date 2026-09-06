@@ -313,6 +313,80 @@ func TestCreateRun_TargetsMultiple_FanOutFalse_400(t *testing.T) {
 	}
 }
 
+// TestCreateRun_TargetsMultiple_GitHubProvider_400_NoRunsCreated pins the
+// provider gate (errFanOutRequiresSecretVariables): a 2+-target dispatch
+// against a github_actions connection is refused even when the connection
+// HAS opted into fan_out -- fan_out:true clears the FIRST gate
+// (errFanOutNotCapable) so this test isolates the second one. Without this
+// gate, dispatchDriftBatch would create two run rows, dispatch "successfully"
+// to GitHub, and return 202 -- but neither run's target carries a callback
+// token any more (driftFanOutTarget dropped it; only azure_devops gets it
+// back, as a secret run variable), so NEITHER could ever post a callback.
+// No fake GitHub server is registered at all: if the implementation
+// regressed to dispatching anyway, this test would hang or fail against a
+// real network call instead of matching the scripted SQL below -- and no
+// SQL is scripted for a source load or an INSERT either, so the gate must
+// fire before either.
+func TestCreateRun_TargetsMultiple_GitHubProvider_400_NoRunsCreated(t *testing.T) {
+	e := newDriftEnv(t)
+	e.mock.ExpectQuery("FROM pipeline_connections WHERE organization_id = ANY").
+		WithArgs([]string{testActingOrg}, "p1").
+		WillReturnRows(pipelineHTTPRow(t, "github_actions", "ghp_x", map[string]any{
+			"owner": "o", "repo": "r", "workflow_id": "w.yml", "fan_out": true,
+		}))
+
+	body := `{"pipeline_connection_id":"p1","targets":[
+		{"source_id":"s1","state_key":"app1.tfstate","working_dir":"app1/"},
+		{"source_id":"s2","state_key":"app2.tfstate","working_dir":"app2/"}
+	]}`
+	w := e.do(http.MethodPost, "/api/v1/drift/runs", body)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 (%s)", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "secret variables") {
+		t.Errorf("body = %s, want the per-target-secret-variables refusal", w.Body.String())
+	}
+	if err := e.mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("the provider gate must refuse before any source load or INSERT (no runs created): %v", err)
+	}
+}
+
+// TestCreateRun_TargetsSingleItem_GitHub_UnaffectedByProviderGate proves
+// errFanOutRequiresSecretVariables is narrow: a ONE-item targets array
+// against a github_actions connection is the legacy single-target path by
+// definition (items() collapses it before the len(items) > 1 gates run) and
+// must still dispatch normally, carrying its one callback_token as the
+// existing plain workflow_dispatch input -- unaffected by a gate that only
+// fires for 2+ items.
+func TestCreateRun_TargetsSingleItem_GitHub_UnaffectedByProviderGate(t *testing.T) {
+	e := newDriftEnv(t)
+	var gotInputs map[string]string
+	srv := fakeGitHubDispatch(t, &gotInputs)
+	defer pipelines.OverrideBaseURLsForTest("", srv.URL)()
+
+	e.mock.ExpectQuery("FROM pipeline_connections WHERE organization_id = ANY").
+		WithArgs([]string{testActingOrg}, "p1").
+		WillReturnRows(pipelineHTTPRow(t, "github_actions", "ghp_x", map[string]any{"owner": "o", "repo": "r", "workflow_id": "w.yml"}))
+	e.mock.ExpectQuery("FROM state_sources WHERE organization_id = ANY").
+		WithArgs([]string{testActingOrg}, "s1").
+		WillReturnRows(sqlmock.NewRows(apiSourceCols).
+			AddRow("s1", "app1", "local", "", []byte(`{"base_path":"/tmp"}`), []byte(`{}`), nil, "2026-06-11", "2026-06-11", testActingOrg))
+	e.mock.ExpectQuery("INSERT INTO drift_runs").
+		WillReturnRows(driftRunInsertRow("d1", "s1", "app1.tfstate", "tok-1", nil))
+
+	body := `{"pipeline_connection_id":"p1","targets":[{"source_id":"s1","state_key":"app1.tfstate","working_dir":"app1/"}]}`
+	w := e.do(http.MethodPost, "/api/v1/drift/runs", body)
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202 (%s)", w.Code, w.Body.String())
+	}
+	if gotInputs["callback_token"] == "" {
+		t.Errorf("a single-target GitHub dispatch must still carry its callback_token: %v", gotInputs)
+	}
+	if err := e.mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("a one-item targets request must dispatch normally: %v", err)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // CreateRun: a real fan-out dispatch
 // ---------------------------------------------------------------------------
