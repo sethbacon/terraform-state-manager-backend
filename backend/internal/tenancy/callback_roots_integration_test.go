@@ -136,6 +136,35 @@ func seedDriftRecordInOrg(t *testing.T, db *sql.DB, orgID, sourceID, stateKey st
 	return id
 }
 
+// seedDriftRecordWithInfraInOrg is seedDriftRecordInOrg plus a non-zero
+// drift_added/drift_changed/drift_destroyed triplet (migration 000039) --
+// seedDriftRecordInOrg leaves those at their column DEFAULT of 0, which
+// cannot exercise CountInfraDriftedInScope or CountsBySourceInScope's
+// infra_drift column at all. added/changed/destroyed (the unapplied-change
+// triplet) are left at 0 here deliberately, so a record built with this
+// helper carries ONLY infra drift -- proving the two triplets are counted
+// independently, not by coincidence of both being non-zero together.
+func seedDriftRecordWithInfraInOrg(t *testing.T, db *sql.DB, orgID, sourceID, stateKey string, driftAdded int) string {
+	t.Helper()
+	var id string
+	err := db.QueryRow(`
+		INSERT INTO drift_records
+			(source_id, state_key, pipeline_connection_id, last_run_id, origin, severity,
+			 added, changed, destroyed, summary, status, acknowledged_by, ack_note,
+			 external_ref, detections, truncated, omitted_entries, omitted_attrs,
+			 unparseable, unmasked, organization_id,
+			 drift_added, drift_changed, drift_destroyed, drift_summary)
+		VALUES ($1, $2, NULL, NULL, 'run', 'warning',
+			 0, 0, 0, '[]'::jsonb,
+			 'open', '', '', NULL, 1, false, 0, 0, false, false, $3,
+			 $4, 0, 0, '[{"address":"aws_instance.hand_edited","actions":["update"]}]'::jsonb)
+		RETURNING id::text`, nullableID(sourceID), stateKey, orgID, driftAdded).Scan(&id)
+	if err != nil {
+		t.Fatalf("seed drift_record with infra drift in %s: %v", orgID, err)
+	}
+	return id
+}
+
 // nullableID renders "" as a SQL NULL, so a fixture can seed the parentless rows
 // 000033 says the callback roots' own column exists for.
 func nullableID(id string) any {
@@ -399,10 +428,10 @@ func TestIntegration_ScopedCallbackRootReads_WithholdAnotherOrganization(t *test
 
 // TestIntegration_ScopedCallbackRootReads_FailClosed covers the direction that
 // matters when something has gone wrong: a caller whose tenancy could not be
-// established reads NOTHING, not everything. It also covers the four Phase 4a
+// established reads NOTHING, not everything. It also covers the Phase 4a/5
 // coverage/summary readers (LatestPerStateInScope, LiveByStateInScope,
-// CountsBySourceInScope, CountIncompleteInScope), reusing the source and
-// record already seeded below.
+// CountsBySourceInScope, CountIncompleteInScope, CountInfraDriftedInScope),
+// reusing the source and record already seeded below.
 func TestIntegration_ScopedCallbackRootReads_FailClosed(t *testing.T) {
 	db := newTestDB(t)
 	ctx := context.Background()
@@ -457,6 +486,9 @@ func TestIntegration_ScopedCallbackRootReads_FailClosed(t *testing.T) {
 			}
 			if n, err := records.CountIncompleteInScope(ctx, tc.scope); err != nil || n != 0 {
 				t.Errorf("records CountIncompleteInScope returned %d (%v) for a scope that permits nothing", n, err)
+			}
+			if n, err := records.CountInfraDriftedInScope(ctx, tc.scope); err != nil || n != 0 {
+				t.Errorf("records CountInfraDriftedInScope returned %d (%v) for a scope that permits nothing", n, err)
 			}
 		})
 	}
@@ -772,6 +804,106 @@ func TestIntegration_CountIncompleteInScope_WithholdsAnotherOrganization(t *test
 	}
 	if nAdmin != 2 {
 		t.Fatalf("CONTROL FAILED: platform admin counted %d incomplete record(s), want 2", nAdmin)
+	}
+}
+
+// TestIntegration_CountInfraDriftedInScope_WithholdsAnotherOrganization is
+// CountIncompleteInScope's twin for the drift summary's infra_drifted field
+// (migration 000039, Phase 5 item 5): CountInfraDriftedInScope is a NEW
+// statement, not a projection added to an already-integration-tested query,
+// so it gets its own real-Postgres mutation-verification rather than relying
+// on an existing test's coverage. Each organization's record carries a
+// DIFFERENT non-zero drift_added, so a predicate that leaked Beta's row into
+// Alpha's count (or vice versa) would be caught by the wrong NUMBER coming
+// back, not merely the wrong row count.
+func TestIntegration_CountInfraDriftedInScope_WithholdsAnotherOrganization(t *testing.T) {
+	db := newTestDB(t)
+	ctx := context.Background()
+
+	srcA := seedSourceInOrg(t, db, orgAlpha, "alpha-infra")
+	srcB := seedSourceInOrg(t, db, orgBeta, "beta-infra")
+	seedDriftRecordWithInfraInOrg(t, db, orgAlpha, srcA, "envs/prod.tfstate", 3)
+	seedDriftRecordWithInfraInOrg(t, db, orgBeta, srcB, "envs/prod.tfstate", 7)
+
+	records := repositories.NewDriftRecordRepository(db)
+	scopeAlpha := tenantscope.Scope{OrgIDs: []string{orgAlpha}}
+	scopeBeta := tenantscope.Scope{OrgIDs: []string{orgBeta}}
+	admin := tenantscope.Scope{PlatformAdmin: true}
+
+	nAlpha, err := records.CountInfraDriftedInScope(ctx, scopeAlpha)
+	if err != nil {
+		t.Fatalf("CountInfraDriftedInScope under Alpha: %v", err)
+	}
+	if nAlpha != 1 {
+		t.Fatalf("CountInfraDriftedInScope under Alpha = %d, want 1 -- not the deployment's total of 2", nAlpha)
+	}
+
+	// CONTROL: Beta counts its own, on a DIFFERENT drift_added value than
+	// Alpha's -- if the predicate were a tautology this would still read 1
+	// (both orgs seeded exactly one infra-drifted record each), so the value
+	// alone cannot prove scoping; the cross-check below does.
+	nBeta, err := records.CountInfraDriftedInScope(ctx, scopeBeta)
+	if err != nil {
+		t.Fatalf("CountInfraDriftedInScope under Beta: %v", err)
+	}
+	if nBeta != 1 {
+		t.Fatalf("CONTROL FAILED: CountInfraDriftedInScope under Beta = %d, want 1", nBeta)
+	}
+
+	// CONTROL: the platform admin sees the deployment's total.
+	nAdmin, err := records.CountInfraDriftedInScope(ctx, admin)
+	if err != nil {
+		t.Fatalf("CountInfraDriftedInScope under admin: %v", err)
+	}
+	if nAdmin != 2 {
+		t.Fatalf("CONTROL FAILED: platform admin counted %d infra-drifted record(s), want 2", nAdmin)
+	}
+}
+
+// TestIntegration_CountsBySourceInScope_InfraDriftColumn_WithholdsAnotherOrganization
+// is CountsBySourceInScope's own withholding test above, extended with the
+// infra_drift column this step added to the SAME shared statement
+// (countsBySourceQuery). A separate test rather than an edit to the one
+// above: that one seeds identically-shaped records via seedDriftRecordInOrg
+// (drift_added defaults to 0), so it cannot exercise this column at all; this
+// one seeds Alpha's record WITH infra drift and Beta's WITHOUT, so a leaked
+// row would flip Alpha's count from 1 to 2, not merely agree by coincidence.
+func TestIntegration_CountsBySourceInScope_InfraDriftColumn_WithholdsAnotherOrganization(t *testing.T) {
+	db := newTestDB(t)
+	ctx := context.Background()
+
+	srcA := seedSourceInOrg(t, db, orgAlpha, "prod")
+	srcB := seedSourceInOrg(t, db, orgBeta, "prod")
+	seedDriftRecordWithInfraInOrg(t, db, orgAlpha, srcA, "envs/prod.tfstate", 5)
+	// Beta's record has NO infra drift (added=changed=destroyed=0 via the
+	// ordinary helper) -- if Alpha's scope somehow counted Beta's row, Alpha's
+	// infra_drift would still read 1 (any non-zero source_id match), so Beta's
+	// row is deliberately infra-CLEAN rather than infra-drifted-with-a-
+	// different-value: the leak this predicate must prevent is Beta's row
+	// joining Alpha's GROUP BY at all, not merely contributing the wrong count.
+	seedDriftRecordInOrg(t, db, orgBeta, srcB, "envs/prod.tfstate")
+
+	records := repositories.NewDriftRecordRepository(db)
+	scopeAlpha := tenantscope.Scope{OrgIDs: []string{orgAlpha}}
+	scopeBeta := tenantscope.Scope{OrgIDs: []string{orgBeta}}
+
+	countsAlpha, err := records.CountsBySourceInScope(ctx, scopeAlpha)
+	if err != nil {
+		t.Fatalf("CountsBySourceInScope under Alpha: %v", err)
+	}
+	if len(countsAlpha) != 1 || countsAlpha[0].InfraDrift != 1 {
+		t.Fatalf("CountsBySourceInScope under Alpha = %+v, want exactly 1 source with infra_drift=1", countsAlpha)
+	}
+
+	// CONTROL: Beta's own scope reaches its source with infra_drift=0 --
+	// proving the column is real (Alpha's =1 above is not a hardcoded value)
+	// and that Beta's clean record was not itself hidden by the predicate.
+	countsBeta, err := records.CountsBySourceInScope(ctx, scopeBeta)
+	if err != nil {
+		t.Fatalf("CountsBySourceInScope under Beta: %v", err)
+	}
+	if len(countsBeta) != 1 || countsBeta[0].InfraDrift != 0 {
+		t.Fatalf("CONTROL FAILED: CountsBySourceInScope under Beta = %+v, want exactly 1 source with infra_drift=0", countsBeta)
 	}
 }
 

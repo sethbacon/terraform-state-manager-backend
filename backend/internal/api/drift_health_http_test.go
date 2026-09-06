@@ -81,7 +81,7 @@ func newDriftEnvWithScope(t *testing.T, scope *tenantscope.Scope) *sourcesEnv {
 func driftRow(token string) *sqlmock.Rows {
 	return testsupport.DriftRunRow("d1", "p1", nil, "app.tfstate", "", "", "dispatched", nil, nil, nil, nil, nil, "", token, "alice",
 		"2026-06-10", "2026-06-10", false, 0, 0, false, false, "11111111-1111-4111-8111-111111111111",
-		nil, "", "")
+		nil, "", "", 0, 0, 0, nil)
 }
 
 var healthCols = []string{"id", "pipeline_connection_id", "repo_ref", "working_dir", "terraform_version",

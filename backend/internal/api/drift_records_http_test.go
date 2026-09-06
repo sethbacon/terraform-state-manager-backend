@@ -20,10 +20,12 @@ func sourceRowFor(e *sourcesEnv, id string) {
 			AddRow(id, "estate", "local", "", []byte(`{"base_path":"/tmp"}`), []byte(`{}`), nil, "2026-06-11", "2026-06-11", testActingOrg))
 }
 
-var driftRecCols = []string{"id", "source_id", "state_key", "pipeline_connection_id", "last_run_id",
-	"origin", "severity", "added", "changed", "destroyed", "summary", "status", "acknowledged_by",
-	"acknowledged_at", "ack_note", "resolved_at", "external_ref", "detections", "first_detected_at",
-	"last_detected_at", "truncated", "omitted_entries", "omitted_attrs", "unparseable", "unmasked", "organization_id"}
+// driftRecCols is testsupport.DriftRecordColumns under the package's existing
+// short local name -- every empty sqlmock.NewRows(driftRecCols) call in this
+// package keeps working unchanged, and the column list itself has exactly one
+// definition (testsupport.DriftRecordColumns), guarded against
+// driftRecordColumns by TestDriftRecordColumns_MatchesProductionDriftRecordColumns.
+var driftRecCols = testsupport.DriftRecordColumns
 
 // driftRecRow is a complete, readable, fully-masked record — the markers all say
 // "the check finished". driftRecRowMarked covers the interesting cases.
@@ -32,11 +34,11 @@ func driftRecRow(id, status, severity string) *sqlmock.Rows {
 }
 
 func driftRecRowMarked(id, status, severity string, truncated bool, omittedEntries, omittedAttrs int, unparseable, unmasked bool) *sqlmock.Rows {
-	return sqlmock.NewRows(driftRecCols).
-		AddRow(id, "s1", "envs/prod.tfstate", nil, nil, "ingest", severity, 1, 1, 1,
-			[]byte(`[{"address":"aws_instance.web","actions":["update"]}]`), status,
-			"", nil, "", nil, "run-77", 1, "2026-06-11", "2026-06-11",
-			truncated, omittedEntries, omittedAttrs, unparseable, unmasked, "11111111-1111-4111-8111-111111111111")
+	return testsupport.DriftRecordRow(id, "s1", "envs/prod.tfstate", nil, nil, "ingest", severity, 1, 1, 1,
+		[]byte(`[{"address":"aws_instance.web","actions":["update"]}]`), status,
+		"", nil, "", nil, "run-77", 1, "2026-06-11", "2026-06-11",
+		truncated, omittedEntries, omittedAttrs, unparseable, unmasked, "11111111-1111-4111-8111-111111111111",
+		0, 0, 0, nil)
 }
 
 func TestIngestDrift_ParsesPlanAndCreatesRecord(t *testing.T) {
@@ -134,7 +136,7 @@ func TestRunResults_DriftCreatesRecord_CleanResolves(t *testing.T) {
 		return testsupport.DriftRunRow("d1", "p1", "s1", "envs/prod.tfstate", "", "", "dispatched",
 			nil, nil, nil, nil, nil, "", token, "alice", "2026-06-11", "2026-06-11",
 			false, 0, 0, false, false, "11111111-1111-4111-8111-111111111111",
-			nil, "", "")
+			nil, "", "", 0, 0, 0, nil)
 	}
 
 	// Drifted callback: consume token → store result → upsert record.
@@ -332,7 +334,7 @@ func TestRunResults_RefusesRecordMaintenanceWhenTheRunsSourceIsNotItsOwn(t *test
 		testsupport.DriftRunRow("d1", "p1", "s-elsewhere", "envs/prod.tfstate", "", "", "dispatched",
 			nil, nil, nil, nil, nil, "", "tok1", "alice", "2026-06-11", "2026-06-11",
 			false, 0, 0, false, false, testActingOrg,
-			nil, "", ""))
+			nil, "", "", 0, 0, 0, nil))
 	e.mock.ExpectExec("UPDATE drift_runs SET callback_token=''").WithArgs("d1", "tok1").
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	e.mock.ExpectExec("UPDATE drift_runs").WillReturnResult(sqlmock.NewResult(0, 1))

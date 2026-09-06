@@ -36,6 +36,15 @@ type DriftRecord struct {
 	FirstDetectedAt      string          `json:"first_detected_at"`
 	LastDetectedAt       string          `json:"last_detected_at"`
 
+	// DriftAdded/DriftChanged/DriftDestroyed/DriftSummary are the drift
+	// contract's second triplet (resource_drift, migration 000039) -- see the
+	// identical fields on DriftRun for what they mean and why they are plain
+	// int rather than pointers.
+	DriftAdded     int             `json:"drift_added"`
+	DriftChanged   int             `json:"drift_changed"`
+	DriftDestroyed int             `json:"drift_destroyed"`
+	DriftSummary   json.RawMessage `json:"drift_summary,omitempty"`
+
 	// Completeness markers from the drift contract, describing what the check
 	// did NOT do. Promoted, so the record's JSON keys are unchanged.
 	Completeness
@@ -67,18 +76,20 @@ const driftRecordColumns = `id, source_id, state_key, pipeline_connection_id, la
 	added, changed, destroyed, summary, status, acknowledged_by, acknowledged_at::text, ack_note,
 	resolved_at::text, external_ref, detections, first_detected_at::text, last_detected_at::text,
 	truncated, omitted_entries, omitted_attrs, unparseable, unmasked,
-	organization_id::text`
+	organization_id::text,
+	COALESCE(drift_added,0), COALESCE(drift_changed,0), COALESCE(drift_destroyed,0), drift_summary`
 
 func scanDriftRecord(scanner interface{ Scan(dest ...any) error }) (*DriftRecord, error) {
 	var r DriftRecord
 	var organizationID sql.NullString
 	var srcID, connID, runID, ackAt, resolvedAt, extRef sql.NullString
-	var summary []byte
+	var summary, driftSummary []byte
 	if err := scanner.Scan(&r.ID, &srcID, &r.StateKey, &connID, &runID, &r.Origin, &r.Severity,
 		&r.Added, &r.Changed, &r.Destroyed, &summary, &r.Status, &r.AcknowledgedBy, &ackAt, &r.AckNote,
 		&resolvedAt, &extRef, &r.Detections, &r.FirstDetectedAt, &r.LastDetectedAt,
 		&r.Truncated, &r.OmittedEntries, &r.OmittedAttrs, &r.Unparseable, &r.Unmasked,
-		&organizationID); err != nil {
+		&organizationID,
+		&r.DriftAdded, &r.DriftChanged, &r.DriftDestroyed, &driftSummary); err != nil {
 		return nil, err
 	}
 	if organizationID.Valid {
@@ -104,6 +115,9 @@ func scanDriftRecord(scanner interface{ Scan(dest ...any) error }) (*DriftRecord
 	}
 	if len(summary) > 0 {
 		r.Summary = summary
+	}
+	if len(driftSummary) > 0 {
+		r.DriftSummary = driftSummary
 	}
 	return &r, nil
 }
@@ -511,6 +525,13 @@ type SourceRecordCounts struct {
 	Open         int    `json:"open"`
 	Acknowledged int    `json:"acknowledged"`
 	Critical     int    `json:"critical"`
+	// InfraDrift is how many of this source's LIVE records carry infra drift
+	// (drift_added/drift_changed/drift_destroyed > 0, migration 000039) --
+	// resource_drift, as opposed to Open/Acknowledged/Critical above, which
+	// classify the record regardless of which triplet produced it. A record
+	// counted here may also be counted in Open or Critical; the two are
+	// independent facets of the same live finding, not alternatives.
+	InfraDrift int `json:"infra_drift"`
 }
 
 // countsBySourceQuery is the ONE statement CountsBySource and CountsBySource
@@ -519,13 +540,14 @@ type SourceRecordCounts struct {
 // cannot drift into disagreeing about what "live" or "critical" mean.
 //
 // Only LIVE (non-resolved) records are grouped: a resolved record contributes
-// zero to every one of the three counts, so including it would only add
+// zero to every one of the four counts, so including it would only add
 // meaningless all-zero rows for sources whose drift has all been closed.
 const countsBySourceQuery = `
 	SELECT r.source_id, COALESCE(s.name,''),
 		COUNT(*) FILTER (WHERE r.status='open'),
 		COUNT(*) FILTER (WHERE r.status='acknowledged'),
-		COUNT(*) FILTER (WHERE r.severity='critical' AND r.status<>'resolved')
+		COUNT(*) FILTER (WHERE r.severity='critical' AND r.status<>'resolved'),
+		COUNT(*) FILTER (WHERE r.drift_added>0 OR r.drift_changed>0 OR r.drift_destroyed>0)
 	FROM drift_records r
 	JOIN state_sources s ON s.id = r.source_id
 	WHERE r.status <> 'resolved'`
@@ -534,7 +556,7 @@ func scanSourceRecordCounts(rows *sql.Rows) ([]SourceRecordCounts, error) {
 	out := []SourceRecordCounts{}
 	for rows.Next() {
 		var c SourceRecordCounts
-		if err := rows.Scan(&c.SourceID, &c.SourceName, &c.Open, &c.Acknowledged, &c.Critical); err != nil {
+		if err := rows.Scan(&c.SourceID, &c.SourceName, &c.Open, &c.Acknowledged, &c.Critical, &c.InfraDrift); err != nil {
 			return nil, err
 		}
 		out = append(out, c)
@@ -563,5 +585,18 @@ func (r *DriftRecordRepository) CountIncomplete(ctx context.Context) (int, error
 	var n int
 	err := r.db.QueryRowContext(ctx,
 		`SELECT COUNT(*) FROM drift_records WHERE status <> 'resolved' AND (unparseable OR truncated)`).Scan(&n)
+	return n, err
+}
+
+// CountInfraDrifted returns the number of LIVE drift records carrying infra
+// drift (drift_added/drift_changed/drift_destroyed > 0, migration 000039) --
+// the drift summary's infra_drifted field, deployment-wide, mirroring
+// CountIncomplete exactly. Callers reach this only through
+// CountInfraDriftedInScope's PlatformAdmin branch.
+func (r *DriftRecordRepository) CountInfraDrifted(ctx context.Context) (int, error) {
+	var n int
+	err := r.db.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM drift_records
+		WHERE status <> 'resolved' AND (drift_added > 0 OR drift_changed > 0 OR drift_destroyed > 0)`).Scan(&n)
 	return n, err
 }

@@ -1,6 +1,7 @@
 package api
 
 import (
+	"encoding/json"
 	"net/http"
 	"testing"
 
@@ -18,14 +19,23 @@ import (
 // triplet, computed from a plan's resource_drift, as opposed to the
 // added/changed/destroyed columns beside them (a plan's resource_changes).
 //
-// Both tests below cover the SAME two properties the record- and run-level
-// repository tests cover one layer down (drift_record_repository_test.go,
-// runs_test.go): the four fields must bind when present, and they must still
-// bind explicit zeros/nil -- never be silently omitted -- when a producer sends
-// none of them. What these add is the missing layer: proof that the HTTP
-// handlers actually decode drift_* out of the request body and thread them
-// through, not just that the repositories accept them once handed a Detection
-// or an InfraDrift value directly.
+// The WRITE-side tests below cover the SAME two properties the record- and
+// run-level repository tests cover one layer down
+// (drift_record_repository_test.go, runs_test.go): the four fields must bind
+// when present, and they must still bind explicit zeros/nil -- never be
+// silently omitted -- when a producer sends none of them. What these add is
+// the missing layer: proof that the HTTP handlers actually decode drift_*
+// out of the request body and thread them through, not just that the
+// repositories accept them once handed a Detection or an InfraDrift value
+// directly.
+//
+// The READ-side tests further down (TestGetRun_ExposesInfraDriftCounts,
+// TestListRuns_ExposesInfraDriftCounts, TestListDriftRecords_ExposesInfraDriftCounts)
+// are the read-path half of Phase 5 item 5: they prove a NON-ZERO stored
+// value actually reaches the JSON response through GetRun/ListRuns/
+// ListDriftRecords, and that drifted is never conflated with the infra
+// triplet -- a run whose only drift is resource_drift still reports
+// drifted:false.
 
 // TestRunResults_InfraDriftCountsPersist is the callback half: a dispatched
 // run's result posts the new triplet, and it must reach BOTH storage paths
@@ -38,7 +48,7 @@ func TestRunResults_InfraDriftCountsPersist(t *testing.T) {
 		testsupport.DriftRunRow("d1", "p1", "s1", "envs/prod.tfstate", "", "", "dispatched",
 			nil, nil, nil, nil, nil, "", "tok1", "alice", "2026-06-11", "2026-06-11",
 			false, 0, 0, false, false, "11111111-1111-4111-8111-111111111111",
-			nil, "", ""))
+			nil, "", "", 0, 0, 0, nil))
 	e.mock.ExpectExec("UPDATE drift_runs SET callback_token=''").WithArgs("d1", "tok1").
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	// The run row: infra counts bound alongside the existing (unapplied-change)
@@ -111,7 +121,7 @@ func TestRunResults_NoDriftFields_BackCompatUnaffected(t *testing.T) {
 		testsupport.DriftRunRow("d1", "p1", "s1", "envs/prod.tfstate", "", "", "dispatched",
 			nil, nil, nil, nil, nil, "", "tok1", "alice", "2026-06-11", "2026-06-11",
 			false, 0, 0, false, false, "11111111-1111-4111-8111-111111111111",
-			nil, "", ""))
+			nil, "", "", 0, 0, 0, nil))
 	e.mock.ExpectExec("UPDATE drift_runs SET callback_token=''").WithArgs("d1", "tok1").
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	e.mock.ExpectExec("UPDATE drift_runs").
@@ -281,5 +291,136 @@ func TestIngestDrift_NoExplicitInfraFields_PlanRecomputeApplies(t *testing.T) {
 	}
 	if err := e.mock.ExpectationsWereMet(); err != nil {
 		t.Errorf("with no explicit drift_* fields the plan recompute must apply: %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Read path (Phase 5 item 5): GetRun / ListRuns / ListDriftRecords must
+// expose drift_added/drift_changed/drift_destroyed/drift_summary, and never
+// blend them into `drifted`.
+// ---------------------------------------------------------------------------
+
+// TestGetRun_ExposesInfraDriftCounts is the headline mutation-verification
+// case: a run whose ONLY drift is resource_drift (added=changed=destroyed=0,
+// drifted=false) but whose drift_* triplet is non-zero must report BOTH
+// facts on the wire -- drifted:false (the resource_changes signal, untouched)
+// and the real drift_added/drift_changed/drift_destroyed/drift_summary
+// values (not silently zeroed or dropped). An all-zero fixture could only
+// prove the columns sit in the right SELECT position; this proves a real
+// value survives the scan and the JSON encode.
+func TestGetRun_ExposesInfraDriftCounts(t *testing.T) {
+	e := newDriftEnv(t)
+	e.mock.ExpectQuery("FROM drift_runs WHERE organization_id = ANY.+AND id").
+		WithArgs([]string{testActingOrg}, "d1").
+		WillReturnRows(testsupport.DriftRunRow("d1", "p1", "s1", "envs/prod.tfstate", "", "", "completed",
+			0, 0, 0, false, nil, "", "", "alice", "2026-06-11", "2026-06-11",
+			false, 0, 0, false, false, testActingOrg, nil, "", "",
+			3, 0, 1, `[{"address":"aws_s3_bucket.orphan","actions":["delete"]}]`))
+
+	w := e.do(http.MethodGet, "/api/v1/drift/runs/d1", "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d (%s)", w.Code, w.Body.String())
+	}
+	var got struct {
+		Drifted        *bool           `json:"drifted"`
+		Added          *int            `json:"added"`
+		DriftAdded     int             `json:"drift_added"`
+		DriftChanged   int             `json:"drift_changed"`
+		DriftDestroyed int             `json:"drift_destroyed"`
+		DriftSummary   json.RawMessage `json:"drift_summary"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatalf("unmarshal: %v (%s)", err, w.Body.String())
+	}
+	if got.Drifted == nil || *got.Drifted {
+		t.Errorf("drifted = %v, want false -- infra-only drift must not flip the unapplied-change signal", got.Drifted)
+	}
+	if got.DriftAdded != 3 || got.DriftChanged != 0 || got.DriftDestroyed != 1 {
+		t.Errorf("drift_added/changed/destroyed = %d/%d/%d, want 3/0/1", got.DriftAdded, got.DriftChanged, got.DriftDestroyed)
+	}
+	if string(got.DriftSummary) != `[{"address":"aws_s3_bucket.orphan","actions":["delete"]}]` {
+		t.Errorf("drift_summary = %s, want the stored infra summary", got.DriftSummary)
+	}
+}
+
+// TestListRuns_ExposesInfraDriftCounts is GetRun's twin for the list shape.
+func TestListRuns_ExposesInfraDriftCounts(t *testing.T) {
+	e := newDriftEnv(t)
+	e.mock.ExpectQuery("FROM drift_runs WHERE organization_id = ANY.+ORDER BY").
+		WithArgs([]string{testActingOrg}, 50, 0).
+		WillReturnRows(testsupport.DriftRunRow("d1", "p1", "s1", "envs/prod.tfstate", "", "", "completed",
+			1, 0, 0, true, nil, "", "", "alice", "2026-06-11", "2026-06-11",
+			false, 0, 0, false, false, testActingOrg, nil, "", "",
+			2, 1, 0, `[{"address":"aws_instance.hand_edited","actions":["update"]}]`))
+	e.mock.ExpectQuery(`SELECT COUNT\(\*\) FROM drift_runs`).
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
+
+	w := e.do(http.MethodGet, "/api/v1/drift/runs", "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d (%s)", w.Code, w.Body.String())
+	}
+	var resp struct {
+		Runs []struct {
+			DriftAdded     int             `json:"drift_added"`
+			DriftChanged   int             `json:"drift_changed"`
+			DriftDestroyed int             `json:"drift_destroyed"`
+			DriftSummary   json.RawMessage `json:"drift_summary"`
+		} `json:"runs"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v (%s)", err, w.Body.String())
+	}
+	if len(resp.Runs) != 1 {
+		t.Fatalf("runs = %+v, want 1", resp.Runs)
+	}
+	if resp.Runs[0].DriftAdded != 2 || resp.Runs[0].DriftChanged != 1 || resp.Runs[0].DriftDestroyed != 0 {
+		t.Errorf("runs[0] drift counts = %+v, want 2/1/0", resp.Runs[0])
+	}
+	if string(resp.Runs[0].DriftSummary) != `[{"address":"aws_instance.hand_edited","actions":["update"]}]` {
+		t.Errorf("runs[0].drift_summary = %s", resp.Runs[0].DriftSummary)
+	}
+}
+
+// TestListDriftRecords_ExposesInfraDriftCounts is the record-shape twin: a
+// live record's own drift_added/drift_changed/drift_destroyed/drift_summary
+// must reach GET /drift/records with non-zero values intact.
+func TestListDriftRecords_ExposesInfraDriftCounts(t *testing.T) {
+	e := newDriftEnv(t)
+	e.mock.ExpectQuery("FROM drift_records WHERE organization_id = ANY").
+		WithArgs([]string{testActingOrg}, 100, 0).
+		WillReturnRows(testsupport.DriftRecordRow("r1", "s1", "envs/prod.tfstate", nil, nil, "run", "warning",
+			1, 1, 1, []byte(`[{"address":"aws_instance.web","actions":["update"]}]`), "open",
+			"", nil, "", nil, "run-77", 1, "2026-06-11", "2026-06-11",
+			false, 0, 0, false, false, testActingOrg,
+			4, 0, 2, `[{"address":"aws_s3_bucket.orphan","actions":["delete"]}]`))
+	e.mock.ExpectQuery(`SELECT COUNT\(\*\) FROM drift_records`).
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
+	e.mock.ExpectQuery(`SELECT status, COUNT\(\*\) FROM drift_records`).
+		WithArgs([]string{testActingOrg}).
+		WillReturnRows(sqlmock.NewRows([]string{"status", "count"}).AddRow("open", 1))
+
+	w := e.do(http.MethodGet, "/api/v1/drift/records", "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d (%s)", w.Code, w.Body.String())
+	}
+	var resp struct {
+		Records []struct {
+			DriftAdded     int             `json:"drift_added"`
+			DriftChanged   int             `json:"drift_changed"`
+			DriftDestroyed int             `json:"drift_destroyed"`
+			DriftSummary   json.RawMessage `json:"drift_summary"`
+		} `json:"records"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v (%s)", err, w.Body.String())
+	}
+	if len(resp.Records) != 1 {
+		t.Fatalf("records = %+v, want 1", resp.Records)
+	}
+	if resp.Records[0].DriftAdded != 4 || resp.Records[0].DriftChanged != 0 || resp.Records[0].DriftDestroyed != 2 {
+		t.Errorf("records[0] drift counts = %+v, want 4/0/2", resp.Records[0])
+	}
+	if string(resp.Records[0].DriftSummary) != `[{"address":"aws_s3_bucket.orphan","actions":["delete"]}]` {
+		t.Errorf("records[0].drift_summary = %s", resp.Records[0].DriftSummary)
 	}
 }

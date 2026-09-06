@@ -36,7 +36,7 @@ func driftRunInsertRow(id, sourceID, stateKey, token string, batchID *string) *s
 	}
 	return testsupport.DriftRunRow(id, "p1", srcVal, stateKey, "", "", "dispatched", nil, nil, nil, nil, nil, "", token, "alice",
 		"2026-06-11", "2026-06-11", false, 0, 0, false, false, testActingOrg,
-		batchVal, "", "")
+		batchVal, "", "", 0, 0, 0, nil)
 }
 
 // driftRowWithBatchAndCI is a GetByID/GetByIDInScope RETURNING row carrying a
@@ -44,7 +44,7 @@ func driftRunInsertRow(id, sourceID, stateKey, token string, batchID *string) *s
 func driftRowWithBatchAndCI(id, token, batchID, ciRunID, ciRunURL string) *sqlmock.Rows {
 	return testsupport.DriftRunRow(id, "p1", "s1", "app.tfstate", "", "", "completed",
 		nil, nil, nil, nil, nil, "", token, "alice", "2026-06-11", "2026-06-11",
-		false, 0, 0, false, false, testActingOrg, batchID, ciRunID, ciRunURL)
+		false, 0, 0, false, false, testActingOrg, batchID, ciRunID, ciRunURL, 0, 0, 0, nil)
 }
 
 // fakeGitHubDispatch stands in for the GitHub workflow_dispatch endpoint: 204,
@@ -790,7 +790,7 @@ func TestRunResults_PerRun_AfterBatchDispatch(t *testing.T) {
 		e.mock.ExpectQuery("FROM drift_runs WHERE id").WithArgs(run.id).
 			WillReturnRows(testsupport.DriftRunRow(run.id, "p1", "s1", run.stateKey, "", "", "dispatched",
 				nil, nil, nil, nil, nil, "", run.token, "alice", "2026-06-11", "2026-06-11",
-				false, 0, 0, false, false, testActingOrg, batchID, "", ""))
+				false, 0, 0, false, false, testActingOrg, batchID, "", "", 0, 0, 0, nil))
 		e.mock.ExpectExec("UPDATE drift_runs SET callback_token=''").WithArgs(run.id, run.token).
 			WillReturnResult(sqlmock.NewResult(0, 1))
 		e.mock.ExpectExec("UPDATE drift_runs").WillReturnResult(sqlmock.NewResult(0, 1))
