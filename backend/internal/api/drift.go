@@ -648,7 +648,19 @@ func (h *DriftHandlers) dispatchDriftBatch(ctx context.Context, tgt DriftTarget,
 		}
 		saved, err := h.driftRepo.Create(ctx, run, auth.organizationID)
 		if err != nil {
-			return nil, fmt.Errorf("create drift run: %w", err)
+			createErr := fmt.Errorf("create drift run: %w", err)
+			// Fail forward. The rows created before this one are real
+			// "dispatched" runs holding live one-shot tokens that no CI job
+			// will ever call back -- nothing has been dispatched yet. Left
+			// alone they would sit until the reconciler expires them at
+			// TSM_DRIFT_RUN_TTL, invisible to a caller who only saw a 500.
+			// Mark them failed now, the same way a dispatch failure does, so
+			// a batch is never half-created.
+			if batchIDCol != nil && len(runs) > 0 {
+				h.failBatch(ctx, &DriftBatch{BatchID: *batchIDCol, Runs: runs}, batchIDCol,
+					"batch aborted: "+createErr.Error())
+			}
+			return nil, createErr
 		}
 		runs = append(runs, saved)
 		fanOutTargets = append(fanOutTargets, driftFanOutTarget{

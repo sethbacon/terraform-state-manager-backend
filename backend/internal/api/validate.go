@@ -10,12 +10,18 @@ import (
 // (not inline shell), we reject shell/HCL-hostile characters server-side as
 // defense-in-depth before dispatch. See the CI-injection findings.
 var (
-	reWorkingDir   = regexp.MustCompile(`^[A-Za-z0-9._/\-]*$`)
-	reGitRef       = regexp.MustCompile(`^[A-Za-z0-9._/\-]*$`)
-	reTFVersion    = regexp.MustCompile(`^[A-Za-z0-9._\-]*$`)
-	reHost         = regexp.MustCompile(`^[A-Za-z0-9.\-]+(:[0-9]+)?$`)
-	reProviderName = regexp.MustCompile(`^[a-z0-9_\-]+$`)
-	reVersionSpec  = regexp.MustCompile(`^[A-Za-z0-9 .,<>=~!^*\-]+$`)
+	reWorkingDir = regexp.MustCompile(`^[A-Za-z0-9._/\-]*$`)
+	// reStateKeyForbidden rejects the characters that would let a state key
+	// break out of a CI template parameter or a shell/YAML context (control
+	// characters, quotes, backtick, `$`, and shell metacharacters). It is a
+	// denylist rather than reWorkingDir's allowlist because backend keys are
+	// legitimately looser than directory names (`env=prod/app.tfstate`).
+	reStateKeyForbidden = regexp.MustCompile("[\x00-\x1f\x7f\"'`$;|&<>\\\\]")
+	reGitRef            = regexp.MustCompile(`^[A-Za-z0-9._/\-]*$`)
+	reTFVersion         = regexp.MustCompile(`^[A-Za-z0-9._\-]*$`)
+	reHost              = regexp.MustCompile(`^[A-Za-z0-9.\-]+(:[0-9]+)?$`)
+	reProviderName      = regexp.MustCompile(`^[a-z0-9_\-]+$`)
+	reVersionSpec       = regexp.MustCompile(`^[A-Za-z0-9 .,<>=~!^*\-]+$`)
 )
 
 // validatePipelineInputs rejects untrusted run inputs that contain characters
@@ -46,6 +52,10 @@ func validatePipelineInputs(workingDir, repoRef, tfVersion, registryHost string,
 // (drift-fleet-scale.md Phase 1, task 1.3).
 const maxDriftTargets = 100
 
+// maxStateKeyLen bounds one target's state_key; real keys are a few dozen
+// characters, and the whole targets list has to fit an ADO template parameter.
+const maxStateKeyLen = 512
+
 // validateDriftTargets is the write-time validation for a dispatch's
 // items() -- called from CreateRun and scheduleRequest.validate() so a
 // malformed request or schedule is refused before it can ever reach dispatch,
@@ -70,6 +80,15 @@ func validateDriftTargets(items []DriftTargetItem) error {
 	for _, item := range items {
 		if err := validatePipelineInputs(item.WorkingDir, "", "", "", nil, nil); err != nil {
 			return err
+		}
+		// state_key travels into the "targets" CI template parameter under
+		// fan-out (and into the backend key the template derives from it), so
+		// it gets the same hostile-character screen working_dir already has.
+		if len(item.StateKey) > maxStateKeyLen {
+			return fmt.Errorf("state_key too long (%d); the maximum is %d", len(item.StateKey), maxStateKeyLen)
+		}
+		if reStateKeyForbidden.MatchString(item.StateKey) {
+			return fmt.Errorf("state_key %q contains a character that is not allowed in a CI parameter", item.StateKey)
 		}
 		if item.SourceID == "" && item.StateKey == "" {
 			continue

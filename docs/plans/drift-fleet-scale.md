@@ -26,7 +26,7 @@
 | 0 — Environment prerequisites | **not started** | ops only, no code |
 | 1 — Repo-level fan-out dispatch | **done (backend)** | sethbacon/terraform-state-manager-backend#569 |
 | 1.4 — Brunswick operator templates | **not done** | templates live outside this repo |
-| 1b — Workload Identity | **done** | sethbacon/terraform-state-manager-backend#569 |
+| 1b — Workload Identity | **done, except item 3** — per-target `Params` (per-app service connection) is not implemented and gates 1.4 | sethbacon/terraform-state-manager-backend#569 |
 | 2 — Scheduler pacing | **done** | sethbacon/terraform-state-manager-backend#569 |
 | 3 — Discovery-driven onboarding | **not started** | tooling host unreachable |
 | 4a — Dashboard read-path (backend) | **done** | sethbacon/terraform-state-manager-backend#569 |
@@ -73,9 +73,10 @@ following it literally would have introduced a security regression.
 
 ### Verification gaps — read before rollout
 
-- **Spike 1.0 was never run** (see below). The `fan-out` template's `type: object`
-  coercion assumption is **unverified**; it needs a live ADO org. The documented string
-  fallback remains a small localised change.
+- **Spike 1.0 has now been run** (2026-09-05, live `bconline` org — see "Spike results").
+  The `type: object` coercion **holds**; the token-exposure result changes the
+  recommendation for the fan-out template (secret run variables, not template
+  parameters). The "string fallback" is **not** an exposure mitigation.
 - **No live ADO or GitHub dispatch** was exercised anywhere; CI paths are covered by fake
   HTTP servers. Workload Identity was verified against the handler's accepted request
   shape, not a real federated-credential exchange.
@@ -268,17 +269,40 @@ Phase order is a dependency order. Phases 1, 2 and 4a (backend) are independentl
 behind additive schema. Phase 3 depends on 1. Phase 4b (frontend) depends on 1 + 4a.
 Phase 5 is independent but sequenced last.
 
-### Spike results (fill in before Phase 1 code starts)
+### Spike results (run 2026-09-05 against `bconline/Brunswick`, pipeline 3642)
 
-- [ ] 1.0(a) ADO Runs API coerces a JSON string into a `type: object` parameter: **STILL TBD**
-- [ ] 1.0(b) `${{ each }}` token exposure in the expanded YAML / Parameters view: **STILL TBD**
+Method: the ADO **preview** API (`POST …/pipelines/{id}/preview?api-version=7.1-preview.1`)
+compiles a run and returns `finalYaml` without queuing anything. A throwaway branch
+carried the spike YAML; it was deleted afterwards. `yamlOverride` needs `EditBuild`, so the
+YAML must live in the repo.
 
-**Neither was run** — both need a live Azure DevOps organization. Phase 1 shipped the
-primary (`type: object`) design anyway, on the explicit decision that the documented
-fallback in 1.0(a) stays a small localised change if the assumption proves false. The
-built-in `fan-out` template and its commit both say so. **Run this spike before any fleet
-rollout**; a `dry_run: true` dispatch against one repo answers (a), and the run's expanded
-YAML answers (b).
+- [x] 1.0(a) **Confirmed.** A JSON *string* in `templateParameters.targets` is coerced into
+  the `type: object` parameter and `${{ each t in parameters.targets }}` expands one step
+  set per item. A JSON *array value* is **rejected** (`400 Value cannot be null: runParameters`)
+  — values must be strings, which is what `DriftInputs.TargetsJSON` sends. An undeclared
+  parameter is `400 Unexpected parameter`; an empty `targets` compiles the legacy path only.
+- [x] 1.0(b) **Tokens are visible.** Every `${{ t.callback_token }}` reference is expanded
+  verbatim into `finalYaml` (`env: CB_TOKEN: <value>`). Today's single `callback_token`
+  template parameter is expanded the same way, so this is the same exposure *in kind*
+  (one-shot tokens, private network, build-read audience) and larger *in volume*. A
+  `type: string` parameter is expanded identically — **the "string fallback" is not a
+  mitigation**; runtime `issecret=true` masking cannot hide a compile-time expansion.
+
+**Recommendation (fan-out path only; the legacy 3-parameter contract stays as is):** pass
+per-target tokens as **secret run variables** in the Runs API body —
+`"variables": {"cb_token_<safe_dir>": {"value": "<token>", "isSecret": true}}` — and have
+the `fan-out` template reference `$(cb_token_${{ replace(t.working_dir, '/', '_') }})` in
+the drift task's `callbackToken` input. The macro *name* is composed at compile time, the
+secret resolves at run time, so `finalYaml` and the Parameters view show only the
+reference. `targets` keeps `working_dir` / `state_key` / `callback_url` (non-secret).
+Needs one real run to confirm the task receives the value; not yet done.
+
+**Identity finding for Phases 1b/3:** an Entra token minted with
+`az account get-access-token --resource 499b84ac-…` under `sbacon_ca@brunswick.com`
+reaches the Pipelines APIs (list/preview `200`; no `EditBuild`) but sees **zero Git repos**
+org-wide. `seth.bacon@brunswick.com` (the identity behind the cached Git credential) has
+repo access. Name the identity the onboarding script runs as, and grant it Code Read +
+Contribute explicitly — pipeline rights do not imply repo rights.
 
 ### Phase 0 — Environment prerequisites (ops, no code) — NOT STARTED
 
@@ -462,7 +486,7 @@ by hand before upgrading. Update the stale "next migration" note in `CONTRIBUTIN
 `batch_id`, each `completed`/`failed` correctly, `ci_run_url` populated, and a request
 without `targets` produces a byte-identical wire body to today (golden test).
 
-### Phase 1b — Identity between TSM, Azure DevOps and the cloud (no PATs, no per-app rows) — DONE
+### Phase 1b — Identity between TSM, Azure DevOps and the cloud (no PATs, no per-app rows) — DONE except item 3 (per-target `Params`)
 
 **Entity model after Phase 1 (answers the "a source per app" objection):**
 

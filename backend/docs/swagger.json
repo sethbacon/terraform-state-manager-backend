@@ -2347,7 +2347,7 @@
                     },
                     {
                         "type": "string",
-                        "description": "duration a state may go unchecked before it counts as stale (default 24h)",
+                        "description": "duration a state may go unchecked before it counts as stale (default 24h; a positive Go duration no greater than 720h, else 400)",
                         "name": "stale_after",
                         "in": "query"
                     }
