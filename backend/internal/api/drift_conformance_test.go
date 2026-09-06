@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"strings"
 	"testing"
@@ -277,5 +278,34 @@ func TestConformance_DispatchedSummaryIsBounded(t *testing.T) {
 				t.Errorf("added=%d drifted=%v, want 503/true", got.Added, got.Drifted)
 			}
 		})
+	}
+}
+
+// TestConformance_InfraDriftPayloadKeysMatch is the conformance property for
+// migration 000039's four columns, on the two receiving DTOs rather than on the
+// jq producers above: driftRunResultPayload (the dispatched-run callback) and
+// driftIngestPayload (the push endpoint) are two independent Go types, and
+// nothing but convention keeps their JSON vocabulary for the SAME four
+// contract fields identical. A rename on one side would compile cleanly (they
+// share no embedded struct for these fields the way Completeness is shared)
+// and would only surface as two producers disagreeing about a wire shape --
+// exactly the defect class Completeness's shared type was introduced to
+// prevent (see drift_completeness.go). This pins the keys directly instead of
+// trusting that the two literals were typed identically.
+func TestConformance_InfraDriftPayloadKeysMatch(t *testing.T) {
+	want := []string{"drift_added", "drift_changed", "drift_destroyed", "drift_summary"}
+
+	runKeys := decodedJSONKeys(reflect.TypeOf(driftRunResultPayload{}))
+	ingestKeys := decodedJSONKeys(reflect.TypeOf(driftIngestPayload{}))
+	if len(runKeys) == 0 || len(ingestKeys) == 0 {
+		t.Fatal("no json tags found on one of the payload DTOs; the guard would pass vacuously")
+	}
+	for _, k := range want {
+		if !runKeys[k] {
+			t.Errorf("driftRunResultPayload does not decode %q", k)
+		}
+		if !ingestKeys[k] {
+			t.Errorf("driftIngestPayload does not decode %q", k)
+		}
 	}
 }
