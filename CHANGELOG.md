@@ -1,5 +1,26 @@
 # Changelog
 
+## [3.21.0](https://github.com/sethbacon/terraform-state-manager-backend/compare/v3.20.1...v3.21.0) (2026-09-06)
+
+
+### Features
+
+* **drift:** fleet-scale fan-out dispatch, scheduler pacing, workload identity and the coverage read-path ([#569](https://github.com/sethbacon/terraform-state-manager-backend/issues/569)) ([82db86e](https://github.com/sethbacon/terraform-state-manager-backend/commit/82db86e33335d1f746d6825260638a8927551815))
+* **drift:** per-target params, and move fan-out callback tokens off the compiled template ([#573](https://github.com/sethbacon/terraform-state-manager-backend/issues/573)) ([fda3799](https://github.com/sethbacon/terraform-state-manager-backend/commit/fda379980200c7f4ac8a7987c7d1aa5cd6b08010))
+
+
+### Bug Fixes
+
+* **drift:** fail half-created batches forward, keep in-flight runs out of retention, validate coverage input ([#571](https://github.com/sethbacon/terraform-state-manager-backend/issues/571)) ([7083a71](https://github.com/sethbacon/terraform-state-manager-backend/commit/7083a71f45427a58a8d1eace713f340d052eb048))
+
+
+### Documentation
+
+* add fleet-scale drift plan; mark auth plans implemented ([#567](https://github.com/sethbacon/terraform-state-manager-backend/issues/567)) ([3865d03](https://github.com/sethbacon/terraform-state-manager-backend/commit/3865d03ce4ed3b614f0edf2654f05545b1fa7211))
+* **plans:** mark Phase 1b complete and record the fan-out provider constraint ([#574](https://github.com/sethbacon/terraform-state-manager-backend/issues/574)) ([b9e4c8a](https://github.com/sethbacon/terraform-state-manager-backend/commit/b9e4c8a09f44f9f9ac90a89d4acb04d3ea27ceb4))
+* **plans:** record fleet-scale drift implementation status and stale anchors ([#570](https://github.com/sethbacon/terraform-state-manager-backend/issues/570)) ([a221035](https://github.com/sethbacon/terraform-state-manager-backend/commit/a221035db6c085d03bddad7543c65e0d0c1d71d6))
+* **plans:** record Phase 0 verification results for the fleet drift plan ([#572](https://github.com/sethbacon/terraform-state-manager-backend/issues/572)) ([b5bc438](https://github.com/sethbacon/terraform-state-manager-backend/commit/b5bc4380af40ea978670212dccb97b3f41e3d61c))
+
 ## [3.20.1](https://github.com/sethbacon/terraform-state-manager-backend/compare/v3.20.0...v3.20.1) (2026-09-02)
 
 
