@@ -19,7 +19,7 @@
 
 ---
 
-## 0. Implementation status (2026-09-05)
+## 0. Implementation status (updated 2026-09-06)
 
 | Phase | Status | Where |
 | --- | --- | --- |
@@ -31,7 +31,7 @@
 | 3 — Discovery-driven onboarding | **not started** | tooling host unreachable |
 | 4a — Dashboard read-path (backend) | **done** | sethbacon/terraform-state-manager-backend#569 |
 | 4b — Dashboard read-path (frontend) | **done** | sethbacon/terraform-state-manager-frontend#416 |
-| 5 — Contract: infra drift vs unapplied | **not started** | sequenced last by design |
+| 5 — Contract: infra drift vs unapplied | **in progress** — step 1 done: contract **v1.4.0 published**; steps 2–5 (Go mirror, task/action, backend storage, frontend) outstanding | 4cloudguru/terraform-drift-contract#83 |
 
 ### Corrections — this document's §3 anchors were stale within a day
 
@@ -249,7 +249,7 @@ Templates, tooling, contract:
   `conformance/vectors.json` (56 vectors) with `CORPUS_SHA256`/`RECONCILED_DIGEST`; Go mirror
   `backend/internal/services/driftingest/plan.go` (`Result` :108-132, vendored corpus
   `testdata/conformance/vectors.json`, digests `conformance_test.go:43-46`).
-  `resource_drift`: **zero occurrences** anywhere. GH action `terraform-drift-report` pins
+  `resource_drift`: was **zero occurrences** anywhere when this was written; it now exists in the contract as of v1.4.0 (4cloudguru/terraform-drift-contract#83). The Go mirror, the task, the action, backend storage and the frontend still have none — that is the remainder of Phase 5. GH action `terraform-drift-report` pins
   `github:sethbacon/terraform-drift-contract#v1.0.0` (unscoped; debt).
 
 ## 4. Design decisions (fixed)
@@ -883,7 +883,7 @@ unparseable — and click through to the ADO run.
 
 Order is strict: contract → Go mirror → task/action → backend storage → frontend.
 
-1. `terraform-drift-contract` (→ **1.3.0**): `Plan` += `resource_drift?: ResourceChange[]`;
+1. `terraform-drift-contract` (→ ~~1.3.0~~ **1.4.0 — DONE, published**; 1.3.0 was already taken by unrelated work, and release-please computed 1.4.0 from the `feat:` commit): `Plan` += `resource_drift?: ResourceChange[]`;
    `Result` += `drift_added, drift_changed, drift_destroyed: number` computed from
    `resource_drift` with the same skip rules (`no-op`/`read`) and bounds, plus a parallel
    `drift_summary: SummaryEntry[]` — **`summary` itself is unchanged** so existing consumers
