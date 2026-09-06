@@ -2329,7 +2329,7 @@
                         "CookieAuth": []
                     }
                 ],
-                "description": "For each state the connector currently lists: whether a schedule already targets it, its latest run (status, drifted, completeness, CI link), and its live (non-resolved) drift record, if any. summary gives the same chip counts the states array would produce if counted by hand.",
+                "description": "For each state the connector currently lists: whether a schedule already targets it, its latest run (status, drifted, infra_drifted, completeness, CI link), and its live (non-resolved) drift record, if any. infra_drifted (migration 000039) reports the latest run's resource_drift finding and is never conflated with drifted, which stays the resource_changes signal. summary gives the same chip counts the states array would produce if counted by hand.",
                 "produces": [
                     "application/json"
                 ],
@@ -2716,7 +2716,7 @@
                         "CookieAuth": []
                     }
                 ],
-                "description": "Per-source open/acknowledged/critical drift-record counts, the last 24h of drift runs by terminal status, how many live records are incomplete (unparseable or truncated), and how many runs are currently in flight -- all scoped to the caller's organization(s).",
+                "description": "Per-source open/acknowledged/critical/infra_drift drift-record counts, the last 24h of drift runs by terminal status, how many live records are incomplete (unparseable or truncated), how many live records carry infra drift (resource_drift, migration 000039, never conflated with the unapplied-change counts beside it), and how many runs are currently in flight -- all scoped to the caller's organization(s).",
                 "produces": [
                     "application/json"
                 ],

@@ -35,10 +35,10 @@ func coverageSourceRow(e *sourcesEnv, id, dir string) {
 // by state_key (driftRecRow elsewhere in this package fixes it at
 // "envs/prod.tfstate", which does not match this file's own state fixtures).
 func coverageRecordRow(id, sourceID, stateKey, status, severity string) *sqlmock.Rows {
-	return sqlmock.NewRows(driftRecCols).
-		AddRow(id, sourceID, stateKey, nil, nil, "run", severity, 1, 0, 0,
-			[]byte(`[]`), status, "", nil, "", nil, nil, 1, "2026-06-11", "2026-06-11",
-			false, 0, 0, false, false, testActingOrg)
+	return testsupport.DriftRecordRow(id, sourceID, stateKey, nil, nil, "run", severity, 1, 0, 0,
+		[]byte(`[]`), status, "", nil, "", nil, nil, 1, "2026-06-11", "2026-06-11",
+		false, 0, 0, false, false, testActingOrg,
+		0, 0, 0, nil)
 }
 
 // pgNow renders t the way PostgreSQL's `timestamptz::text` cast does (space
@@ -66,7 +66,8 @@ func TestCoverage_JoinsRunRecordSchedule(t *testing.T) {
 		WithArgs([]string{testActingOrg}, "s1").
 		WillReturnRows(testsupport.DriftRunRow("d1", "p1", "s1", "prod.tfstate", "", "", "completed",
 			1, 0, 0, true, []byte(`[]`), "", "", "alice", fresh, fresh,
-			false, 0, 0, false, false, testActingOrg, nil, "555", "https://ado/build/555"))
+			false, 0, 0, false, false, testActingOrg, nil, "555", "https://ado/build/555",
+			2, 1, 0, `[{"address":"aws_instance.hand_edited","actions":["update"]}]`))
 
 	e.mock.ExpectQuery(`FROM drift_records WHERE organization_id = ANY.+AND source_id = \$2.+AND status <> 'resolved'`).
 		WithArgs([]string{testActingOrg}, "s1").
@@ -95,13 +96,15 @@ func TestCoverage_JoinsRunRecordSchedule(t *testing.T) {
 			RecordID     *string `json:"record_id"`
 			RecordStatus *string `json:"record_status"`
 			Severity     *string `json:"severity"`
+			InfraDrifted *bool   `json:"infra_drifted"`
 		} `json:"states"`
 		Summary struct {
-			Total       int `json:"total"`
-			Scheduled   int `json:"scheduled"`
-			Unscheduled int `json:"unscheduled"`
-			Open        int `json:"open"`
-			Critical    int `json:"critical"`
+			Total        int `json:"total"`
+			Scheduled    int `json:"scheduled"`
+			Unscheduled  int `json:"unscheduled"`
+			Open         int `json:"open"`
+			Critical     int `json:"critical"`
+			InfraDrifted int `json:"infra_drifted"`
 		} `json:"summary"`
 	}
 	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
@@ -121,6 +124,12 @@ func TestCoverage_JoinsRunRecordSchedule(t *testing.T) {
 	if prod.Drifted == nil || !*prod.Drifted {
 		t.Errorf("prod.tfstate drifted not carried through: %+v", prod)
 	}
+	// The fixture's latest run carries a NON-ZERO infra-drift triplet
+	// (drift_added=2, drift_changed=1) alongside drifted=true -- proving the
+	// two fields are read independently, not one derived from the other.
+	if prod.InfraDrifted == nil || !*prod.InfraDrifted {
+		t.Errorf("prod.tfstate infra_drifted not carried through: %+v", prod)
+	}
 	if prod.CIRunURL == nil || *prod.CIRunURL != "https://ado/build/555" {
 		t.Errorf("prod.tfstate ci_run_url missing: %+v", prod)
 	}
@@ -131,9 +140,17 @@ func TestCoverage_JoinsRunRecordSchedule(t *testing.T) {
 	if dev.Scheduled || dev.LastRunID != nil || dev.RecordID != nil {
 		t.Errorf("dev.tfstate must show no run, no schedule, no record: %+v", dev)
 	}
+	// dev.tfstate has no run at all, so infra_drifted must read nil (unknown),
+	// exactly like drifted -- never false, which would claim a check ran.
+	if dev.InfraDrifted != nil {
+		t.Errorf("dev.tfstate infra_drifted must be nil (never checked), got %v", *dev.InfraDrifted)
+	}
 	if resp.Summary.Total != 2 || resp.Summary.Scheduled != 1 || resp.Summary.Unscheduled != 1 ||
 		resp.Summary.Open != 1 || resp.Summary.Critical != 1 {
 		t.Errorf("summary = %+v, want total=2 scheduled=1 unscheduled=1 open=1 critical=1", resp.Summary)
+	}
+	if resp.Summary.InfraDrifted != 1 {
+		t.Errorf("summary.infra_drifted = %d, want 1", resp.Summary.InfraDrifted)
 	}
 }
 
@@ -157,7 +174,7 @@ func TestCoverage_StaleAndUnscheduled(t *testing.T) {
 		WithArgs([]string{testActingOrg}, "s1").
 		WillReturnRows(testsupport.DriftRunRow("d1", "p1", "s1", "old.tfstate", "", "", "completed",
 			0, 0, 0, false, nil, "", "", "alice", old, old,
-			false, 0, 0, false, false, testActingOrg, nil, "", ""))
+			false, 0, 0, false, false, testActingOrg, nil, "", "", 0, 0, 0, nil))
 	e.mock.ExpectQuery(`FROM drift_records WHERE organization_id = ANY.+AND source_id = \$2.+AND status <> 'resolved'`).
 		WithArgs([]string{testActingOrg}, "s1").
 		WillReturnRows(sqlmock.NewRows(driftRecCols)) // no live records
@@ -265,11 +282,14 @@ func TestDriftSummary_Grouping(t *testing.T) {
 
 	e.mock.ExpectQuery(`FROM drift_records r\s+JOIN state_sources s ON s\.id = r\.source_id\s+WHERE r\.status <> 'resolved' AND r\.organization_id = ANY.+AND s\.organization_id = ANY`).
 		WithArgs([]string{testActingOrg}).
-		WillReturnRows(sqlmock.NewRows([]string{"source_id", "source_name", "open", "acknowledged", "critical"}).
-			AddRow("s1", "prod", 2, 1, 1))
+		WillReturnRows(sqlmock.NewRows([]string{"source_id", "source_name", "open", "acknowledged", "critical", "infra_drift"}).
+			AddRow("s1", "prod", 2, 1, 1, 2))
 	e.mock.ExpectQuery(`SELECT COUNT\(\*\) FROM drift_records WHERE organization_id = ANY.+AND status <> 'resolved' AND \(unparseable OR truncated\)`).
 		WithArgs([]string{testActingOrg}).
 		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(3))
+	e.mock.ExpectQuery(`SELECT COUNT\(\*\) FROM drift_records WHERE organization_id = ANY.+AND status <> 'resolved' AND \(drift_added > 0 OR drift_changed > 0 OR drift_destroyed > 0\)`).
+		WithArgs([]string{testActingOrg}).
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(4))
 
 	// runs_24h: completed/failed/running/dispatched, each its own scoped+windowed
 	// count reusing DriftRunFilter.Since -- four calls rather than one bespoke
@@ -304,9 +324,10 @@ func TestDriftSummary_Grouping(t *testing.T) {
 	}
 	var resp struct {
 		RecordsBySource []struct {
-			SourceID string `json:"source_id"`
-			Open     int    `json:"open"`
-			Critical int    `json:"critical"`
+			SourceID   string `json:"source_id"`
+			Open       int    `json:"open"`
+			Critical   int    `json:"critical"`
+			InfraDrift int    `json:"infra_drift"`
 		} `json:"records_by_source"`
 		Runs24h struct {
 			Completed  int `json:"completed"`
@@ -314,6 +335,7 @@ func TestDriftSummary_Grouping(t *testing.T) {
 			Dispatched int `json:"dispatched"`
 		} `json:"runs_24h"`
 		IncompleteRecords int `json:"incomplete_records"`
+		InfraDrifted      int `json:"infra_drifted"`
 		InFlight          int `json:"in_flight"`
 	}
 	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
@@ -322,11 +344,17 @@ func TestDriftSummary_Grouping(t *testing.T) {
 	if len(resp.RecordsBySource) != 1 || resp.RecordsBySource[0].SourceID != "s1" || resp.RecordsBySource[0].Open != 2 {
 		t.Errorf("records_by_source = %+v", resp.RecordsBySource)
 	}
+	if resp.RecordsBySource[0].InfraDrift != 2 {
+		t.Errorf("records_by_source[0].infra_drift = %d, want 2", resp.RecordsBySource[0].InfraDrift)
+	}
 	if resp.Runs24h.Completed != 5 || resp.Runs24h.Failed != 1 || resp.Runs24h.Dispatched != 3 {
 		t.Errorf("runs_24h = %+v, want completed=5 failed=1 dispatched=3 (dispatched+running folded together)", resp.Runs24h)
 	}
 	if resp.IncompleteRecords != 3 {
 		t.Errorf("incomplete_records = %d, want 3", resp.IncompleteRecords)
+	}
+	if resp.InfraDrifted != 4 {
+		t.Errorf("infra_drifted = %d, want 4", resp.InfraDrifted)
 	}
 	if resp.InFlight != 3 {
 		t.Errorf("in_flight = %d, want 3 (2 dispatched + 1 running)", resp.InFlight)

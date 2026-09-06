@@ -114,6 +114,18 @@ type coverageState struct {
 	RecordID     *string `json:"record_id"`
 	RecordStatus *string `json:"record_status"`
 	Severity     *string `json:"severity"`
+	// InfraDrifted reports the latest run's drift contract's second triplet
+	// (resource_drift, migration 000039): whether that run's own check found
+	// drift OUTSIDE Terraform, independent of Drifted above (which stays
+	// exactly the resource_changes-derived "unapplied changes" signal). Nil
+	// under the same condition Drifted is nil -- no run has ever been
+	// dispatched for this state -- and a real bool once one has, even a run
+	// still "dispatched" (drift_added/changed/destroyed default to 0 until the
+	// callback lands, so a not-yet-checked run reads identically to a
+	// checked-and-clean one here, exactly as Added/Changed/Destroyed already
+	// do until their own UpdateResult). Phase 5's whole point is that this
+	// field and Drifted must never be conflated into one signal.
+	InfraDrifted *bool `json:"infra_drifted"`
 }
 
 // coverageSummary is GET /drift/coverage's summary object: chip counts over
@@ -127,6 +139,10 @@ type coverageSummary struct {
 	Incomplete  int `json:"incomplete"`
 	Open        int `json:"open"`
 	Critical    int `json:"critical"`
+	// InfraDrifted counts the states above whose InfraDrifted is true --
+	// the coverage view's own chip for resource_drift, kept separate from
+	// Open/Critical (which describe live drift_records, not the latest run).
+	InfraDrifted int `json:"infra_drifted"`
 }
 
 // sourceInScopeByID loads a source by an id NOT taken from the URL path
@@ -225,7 +241,7 @@ func scheduledStateKeys(schedules []repositories.Schedule, sourceID string) map[
 // Coverage joins one source's live state listing against its latest drift
 // run, live drift record, and schedule membership.
 // @Summary      Drift coverage for one source
-// @Description  For each state the connector currently lists: whether a schedule already targets it, its latest run (status, drifted, completeness, CI link), and its live (non-resolved) drift record, if any. summary gives the same chip counts the states array would produce if counted by hand.
+// @Description  For each state the connector currently lists: whether a schedule already targets it, its latest run (status, drifted, infra_drifted, completeness, CI link), and its live (non-resolved) drift record, if any. infra_drifted (migration 000039) reports the latest run's resource_drift finding and is never conflated with drifted, which stays the resource_changes signal. summary gives the same chip counts the states array would produce if counted by hand.
 // @Tags         Drift
 // @Produce      json
 // @Param        source_id   query  string  true   "state source id"
@@ -338,6 +354,11 @@ func (h *DriftHandlers) Coverage() gin.HandlerFunc {
 					url := run.CIRunURL
 					cs.CIRunURL = &url
 				}
+				// Independent of Drifted above -- never derived from it, and
+				// never folded into the same field. See InfraDrifted's own
+				// comment on coverageState.
+				infraDrifted := run.DriftAdded > 0 || run.DriftChanged > 0 || run.DriftDestroyed > 0
+				cs.InfraDrifted = &infraDrifted
 				if t, ok := parsePGTimestamp(run.CreatedAt); ok && now.Sub(t) < staleAfter {
 					stale = false
 				}
@@ -347,6 +368,9 @@ func (h *DriftHandlers) Coverage() gin.HandlerFunc {
 			}
 			if cs.Unparseable || cs.Truncated {
 				summary.Incomplete++
+			}
+			if cs.InfraDrifted != nil && *cs.InfraDrifted {
+				summary.InfraDrifted++
 			}
 
 			if rec, ok := inputs.liveRecords[ref.Key]; ok {
@@ -371,7 +395,7 @@ func (h *DriftHandlers) Coverage() gin.HandlerFunc {
 
 // Summary is the fleet-wide rollup behind the landing page's drift cards.
 // @Summary      Drift summary
-// @Description  Per-source open/acknowledged/critical drift-record counts, the last 24h of drift runs by terminal status, how many live records are incomplete (unparseable or truncated), and how many runs are currently in flight -- all scoped to the caller's organization(s).
+// @Description  Per-source open/acknowledged/critical/infra_drift drift-record counts, the last 24h of drift runs by terminal status, how many live records are incomplete (unparseable or truncated), how many live records carry infra drift (resource_drift, migration 000039, never conflated with the unapplied-change counts beside it), and how many runs are currently in flight -- all scoped to the caller's organization(s).
 // @Tags         Drift
 // @Produce      json
 // @Success      200  {object}  map[string]interface{}
@@ -393,6 +417,16 @@ func (h *DriftHandlers) Summary() gin.HandlerFunc {
 			return
 		}
 		incomplete, err := h.recordRepo.CountIncompleteInScope(ctx, scope)
+		if err != nil {
+			serverError(c, err, "failed to load drift summary")
+			return
+		}
+		// infra_drifted mirrors incomplete_records' shape exactly (a single
+		// scoped count over LIVE records) but classifies by the drift
+		// contract's second triplet instead: how many open findings carry
+		// resource_drift, independent of whatever their own
+		// added/changed/destroyed (resource_changes) says.
+		infraDrifted, err := h.recordRepo.CountInfraDriftedInScope(ctx, scope)
 		if err != nil {
 			serverError(c, err, "failed to load drift summary")
 			return
@@ -446,6 +480,7 @@ func (h *DriftHandlers) Summary() gin.HandlerFunc {
 				"dispatched": dispatched24h + running24h,
 			},
 			"incomplete_records": incomplete,
+			"infra_drifted":      infraDrifted,
 			"in_flight":          inFlightDispatched + inFlightRunning,
 		})
 	}
