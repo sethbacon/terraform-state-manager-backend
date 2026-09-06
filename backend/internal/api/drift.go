@@ -960,6 +960,18 @@ type driftRunResultPayload struct {
 	// never re-parses the plan (only its module_calls projection arrives), so
 	// the producer's markers are the only account of completeness there is.
 	repositories.Completeness
+	// DriftAdded/Changed/Destroyed/Summary are the drift contract's second
+	// triplet (terraform-drift-contract 1.3.0), computed from a plan's
+	// resource_drift -- changes made OUTSIDE Terraform -- as opposed to
+	// Added/Changed/Destroyed above, which count resource_changes (edits
+	// nobody has applied yet). Zero/absent on any runner that predates the
+	// contract bump, which is exactly what lenient decoding already gives
+	// for free: a missing key decodes to the zero value, not an error. See
+	// migration 000039.
+	DriftAdded     int             `json:"drift_added"`
+	DriftChanged   int             `json:"drift_changed"`
+	DriftDestroyed int             `json:"drift_destroyed"`
+	DriftSummary   json.RawMessage `json:"drift_summary"`
 }
 
 // RunResults is the machine callback the CI job posts drift results to. It is
@@ -1031,7 +1043,10 @@ func (h *DriftHandlers) RunResults() gin.HandlerFunc {
 		if body.Drifted != nil {
 			drifted = *body.Drifted
 		}
-		if err := h.driftRepo.UpdateResultInScope(ctx, run.ID, status, body.Added, body.Changed, body.Destroyed, drifted, body.Summary, body.Detail, body.Completeness, auth.scope); err != nil {
+		infra := repositories.InfraDrift{
+			Added: body.DriftAdded, Changed: body.DriftChanged, Destroyed: body.DriftDestroyed, Summary: body.DriftSummary,
+		}
+		if err := h.driftRepo.UpdateResultInScope(ctx, run.ID, status, body.Added, body.Changed, body.Destroyed, drifted, body.Summary, body.Detail, body.Completeness, infra, auth.scope); err != nil {
 			serverError(c, err, "failed to record results")
 			return
 		}
@@ -1069,7 +1084,7 @@ func (h *DriftHandlers) RunResults() gin.HandlerFunc {
 			return
 		}
 		if src != nil {
-			h.recordDriftOutcome(ctx, run, status, body.Added, body.Changed, body.Destroyed, drifted, body.Summary, body.Completeness, auth)
+			h.recordDriftOutcome(ctx, run, status, body.Added, body.Changed, body.Destroyed, drifted, body.Summary, body.Completeness, infra, auth)
 			// Best-effort module provenance for dispatched runs: if the runner
 			// uploaded the plan's module calls (+ optional locks), capture them
 			// against this run's source/state (both taken from the token-scoped

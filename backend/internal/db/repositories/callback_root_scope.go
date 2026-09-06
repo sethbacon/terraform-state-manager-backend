@@ -206,27 +206,33 @@ func (r *DriftRepository) LatestPerStateInScope(ctx context.Context, sourceID st
 // takes away, by reading the id from the URL or the body instead. A tenancy
 // partition that only holds while nobody moves one line is not a partition; the
 // statement says who may write it.
-func (r *DriftRepository) UpdateResultInScope(ctx context.Context, id, status string, added, changed, destroyed int, drifted bool, summary []byte, detail string, marks Completeness, scope tenantscope.Scope) error {
+func (r *DriftRepository) UpdateResultInScope(ctx context.Context, id, status string, added, changed, destroyed int, drifted bool, summary []byte, detail string, marks Completeness, infra InfraDrift, scope tenantscope.Scope) error {
 	w := scopeWrite(scope)
 	if w.Deny {
 		return ErrNotInScope
 	}
 	if w.Skip {
-		return r.UpdateResult(ctx, id, status, added, changed, destroyed, drifted, summary, detail, marks)
+		return r.UpdateResult(ctx, id, status, added, changed, destroyed, drifted, summary, detail, marks, infra)
 	}
 	var summaryArg any
 	if len(summary) > 0 {
 		summaryArg = string(summary)
+	}
+	var infraSummaryArg any
+	if len(infra.Summary) > 0 {
+		infraSummaryArg = string(infra.Summary)
 	}
 	marks.MarkTruncation()
 	_, err := r.db.ExecContext(ctx, `
 		UPDATE drift_runs
 		SET status=$2, added=$3, changed=$4, destroyed=$5, drifted=$6, summary=$7::jsonb,
 		    detail=COALESCE(NULLIF($8,''), detail), updated_at=now(),
-		    truncated=$9, omitted_entries=$10, omitted_attrs=$11, unparseable=$12, unmasked=$13
-		WHERE id=$1 AND organization_id = ANY($14::uuid[])`,
+		    truncated=$9, omitted_entries=$10, omitted_attrs=$11, unparseable=$12, unmasked=$13,
+		    drift_added=$14, drift_changed=$15, drift_destroyed=$16, drift_summary=$17::jsonb
+		WHERE id=$1 AND organization_id = ANY($18::uuid[])`,
 		id, status, added, changed, destroyed, drifted, summaryArg, detail,
 		marks.Truncated, marks.OmittedEntries, marks.OmittedAttrs, marks.Unparseable, marks.Unmasked,
+		infra.Added, infra.Changed, infra.Destroyed, infraSummaryArg,
 		w.OrgIDs)
 	return err
 }
@@ -626,5 +632,5 @@ func (r *DriftRecordRepository) UpsertDetectionInScope(ctx context.Context, d *D
 	if w.Skip {
 		return r.UpsertDetection(ctx, d)
 	}
-	return r.upsertDetection(ctx, d, ` AND s.organization_id = ANY($17::uuid[])`, w.OrgIDs)
+	return r.upsertDetection(ctx, d, ` AND s.organization_id = ANY($21::uuid[])`, w.OrgIDs)
 }

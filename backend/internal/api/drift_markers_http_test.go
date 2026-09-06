@@ -34,7 +34,7 @@ func TestIngestDrift_PersistsCompletenessMarkers(t *testing.T) {
 	e.mock.ExpectQuery("INSERT INTO drift_records").
 		WithArgs("s1", "envs/prod.tfstate", nil, nil, "ingest", "warning",
 			3, 0, 0, `[{"address":"aws_instance.web","actions":["create"]}]`, "run-88",
-			true, 7, 15, true, true, []string{testActingOrg}).
+			true, 7, 15, true, true, 0, 0, 0, nil, []string{testActingOrg}).
 		WillReturnRows(driftRecRowMarked("r1", "open", "warning", true, 7, 15, true, true))
 
 	body := `{
@@ -79,7 +79,7 @@ func TestRunResults_PersistsCompletenessMarkers(t *testing.T) {
 	e.mock.ExpectQuery("INSERT INTO drift_records").
 		WithArgs("s1", "envs/prod.tfstate", "p1", "d1", "run", "warning",
 			1, 0, 0, `[{"address":"a.b","actions":["create"]}]`, nil,
-			true, 4, 0, false, true, []string{testActingOrg}).
+			true, 4, 0, false, true, 0, 0, 0, nil, []string{testActingOrg}).
 		WillReturnRows(driftRecRowMarked("r1", "open", "warning", true, 4, 0, false, true))
 
 	body := `{"added":1,"changed":0,"destroyed":0,"drifted":true,
@@ -106,7 +106,7 @@ func TestDriftMarkers_TruncatedIsWidenedNotNarrowed(t *testing.T) {
 	sourceRowFor(e, "s1")
 	e.mock.ExpectQuery("INSERT INTO drift_records").
 		WithArgs("s1", "k", nil, nil, "ingest", "warning", 1, 0, 0, nil, nil,
-			true, 2, 0, false, false, []string{testActingOrg}). // truncated derived from omitted_entries
+			true, 2, 0, false, false, 0, 0, 0, nil, []string{testActingOrg}). // truncated derived from omitted_entries
 		WillReturnRows(driftRecRowMarked("r1", "open", "warning", true, 2, 0, false, false))
 
 	w := e.do(http.MethodPost, "/api/v1/drift/ingest",
@@ -132,7 +132,7 @@ func TestIngestDrift_ServerParsedPlanOverridesClaimedMarkers(t *testing.T) {
 	// unmasked=TRUE — the exact inverse of every claim in the body below.
 	e.mock.ExpectQuery("INSERT INTO drift_records").
 		WithArgs("s1", "k", nil, nil, "ingest", "warning", 0, 1, 0, sqlmock.AnyArg(), nil,
-			false, 0, 0, false, true, []string{testActingOrg}).
+			false, 0, 0, false, true, 0, 0, 0, "[]", []string{testActingOrg}). // drift_summary recomputed to "[]": the plan carries no resource_drift
 		WillReturnRows(driftRecRowMarked("r1", "open", "warning", false, 0, 0, false, true))
 
 	body := `{"source_id":"s1","state_key":"k",

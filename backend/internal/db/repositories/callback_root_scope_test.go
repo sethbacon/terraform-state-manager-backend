@@ -47,7 +47,7 @@ func TestCallbackRoots_ScopedReadsOnAnEmptyScopeTouchNothing(t *testing.T) {
 		if got, err := r.GetByIDInScope(ctx, "d1", tenantscope.Scope{}); err != nil || got != nil {
 			t.Errorf("GetByIDInScope on an empty scope = %+v, %v; want nothing", got, err)
 		}
-		if err := r.UpdateResultInScope(ctx, "d1", "completed", 0, 0, 0, false, nil, "", Completeness{}, tenantscope.Scope{}); !errors.Is(err, ErrNotInScope) {
+		if err := r.UpdateResultInScope(ctx, "d1", "completed", 0, 0, 0, false, nil, "", Completeness{}, InfraDrift{}, tenantscope.Scope{}); !errors.Is(err, ErrNotInScope) {
 			t.Errorf("UpdateResultInScope on an empty scope = %v; want ErrNotInScope", err)
 		}
 		if out, err := r.LatestPerStateInScope(ctx, "s1", tenantscope.Scope{}); err != nil || len(out) != 0 {
@@ -160,12 +160,13 @@ func TestCallbackRoots_ScopedReads_BindTheOrganization(t *testing.T) {
 			t.Errorf("a run outside the scope must be (nil, nil), got %+v %v", got, err)
 		}
 
-		// The write side binds the organization LAST, after the thirteen value
+		// The write side binds the organization LAST, after the seventeen value
 		// arguments.
 		mock.ExpectExec("UPDATE drift_runs SET status.+organization_id = ANY").
-			WithArgs("d1", "completed", 1, 2, 3, true, nil, "detail", false, 0, 0, false, false, []string{scopeOrgA}).
+			WithArgs("d1", "completed", 1, 2, 3, true, nil, "detail", false, 0, 0, false, false,
+				0, 0, 0, nil, []string{scopeOrgA}).
 			WillReturnResult(sqlmock.NewResult(0, 1))
-		if err := r.UpdateResultInScope(ctx, "d1", "completed", 1, 2, 3, true, nil, "detail", Completeness{}, scope); err != nil {
+		if err := r.UpdateResultInScope(ctx, "d1", "completed", 1, 2, 3, true, nil, "detail", Completeness{}, InfraDrift{}, scope); err != nil {
 			t.Fatalf("UpdateResultInScope: %v", err)
 		}
 
@@ -280,12 +281,12 @@ func TestCallbackRoots_ScopedReads_BindTheOrganization(t *testing.T) {
 			t.Fatalf("ResolveCleanInScope = %v, %v", ok, err)
 		}
 
-		// The scope lands on the SOURCE SELECT, as $17, so the detection is
+		// The scope lands on the SOURCE SELECT, as $21, so the detection is
 		// produced only when the source the record inherits from is one this
 		// authority may reach.
 		mock.ExpectQuery("INSERT INTO drift_records.+s.organization_id = ANY").
 			WithArgs("s1", "k", nil, nil, "run", "warning", 1, 0, 0, nil, nil,
-				false, 0, 0, false, false, []string{scopeOrgA}).
+				false, 0, 0, false, false, 0, 0, 0, nil, []string{scopeOrgA}).
 			WillReturnRows(driftRecordRow("r1", "open"))
 		if _, err := r.UpsertDetectionInScope(ctx, &Detection{SourceID: "s1", StateKey: "k", Origin: "run", Added: 1}, scope); err != nil {
 			t.Fatalf("UpsertDetectionInScope: %v", err)
@@ -523,7 +524,7 @@ func TestCallbackRoots_ScopedReaders_ReportQueryErrors(t *testing.T) {
 		t.Error("drift GetByIDInScope swallowed the query error")
 	}
 	mock.ExpectExec("UPDATE drift_runs SET status").WillReturnError(errDB)
-	if err := drift.UpdateResultInScope(ctx, "d1", "completed", 0, 0, 0, false, []byte(`[]`), "", Completeness{}, scope); err == nil {
+	if err := drift.UpdateResultInScope(ctx, "d1", "completed", 0, 0, 0, false, []byte(`[]`), "", Completeness{}, InfraDrift{}, scope); err == nil {
 		t.Error("drift UpdateResultInScope swallowed the exec error")
 	}
 

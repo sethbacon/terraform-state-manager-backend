@@ -95,7 +95,7 @@ func TestDriftRecordRepository_PersistsCompletenessMarkers(t *testing.T) {
 
 	mock.ExpectQuery("INSERT INTO drift_records").
 		WithArgs("s1", "app.tfstate", nil, nil, "ingest", "warning", 1, 0, 0, nil, nil,
-			true, 5, 9, true, true).
+			true, 5, 9, true, true, 0, 0, 0, nil).
 		WillReturnRows(sqlmock.NewRows(driftRecordCols).
 			AddRow("r1", "s1", "app.tfstate", nil, nil, "ingest", "warning", 1, 0, 0,
 				[]byte(`[]`), "open", "", nil, "", nil, nil, 1, "2026-06-11", "2026-06-11",
@@ -114,6 +114,67 @@ func TestDriftRecordRepository_PersistsCompletenessMarkers(t *testing.T) {
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Errorf("markers must be bound into the INSERT: %v", err)
+	}
+}
+
+// TestDriftRecordRepository_PersistsInfraDrift is the storage half of the
+// infra-drift round trip (migration 000039): the four new columns must be
+// bound into the INSERT (and the ON CONFLICT DO UPDATE, exercised by the
+// second detection below), not merely accepted by the Detection struct.
+func TestDriftRecordRepository_PersistsInfraDrift(t *testing.T) {
+	db, mock := newMock(t)
+	r := NewDriftRecordRepository(db)
+
+	mock.ExpectQuery("INSERT INTO drift_records").
+		WithArgs("s1", "app.tfstate", nil, nil, "run", "warning", 1, 0, 0, nil, nil,
+			false, 0, 0, false, false,
+			2, 1, 0, `[{"address":"aws_instance.hand_edited","actions":["update"]}]`).
+		WillReturnRows(sqlmock.NewRows(driftRecordCols).
+			AddRow("r1", "s1", "app.tfstate", nil, nil, "run", "warning", 1, 0, 0,
+				[]byte(`[]`), "open", "", nil, "", nil, nil, 1, "2026-06-11", "2026-06-11",
+				false, 0, 0, false, false, "11111111-1111-4111-8111-111111111111"))
+
+	rec, err := r.UpsertDetection(ctx, &Detection{
+		SourceID: "s1", StateKey: "app.tfstate", Origin: "run", Added: 1,
+		Infra: InfraDrift{Added: 2, Changed: 1, Destroyed: 0,
+			Summary: []byte(`[{"address":"aws_instance.hand_edited","actions":["update"]}]`)},
+	})
+	if err != nil {
+		t.Fatalf("UpsertDetection: %v", err)
+	}
+	if rec.ID != "r1" {
+		t.Fatalf("UpsertDetection: %+v", rec)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("infra drift counts must be bound into the INSERT: %v", err)
+	}
+}
+
+// TestDriftRecordRepository_ZeroInfraDrift_BindsExactlyZeroNotSilentlyDropped
+// is the back-compat property: a detection from a producer that predates
+// terraform-drift-contract 1.3.0 carries a zero-value InfraDrift, and that MUST
+// still bind explicit 0/0/0/nil into the statement -- not omit the columns, and
+// not silently coalesce to some other default. Proves the change is additive:
+// an old producer's write is byte-for-byte what it was before this migration
+// for every column it already wrote, plus explicit zeros for the four new ones.
+func TestDriftRecordRepository_ZeroInfraDrift_BindsExactlyZeroNotSilentlyDropped(t *testing.T) {
+	db, mock := newMock(t)
+	r := NewDriftRecordRepository(db)
+
+	mock.ExpectQuery("INSERT INTO drift_records").
+		WithArgs("s1", "app.tfstate", nil, nil, "ingest", "warning", 1, 2, 0, nil, nil,
+			false, 0, 0, false, false,
+			0, 0, 0, nil).
+		WillReturnRows(driftRecordRow("r1", "open"))
+
+	if _, err := r.UpsertDetection(ctx, &Detection{
+		SourceID: "s1", StateKey: "app.tfstate", Origin: "ingest", Added: 1, Changed: 2,
+	}); err != nil {
+		t.Fatalf("UpsertDetection: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("an unset InfraDrift must still bind explicit zeros/nil, not diverge from the pinned "+
+			"statement shape: %v", err)
 	}
 }
 
