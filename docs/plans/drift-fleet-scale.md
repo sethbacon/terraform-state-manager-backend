@@ -2,12 +2,15 @@
 
 > **Status:** **Partially implemented 2026-09-05.** Phases 1, 1b, 2 and 4a landed in
 > sethbacon/terraform-state-manager-backend#569; Phase 4b in sethbacon/terraform-state-manager-frontend#416.
-> Phase 5 is **4 of 5 steps done** — only the frontend remains. Phase 0 (ops) and
-> Phase 3 (tooling) are not started.
+> Phase 5 is **4 of 5 steps done** — only the frontend remains. **Phase 3 (onboarding
+> tooling) is done and proven** (2026-09-06; ADO PRs !94948 templates, !94949 tooling).
+> Phase 0 (ops) is partially met — the drift pool, the ADO identity for TSM and the
+> 3.22.0 deployment are the gating items.
 > See "Implementation status" below before working from this document.
 > **Repo:** `terraform-state-manager-backend` (primary) + `terraform-state-manager-frontend`,
-> the Brunswick drift templates (operator data in the TSM template registry), the Brunswick
-> onboarding tooling, and — Phase 5 only — `terraform-drift-contract`, `driftingest`,
+> the Brunswick drift templates (`Brunswick/terraform-app-pipeline-templates`, folder
+> `drift/`), the onboarding tooling (`CE_Automation/terraform-migration-tools`, folder
+> `drift/`), and — Phase 5 only — `terraform-drift-contract`, `driftingest`,
 > `azure-pipelines-terraform`, `terraform-drift-report`.
 > **Scope:** Make TSM the central drift scheduler and dashboard for an org of ~300
 > repositories × ~5 states on a **private** TSM, **private** registry and **self-hosted**
@@ -24,12 +27,12 @@
 
 | Phase | Status | Where |
 | --- | --- | --- |
-| 0 — Environment prerequisites | **verified 2026-09-06 — partially met**: CA-in-image and callback base already OK; drift pool, ADO identity and the 3.21 deployment outstanding (see Phase 0) | ops only, no code |
+| 0 — Environment prerequisites | **verified 2026-09-06 — partially met**: CA-in-image and callback base OK; 3.21.0 live and the test wiring re-registered; **outstanding: the drift pool, the managed identity as an ADO user, deploying 3.22.0** (see Phase 0) | ops only, no code |
 | 1 — Repo-level fan-out dispatch | **done — accepted end to end 2026-09-06** (live TSM 3.21.0 → one ADO run → 3 runs under one batch, real callbacks; see "Done when" evidence) | sethbacon/terraform-state-manager-backend#569, #573 |
-| 1.4 — Brunswick operator templates | **done for Azure** (validated on TBD4330); SQL and OCI variants ported — see 1.4 results for their per-repo caveats | `C:\dev\ado\.drift-assess\templates\` + TSM template registry |
+| 1.4 — Brunswick operator templates | **done** — Azure validated on TBD4330, OCI on TBD728, SQL loop on TBD4826 (that repo's own build is broken by a module change); source of truth now under git | `Brunswick/terraform-app-pipeline-templates` PR **!94948** (`drift/*.yml`); TSM registry upload still needs an admin-scoped key |
 | 1b — Workload Identity | **done** (item 3 landed separately) | sethbacon/terraform-state-manager-backend#569, #573 |
 | 2 — Scheduler pacing | **done** | sethbacon/terraform-state-manager-backend#569 |
-| 3 — Discovery-driven onboarding | **not started** | tooling host unreachable |
+| 3 — Discovery-driven onboarding | **done and proven 2026-09-06** — pilot apply on TBD4330 (definition 3741, connection, schedule; schedule run → one batch, both apps completed); fleet dry run over 488 repos: **162 plannable now / 211 non-prod apps**, 331 prod apps await a prod state source — see Phase 3 results | `CE_Automation/terraform-migration-tools` PR **!94949** (`drift/onboard_drift.py`) |
 | 4a — Dashboard read-path (backend) | **done** | sethbacon/terraform-state-manager-backend#569 |
 | 4b — Dashboard read-path (frontend) | **done** | sethbacon/terraform-state-manager-frontend#416 |
 | 5 — Contract: infra drift vs unapplied | **4 of 5 done** — contract v1.4.0 published, Go mirror, task + action, and backend storage all merged; **only step 5 (frontend) remains** | 4cloudguru/terraform-drift-contract#83, sethbacon/terraform-state-manager-backend#578, #579, sethbacon/azure-pipelines-terraform#1116, sethbacon/terraform-drift-report#85 |
@@ -88,6 +91,12 @@ following it literally would have introduced a security regression.
   predicate was replaced with a tautology and each test failed by returning the other
   organization's row. sqlmock alone could not have shown this — it matches query text and
   never evaluates a predicate.
+- **The schedule → dispatch path has now been exercised live** (2026-09-06, Phase 3):
+  `POST /schedules/{id}/run` on a script-created fan-out schedule produced one batch and
+  one ADO run with both callbacks recorded. **Phase 2's pacing is still unexercised at
+  scale** — zero enabled schedules exist yet; the first cohort with `--enable` on the drift
+  pool is where `TSM_SCHEDULER_BATCH_LIMIT` / `TSM_DRIFT_MAX_IN_FLIGHT` get their first
+  real tick.
 
 ---
 
@@ -398,18 +407,24 @@ Managed Identity), and the TSM API at `tfstate.brunswick.com` with the admin key
   - Resource authorization (queue 1358, service connection, variable groups) was granted to
     the three test definitions (3642/3643/3645) and still holds; every new definition needs
     the same `pipelinePermissions` grant — that is the onboarding script's job.
-- [ ] **TSM deployment — NOT MET (new item).** `tfstate.brunswick.com` runs **3.20.1**
-  (built 2026-09-02), which predates fan-out / workload identity (#569) and the follow-ups
-  (#571); release 3.21.0 (release-please #568) is not merged or deployed. The instance is
-  also **empty** — 0 state sources, CI sources, pipeline connections, schedules, runs — so
-  the June test wiring was lost in a redeploy. Action: merge #568, deploy 3.21.x through
-  pipeline 3632 (`terraform-state-manager-aks`), then re-register one state source
-  ("Azure Non-Prod", `crpnonprdtrrfrmstaterepo/terraformbackend`), the CI source (Phase 1b
-  identity, `workload_identity`) and one fan-out connection before the acceptance dispatch.
+- [~] **TSM deployment — PARTIAL.** `tfstate.brunswick.com` now runs **3.21.0** (built
+  2026-09-06 — fan-out, workload identity, pacing, coverage), and the Phase 1 acceptance
+  dispatch ran against it. Not yet deployed: **3.22.0** (release-please #576 — the review
+  follow-ups from #571, Phase 5's `resource_drift` storage from #579 and migration
+  `000039_drift_infra_counts`). The instance was re-registered for the acceptance work and
+  holds: state source "Azure Non-Prod" (`crpnonprdtrrfrmstaterepo/terraformbackend`, 803
+  states), a **temporary PAT-backed** CI source "bconline Brunswick (temp PAT)", the
+  hand-made connection "TBD4330 drift (fan-out test)" (definition 3642), and the
+  script-made pilot "TBD4330 drift" (definition 3741) with its disabled schedule. Action:
+  merge/deploy 3.22.0 via pipeline 3632; replace the PAT CI source with `workload_identity`
+  once the managed identity is an ADO user (`PUT /ci-sources/{id}`); register the **prod**
+  state source `crpprdtrrfrmstaterepo` (`RG-CRP-TRRFRM-P-CUS01`, subscription BC-INF-P-00) —
+  `sbacon_ca` cannot list its keys, so either a key holder does it or the blob connector's
+  Entra option (§9) lands first.
 
 **Done when** (unchanged): a manual dispatch from TSM to a pipeline on the new pool completes
 a callback with TLS verification on and no host pinning. **Gating today: the drift pool, the
-ADO identity, and the 3.21 deployment.**
+ADO identity, the prod state source and the 3.22.0 deployment.**
 
 ### Phase 1 — Repo-level fan-out dispatch (backend + templates) — DONE, accepted end to end 2026-09-06
 
@@ -646,7 +661,7 @@ steps skipped; 121 s for two apps including the terraform download and module ar
 `403 Required scope: admin` — the stored API key has `allowed_scopes: []` and reaches the
 instance only through its org memberships (`admin` role in `aceo` and `default`), which
 `/admin/*` does not accept. Mint an API key with the `admin` scope and re-run the uploader;
-the validated files are in `C:\devdo\.drift-assess	emplates\` and on the three test
+the validated files are in `C:\devdo\.drift-assess emplates\` and on the three test
 branches meanwhile.
 
 **Done when:** one ADO run for TBD4330 with 3 targets produces 3 `drift_runs` rows under one
@@ -793,12 +808,13 @@ Entra/Workload-Identity option for the blob connector (mirroring the pipelines'
 are ever `dispatched|running` at once and all 60 fire within (60/20) × tick with every
 schedule's `last_run_at` advanced exactly once.
 
-### Phase 3 — Discovery-driven bulk onboarding (Brunswick tooling) — NOT STARTED
+### Phase 3 — Discovery-driven bulk onboarding (Brunswick tooling) — DONE, proven 2026-09-06
 
-New `C:\dev\ado\code\shared\scripts\python\Azure\migration_scripts\drift\onboard_drift.py`
-(+ `README.md`), dry-run by default, idempotent by name. Reuse `select_repos.py`
-`api()`/PAT auth, `oci_decompose.parse_active_tops()` for active stages, and
-`.tsmbase`/`.tsmtoken` (or `TSM_API_KEY`) for TSM.
+Implemented as `drift/onboard_drift.py` (+ `drift/README.md`) in
+`CE_Automation/terraform-migration-tools` (PR **!94949**), dry-run by default, idempotent by
+name, `--verify`, `--dump-dir`. Credentials: `AZUREDEVOPS_PAT` (seth.bacon — Code
+read/contribute + Build) and `TSM_API_KEY` or `--tsm-auth-dir`. The original sketch below is
+kept; where the implementation deliberately differs, the results block says so.
 
 Per repo (input: repo names or `--all-tbd`):
 
@@ -824,9 +840,77 @@ Per repo (input: repo names or `--all-tbd`):
 7. Emit `onboard-report.csv` (repo, apps, profile, connection id, schedule id,
    skipped-with-reason). `--verify` re-reads TSM and diffs.
 
+#### Phase 3 results (2026-09-06)
+
+**As implemented — differences from the sketch above:**
+
+- **Templates come from git, not the TSM registry.** `GET /drift/workflow?profile=<p>`
+  silently falls back to the generic built-in for an unknown profile, which cannot plan a
+  Brunswick repo, and the registry upload is still blocked on an admin-scoped key. The
+  script reads `drift/<profile>.yml` from `Brunswick/terraform-app-pipeline-templates` at
+  `--template-ref` (default `main`; `--template-dir` overrides with a local folder).
+- **Per-repo variation is derived, not edited.** The repo's uncommented Universal-Package /
+  build-artifact downloads replace the template's module block (marker comments
+  `# 1b) ### EDIT (per repo): module acquisition. ###` … `# 1c) Pinned terraform …`);
+  extra `-var`s beyond the profile baseline are passed through the way the build feeds
+  them — variable-group macros as `TF_VAR_x: $(var)` on both plan steps; per-app
+  parameters as resolver exports `appVar_x` from `P_<n>` in `pipeline-parameters.yml`
+  (secret-flagged when the source is a `$(…)`) plus `TF_VAR_x: $(appVar_x)`; the vnet-style
+  `$env:${{ parameters.P }}` double indirection via `deref2`. Commented-out `-var` lines
+  are ignored; SP-credential vars (`azure_client_id/secret`) are dropped with a REVIEW flag.
+  The rendered TBD4330 file is identical to the hand-validated template.
+- **Profile detection:** OCI when `versions.tf` names the OCI provider; SQL when the build
+  has an *uncommented* `terraform_sqldb_azure_module` download (a regex spanning into the
+  commented block many repos carry mislabelled 38 repos on the first pass); else Azure.
+- **Active apps** = uncommented `- template: pipeline-build.yml` blocks in `pipeline.yml`,
+  resolved through `APP_ID_<n>` / `environment_<n>` (inline `# comments` stripped —
+  `value: APP1234 # Test` leaked into eleven state keys on the first pass).
+  `oci_decompose.parse_active_tops()` was not reusable: it parses OCI's
+  `tops_expected_artifacts`, a different mechanism.
+- **Commit modes:** `pr` (TSM `workflow-setup`, file at `/azure-pipelines-tsm-drift.yml`,
+  definition via TSM against the default branch), `branch` (direct Git Pushes API to
+  `--branch`, definition via the **Build Definitions API** with that branch as default —
+  the TSM route cannot point a definition at a non-default branch), `none`. The definition
+  gets `pipelinePermissions` for the queue, the service connection and the repo's variable
+  groups (secure files are not automated).
+- **Schedules are created disabled** unless `--enable`, so a fleet can be registered before
+  the drift pool exists. Cron = `crc32(repo) % 60` minutes at a hash-spread hour in
+  `--window`.
+- Production apps are skipped unless `--source-prod` is given; a missing state key is
+  reported, never registered.
+
+**Pilot (TBD4330, `--commit-mode branch --branch tsm/drift --apply`):** pushed `446d5838`,
+created definition **3741** (queue 1358 + SC `73bdd1ac…` + variable groups 2/3/122
+authorized), connection `TBD4330 drift` (fan_out) and schedule `TBD4330 drift nightly`
+(`55 1 * * *`, disabled, 2 targets); `--verify` clean. **Done-when met:**
+`POST /schedules/{id}/run` → batch `edbc79a1…` → ADO run 370353 → APP5849 `completed`
+clean, APP5850 `completed drifted=true ~1`; the schedule's `last_run_id` is the batch id.
+
+**Fleet discovery (488 `TBD*` repos, dry run, non-prod source only):**
+
+| | Count |
+| --- | --- |
+| Plannable now | **162 repos / 211 apps** (1.3 per repo, max 4) — Azure 63, SQL 81, OCI 18 |
+| No `pipeline.yml`/`pipeline-parameters.yml` | 120 (not the TBD layout; out of scope) |
+| No registrable active app | 206 — almost all because their only active apps are **production**: 331 prod apps await a prod state source |
+| No matching non-prod state key | 8 apps (TBD2080/APP6203, TBD4132/APP5188, TBD4324/APP5836, TBD4337/APP5866, TBD4607/APP6379, TBD4715/APP6515, TBD8888/APP9999, TBD9876/APP9988) |
+| Extra `-var` pass-throughs | `domainjoin` 68 (three feeding shapes), `dbadminsec` 14, `sc_sql_role` 6, `dbadminsec_env` 3, `webhook_service_uri` 2, `automation_key_vlt_*` 1 |
+| REVIEW flags | 5 — TBD4876 passes SP credentials; three builds name `dbadminsec_env` with no per-app value (the SQL profile feeds it anyway); TBD4134/TBD596 write the malformed `$({ parameters.x })` (ADO never expands it — their own builds are mis-fed) |
+
+Nightly cost of the plannable set ≈ 535 agent-minutes: **~2.2 h on the 4-agent shared
+pool**, ~0.4 h on a 20-agent drift pool. All 162 rendered templates are kept in
+`C:\dev\ado\.drift-assess\onboard-dump\` for review; reports in
+`C:\dev\ado\.drift-assess\onboard-report.*.csv`.
+
+**Decisions before the fleet wave:** (1) the prod state source (see Phase 0); (2) commit
+mode — `branch` for the first cohorts, `pr` once the thin-wrapper follow-up (§9) makes the
+per-repo file small; (3) enable schedules only when the drift pool exists.
+
 **Done when:** running against TBD4330, TBD4826, TBD728 in `--apply` mode yields 3
 connections + 3 schedules, `--verify` is clean, and `POST /schedules/{id}/run` on each
-produces one batch with N completed runs.
+produces one batch with N completed runs. *(Met on TBD4330 as above; TBD728's only
+active app is prod, and TBD4826's app plan-fails on its own module break — both are
+registered by the same code path once their blockers clear.)*
 
 ### Phase 4 — Dashboard read-path — DONE (4a + 4b)
 
@@ -953,10 +1037,14 @@ byte-identical.
 1. Phase 0 (ops) in parallel with Phase 1 code.
 2. Ship 000033 + Phase 1 backend behind no flag (additive; legacy path byte-identical).
 3. Publish the `fan-out` built-in and the ported Brunswick profiles; validate on the three
-   proven repos before any fleet onboarding.
+   proven repos before any fleet onboarding. *(Done: profiles are in
+   `terraform-app-pipeline-templates/drift/` — !94948; the TSM registry upload waits on an
+   admin-scoped API key.)*
 4. Phase 2 with `TSM_DRIFT_MAX_IN_FLIGHT` set to the drift pool's agent count.
-5. Phase 3 onboarding in cohorts (10 → 50 → rest), watching `tsm_drift_runs_in_flight`
-   and the coverage view.
+5. Phase 3 onboarding in cohorts (10 → 50 → rest) with
+   `onboard_drift.py --repos … --commit-mode branch --apply`, then `--verify`; enable
+   schedules (`--enable`) once the drift pool exists; watch `tsm_drift_runs_in_flight` and
+   the coverage view. Register the prod state source before the prod cohorts (331 apps).
 6. Phase 4 UI can land any time after 4a; Phase 5 last.
 
 ## 9. Out of scope / follow-ups
@@ -965,6 +1053,20 @@ byte-identical.
 - `/drift/ingest` mode in the ADO task (only for repos that cannot be dispatched).
 - Auto-resolve on state-serial change after an apply (heuristic; evaluate after Phase 4
   data exists).
+- **Thin per-repo drift wrapper.** Onboarding commits a fully rendered ~500-line
+  `azure-pipelines-tsm-drift.yml` per repo, so a template fix means re-running onboarding
+  across the fleet. End state: a ~30-line wrapper referencing
+  `terraform-app-pipeline-templates/drift/<profile>.yml` through `resources.repositories`
+  with the module list and extra vars as parameters — one PR propagates a fix.
+- **Prod state source without a storage key.** `crpprdtrrfrmstaterepo` needs either a key
+  holder or the blob connector's Entra option below; the second also removes the
+  non-prod source's stored key.
+- **Fleet hygiene surfaced by discovery:** two builds write `$({ parameters.x })` instead
+  of `${{ … }}` (TBD4134, TBD596 — their own plan step is mis-fed); eight apps have no
+  state in the non-prod account; 120 `TBD*` repos are not on the pipeline-parameters
+  layout and need a different onboarding path or none.
+- **Managed identity as an Azure DevOps user** (Phase 1b's last step) so the temporary
+  PAT-backed CI source can be replaced via `PUT /ci-sources/{id}`.
 - **Azure blob state sources still use a shared `account_key`** (`internal/statesource/azure.go:37-47`,
   `azblob.NewSharedKeyCredential`) — the last shared secret in the drift path once Phase 1b
   lands. Follow-up: add an Entra / Workload Identity option to the blob connector
