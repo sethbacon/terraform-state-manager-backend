@@ -25,8 +25,8 @@
 | --- | --- | --- |
 | 0 — Environment prerequisites | **verified 2026-09-06 — partially met**: CA-in-image and callback base already OK; drift pool, ADO identity and the 3.21 deployment outstanding (see Phase 0) | ops only, no code |
 | 1 — Repo-level fan-out dispatch | **done (backend)** | sethbacon/terraform-state-manager-backend#569 |
-| 1.4 — Brunswick operator templates | **not done** | templates live outside this repo |
-| 1b — Workload Identity | **done, except item 3** — per-target `Params` (per-app service connection) is not implemented and gates 1.4 | sethbacon/terraform-state-manager-backend#569 |
+| 1.4 — Brunswick operator templates | **not done — no longer blocked**; item 3 landed in #573 | templates live outside this repo |
+| 1b — Workload Identity | **done** (item 3 landed separately) | sethbacon/terraform-state-manager-backend#569, #573 |
 | 2 — Scheduler pacing | **done** | sethbacon/terraform-state-manager-backend#569 |
 | 3 — Discovery-driven onboarding | **not started** | tooling host unreachable |
 | 4a — Dashboard read-path (backend) | **done** | sethbacon/terraform-state-manager-backend#569 |
@@ -298,7 +298,27 @@ the `fan-out` template reference `$(cb_token_${{ replace(t.working_dir, '/', '_'
 the drift task's `callbackToken` input. The macro *name* is composed at compile time, the
 secret resolves at run time, so `finalYaml` and the Parameters view show only the
 reference. `targets` keeps `working_dir` / `state_key` / `callback_url` (non-secret).
-Needs one real run to confirm the task receives the value; not yet done.
+
+**Implemented in sethbacon/terraform-state-manager-backend#573.** `driftFanOutTarget` no longer
+carries `callback_token` at all; the Runs API body gains
+`variables: {cb_token_<safe_dir>: {value, isSecret: true}}`, and the built-in `fan-out`
+template references the macro. The name transform is one exported Go function
+(`FanOutCallbackTokenVariableName`) pinned by a table test **and** by assertions on the
+template's literal `replace(...)` expression at each call site, because the two sides are
+written in different languages and a divergence would hand the task an empty
+`callbackToken` — no callback, and the run sits `dispatched` until the reconciler expires
+it. Two working dirs that derive the same variable name (`a/b` vs `a_b`) are **refused** at
+validation rather than disambiguated.
+
+**Still needs one real run** to confirm the task actually receives the value through
+`$(cb_token_…)`. Nothing in #573 changes that.
+
+**New constraint, recorded because it is not in §4:** a fan-out dispatch (2+ targets) is now
+**refused for any provider without per-target secret variables** — today that means
+everything except `azure_devops` — with a 400 at the same gate as `fan_out`. Dropping the
+token from the shared `driftFanOutTarget` would otherwise have left a GitHub fan-out
+dispatch returning 202 with N tokenless targets and no callback possible, every run stuck
+until TTL. A GitHub fan-out path needs a per-target secret mechanism first.
 
 **Identity finding for Phases 1b/3:** an Entra token minted with
 `az account get-access-token --resource 499b84ac-…` under `sbacon_ca@brunswick.com`
@@ -540,7 +560,7 @@ by hand before upgrading. Update the stale "next migration" note in `CONTRIBUTIN
 `batch_id`, each `completed`/`failed` correctly, `ci_run_url` populated, and a request
 without `targets` produces a byte-identical wire body to today (golden test).
 
-### Phase 1b — Identity between TSM, Azure DevOps and the cloud (no PATs, no per-app rows) — DONE except item 3 (per-target `Params`)
+### Phase 1b — Identity between TSM, Azure DevOps and the cloud (no PATs, no per-app rows) — DONE
 
 **Entity model after Phase 1 (answers the "a source per app" objection):**
 
