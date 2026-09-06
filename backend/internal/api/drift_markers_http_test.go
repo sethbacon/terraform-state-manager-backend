@@ -69,7 +69,7 @@ func TestRunResults_PersistsCompletenessMarkers(t *testing.T) {
 		testsupport.DriftRunRow("d1", "p1", "s1", "envs/prod.tfstate", "", "", "dispatched",
 			nil, nil, nil, nil, nil, "", "tok1", "alice", "2026-06-11", "2026-06-11",
 			false, 0, 0, false, false, "11111111-1111-4111-8111-111111111111",
-			nil, "", ""))
+			nil, "", "", 0, 0, 0, nil))
 	e.mock.ExpectExec("UPDATE drift_runs SET callback_token=''").WithArgs("d1", "tok1").
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	e.mock.ExpectExec("UPDATE drift_runs").WillReturnResult(sqlmock.NewResult(0, 1))
@@ -177,7 +177,7 @@ func TestDriftMarkers_UnparseableDoesNotResolve(t *testing.T) {
 			testsupport.DriftRunRow("d1", "p1", "s1", "envs/prod.tfstate", "", "", "dispatched",
 				nil, nil, nil, nil, nil, "", "tok1", "alice", "2026-06-11", "2026-06-11",
 				false, 0, 0, false, false, "11111111-1111-4111-8111-111111111111",
-				nil, "", ""))
+				nil, "", "", 0, 0, 0, nil))
 		e.mock.ExpectExec("UPDATE drift_runs SET callback_token=''").WithArgs("d1", "tok1").
 			WillReturnResult(sqlmock.NewResult(0, 1))
 		e.mock.ExpectExec("UPDATE drift_runs").WillReturnResult(sqlmock.NewResult(0, 1))
