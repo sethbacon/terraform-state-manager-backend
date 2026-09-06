@@ -91,3 +91,25 @@ func TestDriftRunColumns_MatchesProductionDriftColumns(t *testing.T) {
 			"scanDrift's actual column order.", got, testsupport.DriftRunColumns)
 	}
 }
+
+// TestDriftRecordColumns_MatchesProductionDriftRecordColumns is
+// TestDriftRunColumns_MatchesProductionDriftColumns's twin for drift_records:
+// it parses the ACTUAL driftRecordColumns SQL constant scanDriftRecord
+// selects and asserts the result equals testsupport.DriftRecordColumns, in
+// order, reusing the same fragment parser (splitTopLevelCommas /
+// bareDriftColumnName) rather than a second copy of it. A column added to
+// driftRecordColumns without updating testsupport.DriftRecordColumns fails
+// this test by name.
+func TestDriftRecordColumns_MatchesProductionDriftRecordColumns(t *testing.T) {
+	var got []string
+	for _, frag := range splitTopLevelCommas(driftRecordColumns) {
+		got = append(got, bareDriftColumnName(t, strings.TrimSpace(frag)))
+	}
+	if !reflect.DeepEqual(got, testsupport.DriftRecordColumns) {
+		t.Fatalf("testsupport.DriftRecordColumns has drifted from the production driftRecordColumns const.\n"+
+			"  parsed from driftRecordColumns:  %v\n"+
+			"  testsupport.DriftRecordColumns:  %v\n"+
+			"update testsupport.DriftRecordColumns (and gofmt/gate every fixture built on it) to match "+
+			"scanDriftRecord's actual column order.", got, testsupport.DriftRecordColumns)
+	}
+}

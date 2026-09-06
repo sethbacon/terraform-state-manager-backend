@@ -7,18 +7,15 @@ import (
 
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
 	"github.com/jackc/pgx/v5/pgconn"
+
+	"github.com/terraform-state-manager/terraform-state-manager/internal/testsupport"
 )
 
-var driftRecordCols = []string{"id", "source_id", "state_key", "pipeline_connection_id", "last_run_id",
-	"origin", "severity", "added", "changed", "destroyed", "summary", "status", "acknowledged_by",
-	"acknowledged_at", "ack_note", "resolved_at", "external_ref", "detections", "first_detected_at",
-	"last_detected_at", "truncated", "omitted_entries", "omitted_attrs", "unparseable", "unmasked", "organization_id"}
-
 func driftRecordRow(id, status string) *sqlmock.Rows {
-	return sqlmock.NewRows(driftRecordCols).
-		AddRow(id, "s1", "app.tfstate", nil, nil, "run", "warning", 1, 2, 0, []byte(`[]`), status,
-			"", nil, "", nil, nil, 1, "2026-06-11", "2026-06-11",
-			false, 0, 0, false, false, "11111111-1111-4111-8111-111111111111")
+	return testsupport.DriftRecordRow(id, "s1", "app.tfstate", nil, nil, "run", "warning", 1, 2, 0, []byte(`[]`), status,
+		"", nil, "", nil, nil, 1, "2026-06-11", "2026-06-11",
+		false, 0, 0, false, false, "11111111-1111-4111-8111-111111111111",
+		0, 0, 0, nil)
 }
 
 func TestDriftSeverity(t *testing.T) {
@@ -96,10 +93,11 @@ func TestDriftRecordRepository_PersistsCompletenessMarkers(t *testing.T) {
 	mock.ExpectQuery("INSERT INTO drift_records").
 		WithArgs("s1", "app.tfstate", nil, nil, "ingest", "warning", 1, 0, 0, nil, nil,
 			true, 5, 9, true, true, 0, 0, 0, nil).
-		WillReturnRows(sqlmock.NewRows(driftRecordCols).
+		WillReturnRows(sqlmock.NewRows(testsupport.DriftRecordColumns).
 			AddRow("r1", "s1", "app.tfstate", nil, nil, "ingest", "warning", 1, 0, 0,
 				[]byte(`[]`), "open", "", nil, "", nil, nil, 1, "2026-06-11", "2026-06-11",
-				true, 5, 9, true, true, "11111111-1111-4111-8111-111111111111"))
+				true, 5, 9, true, true, "11111111-1111-4111-8111-111111111111",
+				0, 0, 0, nil))
 
 	rec, err := r.UpsertDetection(ctx, &Detection{
 		SourceID: "s1", StateKey: "app.tfstate", Origin: "ingest", Added: 1,
@@ -117,10 +115,14 @@ func TestDriftRecordRepository_PersistsCompletenessMarkers(t *testing.T) {
 	}
 }
 
-// TestDriftRecordRepository_PersistsInfraDrift is the storage half of the
-// infra-drift round trip (migration 000039): the four new columns must be
-// bound into the INSERT (and the ON CONFLICT DO UPDATE, exercised by the
-// second detection below), not merely accepted by the Detection struct.
+// TestDriftRecordRepository_PersistsInfraDrift is the full infra-drift round
+// trip (migration 000039): the four new columns must be bound into the
+// INSERT (and the ON CONFLICT DO UPDATE, exercised by the second detection
+// below), AND come back out of the RETURNING row with the SAME non-zero
+// values -- an all-zero RETURNING row would only prove the columns sit in
+// the right SELECT position, not that a real value survives the scan (the
+// exact gap that let a value go missing silently on the write side one step
+// ago).
 func TestDriftRecordRepository_PersistsInfraDrift(t *testing.T) {
 	db, mock := newMock(t)
 	r := NewDriftRecordRepository(db)
@@ -129,10 +131,10 @@ func TestDriftRecordRepository_PersistsInfraDrift(t *testing.T) {
 		WithArgs("s1", "app.tfstate", nil, nil, "run", "warning", 1, 0, 0, nil, nil,
 			false, 0, 0, false, false,
 			2, 1, 0, `[{"address":"aws_instance.hand_edited","actions":["update"]}]`).
-		WillReturnRows(sqlmock.NewRows(driftRecordCols).
-			AddRow("r1", "s1", "app.tfstate", nil, nil, "run", "warning", 1, 0, 0,
-				[]byte(`[]`), "open", "", nil, "", nil, nil, 1, "2026-06-11", "2026-06-11",
-				false, 0, 0, false, false, "11111111-1111-4111-8111-111111111111"))
+		WillReturnRows(testsupport.DriftRecordRow("r1", "s1", "app.tfstate", nil, nil, "run", "warning", 1, 0, 0,
+			[]byte(`[]`), "open", "", nil, "", nil, nil, 1, "2026-06-11", "2026-06-11",
+			false, 0, 0, false, false, "11111111-1111-4111-8111-111111111111",
+			2, 1, 0, `[{"address":"aws_instance.hand_edited","actions":["update"]}]`))
 
 	rec, err := r.UpsertDetection(ctx, &Detection{
 		SourceID: "s1", StateKey: "app.tfstate", Origin: "run", Added: 1,
@@ -144,6 +146,13 @@ func TestDriftRecordRepository_PersistsInfraDrift(t *testing.T) {
 	}
 	if rec.ID != "r1" {
 		t.Fatalf("UpsertDetection: %+v", rec)
+	}
+	if rec.DriftAdded != 2 || rec.DriftChanged != 1 || rec.DriftDestroyed != 0 {
+		t.Fatalf("infra drift counts lost on the read side: added=%d changed=%d destroyed=%d, want 2/1/0",
+			rec.DriftAdded, rec.DriftChanged, rec.DriftDestroyed)
+	}
+	if string(rec.DriftSummary) != `[{"address":"aws_instance.hand_edited","actions":["update"]}]` {
+		t.Fatalf("drift_summary lost on the read side: %s", rec.DriftSummary)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Errorf("infra drift counts must be bound into the INSERT: %v", err)
@@ -211,7 +220,7 @@ func TestDriftRecordRepository_ListAndCounts(t *testing.T) {
 
 	// No filters: only the window binds.
 	mock.ExpectQuery("FROM drift_records WHERE 1=1 ORDER BY").WithArgs(25, 50).
-		WillReturnRows(sqlmock.NewRows(driftRecordCols))
+		WillReturnRows(sqlmock.NewRows(testsupport.DriftRecordColumns))
 	if recs, err := r.List(ctx, nil, "", "", 25, 50, nil, nil); err != nil || len(recs) != 0 {
 		t.Fatalf("unfiltered List: %v %+v", err, recs)
 	}
@@ -222,7 +231,7 @@ func TestDriftRecordRepository_ListAndCounts(t *testing.T) {
 	end := time.Date(2026, 7, 9, 0, 0, 0, 0, time.UTC)
 	mock.ExpectQuery("FROM drift_records WHERE 1=1 AND last_detected_at >= .+ AND last_detected_at <=").
 		WithArgs(start, end, 100, 0).
-		WillReturnRows(sqlmock.NewRows(driftRecordCols))
+		WillReturnRows(sqlmock.NewRows(testsupport.DriftRecordColumns))
 	if _, err := r.List(ctx, nil, "", "", 0, 0, &start, &end); err != nil {
 		t.Fatalf("date-ranged List: %v", err)
 	}
@@ -296,16 +305,23 @@ func TestCountOpenBySeverity(t *testing.T) {
 
 // TestCountsBySource pins the drift summary's per-source breakdown: only LIVE
 // (non-resolved) records are grouped, and the join brings in the source name.
+// The infra_drift column is asserted with a NON-ZERO value (2 of the 3 live
+// records) alongside the pre-existing three, so a wrong column position or a
+// silently-dropped value would fail this the same way an all-zero fixture
+// could not.
 func TestCountsBySource(t *testing.T) {
 	db, mock := newMock(t)
 	r := NewDriftRecordRepository(db)
 
 	mock.ExpectQuery(`FROM drift_records r\s+JOIN state_sources s ON s\.id = r\.source_id\s+WHERE r\.status <> 'resolved'\s+GROUP BY r\.source_id, s\.name`).
-		WillReturnRows(sqlmock.NewRows([]string{"source_id", "source_name", "open", "acknowledged", "critical"}).
-			AddRow("s1", "prod", 2, 1, 1))
+		WillReturnRows(sqlmock.NewRows([]string{"source_id", "source_name", "open", "acknowledged", "critical", "infra_drift"}).
+			AddRow("s1", "prod", 2, 1, 1, 2))
 	out, err := r.CountsBySource(ctx)
 	if err != nil || len(out) != 1 || out[0].SourceID != "s1" || out[0].Open != 2 || out[0].Critical != 1 {
 		t.Fatalf("CountsBySource: %v %+v", err, out)
+	}
+	if out[0].InfraDrift != 2 {
+		t.Fatalf("CountsBySource InfraDrift = %d, want 2", out[0].InfraDrift)
 	}
 }
 
@@ -336,7 +352,7 @@ func TestDriftRecordRepository_AcknowledgeAndResolve(t *testing.T) {
 
 	// Not-open (or missing) records return (nil, nil) — handlers disambiguate.
 	mock.ExpectQuery("UPDATE drift_records").WithArgs("r2", "alice", "").
-		WillReturnRows(sqlmock.NewRows(driftRecordCols))
+		WillReturnRows(sqlmock.NewRows(testsupport.DriftRecordColumns))
 	if rec, err := r.Acknowledge(ctx, "r2", "alice", ""); err != nil || rec != nil {
 		t.Errorf("ack of non-open record: %v %+v", err, rec)
 	}
@@ -361,7 +377,7 @@ func TestDriftRecordRepository_GetByID(t *testing.T) {
 	}
 
 	mock.ExpectQuery("FROM drift_records WHERE id").WithArgs("ghost").
-		WillReturnRows(sqlmock.NewRows(driftRecordCols))
+		WillReturnRows(sqlmock.NewRows(testsupport.DriftRecordColumns))
 	if rec, err := r.GetByID(ctx, "ghost"); err != nil || rec != nil {
 		t.Errorf("missing record: %v %+v", err, rec)
 	}

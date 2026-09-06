@@ -18,7 +18,7 @@ func driftRow(token string) *sqlmock.Rows {
 	return testsupport.DriftRunRow("d1", "p1", "s1", "app.tfstate", "refs/heads/main", "infra/",
 		"completed", 1, 2, 0, true, []byte(`{"resources":[]}`), "", token, "alice",
 		"2026-06-10", "2026-06-10", false, 0, 0, false, false, "11111111-1111-4111-8111-111111111111",
-		nil, "", "")
+		nil, "", "", 0, 0, 0, nil)
 }
 
 // driftRowWithBatch is driftRow with a non-NULL batch_id, for the fan-out shape.
@@ -26,7 +26,7 @@ func driftRowWithBatch(token, batchID string) *sqlmock.Rows {
 	return testsupport.DriftRunRow("d1", "p1", "s1", "app.tfstate", "refs/heads/main", "infra/",
 		"dispatched", nil, nil, nil, nil, nil, "", token, "alice",
 		"2026-06-10", "2026-06-10", false, 0, 0, false, false, "11111111-1111-4111-8111-111111111111",
-		batchID, "", "")
+		batchID, "", "", 0, 0, 0, nil)
 }
 
 func TestDriftRepository_CreateAndGet(t *testing.T) {
@@ -350,7 +350,7 @@ func TestDriftRepository_UpdateResultPersistsCompletenessMarkers(t *testing.T) {
 		WillReturnRows(testsupport.DriftRunRow("d1", "p1", "s1", "app.tfstate", "", "", "completed",
 			0, 0, 0, false, nil, "", "", "alice", "2026-06-10", "2026-06-10",
 			true, 5, 9, true, true, "11111111-1111-4111-8111-111111111111",
-			nil, "", ""))
+			nil, "", "", 0, 0, 0, nil))
 	got, err := r.GetByID(ctx, "d1")
 	if err != nil || got == nil {
 		t.Fatalf("GetByID: %v %+v", err, got)
@@ -381,6 +381,45 @@ func TestDriftRepository_UpdateResultPersistsInfraDrift(t *testing.T) {
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Errorf("infra drift counts must be bound into the UPDATE: %v", err)
+	}
+}
+
+// TestDriftRepository_GetByID_ReadsInfraDriftNonZero is the READ half of the
+// infra-drift round trip (the write half is
+// TestDriftRepository_UpdateResultPersistsInfraDrift above): a row carrying
+// NON-ZERO drift_added/drift_changed/drift_destroyed/drift_summary must scan
+// into DriftRun.DriftAdded/DriftChanged/DriftDestroyed/DriftSummary with those
+// exact values. An all-zero fixture would only prove the four columns are in
+// the right SELECT position -- it cannot show a real value survives the scan,
+// which is exactly the class of bug that shipped silently in the write path
+// one step ago. added/changed/destroyed (the unapplied-change triplet) are
+// asserted unchanged alongside it, pinning that the two triplets are read
+// independently rather than one overwriting the other.
+func TestDriftRepository_GetByID_ReadsInfraDriftNonZero(t *testing.T) {
+	db, mock := newMock(t)
+	r := NewDriftRepository(db)
+
+	mock.ExpectQuery("SELECT .+ FROM drift_runs WHERE id").WithArgs("d1").
+		WillReturnRows(testsupport.DriftRunRow("d1", "p1", "s1", "app.tfstate", "", "", "completed",
+			1, 0, 0, true, []byte(`{"resource_changes":1}`), "", "", "alice", "2026-06-10", "2026-06-10",
+			false, 0, 0, false, false, "11111111-1111-4111-8111-111111111111",
+			nil, "", "", 3, 1, 0, `[{"address":"aws_instance.hand_edited","actions":["update"]}]`))
+
+	got, err := r.GetByID(ctx, "d1")
+	if err != nil || got == nil {
+		t.Fatalf("GetByID: %v %+v", err, got)
+	}
+	if got.DriftAdded != 3 || got.DriftChanged != 1 || got.DriftDestroyed != 0 {
+		t.Fatalf("infra drift counts lost in the round trip: added=%d changed=%d destroyed=%d, want 3/1/0",
+			got.DriftAdded, got.DriftChanged, got.DriftDestroyed)
+	}
+	if string(got.DriftSummary) != `[{"address":"aws_instance.hand_edited","actions":["update"]}]` {
+		t.Fatalf("drift_summary lost in the round trip: %s", got.DriftSummary)
+	}
+	// The pre-existing (resource_changes) triplet must be unaffected by reading
+	// the new columns beside it.
+	if got.Added == nil || *got.Added != 1 || got.Changed == nil || *got.Changed != 0 {
+		t.Fatalf("added/changed/destroyed corrupted by the infra drift read: added=%+v changed=%+v", got.Added, got.Changed)
 	}
 }
 

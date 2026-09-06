@@ -45,6 +45,24 @@ type DriftRun struct {
 	CIRunID  string `json:"ci_run_id"`
 	CIRunURL string `json:"ci_run_url"`
 
+	// DriftAdded/DriftChanged/DriftDestroyed/DriftSummary are the drift
+	// contract's second triplet (terraform-drift-contract 1.3.0+, migration
+	// 000039): resources changed OUTSIDE Terraform (resource_drift), as opposed
+	// to Added/Changed/Destroyed above, which count a plan's resource_changes
+	// (edits nobody has applied yet). The two are never blended -- Drifted
+	// above stays exactly the resource_changes-derived signal it always was,
+	// so a run with only infra drift still reports Drifted=false; a consumer
+	// wanting "did resource_drift show anything" reads these fields instead.
+	// Plain int (not *int, unlike Added/Changed/Destroyed): the column carries
+	// DEFAULT 0 rather than no default, so it is never NULL for a row this
+	// application wrote -- see migration 000039's comment for why that default
+	// was chosen despite the same nullable-until-first-result reasoning that
+	// gave Added/Changed/Destroyed a pointer.
+	DriftAdded     int             `json:"drift_added"`
+	DriftChanged   int             `json:"drift_changed"`
+	DriftDestroyed int             `json:"drift_destroyed"`
+	DriftSummary   json.RawMessage `json:"drift_summary,omitempty"`
+
 	// Completeness markers describing what THIS run's check did not do. Stored
 	// on the run rather than derived from its record because a clean run writes
 	// no record, an unparseable run touches none by design, and re-detection
@@ -70,7 +88,8 @@ const driftColumns = `id, pipeline_connection_id, source_id, COALESCE(state_key,
 	COALESCE(working_dir,''), status, added, changed, destroyed, drifted, summary, COALESCE(detail,''),
 	callback_token, COALESCE(actor,''), created_at::text, updated_at::text,
 	truncated, omitted_entries, omitted_attrs, unparseable, unmasked,
-	organization_id::text, batch_id::text, COALESCE(ci_run_id,''), COALESCE(ci_run_url,'')`
+	organization_id::text, batch_id::text, COALESCE(ci_run_id,''), COALESCE(ci_run_url,''),
+	COALESCE(drift_added,0), COALESCE(drift_changed,0), COALESCE(drift_destroyed,0), drift_summary`
 
 func scanDrift(scanner interface{ Scan(dest ...any) error }) (*DriftRun, error) {
 	var d DriftRun
@@ -78,12 +97,13 @@ func scanDrift(scanner interface{ Scan(dest ...any) error }) (*DriftRun, error) 
 	var connID, srcID sql.NullString
 	var added, changed, destroyed sql.NullInt64
 	var drifted sql.NullBool
-	var summary []byte
+	var summary, driftSummary []byte
 	if err := scanner.Scan(&d.ID, &connID, &srcID, &d.StateKey, &d.RepoRef, &d.WorkingDir, &d.Status,
 		&added, &changed, &destroyed, &drifted, &summary, &d.Detail, &d.CallbackToken, &d.Actor,
 		&d.CreatedAt, &d.UpdatedAt,
 		&d.Truncated, &d.OmittedEntries, &d.OmittedAttrs, &d.Unparseable, &d.Unmasked,
-		&organizationID, &batchID, &d.CIRunID, &d.CIRunURL); err != nil {
+		&organizationID, &batchID, &d.CIRunID, &d.CIRunURL,
+		&d.DriftAdded, &d.DriftChanged, &d.DriftDestroyed, &driftSummary); err != nil {
 		return nil, err
 	}
 	if organizationID.Valid {
@@ -116,6 +136,9 @@ func scanDrift(scanner interface{ Scan(dest ...any) error }) (*DriftRun, error) 
 	}
 	if len(summary) > 0 {
 		d.Summary = summary
+	}
+	if len(driftSummary) > 0 {
+		d.DriftSummary = driftSummary
 	}
 	return &d, nil
 }

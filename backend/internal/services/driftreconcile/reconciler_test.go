@@ -55,7 +55,7 @@ func (n *recordingNotifier) count() int {
 func dispatchedRow(id, token string) *sqlmock.Rows {
 	return testsupport.DriftRunRow(id, "p1", nil, "app.tfstate", "", "", "dispatched", nil, nil, nil, nil, nil, "", token, "alice",
 		"2026-06-21 10:00:00", "2026-06-21 10:00:00", false, 0, 0, false, false, "11111111-1111-4111-8111-111111111111",
-		nil, "", "")
+		nil, "", "", 0, 0, 0, nil)
 }
 
 // frozenNow is the reconciler's injected clock so the cutoff is deterministic and

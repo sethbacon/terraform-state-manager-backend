@@ -502,6 +502,25 @@ func (r *DriftRecordRepository) CountIncompleteInScope(ctx context.Context, scop
 	return n, err
 }
 
+// CountInfraDriftedInScope is the drift summary's infra_drifted field,
+// restricted to organizations the scope reaches -- CountIncompleteInScope's
+// twin, for the same disclosure reason: an unscoped count would tell a tenant
+// how many findings carry infra drift across the WHOLE deployment.
+func (r *DriftRecordRepository) CountInfraDriftedInScope(ctx context.Context, scope tenantscope.Scope) (int, error) {
+	if scope.Empty() {
+		return 0, nil
+	}
+	if scope.PlatformAdmin {
+		return r.CountInfraDrifted(ctx)
+	}
+	var n int
+	err := r.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM drift_records WHERE `+driftRecordOrgPredicate+`
+		 AND status <> 'resolved' AND (drift_added > 0 OR drift_changed > 0 OR drift_destroyed > 0)`,
+		scope.OrgIDs).Scan(&n)
+	return n, err
+}
+
 // GetByIDInScope returns one drift record when the scope permits it.
 //
 // A record in another organization is reported EXACTLY as one that does not

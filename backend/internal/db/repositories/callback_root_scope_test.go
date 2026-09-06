@@ -302,10 +302,10 @@ func TestCallbackRoots_ScopedReads_BindTheOrganization(t *testing.T) {
 
 		mock.ExpectQuery(`FROM drift_records r\s+JOIN state_sources s ON s\.id = r\.source_id\s+WHERE r\.status <> 'resolved' AND r\.organization_id = ANY.+AND s\.organization_id = ANY`).
 			WithArgs([]string{scopeOrgA}).
-			WillReturnRows(sqlmock.NewRows([]string{"source_id", "source_name", "open", "acknowledged", "critical"}).
-				AddRow("s1", "prod", 2, 0, 1))
+			WillReturnRows(sqlmock.NewRows([]string{"source_id", "source_name", "open", "acknowledged", "critical", "infra_drift"}).
+				AddRow("s1", "prod", 2, 0, 1, 1))
 		bySource, err := r.CountsBySourceInScope(ctx, scope)
-		if err != nil || len(bySource) != 1 || bySource[0].SourceID != "s1" {
+		if err != nil || len(bySource) != 1 || bySource[0].SourceID != "s1" || bySource[0].InfraDrift != 1 {
 			t.Fatalf("CountsBySourceInScope: %v %+v", err, bySource)
 		}
 
