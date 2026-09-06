@@ -2514,6 +2514,689 @@
           }
         }
       }
+    },
+    {
+      "id": "drift/only-resource-drift",
+      "why": "resource_drift is processed independently of resource_changes: a plan with no unapplied changes but one hand-edited resource reports zero added/changed/destroyed and a non-zero drift_added, with drift_summary carrying the row summary omits.",
+      "plan": {
+        "resource_changes": [],
+        "resource_drift": [
+          {
+            "address": "aws_instance.hand_edited",
+            "change": {
+              "actions": [
+                "create"
+              ],
+              "before": null,
+              "after": {
+                "instance_type": "t3.micro"
+              }
+            }
+          }
+        ]
+      },
+      "expect": {
+        "added": 0,
+        "changed": 0,
+        "destroyed": 0,
+        "drifted": false,
+        "summary": [],
+        "drift_added": 1,
+        "drift_changed": 0,
+        "drift_destroyed": 0,
+        "drift_summary": [
+          {
+            "address": "aws_instance.hand_edited",
+            "actions": [
+              "create"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "drift/both",
+      "why": "resource_changes and resource_drift are counted and summarised on independent tracks: an unapplied update does not touch drift_added/drift_summary, and a drifted create/delete pair does not touch added/changed/destroyed/summary.",
+      "plan": {
+        "resource_changes": [
+          {
+            "address": "aws_instance.unapplied",
+            "change": {
+              "actions": [
+                "update"
+              ],
+              "before": {
+                "size": 1
+              },
+              "after": {
+                "size": 2
+              }
+            }
+          }
+        ],
+        "resource_drift": [
+          {
+            "address": "aws_s3_bucket.drifted_new",
+            "change": {
+              "actions": [
+                "create"
+              ],
+              "before": null,
+              "after": {
+                "bucket": "a"
+              }
+            }
+          },
+          {
+            "address": "aws_instance.drifted_gone",
+            "change": {
+              "actions": [
+                "delete"
+              ],
+              "before": {
+                "size": 1
+              },
+              "after": null
+            }
+          }
+        ]
+      },
+      "expect": {
+        "added": 0,
+        "changed": 1,
+        "destroyed": 0,
+        "drifted": true,
+        "summary": [
+          {
+            "address": "aws_instance.unapplied",
+            "actions": [
+              "update"
+            ],
+            "attrs": [
+              {
+                "name": "size",
+                "before": "1",
+                "after": "2"
+              }
+            ]
+          }
+        ],
+        "unmasked": true,
+        "drift_added": 1,
+        "drift_changed": 0,
+        "drift_destroyed": 1,
+        "drift_summary": [
+          {
+            "address": "aws_s3_bucket.drifted_new",
+            "actions": [
+              "create"
+            ]
+          },
+          {
+            "address": "aws_instance.drifted_gone",
+            "actions": [
+              "delete"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "drift/skip-read",
+      "why": "PINNED: resource_drift honours the identical skip rule as resource_changes -- exactly [\"no-op\"] or [\"read\"] entries are skipped from both drift counts and drift_summary. The plan is explicit that drift counting reuses these rules rather than a parallel copy; a divergence between the two paths is the bug this phase exists to avoid.",
+      "plan": {
+        "resource_changes": [],
+        "resource_drift": [
+          {
+            "address": "aws_instance.unchanged",
+            "change": {
+              "actions": [
+                "no-op"
+              ],
+              "before": {
+                "a": 1
+              },
+              "after": {
+                "a": 1
+              }
+            }
+          },
+          {
+            "address": "data.aws_ami.refreshed",
+            "change": {
+              "actions": [
+                "read"
+              ],
+              "before": null,
+              "after": {
+                "id": "ami-1"
+              }
+            }
+          },
+          {
+            "address": "aws_instance.really_drifted",
+            "change": {
+              "actions": [
+                "update"
+              ],
+              "before": {
+                "size": 1
+              },
+              "after": {
+                "size": 3
+              }
+            }
+          }
+        ]
+      },
+      "expect": {
+        "added": 0,
+        "changed": 0,
+        "destroyed": 0,
+        "drifted": false,
+        "summary": [],
+        "drift_added": 0,
+        "drift_changed": 1,
+        "drift_destroyed": 0,
+        "drift_summary": [
+          {
+            "address": "aws_instance.really_drifted",
+            "actions": [
+              "update"
+            ],
+            "attrs": [
+              {
+                "name": "size",
+                "before": "1",
+                "after": "3"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "drift/absent-array",
+      "why": "resource_drift is optional and purely additive: a plan that omits it entirely reports zero drift counts and an empty drift_summary, and existing resource_changes handling is unaffected.",
+      "plan": {
+        "resource_changes": [
+          {
+            "address": "aws_s3_bucket.a",
+            "change": {
+              "actions": [
+                "create"
+              ],
+              "before": null,
+              "after": {
+                "bucket": "a"
+              }
+            }
+          }
+        ]
+      },
+      "expect": {
+        "added": 1,
+        "changed": 0,
+        "destroyed": 0,
+        "drifted": true,
+        "summary": [
+          {
+            "address": "aws_s3_bucket.a",
+            "actions": [
+              "create"
+            ]
+          }
+        ],
+        "drift_added": 0,
+        "drift_changed": 0,
+        "drift_destroyed": 0,
+        "drift_summary": []
+      }
+    },
+    {
+      "id": "drift/truncation",
+      "why": "resource_drift attrs are bounded by the same max_attrs_per_entry as resource_changes: 51 differing top-level keys on one drifted resource emit only the first 50 in code-point order, the 51st silently dropped by the shared cap.",
+      "plan": {
+        "resource_changes": [],
+        "resource_drift": [
+          {
+            "address": "aws_instance.many_attrs",
+            "change": {
+              "actions": [
+                "update"
+              ],
+              "before": {
+                "k00": 0,
+                "k01": 0,
+                "k02": 0,
+                "k03": 0,
+                "k04": 0,
+                "k05": 0,
+                "k06": 0,
+                "k07": 0,
+                "k08": 0,
+                "k09": 0,
+                "k10": 0,
+                "k11": 0,
+                "k12": 0,
+                "k13": 0,
+                "k14": 0,
+                "k15": 0,
+                "k16": 0,
+                "k17": 0,
+                "k18": 0,
+                "k19": 0,
+                "k20": 0,
+                "k21": 0,
+                "k22": 0,
+                "k23": 0,
+                "k24": 0,
+                "k25": 0,
+                "k26": 0,
+                "k27": 0,
+                "k28": 0,
+                "k29": 0,
+                "k30": 0,
+                "k31": 0,
+                "k32": 0,
+                "k33": 0,
+                "k34": 0,
+                "k35": 0,
+                "k36": 0,
+                "k37": 0,
+                "k38": 0,
+                "k39": 0,
+                "k40": 0,
+                "k41": 0,
+                "k42": 0,
+                "k43": 0,
+                "k44": 0,
+                "k45": 0,
+                "k46": 0,
+                "k47": 0,
+                "k48": 0,
+                "k49": 0,
+                "k50": 0
+              },
+              "after": {
+                "k00": 1,
+                "k01": 1,
+                "k02": 1,
+                "k03": 1,
+                "k04": 1,
+                "k05": 1,
+                "k06": 1,
+                "k07": 1,
+                "k08": 1,
+                "k09": 1,
+                "k10": 1,
+                "k11": 1,
+                "k12": 1,
+                "k13": 1,
+                "k14": 1,
+                "k15": 1,
+                "k16": 1,
+                "k17": 1,
+                "k18": 1,
+                "k19": 1,
+                "k20": 1,
+                "k21": 1,
+                "k22": 1,
+                "k23": 1,
+                "k24": 1,
+                "k25": 1,
+                "k26": 1,
+                "k27": 1,
+                "k28": 1,
+                "k29": 1,
+                "k30": 1,
+                "k31": 1,
+                "k32": 1,
+                "k33": 1,
+                "k34": 1,
+                "k35": 1,
+                "k36": 1,
+                "k37": 1,
+                "k38": 1,
+                "k39": 1,
+                "k40": 1,
+                "k41": 1,
+                "k42": 1,
+                "k43": 1,
+                "k44": 1,
+                "k45": 1,
+                "k46": 1,
+                "k47": 1,
+                "k48": 1,
+                "k49": 1,
+                "k50": 1
+              }
+            }
+          }
+        ]
+      },
+      "expect": {
+        "added": 0,
+        "changed": 0,
+        "destroyed": 0,
+        "drifted": false,
+        "summary": [],
+        "drift_added": 0,
+        "drift_changed": 1,
+        "drift_destroyed": 0,
+        "drift_summary": [
+          {
+            "address": "aws_instance.many_attrs",
+            "actions": [
+              "update"
+            ],
+            "attrs": [
+              {
+                "name": "k00",
+                "before": "0",
+                "after": "1"
+              },
+              {
+                "name": "k01",
+                "before": "0",
+                "after": "1"
+              },
+              {
+                "name": "k02",
+                "before": "0",
+                "after": "1"
+              },
+              {
+                "name": "k03",
+                "before": "0",
+                "after": "1"
+              },
+              {
+                "name": "k04",
+                "before": "0",
+                "after": "1"
+              },
+              {
+                "name": "k05",
+                "before": "0",
+                "after": "1"
+              },
+              {
+                "name": "k06",
+                "before": "0",
+                "after": "1"
+              },
+              {
+                "name": "k07",
+                "before": "0",
+                "after": "1"
+              },
+              {
+                "name": "k08",
+                "before": "0",
+                "after": "1"
+              },
+              {
+                "name": "k09",
+                "before": "0",
+                "after": "1"
+              },
+              {
+                "name": "k10",
+                "before": "0",
+                "after": "1"
+              },
+              {
+                "name": "k11",
+                "before": "0",
+                "after": "1"
+              },
+              {
+                "name": "k12",
+                "before": "0",
+                "after": "1"
+              },
+              {
+                "name": "k13",
+                "before": "0",
+                "after": "1"
+              },
+              {
+                "name": "k14",
+                "before": "0",
+                "after": "1"
+              },
+              {
+                "name": "k15",
+                "before": "0",
+                "after": "1"
+              },
+              {
+                "name": "k16",
+                "before": "0",
+                "after": "1"
+              },
+              {
+                "name": "k17",
+                "before": "0",
+                "after": "1"
+              },
+              {
+                "name": "k18",
+                "before": "0",
+                "after": "1"
+              },
+              {
+                "name": "k19",
+                "before": "0",
+                "after": "1"
+              },
+              {
+                "name": "k20",
+                "before": "0",
+                "after": "1"
+              },
+              {
+                "name": "k21",
+                "before": "0",
+                "after": "1"
+              },
+              {
+                "name": "k22",
+                "before": "0",
+                "after": "1"
+              },
+              {
+                "name": "k23",
+                "before": "0",
+                "after": "1"
+              },
+              {
+                "name": "k24",
+                "before": "0",
+                "after": "1"
+              },
+              {
+                "name": "k25",
+                "before": "0",
+                "after": "1"
+              },
+              {
+                "name": "k26",
+                "before": "0",
+                "after": "1"
+              },
+              {
+                "name": "k27",
+                "before": "0",
+                "after": "1"
+              },
+              {
+                "name": "k28",
+                "before": "0",
+                "after": "1"
+              },
+              {
+                "name": "k29",
+                "before": "0",
+                "after": "1"
+              },
+              {
+                "name": "k30",
+                "before": "0",
+                "after": "1"
+              },
+              {
+                "name": "k31",
+                "before": "0",
+                "after": "1"
+              },
+              {
+                "name": "k32",
+                "before": "0",
+                "after": "1"
+              },
+              {
+                "name": "k33",
+                "before": "0",
+                "after": "1"
+              },
+              {
+                "name": "k34",
+                "before": "0",
+                "after": "1"
+              },
+              {
+                "name": "k35",
+                "before": "0",
+                "after": "1"
+              },
+              {
+                "name": "k36",
+                "before": "0",
+                "after": "1"
+              },
+              {
+                "name": "k37",
+                "before": "0",
+                "after": "1"
+              },
+              {
+                "name": "k38",
+                "before": "0",
+                "after": "1"
+              },
+              {
+                "name": "k39",
+                "before": "0",
+                "after": "1"
+              },
+              {
+                "name": "k40",
+                "before": "0",
+                "after": "1"
+              },
+              {
+                "name": "k41",
+                "before": "0",
+                "after": "1"
+              },
+              {
+                "name": "k42",
+                "before": "0",
+                "after": "1"
+              },
+              {
+                "name": "k43",
+                "before": "0",
+                "after": "1"
+              },
+              {
+                "name": "k44",
+                "before": "0",
+                "after": "1"
+              },
+              {
+                "name": "k45",
+                "before": "0",
+                "after": "1"
+              },
+              {
+                "name": "k46",
+                "before": "0",
+                "after": "1"
+              },
+              {
+                "name": "k47",
+                "before": "0",
+                "after": "1"
+              },
+              {
+                "name": "k48",
+                "before": "0",
+                "after": "1"
+              },
+              {
+                "name": "k49",
+                "before": "0",
+                "after": "1"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "drift/masking",
+      "why": "resource_drift attrs go through the identical masking rule as resource_changes: a key marked sensitive on either mirror renders \"(sensitive)\" in drift_summary rather than the raw value.",
+      "plan": {
+        "resource_changes": [],
+        "resource_drift": [
+          {
+            "address": "aws_instance.rotated_secret",
+            "change": {
+              "actions": [
+                "update"
+              ],
+              "before": {
+                "pw": "old-secret"
+              },
+              "after": {
+                "pw": "new-secret"
+              },
+              "before_sensitive": {
+                "pw": true
+              },
+              "after_sensitive": {}
+            }
+          }
+        ]
+      },
+      "expect": {
+        "added": 0,
+        "changed": 0,
+        "destroyed": 0,
+        "drifted": false,
+        "summary": [],
+        "drift_added": 0,
+        "drift_changed": 1,
+        "drift_destroyed": 0,
+        "drift_summary": [
+          {
+            "address": "aws_instance.rotated_secret",
+            "actions": [
+              "update"
+            ],
+            "attrs": [
+              {
+                "name": "pw",
+                "before": "(sensitive)",
+                "after": "(sensitive)"
+              }
+            ]
+          }
+        ]
+      }
     }
   ]
 }

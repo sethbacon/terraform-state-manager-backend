@@ -40,10 +40,21 @@ import (
 // the semantic change, the vector and the three literals move together, in both
 // repositories, in the same batch.
 const (
-	corpusPath   = "testdata/conformance/vectors.json"
-	corpusSHA256 = "668a292a169dedfad131e98d44f7768159635112a7fbf2cf11a201ffb02e8daa"
-	// Same literal as RECONCILED_DIGEST in the contract's __tests__/conformance.test.ts.
-	reconciledDigest = "4f0002731219d9491636de981cde760688f720971d9a3882a2d6f55e13b6a173"
+	corpusPath = "testdata/conformance/vectors.json"
+	// Updated for the 6 drift/* vectors added alongside resource_drift /
+	// drift_added / drift_changed / drift_destroyed / drift_summary (contract
+	// v1.4.0, Phase 5 item 1): the corpus file's bytes changed, so this digest
+	// must change with it — a stale value here would mean this repository's
+	// vendored copy and the contract's copy have silently diverged.
+	corpusSHA256 = "7052e9e0093538f411e538ded70d363dfb59980223a2b2e26ad25546fdbaa5aa"
+	// Same literal as RECONCILED_DIGEST in the contract's
+	// __tests__/conformance.test.ts. Updated for the same reason as
+	// corpusSHA256: envelope()/renderConform now include
+	// drift_added/drift_changed/drift_destroyed/drift_summary, so every
+	// reconciled vector's rendered bytes changed even where its drift fields
+	// are all-default, and the 6 new drift/* vectors (none states a `go`
+	// difference, so all 6 join the reconciled set) contribute their own rows.
+	reconciledDigest = "bc1a7fcfb176c628f26665ab0f039d493526b513585649821777781a7dbcbc1b"
 )
 
 type conformStated struct {
@@ -69,6 +80,9 @@ type conformResult struct {
 	Added          int            `json:"added"`
 	Changed        int            `json:"changed"`
 	Destroyed      int            `json:"destroyed"`
+	DriftAdded     int            `json:"drift_added"`
+	DriftChanged   int            `json:"drift_changed"`
+	DriftDestroyed int            `json:"drift_destroyed"`
 	Drifted        bool           `json:"drifted"`
 	Unparseable    bool           `json:"unparseable"`
 	Unmasked       bool           `json:"unmasked"`
@@ -76,6 +90,7 @@ type conformResult struct {
 	OmittedEntries int            `json:"omitted_entries"`
 	OmittedAttrs   int            `json:"omitted_attrs"`
 	Summary        []SummaryEntry `json:"summary"`
+	DriftSummary   []SummaryEntry `json:"drift_summary"`
 }
 
 // envelope projects a Result into the comparison shape, in one place, so the
@@ -83,9 +98,10 @@ type conformResult struct {
 func envelope(r *Result) conformResult {
 	return conformResult{
 		Added: r.Added, Changed: r.Changed, Destroyed: r.Destroyed,
+		DriftAdded: r.DriftAdded, DriftChanged: r.DriftChanged, DriftDestroyed: r.DriftDestroyed,
 		Drifted: r.Drifted(), Unparseable: r.Unparseable, Unmasked: r.Unmasked,
 		Truncated: r.Truncated(), OmittedEntries: r.OmittedEntries,
-		OmittedAttrs: r.OmittedAttrs, Summary: r.Summary,
+		OmittedAttrs: r.OmittedAttrs, Summary: r.Summary, DriftSummary: r.DriftSummary,
 	}
 }
 
@@ -113,6 +129,9 @@ func renderExpected(t *testing.T, raw json.RawMessage) string {
 	}
 	if want.Summary == nil {
 		want.Summary = []SummaryEntry{}
+	}
+	if want.DriftSummary == nil {
+		want.DriftSummary = []SummaryEntry{}
 	}
 	return renderConform(t, want)
 }
