@@ -674,3 +674,44 @@ func TestCreatePipeline_FanOutMustBeBoolean_400(t *testing.T) {
 		t.Errorf("a boolean fan_out must be accepted: status = %d (%s)", w2.Code, w2.Body.String())
 	}
 }
+
+// A database failure part-way through creating a fan-out batch must not strand
+// the rows already created: they hold live one-shot tokens that no CI job will
+// ever use (nothing has been dispatched yet), so they are failed forward
+// exactly like a dispatch failure instead of sitting "dispatched" until the
+// reconciler's TTL.
+func TestCreateRun_MidBatchCreateFails_FailsCreatedRows(t *testing.T) {
+	e := newDriftEnv(t)
+	e.mock.ExpectQuery("FROM pipeline_connections WHERE organization_id = ANY").
+		WithArgs([]string{testActingOrg}, "p1").
+		WillReturnRows(pipelineHTTPRow(t, "azure_devops", "pat", map[string]any{
+			"organization": "corp", "project": "P", "pipeline_id": "7", "fan_out": true,
+		}))
+	e.mock.ExpectQuery("FROM state_sources WHERE organization_id = ANY").
+		WithArgs([]string{testActingOrg}, "s1").
+		WillReturnRows(sqlmock.NewRows(apiSourceCols).
+			AddRow("s1", "app1", "local", "", []byte(`{"base_path":"/tmp"}`), []byte(`{}`), nil, "2026-06-11", "2026-06-11", testActingOrg))
+	e.mock.ExpectQuery("FROM state_sources WHERE organization_id = ANY").
+		WithArgs([]string{testActingOrg}, "s2").
+		WillReturnRows(sqlmock.NewRows(apiSourceCols).
+			AddRow("s2", "app2", "local", "", []byte(`{"base_path":"/tmp"}`), []byte(`{}`), nil, "2026-06-11", "2026-06-11", testActingOrg))
+	e.mock.ExpectQuery("INSERT INTO drift_runs").
+		WillReturnRows(driftRunInsertRow("d1", "s1", "app1.tfstate", "tok-a", nil))
+	e.mock.ExpectQuery("INSERT INTO drift_runs").
+		WillReturnError(fmt.Errorf("connection reset by peer"))
+	e.mock.ExpectExec(`UPDATE drift_runs SET status='failed'`).
+		WithArgs(sqlmock.AnyArg(), containsArg("batch aborted")).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+
+	body := `{"pipeline_connection_id":"p1","targets":[
+		{"source_id":"s1","state_key":"app1.tfstate","working_dir":"app1/"},
+		{"source_id":"s2","state_key":"app2.tfstate","working_dir":"app2/"}
+	]}`
+	w := e.do(http.MethodPost, "/api/v1/drift/runs", body)
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500 (%s)", w.Code, w.Body.String())
+	}
+	if err := e.mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("the row created before the failure must be failed forward: %v", err)
+	}
+}

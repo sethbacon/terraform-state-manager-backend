@@ -332,3 +332,71 @@ func TestDriftSummary_Grouping(t *testing.T) {
 		t.Errorf("in_flight = %d, want 3 (2 dispatched + 1 running)", resp.InFlight)
 	}
 }
+
+// stale_after shapes the "stale" verdict for every state in the response, so
+// an unparseable, zero, negative or absurd value is rejected outright rather
+// than silently replaced with the default -- and it is checked before any
+// database read, so the 400 costs nothing.
+func TestCoverage_StaleAfterInvalid_400(t *testing.T) {
+	e := newDriftEnv(t)
+	for _, v := range []string{"soon", "0", "-1h", "0s", "87600h"} {
+		w := e.do(http.MethodGet, "/api/v1/drift/coverage?source_id=s1&stale_after="+v, "")
+		if w.Code != http.StatusBadRequest {
+			t.Errorf("stale_after=%q: status = %d, want 400 (%s)", v, w.Code, w.Body.String())
+		}
+	}
+	if err := e.mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("a rejected stale_after must not touch the database: %v", err)
+	}
+}
+
+// A disabled schedule never fires (GetDue filters on enabled), so its targets
+// must not count as covered -- otherwise the coverage view hides exactly the
+// gap it exists to show.
+func TestCoverage_DisabledScheduleNotCountedAsScheduled(t *testing.T) {
+	e := newDriftEnv(t)
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "app.tfstate"), []byte("{}"), 0o600); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	coverageSourceRow(e, "s1", dir)
+	e.mock.ExpectQuery(`SELECT DISTINCT ON \(state_key\) .+ FROM drift_runs`).
+		WithArgs([]string{testActingOrg}, "s1").
+		WillReturnRows(sqlmock.NewRows(testsupport.DriftRunColumns))
+	e.mock.ExpectQuery(`FROM drift_records WHERE organization_id = ANY.+AND source_id = \$2.+AND status <> 'resolved'`).
+		WithArgs([]string{testActingOrg}, "s1").
+		WillReturnRows(sqlmock.NewRows(driftRecCols))
+	scheduleCfg, _ := json.Marshal(map[string]any{"pipeline_connection_id": "p1", "source_id": "s1", "state_key": "app.tfstate"})
+	e.mock.ExpectQuery("FROM schedules WHERE organization_id = ANY").
+		WithArgs([]string{testActingOrg}).
+		WillReturnRows(sqlmock.NewRows(scheduleHTTPCols).
+			AddRow("sch1", "paused", "0 2 * * *", "drift", scheduleCfg, false,
+				nil, nil, nil, nil, "2026-06-10", "2026-06-10", testActingOrg))
+
+	w := e.do(http.MethodGet, "/api/v1/drift/coverage?source_id=s1", "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d (%s)", w.Code, w.Body.String())
+	}
+	var resp struct {
+		States []struct {
+			Key       string `json:"key"`
+			Scheduled bool   `json:"scheduled"`
+		} `json:"states"`
+		Summary struct {
+			Scheduled   int `json:"scheduled"`
+			Unscheduled int `json:"unscheduled"`
+		} `json:"summary"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(resp.States) != 1 || resp.States[0].Key != "app.tfstate" {
+		t.Fatalf("states = %+v, want exactly app.tfstate", resp.States)
+	}
+	if resp.States[0].Scheduled {
+		t.Error("a state whose only schedule is disabled must not report scheduled=true")
+	}
+	if resp.Summary.Scheduled != 0 || resp.Summary.Unscheduled != 1 {
+		t.Errorf("summary = %+v, want scheduled=0 unscheduled=1", resp.Summary)
+	}
+}

@@ -18,6 +18,7 @@ package api
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"sync"
 	"time"
@@ -52,6 +53,11 @@ type coverageJoinInputs struct {
 // "simplest thing that works" this phase asks for, not a caching framework.
 // One instance per DriftHandlers (constructed fresh per process, and per test
 // rig), so entries never leak across independent handler instances.
+//
+// Keyed by source id alone. That is safe only because every reader resolves
+// the source through GetByIDInScope BEFORE touching the cache, so a caller
+// outside the owning organization 404s before any cached row can be seen.
+// Keep that ordering; if a second reader is ever added, key by (org, source).
 type coverageCache struct {
 	mu      sync.Mutex
 	entries map[string]coverageCacheEntry
@@ -85,9 +91,14 @@ func (cc *coverageCache) set(sourceID string, data coverageJoinInputs) {
 	cc.entries[sourceID] = coverageCacheEntry{at: time.Now(), data: data}
 }
 
-// defaultStaleAfter is applied when ?stale_after= is absent or unparseable --
-// the same 24h window the plan's "Done when" acceptance criteria names.
+// defaultStaleAfter is applied when ?stale_after= is absent -- the same 24h
+// window the plan's "Done when" acceptance criteria names. A present but
+// invalid value is a 400, never silently this default.
 const defaultStaleAfter = 24 * time.Hour
+
+// maxStaleAfter bounds ?stale_after=: past it every state reads as fresh and
+// the coverage view stops meaning anything.
+const maxStaleAfter = 30 * 24 * time.Hour
 
 // coverageState is one row of GET /drift/coverage's states array.
 type coverageState struct {
@@ -192,7 +203,10 @@ func parsePGTimestamp(s string) (time.Time, bool) {
 func scheduledStateKeys(schedules []repositories.Schedule, sourceID string) map[string]bool {
 	out := map[string]bool{}
 	for _, s := range schedules {
-		if s.TargetType != "drift" {
+		// A disabled schedule never fires (GetDue filters on enabled), so its
+		// targets are NOT covered -- counting them would hide exactly the gap
+		// this view exists to show.
+		if s.TargetType != "drift" || !s.Enabled {
 			continue
 		}
 		var t DriftTarget
@@ -215,7 +229,7 @@ func scheduledStateKeys(schedules []repositories.Schedule, sourceID string) map[
 // @Tags         Drift
 // @Produce      json
 // @Param        source_id   query  string  true   "state source id"
-// @Param        stale_after query  string  false  "duration a state may go unchecked before it counts as stale (default 24h)"
+// @Param        stale_after query  string  false  "duration a state may go unchecked before it counts as stale (default 24h; a positive Go duration no greater than 720h, else 400)"
 // @Success      200  {object}  map[string]interface{}
 // @Failure      400  {object}  map[string]interface{}
 // @Failure      404  {object}  map[string]interface{}
@@ -228,6 +242,22 @@ func (h *DriftHandlers) Coverage() gin.HandlerFunc {
 		if sourceID == "" {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "source_id is required"})
 			return
+		}
+		// stale_after shapes the "stale" verdict on every row, so a bad value
+		// is refused rather than silently swapped for the default -- and it is
+		// checked before any database read.
+		staleAfter := defaultStaleAfter
+		if v := c.Query("stale_after"); v != "" {
+			d, dErr := time.ParseDuration(v)
+			if dErr != nil || d <= 0 {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "stale_after must be a positive duration such as 24h or 90m"})
+				return
+			}
+			if d > maxStaleAfter {
+				c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("stale_after may not exceed %s", maxStaleAfter)})
+				return
+			}
+			staleAfter = d
 		}
 		// The Phase 4a read for drift_runs/drift_records/schedules, on the same
 		// terms ListRuns/ListDriftRecords already resolve it on (#393 Phase 3):
@@ -244,13 +274,6 @@ func (h *DriftHandlers) Coverage() gin.HandlerFunc {
 			return
 		}
 		ctx := c.Request.Context()
-
-		staleAfter := defaultStaleAfter
-		if v := c.Query("stale_after"); v != "" {
-			if d, dErr := time.ParseDuration(v); dErr == nil && d > 0 {
-				staleAfter = d
-			}
-		}
 
 		inputs, ok := h.coverage.get(sourceID)
 		if !ok {

@@ -211,7 +211,7 @@ func TestPruneRuns_KeepsNewestPerState(t *testing.T) {
 	db, mock := newMock(t)
 	r := NewDriftRepository(db)
 
-	mock.ExpectExec(`DELETE FROM drift_runs r\s+USING \(\s*SELECT id, row_number\(\) OVER \(\s*PARTITION BY source_id, state_key ORDER BY created_at DESC\s*\) AS rn\s+FROM drift_runs\s*\) w\s+WHERE r\.id = w\.id\s+AND w\.rn > \$1\s+AND r\.created_at < now\(\) - make_interval\(secs => \$2\)`).
+	mock.ExpectExec(`DELETE FROM drift_runs r\s+USING \(\s*SELECT id, row_number\(\) OVER \(\s*PARTITION BY source_id, state_key ORDER BY created_at DESC\s*\) AS rn\s+FROM drift_runs\s*\) w\s+WHERE r\.id = w\.id\s+AND w\.rn > \$1\s+AND r\.created_at < now\(\) - make_interval\(secs => \$2\)\s+AND r\.status NOT IN \('dispatched', 'running'\)`).
 		WithArgs(20, (90 * 24 * time.Hour).Seconds()).
 		WillReturnResult(sqlmock.NewResult(0, 7))
 	n, err := r.PruneRuns(ctx, 20, 90*24*time.Hour)

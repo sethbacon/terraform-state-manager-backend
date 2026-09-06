@@ -382,6 +382,10 @@ func (r *DriftRepository) PruneRuns(ctx context.Context, keepPerState int, maxAg
 	if maxAge <= 0 {
 		return 0, fmt.Errorf("drift run retention max age must be > 0, got %s", maxAge)
 	}
+	// Terminal rows only. A run still "dispatched"/"running" may yet receive
+	// its callback; deleting it would make that callback's UPDATE match zero
+	// rows and lose a legitimate result silently. The reconciler, not
+	// retention, is what moves a stuck run to a terminal status.
 	res, err := r.db.ExecContext(ctx, `
 		DELETE FROM drift_runs r
 		USING (
@@ -392,7 +396,8 @@ func (r *DriftRepository) PruneRuns(ctx context.Context, keepPerState int, maxAg
 		) w
 		WHERE r.id = w.id
 		  AND w.rn > $1
-		  AND r.created_at < now() - make_interval(secs => $2)`,
+		  AND r.created_at < now() - make_interval(secs => $2)
+		  AND r.status NOT IN ('dispatched', 'running')`,
 		keepPerState, maxAge.Seconds())
 	if err != nil {
 		return 0, err
