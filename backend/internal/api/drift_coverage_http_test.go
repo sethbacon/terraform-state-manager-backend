@@ -335,7 +335,7 @@ func TestDriftSummary_Grouping(t *testing.T) {
 			Dispatched int `json:"dispatched"`
 		} `json:"runs_24h"`
 		IncompleteRecords int `json:"incomplete_records"`
-		InfraDrifted      int `json:"infra_drifted"`
+		InfraDriftRecords int `json:"infra_drift_records"`
 		InFlight          int `json:"in_flight"`
 	}
 	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
@@ -353,8 +353,8 @@ func TestDriftSummary_Grouping(t *testing.T) {
 	if resp.IncompleteRecords != 3 {
 		t.Errorf("incomplete_records = %d, want 3", resp.IncompleteRecords)
 	}
-	if resp.InfraDrifted != 4 {
-		t.Errorf("infra_drifted = %d, want 4", resp.InfraDrifted)
+	if resp.InfraDriftRecords != 4 {
+		t.Errorf("infra_drift_records = %d, want 4", resp.InfraDriftRecords)
 	}
 	if resp.InFlight != 3 {
 		t.Errorf("in_flight = %d, want 3 (2 dispatched + 1 running)", resp.InFlight)

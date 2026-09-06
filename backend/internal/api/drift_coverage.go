@@ -395,7 +395,7 @@ func (h *DriftHandlers) Coverage() gin.HandlerFunc {
 
 // Summary is the fleet-wide rollup behind the landing page's drift cards.
 // @Summary      Drift summary
-// @Description  Per-source open/acknowledged/critical/infra_drift drift-record counts, the last 24h of drift runs by terminal status, how many live records are incomplete (unparseable or truncated), how many live records carry infra drift (resource_drift, migration 000039, never conflated with the unapplied-change counts beside it), and how many runs are currently in flight -- all scoped to the caller's organization(s).
+// @Description  Per-source open/acknowledged/critical/infra_drift drift-record counts, the last 24h of drift runs by terminal status, how many live records are incomplete (unparseable or truncated), infra_drift_records -- how many live records carry infra drift (resource_drift, migration 000039, never conflated with the unapplied-change counts beside it) -- and how many runs are currently in flight -- all scoped to the caller's organization(s).
 // @Tags         Drift
 // @Produce      json
 // @Success      200  {object}  map[string]interface{}
@@ -421,12 +421,17 @@ func (h *DriftHandlers) Summary() gin.HandlerFunc {
 			serverError(c, err, "failed to load drift summary")
 			return
 		}
-		// infra_drifted mirrors incomplete_records' shape exactly (a single
-		// scoped count over LIVE records) but classifies by the drift
-		// contract's second triplet instead: how many open findings carry
-		// resource_drift, independent of whatever their own
-		// added/changed/destroyed (resource_changes) says.
-		infraDrifted, err := h.recordRepo.CountInfraDriftedInScope(ctx, scope)
+		// infra_drift_records mirrors incomplete_records' shape AND its name
+		// exactly (a single scoped count over LIVE records) but classifies by
+		// the drift contract's second triplet instead: how many open findings
+		// carry resource_drift, independent of whatever their own
+		// added/changed/destroyed (resource_changes) says. Named distinctly
+		// from coverage's own infra_drifted (a nullable bool per state,
+		// mirroring drifted) and from records_by_source[].infra_drift (a bare
+		// count sitting beside open/acknowledged/critical) -- three different
+		// shapes for three different siblings, not one name reused for all of
+		// them.
+		infraDriftRecords, err := h.recordRepo.CountInfraDriftedInScope(ctx, scope)
 		if err != nil {
 			serverError(c, err, "failed to load drift summary")
 			return
@@ -479,9 +484,9 @@ func (h *DriftHandlers) Summary() gin.HandlerFunc {
 				"failed":     failed,
 				"dispatched": dispatched24h + running24h,
 			},
-			"incomplete_records": incomplete,
-			"infra_drifted":      infraDrifted,
-			"in_flight":          inFlightDispatched + inFlightRunning,
+			"incomplete_records":  incomplete,
+			"infra_drift_records": infraDriftRecords,
+			"in_flight":           inFlightDispatched + inFlightRunning,
 		})
 	}
 }
