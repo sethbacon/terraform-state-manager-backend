@@ -2,7 +2,8 @@
 
 > **Status:** **Partially implemented 2026-09-05.** Phases 1, 1b, 2 and 4a landed in
 > sethbacon/terraform-state-manager-backend#569; Phase 4b in sethbacon/terraform-state-manager-frontend#416.
-> Phase 0 (ops), Phase 3 (tooling) and Phase 5 (contract) are **not started**.
+> Phase 5 is **4 of 5 steps done** — only the frontend remains. Phase 0 (ops) and
+> Phase 3 (tooling) are not started.
 > See "Implementation status" below before working from this document.
 > **Repo:** `terraform-state-manager-backend` (primary) + `terraform-state-manager-frontend`,
 > the Brunswick drift templates (operator data in the TSM template registry), the Brunswick
@@ -31,7 +32,7 @@
 | 3 — Discovery-driven onboarding | **not started** | tooling host unreachable |
 | 4a — Dashboard read-path (backend) | **done** | sethbacon/terraform-state-manager-backend#569 |
 | 4b — Dashboard read-path (frontend) | **done** | sethbacon/terraform-state-manager-frontend#416 |
-| 5 — Contract: infra drift vs unapplied | **in progress** — step 1 done: contract **v1.4.0 published**; steps 2–5 (Go mirror, task/action, backend storage, frontend) outstanding | 4cloudguru/terraform-drift-contract#83 |
+| 5 — Contract: infra drift vs unapplied | **4 of 5 done** — contract v1.4.0 published, Go mirror, task + action, and backend storage all merged; **only step 5 (frontend) remains** | 4cloudguru/terraform-drift-contract#83, sethbacon/terraform-state-manager-backend#578, #579, sethbacon/azure-pipelines-terraform#1116, sethbacon/terraform-drift-report#85 |
 
 ### Corrections — this document's §3 anchors were stale within a day
 
@@ -249,8 +250,16 @@ Templates, tooling, contract:
   `conformance/vectors.json` (56 vectors) with `CORPUS_SHA256`/`RECONCILED_DIGEST`; Go mirror
   `backend/internal/services/driftingest/plan.go` (`Result` :108-132, vendored corpus
   `testdata/conformance/vectors.json`, digests `conformance_test.go:43-46`).
-  `resource_drift`: was **zero occurrences** anywhere when this was written; it now exists in the contract as of v1.4.0 (4cloudguru/terraform-drift-contract#83). The Go mirror, the task, the action, backend storage and the frontend still have none — that is the remainder of Phase 5. GH action `terraform-drift-report` pins
-  `github:sethbacon/terraform-drift-contract#v1.0.0` (unscoped; debt).
+  `resource_drift`: was **zero occurrences** anywhere when this was written. It now
+  exists in the contract (v1.4.0), the Go mirror, the ADO task, the GitHub action and
+  backend storage. **Only the frontend still has none** — that is the remainder of
+  Phase 5.
+
+  The claim that the GH action `terraform-drift-report` pins
+  `github:sethbacon/terraform-drift-contract#v1.0.0` (unscoped; debt) was **already
+  false when this document was written**: commit `cac7a5b` retired that pin on
+  2026-08-13 and moved the action onto the scoped npm package. It is now on `^1.4.0`
+  like the task.
 
 ## 4. Design decisions (fixed)
 
