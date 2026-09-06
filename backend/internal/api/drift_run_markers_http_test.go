@@ -54,7 +54,7 @@ func TestRunResults_UnparseableCleanRunRoundTripsMarkersOnTheRun(t *testing.T) {
 	// The five markers must reach the run UPDATE, not stop at the handler.
 	e.mock.ExpectExec("UPDATE drift_runs").
 		WithArgs("d1", "completed", 0, 0, 0, false, nil, "gh run 9",
-			false, 0, 0, true, false, []string{testActingOrg}).
+			false, 0, 0, true, false, 0, 0, 0, nil, []string{testActingOrg}).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	sourceRowFor(e, "s1")
 
@@ -98,7 +98,7 @@ func TestRunResults_CleanButBoundedRunRoundTripsMarkersOnTheRun(t *testing.T) {
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	e.mock.ExpectExec("UPDATE drift_runs").
 		WithArgs("d1", "completed", 0, 0, 0, false, nil, "",
-			true, 12, 3, false, true, []string{testActingOrg}).
+			true, 12, 3, false, true, 0, 0, 0, nil, []string{testActingOrg}).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	sourceRowFor(e, "s1")
 	// Clean and readable, so the live finding is still resolved — the markers

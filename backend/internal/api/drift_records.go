@@ -53,7 +53,7 @@ func completenessFromResult(res *driftingest.Result) repositories.Completeness {
 // scoping the statements as well is the defence that survives the caller being
 // edited, and it is the layer a mock cannot stand in for -- the refusal happens
 // in SQL, not in a comparison somebody has to keep writing.
-func (h *DriftHandlers) recordDriftOutcome(ctx context.Context, run *repositories.DriftRun, status string, added, changed, destroyed int, drifted bool, summary []byte, marks repositories.Completeness, auth dispatchAuthority) {
+func (h *DriftHandlers) recordDriftOutcome(ctx context.Context, run *repositories.DriftRun, status string, added, changed, destroyed int, drifted bool, summary []byte, marks repositories.Completeness, infra repositories.InfraDrift, auth dispatchAuthority) {
 	if h.recordRepo == nil || status != "completed" || run.SourceID == nil || run.StateKey == "" {
 		return
 	}
@@ -69,6 +69,7 @@ func (h *DriftHandlers) recordDriftOutcome(ctx context.Context, run *repositorie
 			Destroyed:            destroyed,
 			Summary:              summary,
 			Completeness:         marks,
+			Infra:                infra,
 		}
 		if _, err := h.recordRepo.UpsertDetectionInScope(ctx, d, auth.scope); err != nil {
 			driftLog.Error("failed to upsert drift record from run", "run", run.ID, "error", err)
@@ -85,6 +86,12 @@ func (h *DriftHandlers) recordDriftOutcome(ctx context.Context, run *repositorie
 			"run", run.ID, "state", run.StateKey)
 		return
 	}
+	// infra is deliberately not consulted here. Whether infra-only drift
+	// (resource_drift with no resource_changes) should keep a record open is a
+	// policy decision this storage-only step does not make -- drifted stays
+	// exactly the resource_changes-derived signal it always was, and the
+	// infra_* counts this run reported are still persisted onto drift_runs by
+	// UpdateResultInScope above regardless of which branch runs here.
 	if _, err := h.recordRepo.ResolveCleanInScope(ctx, *run.SourceID, run.StateKey, auth.scope); err != nil {
 		driftLog.Error("failed to resolve drift record after clean run", "run", run.ID, "error", err)
 	}
@@ -113,6 +120,17 @@ type driftIngestPayload struct {
 	// the sender supplies counts/summary; overwritten by the server's own
 	// reading when a raw plan is supplied instead.
 	repositories.Completeness
+	// DriftAdded/Changed/Destroyed/Summary are the contract's second triplet
+	// (resource_drift) -- see driftRunResultPayload for what they mean and why
+	// their absence decodes to the zero value rather than an error. Unlike
+	// Added/Changed/Destroyed above, a raw plan supplied here does NOT yet
+	// override these: driftingest.Result gains the mirrored fields in a
+	// separate change (Phase 5 item 2), so until then a sender's own reported
+	// values are what gets stored, exactly as if no plan had been supplied.
+	DriftAdded     int             `json:"drift_added"`
+	DriftChanged   int             `json:"drift_changed"`
+	DriftDestroyed int             `json:"drift_destroyed"`
+	DriftSummary   json.RawMessage `json:"drift_summary"`
 }
 
 // IngestDrift accepts a drift result pushed by a pipeline TSM did not dispatch.
@@ -187,7 +205,15 @@ func (h *DriftHandlers) IngestDrift() gin.HandlerFunc {
 
 		added, changed, destroyed := req.Added, req.Changed, req.Destroyed
 		summary := req.Summary
-		drifted := added+changed+destroyed > 0 || len(summary) > 2 // "[]" is clean
+		// Infra counts also count as drift here, unlike on the run callback
+		// (recordDriftOutcome): a run always has a drift_runs row to persist
+		// infra_* onto regardless of this branch, but ingest has no such row --
+		// the record IS the only durable place these values can land, so a
+		// sender that reports ONLY infra drift (resource_drift, no
+		// resource_changes) must still take the upsert path below, or the
+		// values it sent are accepted and then silently discarded.
+		drifted := added+changed+destroyed > 0 || len(summary) > 2 || // "[]" is clean
+			req.DriftAdded+req.DriftChanged+req.DriftDestroyed > 0
 		if len(req.Plan) > 0 {
 			var plan driftingest.Plan
 			if err := json.Unmarshal(req.Plan, &plan); err != nil {
@@ -264,6 +290,9 @@ func (h *DriftHandlers) IngestDrift() gin.HandlerFunc {
 			Summary:      summary,
 			ExternalRef:  extRef,
 			Completeness: req.Completeness,
+			Infra: repositories.InfraDrift{
+				Added: req.DriftAdded, Changed: req.DriftChanged, Destroyed: req.DriftDestroyed, Summary: req.DriftSummary,
+			},
 		}
 		rec, err := h.recordRepo.UpsertDetectionInScope(ctx, det, scope)
 		if err != nil {
