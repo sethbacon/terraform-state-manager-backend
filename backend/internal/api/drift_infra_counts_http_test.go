@@ -80,6 +80,58 @@ func TestRunResults_InfraDriftCountsPersist(t *testing.T) {
 	}
 }
 
+// TestRunResults_InfraOnlyDrift_OpensRecordWithDriftedFalse is issue #583: a
+// dispatched run whose ONLY drift is infrastructure drift (added=changed=
+// destroyed=0, drifted:false, drift_added/changed/destroyed>0) must still open
+// a drift record on the callback path, mirroring the hasFinding widening
+// IngestDrift already applies (#579) -- upsert-versus-resolve is decided on
+// "is there any finding" (drifted OR infra), while the stored `drifted` value
+// itself stays exactly the resource_changes-derived false it was computed as.
+// Before this fix, recordDriftOutcome gated the whole upsert on `drifted`
+// alone, so this exact payload reached ONLY the run row (UpdateResultInScope)
+// and never the record (UpsertDetectionInScope) -- an operator could see the
+// infra drift on /drift/coverage but had nothing to acknowledge or resolve.
+func TestRunResults_InfraOnlyDrift_OpensRecordWithDriftedFalse(t *testing.T) {
+	e := newDriftEnv(t)
+	e.mock.ExpectQuery("FROM drift_runs WHERE id").WithArgs("d1").WillReturnRows(
+		testsupport.DriftRunRow("d1", "p1", "s1", "envs/prod.tfstate", "", "", "dispatched",
+			nil, nil, nil, nil, nil, "", "tok1", "alice", "2026-06-11", "2026-06-11",
+			false, 0, 0, false, false, "11111111-1111-4111-8111-111111111111",
+			nil, "", "", 0, 0, 0, nil))
+	e.mock.ExpectExec("UPDATE drift_runs SET callback_token=''").WithArgs("d1", "tok1").
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	// The run row: drifted stays false -- it must never absorb the infra
+	// triplet -- while the infra counts themselves persist alongside it.
+	e.mock.ExpectExec("UPDATE drift_runs").
+		WithArgs("d1", "completed", 0, 0, 0, false, nil, "", false, 0, 0, false, false,
+			2, 1, 0, `[{"address":"aws_instance.hand_edited","actions":["update"]}]`,
+			[]string{testActingOrg}).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	sourceRowFor(e, "s1")
+	// The record still opens: hasFinding is true from the infra triplet
+	// alone. added/changed/destroyed on the Detection stay 0, matching the
+	// run's own resource_changes-derived zero -- infra-only drift never
+	// inflates the primary triplet either.
+	e.mock.ExpectQuery("INSERT INTO drift_records").
+		WithArgs("s1", "envs/prod.tfstate", "p1", "d1", "run", "warning",
+			0, 0, 0, nil, nil, false, 0, 0, false, false,
+			2, 1, 0, `[{"address":"aws_instance.hand_edited","actions":["update"]}]`,
+			[]string{testActingOrg}).
+		WillReturnRows(driftRecRow("r1", "open", "warning"))
+
+	body := `{"status":"completed","added":0,"changed":0,"destroyed":0,"drifted":false,
+		"drift_added":2,"drift_changed":1,"drift_destroyed":0,
+		"drift_summary":[{"address":"aws_instance.hand_edited","actions":["update"]}]}`
+	w := e.doWithHeader(http.MethodPost, "/api/v1/drift/runs/d1/results", body,
+		"X-TSM-Callback-Token", "tok1")
+	if w.Code != http.StatusOK {
+		t.Fatalf("callback: %d (%s)", w.Code, w.Body.String())
+	}
+	if err := e.mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("infra-only drift must still open a drift record on the dispatched path: %v", err)
+	}
+}
+
 // TestIngestDrift_InfraDriftCountsPersist is the push half: a pipeline TSM did
 // not dispatch reports the new triplet directly (no raw plan -- the driftingest
 // mirror does not compute these fields from resource_drift yet), and it must
@@ -422,5 +474,57 @@ func TestListDriftRecords_ExposesInfraDriftCounts(t *testing.T) {
 	}
 	if string(resp.Records[0].DriftSummary) != `[{"address":"aws_s3_bucket.orphan","actions":["delete"]}]` {
 		t.Errorf("records[0].drift_summary = %s", resp.Records[0].DriftSummary)
+	}
+}
+
+// TestRunResults_DriftedDefault_NeverAbsorbsInfraCounts pins the other half of
+// #583's "must not break" list on the dispatched path's own wire boundary: a
+// callback body that omits `drifted` entirely (so the handler falls back to
+// its own added+changed+destroyed>0 default, the same default a pre-000039
+// runner already relies on) must compute that default from the PRIMARY
+// triplet only. A body carrying only infra counts (drift_added>0) and no
+// unapplied changes must still compute drifted=false -- both on the run row
+// (UpdateResultInScope's `drifted` argument) and, one layer down, on the
+// branch recordDriftOutcome takes (hasDriftFinding still opens the record,
+// but from the infra triplet, not because `drifted` was corrupted into
+// true). If this default ever widened to include the infra triplet, a
+// caller that never sends `drifted` at all would see its infra-only result
+// silently reported as an unapplied change.
+func TestRunResults_DriftedDefault_NeverAbsorbsInfraCounts(t *testing.T) {
+	e := newDriftEnv(t)
+	e.mock.ExpectQuery("FROM drift_runs WHERE id").WithArgs("d1").WillReturnRows(
+		testsupport.DriftRunRow("d1", "p1", "s1", "envs/prod.tfstate", "", "", "dispatched",
+			nil, nil, nil, nil, nil, "", "tok1", "alice", "2026-06-11", "2026-06-11",
+			false, 0, 0, false, false, "11111111-1111-4111-8111-111111111111",
+			nil, "", "", 0, 0, 0, nil))
+	e.mock.ExpectExec("UPDATE drift_runs SET callback_token=''").WithArgs("d1", "tok1").
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	// drifted (6th positional arg) computed from added+changed+destroyed
+	// only -- 0 here -- even though drift_added is 3.
+	e.mock.ExpectExec("UPDATE drift_runs").
+		WithArgs("d1", "completed", 0, 0, 0, false, nil, "", false, 0, 0, false, false,
+			3, 0, 0, `[{"address":"aws_instance.hand_edited","actions":["update"]}]`,
+			[]string{testActingOrg}).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	sourceRowFor(e, "s1")
+	e.mock.ExpectQuery("INSERT INTO drift_records").
+		WithArgs("s1", "envs/prod.tfstate", "p1", "d1", "run", "warning",
+			0, 0, 0, nil, nil, false, 0, 0, false, false,
+			3, 0, 0, `[{"address":"aws_instance.hand_edited","actions":["update"]}]`,
+			[]string{testActingOrg}).
+		WillReturnRows(driftRecRow("r1", "open", "warning"))
+
+	// No "drifted" key at all -- the handler must fall back to its own
+	// default, not to a value borrowed from the infra triplet.
+	body := `{"status":"completed","added":0,"changed":0,"destroyed":0,
+		"drift_added":3,"drift_changed":0,"drift_destroyed":0,
+		"drift_summary":[{"address":"aws_instance.hand_edited","actions":["update"]}]}`
+	w := e.doWithHeader(http.MethodPost, "/api/v1/drift/runs/d1/results", body,
+		"X-TSM-Callback-Token", "tok1")
+	if w.Code != http.StatusOK {
+		t.Fatalf("callback: %d (%s)", w.Code, w.Body.String())
+	}
+	if err := e.mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("drifted's default must not absorb the infra triplet: %v", err)
 	}
 }
