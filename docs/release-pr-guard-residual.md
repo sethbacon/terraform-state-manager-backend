@@ -40,34 +40,37 @@ coverage this repository's local suite did not have (119 cases there against
 
 ## THE RESIDUAL — what is specific to this repository
 
-**Required contexts, re-derived at the time of this change (2026-08-30):** this
-repository's `main` carries eleven required status checks, including both
-`Release PR closes only what it completes` (the `closing-keywords` job, still
-posted under that exact name by the shared guard) and `Release-PR guard
-self-test`. Verify current state, don't trust this file:
+**Required contexts, re-derived 2026-09-07:** this repository's `main` carries
+eleven required status checks, including `Release PR closes only what it
+completes` (the `closing-keywords` job, still posted under that exact name by
+the shared guard) and `release-guard/link-regrade`. Verify current state, don't
+trust this file:
 
 ```
 gh api repos/sethbacon/terraform-state-manager-backend/branches/main/protection/required_status_checks --jq .contexts
 ```
 
-**`Release-PR guard self-test` is now a required context with nothing left to
-post it.** That job ran `.github/release-pr-closing-keywords/`'s own
-`node --test` suite; this migration deleted that directory, and
-`release-pr-guard.yml` no longer defines a job by that name — see the comment
-block at the bottom of that file for why an equivalent local job was not kept
-(the suite it would run now lives in shared-workflows' own CI, gating shared-
-workflows' own `main`, not this repository's). Removing `Release-PR guard
-self-test` from this repository's required status checks is a branch-protection
-setting this pull request cannot make. Until an admin does, that context is
-required and permanently unreported — indistinguishable, at the API level, from
-a context nobody ever added, but present in branch protection's list, and
-merges here already rely on `--admin` (see R2 below) to get past exactly that
-shape of thing.
+**`Release-PR guard self-test` was a required context with nothing left to post
+it; it has since been removed from the required list.** That job ran
+`.github/release-pr-closing-keywords/`'s own `node --test` suite; the migration
+to the shared action deleted that directory, and `release-pr-guard.yml` no
+longer defines a job by that name — see the comment block at the bottom of that
+file for why an equivalent local job was not kept (the suite it would run now
+lives in shared-workflows' own CI, gating shared-workflows' own `main`, not this
+repository's). While it stayed listed, that context was required and permanently
+unreported — indistinguishable, at the API level, from a context nobody ever
+added, but present in branch protection's list. It is absent from the list
+re-derived above. This paragraph is kept, rather than deleted, because a
+required context that nothing posts blocks every non-admin merge forever, and
+that is the failure shape to watch for whenever a job is renamed or removed.
 
-**`release-guard/link-regrade` — still not a required context here,** matching
-the shared doc's residual: the commit status the cron overwrites is not in this
-repository's required list. Until it is, the bounded time-of-check window is
-decorative at merge time.
+**`release-guard/link-regrade` is now a required context here.** The commit
+status the scheduled re-grade overwrites is in this repository's required list,
+so the bounded time-of-check window is load-bearing at merge time rather than
+decorative: a link attached through the Development panel after the last
+`pull_request` event — the exact #243/#245 shape recorded above, which writes a
+`connected` timeline event and emits no activity a pre-merge trigger can see —
+is caught by the re-grade before a non-admin merge can proceed.
 
 **`enforce_admins` is `false` — by deliberate decision recorded on issue #529,
 not an oversight.** An `--admin` merge bypasses every required context, and
