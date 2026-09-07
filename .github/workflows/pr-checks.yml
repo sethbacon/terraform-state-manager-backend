@@ -38,7 +38,7 @@ jobs:
       #   only the pull request title through the GitHub API, but no repository-wide
       #   endpoint baseline exists yet
       - name: Harden the runner
-        uses: step-security/harden-runner@05e31511f85b41b11d1cf0ef85d0992719546e2c # v2.21.0
+        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
         with:
           egress-policy: audit
 
@@ -82,7 +82,7 @@ jobs:
       #   GitHub advisory API, and the endpoint set is not enumerated until an audit
       #   run records it
       - name: Harden the runner
-        uses: step-security/harden-runner@05e31511f85b41b11d1cf0ef85d0992719546e2c # v2.21.0
+        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
         with:
           egress-policy: audit
 
@@ -171,7 +171,7 @@ jobs:
       #   checkout, so its egress is already minimal, but audit is kept until this
       #   repository has a baseline to write a block policy from
       - name: Harden the runner
-        uses: step-security/harden-runner@05e31511f85b41b11d1cf0ef85d0992719546e2c # v2.21.0
+        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
         with:
           egress-policy: audit
 
@@ -203,7 +203,7 @@ jobs:
       #   GitHub API and mints no long-lived credential, with no endpoint baseline
       #   recorded yet
       - name: Harden the runner
-        uses: step-security/harden-runner@05e31511f85b41b11d1cf0ef85d0992719546e2c # v2.21.0
+        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
         with:
           egress-policy: audit
 
