@@ -134,8 +134,21 @@ jobs:
       # signature-replay check.
       - name: Run OSV-Scanner
         id: osv
-        uses: google/osv-scanner-action/osv-scanner-action@6e4298ebc4db23e847df9b2e2de2939d6f066c67 # v2.5.1
-        continue-on-error: true
+        # THE SHARED ACTION, NOT THE OFFICIAL ONE, AND NO continue-on-error (#894).
+        #
+        # `continue-on-error` was the defect. It collapsed exit 1 ("ran, found
+        # something") and the error exits (127, "could not scan") into one
+        # `outcome == 'failure'`, and it rewrote a failed step's `conclusion` to
+        # `success`. A scanner that had stopped working therefore produced
+        # exactly the same green as one that ran and found nothing, in the run
+        # history and in the API alike -- which is how a scan that exited 127
+        # filed a false "vulnerabilities found" issue here while seven real
+        # advisories stayed invisible (#334, PR #390).
+        #
+        # The shared action reports the exit code it actually got, so the steps
+        # below decide on `outputs.findings` instead of on `outcome`, and a
+        # scanner ERROR fails the job immediately rather than passing for clean.
+        uses: 4cloudguru/shared-workflows/.github/actions/osv-scan@3aae0966a70daa50bcfe741ef07e20e86c814af4 # v1.20.2
         with:
           # JSON (not table) so the triage step below can tell an advisory with a
           # published fix from one without; the triage step prints a
@@ -156,7 +169,11 @@ jobs:
       # leaves the weekly run green; the exit status is read below.
       - name: Triage findings (weekly)
         id: osv_triage_weekly
-        if: steps.osv.outcome == 'failure' && github.event_name == 'schedule'
+        # `outputs.findings`, not `outcome`. Findings no longer fail the scan
+        # step, so its outcome is `success` on a run that found something -- and
+        # a scanner error no longer reaches here at all, because it fails the
+        # job outright rather than arriving disguised as a finding.
+        if: steps.osv.outputs.findings == 'true' && github.event_name == 'schedule'
         continue-on-error: true
         run: python3 backend/scripts/osv_triage.py osv-results.json --scanner-failed --issue-body osv-report.md
 
@@ -205,7 +222,8 @@ jobs:
         # would pin the check red until upstream ships, regardless of what the
         # PR changed, and a permanently-red required check is one everybody
         # learns to ignore.
-        if: steps.osv.outcome == 'failure' && github.event_name != 'schedule'
+        # `outputs.findings` for the same reason as the weekly triage above.
+        if: steps.osv.outputs.findings == 'true' && github.event_name != 'schedule'
         run: python3 backend/scripts/osv_triage.py osv-results.json --scanner-failed
 
   # ── govulncheck (reachability-aware scan) ─────────────
