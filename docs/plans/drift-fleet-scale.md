@@ -1,11 +1,12 @@
 # Plan: TSM as the Fleet Drift Dashboard + Scheduler (repo-level fan-out)
 
-> **Status:** **Partially implemented 2026-09-05.** Phases 1, 1b, 2 and 4a landed in
-> sethbacon/terraform-state-manager-backend#569; Phase 4b in sethbacon/terraform-state-manager-frontend#416.
-> Phase 5 is **4 of 5 steps done** — only the frontend remains. **Phase 3 (onboarding
-> tooling) is done and proven** (2026-09-06; ADO PRs !94948 templates, !94949 tooling).
-> Phase 0 (ops) is partially met — the drift pool, the ADO identity for TSM and the
-> 3.22.0 deployment are the gating items.
+> **Status:** **Every phase with code is done, 2026-09-06.** Phases 1, 1b, 2 and 4a
+> landed in sethbacon/terraform-state-manager-backend#569; Phase 4b in
+> sethbacon/terraform-state-manager-frontend#416; **Phase 5 completed** across six
+> repositories; **Phase 3 (onboarding tooling) is done and proven** (ADO PRs !94948
+> templates, !94949 tooling).
+> **Phase 0 (ops) is the only remaining blocker to fleet rollout** — the drift pool, the
+> ADO identity for TSM and the 3.22.0 deployment are the gating items.
 > See "Implementation status" below before working from this document.
 > **Repo:** `terraform-state-manager-backend` (primary) + `terraform-state-manager-frontend`,
 > the Brunswick drift templates (`Brunswick/terraform-app-pipeline-templates`, folder
@@ -35,7 +36,7 @@
 | 3 — Discovery-driven onboarding | **done and proven 2026-09-06** — pilot apply on TBD4330 (definition 3741, connection, schedule; schedule run → one batch, both apps completed); fleet dry run over 488 repos: **162 plannable now / 211 non-prod apps**, 331 prod apps await a prod state source — see Phase 3 results | `CE_Automation/terraform-migration-tools` PR **!94949** (`drift/onboard_drift.py`) |
 | 4a — Dashboard read-path (backend) | **done** | sethbacon/terraform-state-manager-backend#569 |
 | 4b — Dashboard read-path (frontend) | **done** | sethbacon/terraform-state-manager-frontend#416 |
-| 5 — Contract: infra drift vs unapplied | **4 of 5 done** — contract v1.4.0 published, Go mirror, task + action, and backend storage all merged; **only step 5 (frontend) remains** | 4cloudguru/terraform-drift-contract#83, sethbacon/terraform-state-manager-backend#578, #579, sethbacon/azure-pipelines-terraform#1116, sethbacon/terraform-drift-report#85 |
+| 5 — Contract: infra drift vs unapplied | **done 2026-09-06** — all five steps merged, plus a follow-up fix so an infra-only finding is actionable and not merely visible | 4cloudguru/terraform-drift-contract#83; sethbacon/terraform-state-manager-backend#578, #579, #582, #584; sethbacon/azure-pipelines-terraform#1116; sethbacon/terraform-drift-report#85; sethbacon/terraform-state-manager-frontend#421 |
 
 ### Corrections — this document's §3 anchors were stale within a day
 
@@ -1002,6 +1003,19 @@ Order is strict: contract → Go mirror → task/action → backend storage → 
 **Done when:** a plan whose only changes are in `resource_drift` reports
 `drifted:false, drift_added/changed/destroyed>0` end to end, and existing vectors are
 byte-identical.
+
+**Met 2026-09-06**, after a defect found while building step 5's UI. The five steps
+shipped the value everywhere it is *displayed*, but `recordDriftOutcome` still opened a
+drift record only when the **unapplied** triplet was non-zero. On the dispatched path an
+infra-only finding was therefore visible on `/drift/coverage` and impossible to
+acknowledge or resolve, and `infra_drift_records` read near-zero. `IngestDrift` had been
+widened for exactly this case in #579 while the callback path was left behind, so the two
+paths disagreed about the same finding. Fixed in #584 by sharing one `hasDriftFinding`
+condition between both call sites rather than copying it — the defect existed *because*
+that rule lived in two places.
+
+Worth carrying forward: read "end to end" in a Done-when as including the record an
+operator acts on, not only the value a page renders.
 
 ## 6. Security
 
