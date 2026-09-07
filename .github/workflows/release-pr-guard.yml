@@ -181,7 +181,6 @@ jobs:
   # CI, which tests a moving target this repository does not control the pin
   # for. Neither is what a required context on THIS repository should mean.
   #
-  # `Release-PR guard self-test` is still listed in this repository's branch
-  # protection as of this change. Removing that from the required contexts is a
-  # repository setting this pull request cannot make -- see
-  # `docs/release-pr-guard-residual.md`.
+  # `Release-PR guard self-test` has since been removed from this repository's
+  # required contexts, so nothing is left requiring a job that no longer exists
+  # — see `docs/release-pr-guard-residual.md`.
