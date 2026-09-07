@@ -43,21 +43,48 @@ func completenessFromResult(res *driftingest.Result) repositories.Completeness {
 	}
 }
 
-// recordDriftOutcome maintains drift_records from a run result: a drifted
-// completion upserts the live record for the state, a clean completion resolves
-// it. Runs without a source_id + state_key cannot be mapped to a record (the
-// pair is the record identity) and are skipped; failures don't touch records.
+// hasDriftFinding decides whether an observation is worth an open,
+// acknowledgeable drift record at all: an unapplied change (drifted) OR infra
+// drift (resource_drift with no resource_changes), either one. drifted itself
+// is deliberately excluded from this widening -- it stays exactly the
+// resource_changes-derived signal both storage paths have always reported,
+// and "infra drift is not an unapplied change" is the separation the whole
+// contract keeps (driftingest.Result.Drifted() enforces the identical rule).
+//
+// Shared by IngestDrift and recordDriftOutcome (#583) rather than each
+// computing its own copy: the two are the ingest and dispatched halves of the
+// same decision, and a hand-copied predicate in each is exactly the kind of
+// parallel rule this plan has repeatedly found drifting apart (#579 gave
+// ingest this widening; the callback path was left on the old drifted-only
+// gate until #583).
+func hasDriftFinding(drifted bool, infraAdded, infraChanged, infraDestroyed int) bool {
+	return drifted || infraAdded+infraChanged+infraDestroyed > 0
+}
+
+// recordDriftOutcome maintains drift_records from a run result: a completion
+// that found ANYTHING (an unapplied change, infra drift, or both) upserts the
+// live record for the state; a genuinely clean completion resolves it. Runs
+// without a source_id + state_key cannot be mapped to a record (the pair is
+// the record identity) and are skipped; failures don't touch records.
 // auth is the authority the CALLBACK derived from the run it authenticated (see
 // callback_authority.go), and both statements below run under it. The caller has
 // already established that the run's source is reachable under that authority;
 // scoping the statements as well is the defence that survives the caller being
 // edited, and it is the layer a mock cannot stand in for -- the refusal happens
 // in SQL, not in a comparison somebody has to keep writing.
+//
+// The upsert-versus-resolve decision is hasDriftFinding(drifted, infra...),
+// not drifted alone (#583): a dispatched run whose only drift is
+// infrastructure drift (drifted:false, drift_added/changed/destroyed>0)
+// still opens a record, mirroring the widening IngestDrift already applies
+// (#579) for exactly the same reason -- an operator needs something to
+// acknowledge. drifted itself is passed through to the Detection UNCHANGED
+// either way: this widens which branch runs, it never redefines drifted.
 func (h *DriftHandlers) recordDriftOutcome(ctx context.Context, run *repositories.DriftRun, status string, added, changed, destroyed int, drifted bool, summary []byte, marks repositories.Completeness, infra repositories.InfraDrift, auth dispatchAuthority) {
 	if h.recordRepo == nil || status != "completed" || run.SourceID == nil || run.StateKey == "" {
 		return
 	}
-	if drifted {
+	if hasDriftFinding(drifted, infra.Added, infra.Changed, infra.Destroyed) {
 		d := &repositories.Detection{
 			SourceID:             *run.SourceID,
 			StateKey:             run.StateKey,
@@ -86,11 +113,11 @@ func (h *DriftHandlers) recordDriftOutcome(ctx context.Context, run *repositorie
 			"run", run.ID, "state", run.StateKey)
 		return
 	}
-	// infra is deliberately not consulted here. Whether infra-only drift
-	// (resource_drift with no resource_changes) should keep a record open is a
-	// policy decision this storage-only step does not make -- drifted stays
-	// exactly the resource_changes-derived signal it always was, and the
-	// infra_* counts this run reported are still persisted onto drift_runs by
+	// Reaching here means hasDriftFinding was false above: drifted is false
+	// AND the infra triplet is all zero, so this is a genuinely clean run,
+	// not merely "no unapplied changes" -- resolving on drifted alone would
+	// have closed a live record while infra drift the run just reported sat
+	// unacknowledged (#583). infra_* is still persisted onto drift_runs by
 	// UpdateResultInScope above regardless of which branch runs here.
 	if _, err := h.recordRepo.ResolveCleanInScope(ctx, *run.SourceID, run.StateKey, auth.scope); err != nil {
 		driftLog.Error("failed to resolve drift record after clean run", "run", run.ID, "error", err)
@@ -275,19 +302,20 @@ func (h *DriftHandlers) IngestDrift() gin.HandlerFunc {
 		}
 
 		// hasFinding decides whether this observation is worth an open,
-		// acknowledgeable record at all: drifted (an unapplied change) OR
-		// infra drift (resource_drift with no resource_changes), either one.
-		// drifted itself is deliberately left out of this widening -- it is
-		// the resource_changes signal this endpoint has always reported, and
-		// "infra drift is not an unapplied change" is the separation the
-		// whole contract keeps (driftingest.Result.Drifted() enforces the
-		// identical rule). Ingest has no run row the way the dispatched
-		// callback does (recordDriftOutcome persists infra_* onto drift_runs
-		// unconditionally, regardless of this same branch decision one layer
-		// up) -- drift_records IS the only durable place infra-only drift can
-		// land here, so resolving it clean would accept the values and
-		// discard them.
-		hasFinding := drifted || infraAdded+infraChanged+infraDestroyed > 0
+		// acknowledgeable record at all -- hasDriftFinding, the same
+		// predicate recordDriftOutcome now uses for the dispatched callback
+		// path (#583), so the two producers of drift_records cannot drift
+		// apart on what counts as a finding. drifted itself is deliberately
+		// left out of this widening -- it is the resource_changes signal
+		// this endpoint has always reported, and "infra drift is not an
+		// unapplied change" is the separation the whole contract keeps
+		// (driftingest.Result.Drifted() enforces the identical rule). Ingest
+		// has no run row the way the dispatched callback does (that path
+		// persists infra_* onto drift_runs unconditionally, regardless of
+		// this same branch decision) -- drift_records IS the only durable
+		// place infra-only drift can land here, so resolving it clean would
+		// accept the values and discard them.
+		hasFinding := hasDriftFinding(drifted, infraAdded, infraChanged, infraDestroyed)
 
 		if !hasFinding {
 			// A sender that could not read its own plan has reported ignorance,
