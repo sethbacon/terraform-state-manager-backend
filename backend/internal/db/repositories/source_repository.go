@@ -389,4 +389,19 @@ func (r *SourceRepository) GetByIDInScope(ctx context.Context, id string, scope 
 // for the same reason: on these tables NULL means "no tenant has been asserted",
 // not "belongs to everyone", and admitting such rows to everybody would leak
 // whichever tenant owns the most unstamped rows.
+//
+// THE SIBLING APP CHOSE THE OPPOSITE, and a reviewer moving between the two
+// repositories has nothing else to warn them. terraform-registry-backend scopes
+// providers with `(p.organization_id = $1 OR p.organization_id IS NULL)`, so a
+// NULL row there is visible to EVERY organization -- its deliberate marker for a
+// mirrored provider everyone should see. Same column name, same suite, same
+// shared identity module underneath, opposite meaning
+// (sethbacon/terraform-registry-backend#932).
+//
+// Neither is wrong on its own terms; what is dangerous is carrying one repo's
+// habit into the other. Copying `OR organization_id IS NULL` into a predicate
+// here would silently publish every unstamped row -- exactly the rows a restore
+// from a pre-000034 backup produces -- to every tenant at once. This paragraph
+// is the warning; the six sibling predicates in this package state the local
+// rule and point back at the same reasoning.
 const sourceOrgPredicate = `organization_id = ANY($1::uuid[])`
