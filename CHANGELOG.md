@@ -1,5 +1,12 @@
 # Changelog
 
+## [3.22.1](https://github.com/sethbacon/terraform-state-manager-backend/compare/v3.22.0...v3.22.1) (2026-09-07)
+
+
+### Documentation
+
+* **repositories:** warn that the sibling registry gives NULL the opposite meaning ([#593](https://github.com/sethbacon/terraform-state-manager-backend/issues/593)) ([692ff14](https://github.com/sethbacon/terraform-state-manager-backend/commit/692ff14776fcf494401f4b9dd958fff4f04cf897))
+
 ## [3.22.0](https://github.com/sethbacon/terraform-state-manager-backend/compare/v3.21.0...v3.22.0) (2026-09-07)
 
 
