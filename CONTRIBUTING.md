@@ -184,7 +184,38 @@ follow-up commit whose own trailer is the `Release-As` you wanted; release-pleas
 recomputes the pending release PR from the whole range.
 
 Keep the subject line under **72 characters**. Reference issues in the commit body with
-`Closes #123`.
+`Closes #123` when the commit genuinely completes the issue — and see the next
+section when it does not.
+
+### A reference that must NOT close belongs in prose
+
+release-please renders a **trailer-position** reference — any line that is
+nothing but `Word #N` — as `closes [#N]`. conventional-changelog prints the word
+`closes` in front of every reference it extracts, whatever verb you wrote, so the
+word you chose is discarded:
+
+```text
+Refs #393     ->  rendered as `closes [#393]`
+See #393      ->  rendered as `closes [#393]`
+```
+
+That text becomes the release PR body, whose squash commit GitHub reads for
+closing keywords, so **the next release closes the issue anyway**. It is not a
+one-off to patch out: the reference is baked into a commit on `main`, so
+release-please regenerates it on every run. Release PR #515 had to be hand-patched
+twice.
+
+**Weave the number into a sentence instead.** A reference inside prose is not
+extracted, costs nothing, and survives regeneration:
+
+```text
+This advances the partition program tracked in #393.
+```
+
+`node .github/commit-message-check/verify.mjs` enforces this on every pull
+request, and rejects only the trailer shape — a deliberate `Closes #123` still
+passes, and ordinary prose is untouched. The backstop if one reaches `main`
+anyway is the required check `Release PR closes only what it completes`.
 
 ---
 

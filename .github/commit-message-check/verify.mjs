@@ -30,10 +30,74 @@ const rejects = text => {
   }
 };
 
+// A reference in trailer position renders as a CLOSING keyword, whatever verb
+// introduces it. conventional-changelog's commit partial hardcodes the word
+// `closes` for every reference it extracts (see #522), so a deliberately
+// non-closing `Refs #393` becomes `closes [#393]` in the generated release body
+// -- and it returns on every regeneration, because it is baked into a commit on
+// `main`. Release PR #515 had to be hand-patched twice, and the failure mode of
+// a careless patch is closing an issue the release did not complete.
+//
+// The remedy is to keep it out of the commit: a mention belongs in PROSE, which
+// is not extracted as a reference. This rejects the trailer shape only -- a line
+// that is nothing but `<verb> #N` with at most three leading words -- so an
+// ordinary sentence that happens to name an issue is untouched, and a DELIBERATE
+// close still passes.
+const CLOSING_KEYWORDS = new Set([
+  'close', 'closes', 'closed',
+  'fix', 'fixes', 'fixed',
+  'resolve', 'resolves', 'resolved',
+]);
+const REFERENCE_TRAILER =
+  /^[ \t]*([A-Za-z][A-Za-z-]*(?:[ \t]+[A-Za-z][A-Za-z-]*){0,2})[ \t]*:?[ \t]+#(\d+)[ \t]*$/;
+
+const referenceTrailers = text => text.split('\n').flatMap(line => {
+  const m = REFERENCE_TRAILER.exec(line);
+  if (!m) return [];
+  const verb = m[1].split(/[ \t]+/)[0].toLowerCase();
+  return CLOSING_KEYWORDS.has(verb) ? [] : [line.trim()];
+});
+
 const err = rejects(message);
 if (!err) {
-  console.log(`OK: release-please can read the squash of this PR's ${commits.length} commit(s).`);
-  process.exit(0);
+  const stray = referenceTrailers(message);
+  if (stray.length === 0) {
+    console.log(`OK: release-please can read the squash of this PR's ${commits.length} commit(s).`);
+    process.exit(0);
+  }
+  fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, [
+    '### A non-closing reference here renders as a closing keyword',
+    '',
+    'These lines would land in the commit this PR squashes into `main`:',
+    '',
+    '```', ...stray, '```',
+    '',
+    'conventional-changelog prints the word `closes` in front of EVERY reference',
+    'it extracts, whatever verb introduced it, so `Refs #393` is rendered as',
+    '`closes [#393]` in the generated release body. It is not a one-off: the',
+    'reference is baked into a commit on `main`, so release-please regenerates it',
+    'on every run and the release PR has to be hand-patched again each time.',
+    'Patch it carelessly once and the release closes an issue it did not complete.',
+    '',
+    '**Move the mention into prose.** A reference inside a sentence is not',
+    'extracted, so it costs nothing and survives regeneration:',
+    '',
+    '```text',
+    'Refs #393                                   <- rendered as `closes [#393]`',
+    '',
+    'This builds on the partition work in #393.  <- ordinary prose, left alone',
+    '```',
+    '',
+    'If the commit really does complete the issue, say so with a closing keyword',
+    '(`Closes #393`) and this check passes -- it is not a ban on references, only',
+    'on ones whose rendering contradicts what they say.',
+    '',
+    'Fix the commit message on the branch, not the PR description -- this',
+    'repository squashes with `COMMIT_MESSAGES`, so the body comes from the',
+    'commits themselves.',
+  ].join('\n') + '\n');
+  console.log(`::error::a non-closing reference would render as a closing keyword: ${stray.join('; ')}`);
+  process.exit(1);
 }
 
 // Re-parse growing prefixes so the report can name the line that breaks it.

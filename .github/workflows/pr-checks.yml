@@ -221,6 +221,14 @@ jobs:
         # nothing is lost by refusing to run them.
         run: npm ci --ignore-scripts
 
+      # The gate had no test of its own, which is the shape it exists to prevent:
+      # a check that is wrong reports success it has not earned. Run in this job
+      # rather than a new one on purpose -- a separate job means a new status
+      # context, and a required context nothing posts blocks every merge forever.
+      - name: Test the gate itself
+        working-directory: .github/commit-message-check
+        run: node --test
+
       - name: Parse the commit this PR would squash into main
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
