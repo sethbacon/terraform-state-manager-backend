@@ -212,8 +212,8 @@ extracted, costs nothing, and survives regeneration:
 This advances the partition program tracked in #393.
 ```
 
-`node .github/commit-message-check/verify.mjs` enforces this on every pull
-request, and rejects only the trailer shape — a deliberate `Closes #123` still
+The shared `commit-message-check` action (`4cloudguru/shared-workflows`)
+enforces this on every pull request, and rejects only the trailer shape — a deliberate `Closes #123` still
 passes, and ordinary prose is untouched. The backstop if one reaches `main`
 anyway is the required check `Release PR closes only what it completes`.
 
