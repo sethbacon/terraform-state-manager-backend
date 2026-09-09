@@ -1,5 +1,12 @@
 # Changelog
 
+## [3.22.2](https://github.com/sethbacon/terraform-state-manager-backend/compare/v3.22.1...v3.22.2) (2026-09-09)
+
+
+### Refactor
+
+* **pipelines:** mint through the shared identity module ([#595](https://github.com/sethbacon/terraform-state-manager-backend/issues/595)) ([8e8efd0](https://github.com/sethbacon/terraform-state-manager-backend/commit/8e8efd0be3baa5f536cd082ff6cdc6fe6d0fb935))
+
 ## [3.22.1](https://github.com/sethbacon/terraform-state-manager-backend/compare/v3.22.0...v3.22.1) (2026-09-07)
 
 
