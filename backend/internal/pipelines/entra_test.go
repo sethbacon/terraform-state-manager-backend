@@ -12,15 +12,13 @@ import (
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/policy"
+
+	sharedcreds "github.com/sethbacon/terraform-suite-identity/identity/appcreds"
 )
 
 // resetEntraCache clears the package token cache so tests don't see each other's
 // cached tokens.
-func resetEntraCache() {
-	entraCacheMu.Lock()
-	entraCache = map[string]entraCachedToken{}
-	entraCacheMu.Unlock()
-}
+func resetEntraCache() { tokenCache.Reset() }
 
 func TestMintEntraADOToken_RequiresAllFields(t *testing.T) {
 	resetEntraCache()
@@ -37,6 +35,7 @@ func TestMintEntraADOToken_RequiresAllFields(t *testing.T) {
 }
 
 func TestMintEntraADOToken_MintsAndCaches(t *testing.T) {
+	allowLoopbackEgress(t)
 	resetEntraCache()
 	var calls int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -92,6 +91,7 @@ func TestMintEntraADOToken_MintsAndCaches(t *testing.T) {
 }
 
 func TestMintEntraADOToken_MapsErrorStatus(t *testing.T) {
+	allowLoopbackEgress(t)
 	resetEntraCache()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)
@@ -252,17 +252,13 @@ func TestEvictADOTokenCacheKey_RemovesOnlyThatEntry(t *testing.T) {
 	entraCreds := EntraCreds{TenantID: "t", ClientID: "c", ClientSecret: "s"}
 	wiCreds := WorkloadIdentityCreds{ClientID: "wi-client"}
 
-	entraCacheMu.Lock()
-	entraCache[entraCreds.Fingerprint()] = entraCachedToken{token: "entra-tok", expiresAt: time.Now().Add(time.Hour)}
-	entraCache[wiCreds.Fingerprint()] = entraCachedToken{token: "wi-tok", expiresAt: time.Now().Add(time.Hour)}
-	entraCacheMu.Unlock()
+	tokenCache.Put(entraCreds, sharedcreds.Token{AccessToken: "entra-tok", ExpiresAt: time.Now().Add(time.Hour)})
+	tokenCache.Put(wiCreds, sharedcreds.Token{AccessToken: "wi-tok", ExpiresAt: time.Now().Add(time.Hour)})
 
 	EvictADOTokenCacheKey(entraCreds.Fingerprint())
 
-	entraCacheMu.Lock()
-	_, entraStillCached := entraCache[entraCreds.Fingerprint()]
-	_, wiStillCached := entraCache[wiCreds.Fingerprint()]
-	entraCacheMu.Unlock()
+	_, entraStillCached := tokenCache.Get(entraCreds)
+	_, wiStillCached := tokenCache.Get(wiCreds)
 
 	if entraStillCached {
 		t.Error("EvictADOTokenCacheKey did not remove the entry it was given")

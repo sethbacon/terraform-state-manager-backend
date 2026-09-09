@@ -1,216 +1,55 @@
-// githubapp.go mints GitHub Actions access tokens from a GitHub App: it signs a
-// short-lived app JWT (RS256) with the app's private key, then exchanges it for
-// an installation access token. This is the headless, app-owned alternative to a
-// personal access token for CI sources whose auth_method is "app" — no user,
-// tokens auto-renewed and cached until shortly before expiry.
+// githubapp.go mints GitHub installation access tokens for CI sources whose
+// auth_method is "app": a GitHub App's RS256 JWT exchanged for an installation
+// token.
+//
+// The exchange itself lives in terraform-suite-identity/identity/appcreds --
+// see entra.go's header for why. What remains here is the cache policy and the
+// explicit eviction the credential-rotation route depends on.
 package pipelines
 
 import (
 	"context"
-	"crypto"
-	"crypto/rand"
-	"crypto/rsa"
-	"crypto/sha256"
-	"crypto/x509"
-	"encoding/base64"
-	"encoding/json"
-	"encoding/pem"
-	"fmt"
-	"io"
-	"net/http"
-	"strings"
-	"sync"
-	"time"
+
+	sharedcreds "github.com/sethbacon/terraform-suite-identity/identity/appcreds"
 )
 
 // GitHubAppCreds is a GitHub App installation used to mint installation access
-// tokens. PrivateKeyPEM is the app's RSA private key in PEM form.
-type GitHubAppCreds struct {
-	AppID          string
-	InstallationID string
-	PrivateKeyPEM  string
-}
-
-func (c GitHubAppCreds) valid() bool {
-	return c.AppID != "" && c.InstallationID != "" && c.PrivateKeyPEM != ""
-}
-
-// Fingerprint keys the token cache so rotating any credential field
-// invalidates the cached token (a different key) without explicit eviction.
-// Exported for the same reason as EntraCreds.Fingerprint: PUT /ci-sources/:id
-// (Phase 1b) uses it to evict the OLD row's cache entry explicitly via
-// EvictGitHubAppTokenCacheKey rather than relying solely on rotation
-// happening to produce a different key.
-func (c GitHubAppCreds) Fingerprint() string {
-	sum := sha256.Sum256([]byte(c.AppID + "\x00" + c.InstallationID + "\x00" + c.PrivateKeyPEM))
-	return string(sum[:])
-}
-
-type ghAppCachedToken struct {
-	token     string
-	expiresAt time.Time
-}
-
-var (
-	ghAppCacheMu sync.Mutex
-	ghAppCache   = map[string]ghAppCachedToken{}
-)
-
-// MintGitHubInstallationToken returns a GitHub installation access token for the
-// app, minting it (sign app JWT -> exchange for installation token) and caching
-// until shortly before expiry. Concurrency-safe.
-func MintGitHubInstallationToken(ctx context.Context, creds GitHubAppCreds) (string, error) {
-	if !creds.valid() {
-		return "", fmt.Errorf("github app credentials require app_id, installation_id, and a private key")
-	}
-	key := creds.Fingerprint()
-
-	ghAppCacheMu.Lock()
-	if t, ok := ghAppCache[key]; ok && time.Until(t.expiresAt) > entraTokenRefreshMargin {
-		token := t.token
-		ghAppCacheMu.Unlock()
-		return token, nil
-	}
-	ghAppCacheMu.Unlock()
-
-	token, expiresAt, err := requestInstallationToken(ctx, creds)
-	if err != nil {
-		return "", err
-	}
-
-	ghAppCacheMu.Lock()
-	ghAppCache[key] = ghAppCachedToken{token: token, expiresAt: expiresAt}
-	ghAppCacheMu.Unlock()
-	return token, nil
-}
-
-// requestInstallationToken signs an app JWT and POSTs to the installation
-// access-token endpoint.
-func requestInstallationToken(ctx context.Context, creds GitHubAppCreds) (string, time.Time, error) {
-	signer, err := parseRSAPrivateKey(creds.PrivateKeyPEM)
-	if err != nil {
-		return "", time.Time{}, err
-	}
-	appJWT, err := signAppJWT(creds.AppID, signer)
-	if err != nil {
-		return "", time.Time{}, err
-	}
-
-	u := fmt.Sprintf("%s/app/installations/%s/access_tokens",
-		githubAPIBaseURL, urlPathSegment(creds.InstallationID))
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u, nil)
-	if err != nil {
-		return "", time.Time{}, err
-	}
-	req.Header.Set("Authorization", "Bearer "+appJWT)
-	req.Header.Set("Accept", "application/vnd.github+json")
-	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
-
-	resp, err := httpClient.Do(req)
-	if err != nil {
-		return "", time.Time{}, fmt.Errorf("github installation token request failed: %w", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<10))
-	if resp.StatusCode != http.StatusCreated {
-		return "", time.Time{}, fmt.Errorf("github installation token endpoint returned %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
-	}
-
-	var out struct {
-		Token     string `json:"token"`
-		ExpiresAt string `json:"expires_at"`
-	}
-	if err := json.Unmarshal(body, &out); err != nil {
-		return "", time.Time{}, fmt.Errorf("github installation token response not JSON: %w", err)
-	}
-	if out.Token == "" {
-		return "", time.Time{}, fmt.Errorf("github installation token response had no token")
-	}
-	expiresAt, perr := time.Parse(time.RFC3339, out.ExpiresAt)
-	if perr != nil {
-		expiresAt = time.Now().Add(time.Hour) // GitHub installation tokens last ~1h
-	}
-	return out.Token, expiresAt, nil
-}
-
-// parseRSAPrivateKey accepts a PKCS#1 ("RSA PRIVATE KEY") or PKCS#8 ("PRIVATE
-// KEY") PEM and returns the RSA key.
-func parseRSAPrivateKey(pemStr string) (*rsa.PrivateKey, error) {
-	block, _ := pem.Decode([]byte(pemStr))
-	if block == nil {
-		return nil, fmt.Errorf("private key is not valid PEM")
-	}
-	if key, err := x509.ParsePKCS1PrivateKey(block.Bytes); err == nil {
-		return key, nil
-	}
-	parsed, err := x509.ParsePKCS8PrivateKey(block.Bytes)
-	if err != nil {
-		return nil, fmt.Errorf("private key is not a supported RSA key (PKCS#1 or PKCS#8): %w", err)
-	}
-	rsaKey, ok := parsed.(*rsa.PrivateKey)
-	if !ok {
-		return nil, fmt.Errorf("private key is not RSA")
-	}
-	return rsaKey, nil
-}
+// tokens. An ALIAS, not a copy: internal/api builds these by name, and an alias
+// guarantees the Fingerprint keying the cache is the shared package's own.
+type GitHubAppCreds = sharedcreds.GitHubAppCreds
 
 // ValidRSAPrivateKey reports whether pemStr parses as a supported RSA private
-// key — used to validate input before encrypting and storing it.
-func ValidRSAPrivateKey(pemStr string) bool {
-	_, err := parseRSAPrivateKey(pemStr)
-	return err == nil
-}
+// key (PKCS#1 or PKCS#8) -- used to validate an uploaded App key before storing
+// it. Re-exported rather than re-implemented so the check performed at upload is
+// by construction the one performed at mint.
+var ValidRSAPrivateKey = sharedcreds.ValidRSAPrivateKey
 
-// signAppJWT builds a GitHub App JWT (RS256): header.payload signed with RSA
-// PKCS#1 v1.5 over SHA-256. iat is backdated 60s for clock skew; exp is +9m
-// (under GitHub's 10-minute maximum).
-func signAppJWT(appID string, key *rsa.PrivateKey) (string, error) {
-	now := time.Now()
-	header := `{"alg":"RS256","typ":"JWT"}`
-	claims, err := json.Marshal(map[string]any{
-		"iat": now.Add(-60 * time.Second).Unix(),
-		"exp": now.Add(9 * time.Minute).Unix(),
-		"iss": appID,
-	})
+// MintGitHubInstallationToken returns a GitHub installation access token for the
+// App installation in creds, minting and caching it until shortly before expiry.
+// Concurrency-safe.
+//
+// Shares tokenCache with the Azure DevOps paths. That is safe because the
+// fingerprints are namespaced per credential type, so a GitHub App entry can
+// never be served for an Entra one -- see the shared package's
+// TestFingerprint_NoCollisionAcrossCredentialTypes, which pins exactly that.
+func MintGitHubInstallationToken(ctx context.Context, creds GitHubAppCreds) (string, error) {
+	tok, err := sharedcreds.CachedMinter{Minter: sharedMinter(), Cache: tokenCache}.GitHubApp(ctx, creds)
 	if err != nil {
 		return "", err
 	}
-	signingInput := b64url([]byte(header)) + "." + b64url(claims)
-	digest := sha256.Sum256([]byte(signingInput))
-	sig, err := rsa.SignPKCS1v15(rand.Reader, key, crypto.SHA256, digest[:])
-	if err != nil {
-		return "", fmt.Errorf("sign app jwt: %w", err)
-	}
-	return signingInput + "." + b64url(sig), nil
+	return tok.AccessToken, nil
 }
 
-func b64url(b []byte) string {
-	return base64.RawURLEncoding.EncodeToString(b)
-}
-
-// urlPathSegment escapes a single path segment (installation ids are numeric,
-// but escape defensively).
-func urlPathSegment(s string) string {
-	return strings.NewReplacer("/", "%2F", "?", "%3F", "#", "%23").Replace(s)
-}
-
-// ResetGitHubAppTokenCacheForTest clears the in-memory token cache between tests.
-func ResetGitHubAppTokenCacheForTest() {
-	ghAppCacheMu.Lock()
-	ghAppCache = map[string]ghAppCachedToken{}
-	ghAppCacheMu.Unlock()
-}
+// ResetGitHubAppTokenCacheForTest clears the in-memory token cache between
+// tests. The cache is shared with the Azure DevOps paths, so this and
+// ResetEntraTokenCacheForTest do the same thing; both names are kept because
+// each package's tests call the one that reads correctly there.
+func ResetGitHubAppTokenCacheForTest() { tokenCache.Reset() }
 
 // EvictGitHubAppTokenCacheKey removes a single cached token, keyed by
-// GitHubAppCreds.Fingerprint -- the GitHub-App twin of
-// pipelines.EvictADOTokenCacheKey, used by the same PUT /ci-sources/:id route
-// for a GitHub App source's credential rotation. See EvictADOTokenCacheKey's
-// comment for why this is explicit rather than left to rotation alone.
-func EvictGitHubAppTokenCacheKey(key string) {
-	if key == "" {
-		return
-	}
-	ghAppCacheMu.Lock()
-	delete(ghAppCache, key)
-	ghAppCacheMu.Unlock()
-}
+// GitHubAppCreds.Fingerprint. The GitHub-App counterpart of
+// EvictADOTokenCacheKey, used by the same PUT /ci-sources/:id route for a
+// GitHub App source's credential rotation. See EvictADOTokenCacheKey's comment
+// for why the route evicts explicitly rather than relying on the fingerprint
+// changing.
+func EvictGitHubAppTokenCacheKey(key string) { tokenCache.EvictKey(key) }

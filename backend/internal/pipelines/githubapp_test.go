@@ -11,6 +11,9 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+
+	sharedcreds "github.com/sethbacon/terraform-suite-identity/identity/appcreds"
+	"time"
 )
 
 // testRSAKeyPEM generates a throwaway PKCS#1 RSA private key PEM for signing.
@@ -49,6 +52,7 @@ func TestMintGitHubInstallationToken_RejectsBadKey(t *testing.T) {
 }
 
 func TestMintGitHubInstallationToken_MintsAndCaches(t *testing.T) {
+	allowLoopbackEgress(t)
 	ResetGitHubAppTokenCacheForTest()
 	pemKey := testRSAKeyPEM(t)
 	var calls int32
@@ -88,6 +92,7 @@ func TestMintGitHubInstallationToken_MintsAndCaches(t *testing.T) {
 }
 
 func TestMintGitHubInstallationToken_MapsErrorStatus(t *testing.T) {
+	allowLoopbackEgress(t)
 	ResetGitHubAppTokenCacheForTest()
 	pemKey := testRSAKeyPEM(t)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -116,17 +121,16 @@ func TestEvictGitHubAppTokenCacheKey_RemovesOnlyThatEntry(t *testing.T) {
 	a := GitHubAppCreds{AppID: "1", InstallationID: "10", PrivateKeyPEM: "key-a"}
 	b := GitHubAppCreds{AppID: "2", InstallationID: "20", PrivateKeyPEM: "key-b"}
 
-	ghAppCacheMu.Lock()
-	ghAppCache[a.Fingerprint()] = ghAppCachedToken{token: "tok-a"}
-	ghAppCache[b.Fingerprint()] = ghAppCachedToken{token: "tok-b"}
-	ghAppCacheMu.Unlock()
+	// A real expiry, not the zero value: the shared cache treats a token with
+	// no expiry as already spent, so a zero-valued entry would never be
+	// readable and the "unrelated entry survives" half would pass vacuously.
+	tokenCache.Put(a, sharedcreds.Token{AccessToken: "tok-a", ExpiresAt: time.Now().Add(time.Hour)})
+	tokenCache.Put(b, sharedcreds.Token{AccessToken: "tok-b", ExpiresAt: time.Now().Add(time.Hour)})
 
 	EvictGitHubAppTokenCacheKey(a.Fingerprint())
 
-	ghAppCacheMu.Lock()
-	_, aStillCached := ghAppCache[a.Fingerprint()]
-	_, bStillCached := ghAppCache[b.Fingerprint()]
-	ghAppCacheMu.Unlock()
+	_, aStillCached := tokenCache.Get(a)
+	_, bStillCached := tokenCache.Get(b)
 
 	if aStillCached {
 		t.Error("EvictGitHubAppTokenCacheKey did not remove the entry it was given")
