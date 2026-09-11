@@ -237,6 +237,10 @@ func newSSOEnv(t *testing.T, mutate func(*config.Config)) *sourcesEnv {
 		mutate(cfg)
 	}
 
+	// No application store on purpose: this exercises SSO settings, and the
+	// group-mapping mirror those writes would otherwise trigger has its own
+	// tests. Writes degrade to the identity leg alone on a nil store (the
+	// documented rig shape); nothing here reads a role.
 	h, err := NewAuthHandlers(cfg, db, nil)
 	if err != nil {
 		t.Fatalf("NewAuthHandlers: %v", err)

@@ -24,9 +24,11 @@
 // role_templates, and identity answers only "is this principal a member of this
 // organization" — the fact it owns.
 //
-// Both places are still written, under either RoleSource, which is what makes
-// TSM_AUTHZ_ROLE_SOURCE=identity a working rollback rather than a downgrade to
-// stale data.
+// Both places are still written. The identity READ position
+// (TSM_AUTHZ_ROLE_SOURCE=identity) was retired in #599; the dual write outlives
+// it because identity.organization_members.role_template_id still exists and
+// CheckDrift still compares the two, until sethbacon/terraform-suite-identity#206
+// Phase 4 drops that column.
 //
 // Five things keep it honest:
 //

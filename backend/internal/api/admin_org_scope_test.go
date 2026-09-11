@@ -10,7 +10,6 @@ import (
 
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
 	"github.com/gin-gonic/gin"
-	"github.com/terraform-state-manager/terraform-state-manager/internal/approles"
 )
 
 // newAdminOrgScopeEnv wires the /admin/organizations/:id* routes the same way
@@ -39,7 +38,7 @@ func newAdminOrgScopeEnvAs(t *testing.T, callerUserID string, presented []string
 	}
 	t.Cleanup(func() { db.Close() })
 
-	h := NewAdminHandlers(db, nil, approles.RoleSourceIdentity)
+	h := NewAdminHandlers(db, db)
 	r := gin.New()
 	r.Use(func(c *gin.Context) {
 		if callerUserID != "" {
@@ -85,6 +84,7 @@ func expectGetUserScopesForOrg(mock sqlmock.Sqlmock, orgID, userID string, roleS
 		WithArgs(orgID, userID).
 		WillReturnRows(sqlmock.NewRows(scopeMemberCols).
 			AddRow(orgID, userID, "rt-1", time.Now(), "Caller", "caller@example.com", "role", "Role", []byte(roleScopesJSON)))
+	expectAppRoleForPair(mock, orgID, userID, &appRole{id: "rt-1", name: "role", scopes: roleScopesJSON})
 }
 
 // expectNoMembership queues a GetUserScopesForOrg lookup that finds no
@@ -109,6 +109,13 @@ func expectGetUserMemberships(mock sqlmock.Sqlmock, targetUserID string, orgIDs 
 		rows.AddRow(orgID, "Org "+orgID, "rt-1", time.Now(), "role", "Role", []byte(`["placeholder"]`))
 	}
 	mock.ExpectQuery("FROM organization_members om").WithArgs(targetUserID).WillReturnRows(rows)
+	if len(orgIDs) > 0 {
+		roles := make([]appRole, 0, len(orgIDs))
+		for _, orgID := range orgIDs {
+			roles = append(roles, appRole{orgID, "rt-1", "role", `["placeholder"]`})
+		}
+		expectAppRolesForUser(mock, targetUserID, roles...)
+	}
 }
 
 // expectCallerAdminIn stubs the caller's OWN membership rows with an
@@ -121,6 +128,13 @@ func expectCallerAdminIn(mock sqlmock.Sqlmock, callerID string, orgIDs ...string
 		rows.AddRow(orgID, "Org "+orgID, "rt-admin", time.Now(), "admin", "Admin", []byte(`["admin"]`))
 	}
 	mock.ExpectQuery("FROM organization_members om").WithArgs(callerID).WillReturnRows(rows)
+	if len(orgIDs) > 0 {
+		roles := make([]appRole, 0, len(orgIDs))
+		for _, orgID := range orgIDs {
+			roles = append(roles, appRole{orgID, "rt-admin", "admin", `["admin"]`})
+		}
+		expectAppRolesForUser(mock, callerID, roles...)
+	}
 }
 
 func TestRequireOrgScope_AllowsAdminActingOnOwnOrg(t *testing.T) {
@@ -179,6 +193,7 @@ func TestRequireOrgScope_AllowsAdminForMemberMutations(t *testing.T) {
 	e := newAdminOrgScopeEnv(t, "caller-1")
 
 	expectGetUserScopesForOrg(e.mock, "org-a", "caller-1", `["admin"]`)
+	e.mock.ExpectExec("DELETE FROM organization_member_roles").WithArgs("org-a", "u2", []string{"org-a"}).WillReturnResult(sqlmock.NewResult(0, 1))
 	e.mock.ExpectExec("DELETE FROM organization_members").WithArgs("org-a", "u2", []string{"org-a"}).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 
@@ -242,6 +257,7 @@ func TestRequireOrgScope_DoesNotGateOrganizationListOrCreate(t *testing.T) {
 	e.mock.ExpectQuery("FROM organization_members om").WithArgs("caller-1").
 		WillReturnRows(sqlmock.NewRows(userMembershipCols).
 			AddRow("org-a", "Org A", "rt-owner", time.Now(), "org_owner", "Owner", []byte(`["organizations:write"]`)))
+	expectAppRolesForUser(e.mock, "caller-1", appRole{"org-a", "rt-owner", "org_owner", `["organizations:write"]`})
 	e.mock.ExpectQuery("FROM organizations").WithArgs([]string{"org-a"}, sqlmock.AnyArg(), sqlmock.AnyArg()).
 		WillReturnRows(sqlmock.NewRows(
 			[]string{"id", "name", "display_name", "idp_type", "idp_name", "created_at", "updated_at"}))
@@ -264,12 +280,15 @@ func TestCreateOrganization_AddsCallerAsOrgOwner(t *testing.T) {
 		WithArgs("Acme", "Acme Corp").
 		WillReturnRows(sqlmock.NewRows([]string{"id", "created_at", "updated_at"}).
 			AddRow("org-1", time.Now(), time.Now()))
+	// The mirror resolves the owner role in the APP store before the identity leg.
+	expectMirrorRoleResolution(e.mock, "org_owner", "rt-owner")
 	e.mock.ExpectQuery("SELECT id FROM role_templates").
 		WithArgs("org_owner").
 		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("rt-org-owner"))
 	e.mock.ExpectExec("INSERT INTO organization_members").
 		WithArgs("org-1", "caller-1", "rt-org-owner", []string{"org-1"}).
 		WillReturnResult(sqlmock.NewResult(0, 1))
+	expectMirrorUpsert(e.mock)
 	e.mock.ExpectQuery("INSERT INTO audit_logs").WillReturnRows(auditInsertReturn())
 
 	w := e.do(http.MethodPost, "/api/v1/admin/organizations", `{"name":"Acme","display_name":"Acme Corp"}`)
@@ -309,6 +328,7 @@ func TestRequireOrgScope_AllowsOrganizationsWriteWithoutAdmin(t *testing.T) {
 	e := newAdminOrgScopeEnv(t, "caller-1")
 
 	expectGetUserScopesForOrg(e.mock, "org-a", "caller-1", `["organizations:write"]`)
+	e.mock.ExpectExec("DELETE FROM organization_member_roles").WithArgs("org-a", "u2", []string{"org-a"}).WillReturnResult(sqlmock.NewResult(0, 1))
 	e.mock.ExpectExec("DELETE FROM organization_members").WithArgs("org-a", "u2", []string{"org-a"}).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 
@@ -521,7 +541,7 @@ func TestListUsers_NarrowsToCallerAdminOrgs(t *testing.T) {
 	}
 	t.Cleanup(func() { db.Close() })
 
-	h := NewAdminHandlers(db, nil, approles.RoleSourceIdentity)
+	h := NewAdminHandlers(db, db)
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
 	r.Use(func(c *gin.Context) { c.Set("user_id", auditScopeCaller); c.Next() })
@@ -533,6 +553,7 @@ func TestListUsers_NarrowsToCallerAdminOrgs(t *testing.T) {
 		WillReturnRows(sqlmock.NewRows(userMembershipCols).
 			AddRow(auditScopeOrgA, "Org A", "rt-admin", time.Now(), "admin", "Admin", []byte(`["admin"]`)).
 			AddRow("org-c", "Org C", "rt-viewer", time.Now(), "viewer", "Viewer", []byte(`["state:read"]`)))
+	expectAppRolesForUser(mock, auditScopeCaller, appRole{auditScopeOrgA, "rt-admin", "admin", `["admin"]`}, appRole{"org-c", "rt-viewer", "viewer", `["state:read"]`})
 	mock.ExpectQuery(`SELECT COUNT\(\*\) FROM users`).WithArgs([]string{auditScopeOrgA}).
 		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(2))
 	mock.ExpectQuery("FROM users").

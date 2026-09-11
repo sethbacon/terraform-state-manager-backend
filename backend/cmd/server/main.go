@@ -329,18 +329,15 @@ func serve(cfg *config.Config) error {
 
 	// WHICH TABLES DECIDE AUTHORIZATION, IN THE STARTUP LOG.
 	//
-	// This is the same reasoning approles.Store.Verify applies to the resolved
-	// table names: a deployment reading the wrong source is indistinguishable
-	// from a correct one in every other observable, so the answer is stated once
-	// at boot rather than inferred later from who can do what. Refused rather
-	// than defaulted — an operator who typed `TSM_AUTHZ_ROLE_SOURCE=idenity` must
-	// see it here, not discover months later that the flip never happened.
-	roleSource, err := approles.ParseRoleSource(cfg.Authz.RoleSource)
-	if err != nil {
-		return err
-	}
-	slog.Info("authorization role source", "source", string(roleSource),
-		"rollback", "set TSM_AUTHZ_ROLE_SOURCE=identity and restart to read the shared identity schema again")
+	// Same reasoning approles.Store.Verify applies to the resolved table names: a
+	// deployment authorizing from the wrong place is indistinguishable from a
+	// correct one in every other observable, so the answer is stated once at boot
+	// rather than inferred later from who can do what. There is one answer since
+	// #599 retired TSM_AUTHZ_ROLE_SOURCE=identity; a config that still sets that
+	// key never reaches this line, because config.Load refuses it.
+	slog.Info("authorization role source",
+		"source", "this application's organization_member_roles and role_templates",
+		"rollback", "none in place: the identity read position was retired in #599; roll back by redeploying the previous image")
 
 	// The standing detector. It reports and never corrects; the repair is
 	// bootstrap.Run's reconcile above, which has just run.
@@ -678,23 +675,26 @@ func reportAuthzDrift(ctx context.Context, appDB, identityDB *sql.DB) {
 	}
 }
 
-// runAuthzDrift is the gate for sethbacon/terraform-suite-identity#206 Phase 3b.
+// runAuthzDrift compares this application's role tables with the shared identity
+// schema's, for sethbacon/terraform-suite-identity#206.
 //
 // # What it is for
 //
-// The reads moved. Which role a principal holds in this application is now
-// answered by organization_member_roles joined to this application's own
+// The reads moved in Phase 3b. Which role a principal holds in this application
+// is answered by organization_member_roles joined to this application's own
 // role_templates, not by identity.organization_members joined to identity's. A
 // gap between the two does not surface as an error: it surfaces as a user
 // silently holding the wrong role — losing access they should have, or keeping
 // access they should not — and nothing in the request path reports it.
 //
-// So the flip is gated on this command rather than on a release note. RUN IT
-// AGAINST A DEPLOYMENT BEFORE UPGRADING IT ONTO A BUILD WHOSE
-// TSM_AUTHZ_ROLE_SOURCE DEFAULTS TO "app", and require a zero exit. The binary
-// need not be the one that is running: this connects to the two databases and
-// reads them, so the new build's `authz-drift` answers for the old build's data,
-// which is exactly the order an upgrade happens in.
+// It gated the flip, and it now gates the removal of the flip's rollback. #599
+// retired TSM_AUTHZ_ROLE_SOURCE=identity, so the release carrying it is the last
+// point at which a divergence can be corrected by rolling back rather than by
+// repair. RUN IT AGAINST A DEPLOYMENT BEFORE UPGRADING IT ONTO THAT BUILD, and
+// require a zero exit. The binary need not be the one that is running: this
+// connects to the two databases and reads them, so the new build's `authz-drift`
+// answers for the old build's data, which is exactly the order an upgrade
+// happens in.
 //
 // # Non-zero while anything is unreconciled
 //
@@ -747,7 +747,7 @@ func runReownRoots(cfg *config.Config, from, to string) error {
 	// application's own organization_member_roles, and a class guard fails the
 	// build on it. The read below is promoted unchanged through the embedded
 	// repository, so this costs nothing and keeps the one construction path.
-	orgs := approles.NewMembers(identityDB, database, approles.RoleSource(cfg.Authz.RoleSource))
+	orgs := approles.NewMembers(identityDB, database)
 
 	res, err := maintenance.Move(ctx, database, from, to, func(ctx context.Context, id string) (bool, error) {
 		org, err := orgs.GetByID(ctx, id, idstore.OrgScopeAllOrganizations())

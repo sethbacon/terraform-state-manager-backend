@@ -170,27 +170,30 @@ auth:
   scim:
     enabled: false
 
-# Where authorization reads a principal's role from, and how often the two
-# candidate sources are compared.
+# How often this application's role tables are compared against the shared
+# identity schema's.
 #
 # Under sethbacon/terraform-suite-identity#206 identity is SHARED and
 # authorization is PER-APP: membership stays a fact in the identity schema, and
 # which role a member holds HERE is a row in this application's own
-# organization_member_roles. "app" (the default) is that model; "identity" is the
-# previous phase, where every role read came from identity.organization_members
-# joined to identity.role_templates.
+# organization_member_roles joined to its own role_templates. That is the ONLY
+# place a role read resolves from.
 #
-# BOTH TABLES ARE WRITTEN UNDER EITHER VALUE, so the source that is not being read
-# stays current and switching back is a restart rather than a restore. That is the
-# rollback: set TSM_AUTHZ_ROLE_SOURCE=identity and restart.
+# authz.role_source (TSM_AUTHZ_ROLE_SOURCE) IS RETIRED AND REFUSED. It was the
+# rollback lever for the read cutover ("app" = this application's tables,
+# "identity" = the shared schema). #599 removed it: it was this application's
+# last read of the shared role_templates, and while it existed the sibling
+# registry could not stop seeding that table without turning the lever into a
+# silent downgrade to stale roles. A config that still sets it, to ANY value,
+# fails the boot with an error naming the key. Do not add it back here.
 #
-# BEFORE UPGRADING ONTO A BUILD THAT DEFAULTS TO "app", run
+# BEFORE UPGRADING ONTO THE RELEASE THAT REMOVES IT, run
 #   tsm-server authz-drift
-# against the deployment and require a zero exit. A gap between the two sources
-# does not surface as an error — it surfaces as a principal silently holding the
-# wrong role.
+# against the deployment and require a zero exit. That release is the last point
+# at which a gap between the two schemas can be corrected by rolling back rather
+# than by repair, and a gap does not surface as an error — it surfaces as a
+# principal silently holding the wrong role.
 authz:
-  role_source: "app"        # app | identity  (TSM_AUTHZ_ROLE_SOURCE)
   # How often the running server re-compares the two sources and reports the
   # difference (it never corrects; the startup reconcile does that). 0 disables
   # the loop. Exports tsm_authz_role_drift{kind=...}; alert on the counts AND on
@@ -211,12 +214,13 @@ suite:
   # one identity database, exactly one must own the seed ("registry" or "tsm") or
   # they overwrite each other's role scopes on every restart.
   #
-  # It NO LONGER decides what this application's own roles grant. Since
-  # authz.role_source defaults to "app", this app seeds its OWN role_templates
-  # unconditionally and authorizes from those; this setting now governs only the
-  # shared copy, which the sibling registry and the authz rollback path still
-  # read. NOTE for coupled deployments: your `editor` (and every other role name)
-  # now means what THIS build defines, not what the sibling seeded.
+  # It NO LONGER decides what this application's own roles grant. This app seeds
+  # its OWN role_templates unconditionally and authorizes from those alone; this
+  # setting governs only the shared copy, which nothing in THIS application reads
+  # any more (the identity rollback position was retired in #599) and which the
+  # sibling registry's startup reconcile still derives from. NOTE for coupled
+  # deployments: your `editor` (and every other role name) means what THIS build
+  # defines, not what the sibling seeded.
   #
   # It is also still what the first-run setup wizard uses to decide whether this
   # app owns identity at all (owner creation, OIDC configuration), so it cannot

@@ -305,6 +305,22 @@ func expectKeyOwnerIsMember(mock sqlmock.Sqlmock, orgID, userID string) {
 	mock.ExpectQuery("FROM organization_members").WithArgs(orgID, userID).
 		WillReturnRows(sqlmock.NewRows([]string{"organization_id", "user_id", "role_template_id", "created_at"}).
 			AddRow(orgID, userID, nil, time.Now()))
+	// The app-side overlay CheckMembership issues after the identity leg
+	// (approles.Store.RoleForPair) since #599. No row: a member with no role
+	// recorded in this application, which is still a member — the boolean is
+	// identity's fact, and only the role id is ours.
+	mock.ExpectQuery("FROM organization_member_roles r").WithArgs(orgID, userID).
+		WillReturnRows(sqlmock.NewRows([]string{"role_template_id", "name", "display_name", "scopes"}))
+}
+
+// expectOwnerAppRoles stages the app-side overlay GetUserCombinedScopes issues
+// after the identity leg (approles.Store.RolesForUser). Since #599 the scopes a
+// key is capped to come from THIS application's role tables, so the identity
+// row's role columns are scanned and then overwritten by this answer.
+func expectOwnerAppRoles(mock sqlmock.Sqlmock, userID, orgID, role, scopesJSON string) {
+	mock.ExpectQuery("FROM organization_member_roles r").WithArgs(userID).
+		WillReturnRows(sqlmock.NewRows([]string{"organization_id", "role_template_id", "name", "display_name", "scopes"}).
+			AddRow(orgID, "rt-"+role, role, role, []byte(scopesJSON)))
 }
 
 func TestAuthMiddleware_APIKeyAuthenticates(t *testing.T) {
@@ -340,7 +356,7 @@ func newOrgRepoMW(t *testing.T) (*approles.Members, sqlmock.Sqlmock) {
 		t.Fatalf("sqlmock.New (org): %v", err)
 	}
 	t.Cleanup(func() { db.Close() })
-	return approles.NewMembers(db, nil, approles.RoleSourceIdentity), mock
+	return approles.NewMembers(db, db), mock
 }
 
 // mwMembershipCols mirrors GetUserCombinedScopes' membership projection.
@@ -370,6 +386,7 @@ func TestAuthMiddleware_APIKeyScopesCappedByLiveOwnerScopes(t *testing.T) {
 	orgMock.ExpectQuery("FROM organization_members om").WithArgs("u1").
 		WillReturnRows(sqlmock.NewRows(mwMembershipCols).
 			AddRow("o1", "default", nil, time.Now(), "viewer", "Viewer", []byte(`["state:read"]`)))
+	expectOwnerAppRoles(orgMock, "u1", "o1", "viewer", `["state:read"]`)
 
 	r := gin.New()
 	r.Use(AuthMiddleware(userRepo, nil, keyRepo, orgRepo, nil, nil))

@@ -50,7 +50,7 @@ func newAuthEnvAs(t *testing.T, userID, authMethod string, mutate func(*config.C
 	if mutate != nil {
 		mutate(cfg)
 	}
-	h, err := NewAuthHandlers(cfg, db, nil)
+	h, err := NewAuthHandlers(cfg, db, db)
 	if err != nil {
 		t.Fatalf("NewAuthHandlers: %v", err)
 	}
@@ -120,10 +120,12 @@ func TestMeHandler(t *testing.T) {
 	e.mock.ExpectQuery("FROM organization_members om").WithArgs("u1").
 		WillReturnRows(sqlmock.NewRows(membershipCols).
 			AddRow("o1", "default", nil, now, "editor", "Editor", []byte(`["state:read","state:write"]`)))
+	expectAppRolesForUser(e.mock, "u1", appRole{"o1", "rt-editor", "editor", `["state:read","state:write"]`})
 	// GetUserCombinedScopes re-reads memberships.
 	e.mock.ExpectQuery("FROM organization_members om").WithArgs("u1").
 		WillReturnRows(sqlmock.NewRows(membershipCols).
 			AddRow("o1", "default", nil, now, "editor", "Editor", []byte(`["state:read","state:write"]`)))
+	expectAppRolesForUser(e.mock, "u1", appRole{"o1", "rt-editor", "editor", `["state:read","state:write"]`})
 
 	w := e.do(http.MethodGet, "/api/v1/auth/me", "")
 	if w.Code != http.StatusOK {
@@ -232,7 +234,7 @@ func TestMeHandlerReportsTheAdminScopeInForceForTheRequest(t *testing.T) {
 				t.Fatalf("sqlmock.New: %v", err)
 			}
 			t.Cleanup(func() { db.Close() })
-			h, err := NewAuthHandlers(&config.Config{}, db, nil)
+			h, err := NewAuthHandlers(&config.Config{}, db, db)
 			if err != nil {
 				t.Fatalf("NewAuthHandlers: %v", err)
 			}
@@ -253,9 +255,11 @@ func TestMeHandlerReportsTheAdminScopeInForceForTheRequest(t *testing.T) {
 			mock.ExpectQuery("FROM organization_members om").WithArgs("u1").
 				WillReturnRows(sqlmock.NewRows(membershipCols).
 					AddRow("o1", "default", nil, now, "editor", "Editor", []byte(tt.union)))
+			expectAppRolesForUser(mock, "u1", appRole{"o1", "rt-editor", "editor", tt.union})
 			mock.ExpectQuery("FROM organization_members om").WithArgs("u1").
 				WillReturnRows(sqlmock.NewRows(membershipCols).
 					AddRow("o1", "default", nil, now, "editor", "Editor", []byte(tt.union)))
+			expectAppRolesForUser(mock, "u1", appRole{"o1", "rt-editor", "editor", tt.union})
 
 			w := e.do(http.MethodGet, "/api/v1/auth/me", "")
 			if w.Code != http.StatusOK {
@@ -430,7 +434,7 @@ func TestMeHandlerSessionExpiry(t *testing.T) {
 			t.Fatalf("sqlmock.New: %v", err)
 		}
 		t.Cleanup(func() { db.Close() })
-		h, err := NewAuthHandlers(&config.Config{}, db, nil)
+		h, err := NewAuthHandlers(&config.Config{}, db, db)
 		if err != nil {
 			t.Fatalf("NewAuthHandlers: %v", err)
 		}

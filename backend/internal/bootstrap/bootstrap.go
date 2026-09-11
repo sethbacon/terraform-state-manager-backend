@@ -300,21 +300,23 @@ func appTemplateIDs(ctx context.Context, appDB *sql.DB) (map[string]string, erro
 //
 // # Why this did not go away when the reads did
 //
-// TSM no longer reads these rows — not on the primary path since Phase 3b, and
-// not anywhere since the Phase 3 close-out retired the residual lookups. It is
-// fair to ask why it still writes them. Two reasons, and both expire in Phase 4
-// when identity.role_templates is dropped:
+// TSM no longer reads these rows — not on the primary path since Phase 3b, not
+// anywhere since the Phase 3 close-out retired the residual lookups, and since
+// #599 not through the rollback lever either, which was the last read this
+// application had of the shared schema's roles.
 //
-//	THE ROLLBACK PATH READS THEM. TSM_AUTHZ_ROLE_SOURCE=identity is this phase's
-//	rollback, and it puts every role-assignment read back onto this table. A
-//	build that stopped seeding it would leave a FRESH standalone deployment with
-//	an empty identity.role_templates, so the rollback would resolve every
-//	membership to no role and lock everybody out — a rollback lever that works on
-//	upgraded deployments and destroys new ones is worse than none.
+// The sibling still does, at boot. The registry authorizes from its own
+// registry_role_templates, but its startup reconcile DERIVES that table from the
+// shared identity schema — template scopes included — before its own seed
+// overwrites the system rows. In a coupled deployment with suite.role_seed_owner
+// = tsm, what this seed writes is therefore what the registry's non-system
+// templates mean over there, and stopping it here would be a behaviour change in
+// the other application made from this one: the shape #206 exists to end.
 //
-//	THE SIBLING READS THEM. In a coupled deployment the registry still authorizes
-//	from this table, and suite.role_seed_owner is still what stops the two apps
-//	overwriting each other in it.
+// So it stays until sethbacon/terraform-suite-identity#206 Phase 4 retires the
+// shared table's writers and that derivation together, registry first. Nothing
+// in THIS application depends on it any more; the day the registry stops
+// reading the shared schema at boot, this function has no reader left and goes.
 //
 // # The ids are the app's now
 //

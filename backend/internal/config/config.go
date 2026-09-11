@@ -48,41 +48,49 @@ type Config struct {
 	DriftRetention DriftRetentionConfig `mapstructure:"drift_retention"`
 }
 
-// AuthzConfig controls where authorization decisions read a principal's role
-// from, and how often the two candidate sources are compared.
+// AuthzConfig controls how often this application's role tables are compared
+// against the shared identity schema's, and refuses the one setting that used to
+// choose between them.
 //
-// # RoleSource is the rollback lever for Phase 3b
+// # There is one role source
 //
 // Under sethbacon/terraform-suite-identity#206, identity is SHARED and
 // authorization is PER-APP: membership stays a fact in the identity schema, and
 // which role a member holds HERE is a row in this application's own
-// organization_member_roles. "app" (the default) is that model. "identity" is the
-// Phase 3a position — every role read comes from identity.organization_members
-// joined to identity.role_templates, exactly as it did before the reads moved.
+// organization_member_roles joined to its own role_templates. That is the only
+// place a role read resolves from.
 //
-// BOTH TABLES ARE WRITTEN UNDER EITHER VALUE. The dual write is not conditional
-// on this setting, so the source that is not being read stays current rather than
-// going stale, and switching back is a restart rather than a restore. That is the
-// whole reason this is a runtime setting and not a code change: an operator who
-// finds a role wrong in production sets TSM_AUTHZ_ROLE_SOURCE=identity, restarts,
-// and is running the previous phase's behaviour with no data movement, no
-// migration, and no window in which authorization is undefined.
+// # RoleSource is a TOMBSTONE, and setting it fails the boot
 //
-// BEFORE UPGRADING ONTO A BUILD THAT DEFAULTS TO "app", run `server authz-drift`
-// against the deployment and require a zero exit. A gap between the two sources
-// does not surface as an error — it surfaces as a principal silently holding the
-// wrong role — so the flip is gated on that command rather than on a release note.
+// Phase 3b shipped with TSM_AUTHZ_ROLE_SOURCE as its rollback lever: `app` was
+// the new model and `identity` put every role read back on the shared schema.
+// #599 retired the lever. It was this application's last read of the shared
+// role_templates, and while it existed the sibling registry could not stop
+// seeding that table — because a lever that reads a table nobody keeps current
+// is not a rollback, it is a silent downgrade to stale data.
+//
+// The key is still bound so that a value can be SEEN and REFUSED. Silently
+// ignoring `authz.role_source: identity` would let a deployment believe it has
+// a rollback it does not have, and this repository has already been bitten by
+// the shape where a setting is accepted and then not honoured (see the history
+// on refuseRetiredRoleSource). Any value at all — including `app`, which is now
+// merely the truth — is an error naming the key, so the line gets deleted from
+// the config that carries it rather than copied forward as folklore.
 //
 // # DriftInterval is the standing detector
 //
-// How often the running server re-compares the two sources and reports the
-// difference (it never corrects; approles.Reconcile does that, at boot). Zero
-// disables the loop. The comparison is two ordered scans of the membership tables,
-// so it is bounded work on a generous interval rather than a per-request shadow
-// read on the API-key hot path.
+// How often the running server re-compares this application's role tables with
+// the shared schema's and reports the difference (it never corrects;
+// approles.Reconcile does that, at boot). Zero disables the loop. The comparison
+// is two ordered scans of the membership tables, so it is bounded work on a
+// generous interval rather than a per-request shadow read on the API-key hot
+// path. It outlives the rollback lever: both tables are still written, and a
+// divergence between them is still a principal silently holding the wrong role
+// somewhere, until #206 Phase 4 drops the identity side.
 //
-// Env: TSM_AUTHZ_ROLE_SOURCE, TSM_AUTHZ_DRIFT_INTERVAL.
+// Env: TSM_AUTHZ_DRIFT_INTERVAL. (TSM_AUTHZ_ROLE_SOURCE is refused; see above.)
 type AuthzConfig struct {
+	// RoleSource is bound only to be refused. See refuseRetiredRoleSource.
 	RoleSource    string        `mapstructure:"role_source"`
 	DriftInterval time.Duration `mapstructure:"drift_interval"`
 }
@@ -652,26 +660,40 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("failed to unmarshal config: %w", err)
 	}
 	cfg.resolveIdentityDatabase()
-	cfg.Authz.RoleSource = normaliseRoleSource(cfg.Authz.RoleSource)
+	if err := refuseRetiredRoleSource(cfg.Authz.RoleSource); err != nil {
+		return nil, err
+	}
 	return &cfg, nil
 }
 
-// normaliseRoleSource lowercases and trims authz.role_source AT LOAD.
+// refuseRetiredRoleSource fails the load when authz.role_source is set at all.
 //
-// NORMALISED HERE, ONCE, because the handler constructors convert this string to
-// an approles.RoleSource with a plain cast — a cast cannot reject anything, and
-// approles.ParseRoleSource (which does) is called only by the serve path, for the
-// startup line. With `TSM_AUTHZ_ROLE_SOURCE=App` the boot therefore SUCCEEDED and
-// logged `source=app`, while every repository held the un-normalised "App" and
-// denied every role read as an undecided source: an authorization outage that
-// announced itself as healthy, on the one setting an operator reaches for when
-// something is already wrong.
+// The setting was the Phase 3b rollback lever, retired in #599 (see AuthzConfig).
+// It is REFUSED rather than ignored, and refused for every value rather than only
+// for `identity`, because of what each alternative does:
 //
-// It normalises but does not validate. A value that is neither `app` nor
-// `identity` still has to fail the boot rather than fall back, and that refusal
-// belongs where the error can name the bad value and stop the process —
-// cmd/server's ParseRoleSource — not in a loader that has no way to refuse.
-func normaliseRoleSource(v string) string { return strings.ToLower(strings.TrimSpace(v)) }
+//   - Ignoring it lets `role_source: identity` sit in a deployment's config as
+//     the record of a rollback that no longer exists. The next operator to reach
+//     for it in an incident finds out then.
+//   - Accepting `app` alone makes this a validator of a setting with no other
+//     value — a setting in name only — and leaves the line to be copied into the
+//     next deployment's config as if it still chose something.
+//
+// It is the LOADER that refuses, not cmd/server. The previous arrangement — a
+// normaliseRoleSource here that lowercased and trimmed but could not refuse, and
+// a ParseRoleSource in the serve path that refused but ran only for the startup
+// line — is what once let `TSM_AUTHZ_ROLE_SOURCE=App` boot, log `source=app`,
+// and deny every role read as an undecided source. A value refused at load
+// cannot be half-honoured anywhere downstream.
+func refuseRetiredRoleSource(v string) error {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return nil
+	}
+	return fmt.Errorf("authz.role_source (TSM_AUTHZ_ROLE_SOURCE) is set to %q, but the setting was retired in #599: "+
+		"this application resolves roles from its own tables only, and the `identity` rollback position no longer "+
+		"exists. Delete the setting", v)
+}
 
 // validSSLModes are the libpq sslmode values the Postgres driver accepts.
 var validSSLModes = map[string]struct{}{
@@ -945,9 +967,15 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("notifications.api_key_expiry_check_interval_hours", 24)
 	v.SetDefault("notifications.events.api_key_expiring", true)
 
-	// Per-app authorization. "app" is Phase 3b (this application's own tables);
-	// "identity" is the Phase 3a rollback position. See AuthzConfig.
-	v.SetDefault("authz.role_source", "app")
+	// Per-app authorization. authz.role_source has NO default and is bound only
+	// so that a value set through the environment still reaches the loader,
+	// where it is refused. AutomaticEnv decodes an env override into the struct
+	// only for keys viper already knows, and a retired key with no default is
+	// one it does not — which would make TSM_AUTHZ_ROLE_SOURCE=identity silently
+	// ignored, the exact outcome refuseRetiredRoleSource exists to prevent. The
+	// env name is spelled here rather than derived, because this runs before
+	// Load sets the prefix and replacer. See AuthzConfig.
+	_ = v.BindEnv("authz.role_source", "TSM_AUTHZ_ROLE_SOURCE")
 	v.SetDefault("authz.drift_interval", 15*time.Minute)
 
 	// Suite runtime discovery

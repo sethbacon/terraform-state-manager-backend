@@ -10,8 +10,6 @@ import (
 
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
 	"github.com/gin-gonic/gin"
-
-	"github.com/terraform-state-manager/terraform-state-manager/internal/approles"
 )
 
 // #485 — the platform-admin carrier may stand in for membership on the bootstrap
@@ -38,7 +36,7 @@ func bootstrapEnv(t *testing.T, carrier platformAdminSource, authMethod string, 
 	}
 	t.Cleanup(func() { db.Close() })
 
-	h := NewAdminHandlers(db, nil, approles.RoleSourceIdentity, WithPlatformAdmins(carrier))
+	h := NewAdminHandlers(db, db, WithPlatformAdmins(carrier))
 	r := gin.New()
 	r.Use(func(c *gin.Context) {
 		c.Set("user_id", "admin-1")

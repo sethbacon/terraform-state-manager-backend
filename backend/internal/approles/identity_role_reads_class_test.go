@@ -38,8 +38,9 @@ import (
 //	        `+` does not hide it.
 //
 // WRITES ARE NOT BANNED: bootstrap.seedSharedRoleTemplates still upserts the
-// identity-side copy (gated by suite.role_seed_owner) for the rollback lever
-// and the sibling, until Phase 4 drops the table. Its statement carries no
+// identity-side copy (gated by suite.role_seed_owner) for the sibling's startup
+// derivation — the rollback lever it also served went in #599 — until Phase 4
+// drops the table. Its statement carries no
 // read shape, so axis B passes it — and would refuse it the day someone adds
 // a RETURNING clause.
 //
@@ -47,7 +48,7 @@ import (
 // fragments that never co-occur in one literal (e.g. Sprintf over a table-name
 // constant), and reads the shared identity library performs internally on the
 // identity connection — the library's own membership queries join
-// identity.role_templates and discard the columns under RoleSourceApp, which
+// identity.role_templates and discard the columns, which
 // is library mechanism this repository cannot unsay and Phase 4 removes. The
 // first is mitigated by axis A (the only convenient handle is banned) and by
 // the matcher self-checks below, which keep both detectors provably alive.

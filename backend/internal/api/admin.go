@@ -68,10 +68,10 @@ func WithAdminCredentialSweeper(s *credlifecycle.Sweeper) AdminOption {
 // identity and nothing else — silently, and only on the deployment that forgot
 // it. A nil appDB is legitimate ONLY in a rig with no application database; it
 // yields a Members that performs the identity leg alone.
-func NewAdminHandlers(identityDB, appDB *sql.DB, source approles.RoleSource, opts ...AdminOption) *AdminHandlers {
+func NewAdminHandlers(identityDB, appDB *sql.DB, opts ...AdminOption) *AdminHandlers {
 	h := &AdminHandlers{
 		userRepo:  idstore.NewUserRepository(identityDB),
-		orgRepo:   approles.NewMembers(identityDB, appDB, source),
+		orgRepo:   approles.NewMembers(identityDB, appDB),
 		auditRepo: idstore.NewAuditRepository(identityDB),
 	}
 	for _, opt := range opts {

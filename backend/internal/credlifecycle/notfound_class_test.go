@@ -83,6 +83,7 @@ func TestAuthorityReduced_RacedOverAskingKey_IsNotIncomplete(t *testing.T) {
 	mock.ExpectQuery("FROM organization_members om").WithArgs("u1").
 		WillReturnRows(sqlmock.NewRows(membershipCols).
 			AddRow("o1", "default", nil, time.Now(), "viewer", "Viewer", []byte(`["state:read"]`)))
+	expectAppRoles(mock, "u1", "o1", "viewer", `["state:read"]`)
 	// The key asks for write, so it over-asks and is selected for revocation...
 	mock.ExpectQuery("FROM api_keys").WithArgs("u1").
 		WillReturnRows(keyRow("k1", `["state:write"]`))

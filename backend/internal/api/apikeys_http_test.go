@@ -9,7 +9,6 @@ import (
 
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
 	"github.com/gin-gonic/gin"
-	"github.com/terraform-state-manager/terraform-state-manager/internal/approles"
 )
 
 // apiKeysEnv wires APIKeysHandlers behind a context stub standing in for the
@@ -28,7 +27,7 @@ func newAPIKeysEnv(t *testing.T) *apiKeysEnv {
 	t.Cleanup(func() { db.Close() })
 
 	scopes := []string{"state:read", "state:drift"}
-	h := NewAPIKeysHandlers(db, nil, approles.RoleSourceIdentity)
+	h := NewAPIKeysHandlers(db, db)
 	h.audit = newAuditor(nil) // keep audit writes off the sqlmock rig
 	r := gin.New()
 	r.Use(func(c *gin.Context) {
@@ -71,6 +70,9 @@ func expectOwnerIsMember(mock sqlmock.Sqlmock, orgID, userID string) {
 	mock.ExpectQuery("FROM organization_members").WithArgs(orgID, userID).
 		WillReturnRows(sqlmock.NewRows([]string{"organization_id", "user_id", "role_template_id", "created_at"}).
 			AddRow(orgID, userID, nil, time.Now()))
+	// The app-side overlay CheckMembership issues after the identity leg since
+	// #599; no row is a member with no role recorded here, still a member.
+	expectAppRoleForPair(mock, orgID, userID, nil)
 }
 
 func TestAPIKeys_CreateReturnsSecretOnce(t *testing.T) {
@@ -167,6 +169,7 @@ func TestAPIKeys_ListOwnVsAdmin(t *testing.T) {
 	e.mock.ExpectQuery("FROM organization_members om").WithArgs("u1").
 		WillReturnRows(sqlmock.NewRows(membershipCols).
 			AddRow("org-a", "A", "rt-admin", time.Now(), "admin", "Admin", []byte(`["admin"]`)))
+	expectAppRolesForUser(e.mock, "u1", appRole{"org-a", "rt-admin", "admin", `["admin"]`})
 	e.mock.ExpectQuery("FROM api_keys ak").
 		WillReturnRows(sqlmock.NewRows(append(apiKeyRowCols, "user_name")).
 			AddRow("k-a", "u-a", "default", "key-a", nil, "h", "tsm_aaa111", []byte(`["state:read"]`), nil, nil, nil, time.Now(), "UserA").
@@ -174,9 +177,11 @@ func TestAPIKeys_ListOwnVsAdmin(t *testing.T) {
 	e.mock.ExpectQuery("FROM organization_members om").WithArgs("u-a").
 		WillReturnRows(sqlmock.NewRows(membershipCols).
 			AddRow("org-a", "A", "rt-x", time.Now(), "editor", "Editor", []byte(`["state:read"]`)))
+	expectAppRolesForUser(e.mock, "u-a", appRole{"org-a", "rt-x", "editor", `["state:read"]`})
 	e.mock.ExpectQuery("FROM organization_members om").WithArgs("u-b").
 		WillReturnRows(sqlmock.NewRows(membershipCols).
 			AddRow("org-b", "B", "rt-x", time.Now(), "editor", "Editor", []byte(`["state:read"]`)))
+	expectAppRolesForUser(e.mock, "u-b", appRole{"org-b", "rt-x", "editor", `["state:read"]`})
 	w = e.do(http.MethodGet, "/api/v1/apikeys", "")
 	if w.Code != http.StatusOK {
 		t.Fatalf("admin list: %d (%s)", w.Code, w.Body.String())
@@ -300,6 +305,7 @@ func TestAPIKeys_AdminListNarrowsToOwnersSharingAnAdminOrg(t *testing.T) {
 		WillReturnRows(sqlmock.NewRows(userMembershipCols).
 			AddRow("org-a", "Org A", "rt-admin", time.Now(), "admin", "Admin", []byte(`["admin"]`)).
 			AddRow("org-c", "Org C", "rt-viewer", time.Now(), "viewer", "Viewer", []byte(`["state:read"]`)))
+	expectAppRolesForUser(e.mock, "u1", appRole{"org-a", "rt-admin", "admin", `["admin"]`}, appRole{"org-c", "rt-viewer", "viewer", `["state:read"]`})
 	// Every key carries the default organization, which is why the row's own
 	// organization_id cannot be the filter.
 	e.mock.ExpectQuery("FROM api_keys").WillReturnRows(
@@ -311,9 +317,11 @@ func TestAPIKeys_AdminListNarrowsToOwnersSharingAnAdminOrg(t *testing.T) {
 	e.mock.ExpectQuery("FROM organization_members om").WithArgs("owner-shared").
 		WillReturnRows(sqlmock.NewRows(userMembershipCols).
 			AddRow("org-a", "Org A", "rt-viewer", time.Now(), "viewer", "Viewer", []byte(`["state:read"]`)))
+	expectAppRolesForUser(e.mock, "owner-shared", appRole{"org-a", "rt-viewer", "viewer", `["state:read"]`})
 	e.mock.ExpectQuery("FROM organization_members om").WithArgs("owner-other").
 		WillReturnRows(sqlmock.NewRows(userMembershipCols).
 			AddRow("org-b", "Org B", "rt-viewer", time.Now(), "viewer", "Viewer", []byte(`["state:read"]`)))
+	expectAppRolesForUser(e.mock, "owner-other", appRole{"org-b", "rt-viewer", "viewer", `["state:read"]`})
 	e.mock.ExpectQuery("FROM organization_members om").WithArgs("owner-orphan").
 		WillReturnRows(sqlmock.NewRows(userMembershipCols))
 

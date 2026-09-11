@@ -102,6 +102,7 @@ func expectRetainedScopes(mock sqlmock.Sqlmock, userID string, scopes string) {
 	mock.ExpectQuery("FROM organization_members om").WithArgs(userID).
 		WillReturnRows(sqlmock.NewRows(membershipCols).
 			AddRow("o1", "default", nil, time.Now(), "viewer", "Viewer", []byte(scopes)))
+	expectAppRolesForUser(mock, userID, appRole{"o1", "rt-viewer", "viewer", scopes})
 }
 
 // expectKeyRevoked registers the key list plus the revocation of the one key it
@@ -134,21 +135,21 @@ func expectKeyList(mock sqlmock.Sqlmock, userID, keyID, scopes string) {
 
 // newClassAdminHandlers builds AdminHandlers exactly as the router does.
 func newClassAdminHandlers(db *sql.DB) *AdminHandlers {
-	return NewAdminHandlers(db, nil, approles.RoleSourceIdentity, WithAdminCredentialSweeper(classSweeper(db)))
+	return NewAdminHandlers(db, db, WithAdminCredentialSweeper(classSweeper(db)))
 }
 
 // newClassAdminHandlersWithApp also wires the APP connection (the same shared
 // sqlmock), which the role-write routes require now that template resolution
 // reads this application's own role_templates rather than identity's.
 func newClassAdminHandlersWithApp(db *sql.DB) *AdminHandlers {
-	return NewAdminHandlers(db, db, approles.RoleSourceIdentity, WithAdminCredentialSweeper(classSweeper(db)))
+	return NewAdminHandlers(db, db, WithAdminCredentialSweeper(classSweeper(db)))
 }
 
 func classSweeper(db *sql.DB) *credlifecycle.Sweeper {
 	return credlifecycle.NewSweeper(
 		repositories.NewUserTokenRevocationRepository(db),
 		idstore.NewAPIKeyRepository(db),
-		approles.NewMembers(db, nil, approles.RoleSourceIdentity),
+		approles.NewMembers(db, db),
 		credlifecycle.NoPlatformAdminCarrier{},
 	)
 }
@@ -161,7 +162,7 @@ func newClassAuthHandlers(t *testing.T, db *sql.DB, mutate func(*config.Config))
 	if mutate != nil {
 		mutate(cfg)
 	}
-	h, err := NewAuthHandlers(cfg, db, nil, WithAuthCredentialSweeper(classSweeper(db)))
+	h, err := NewAuthHandlers(cfg, db, db, WithAuthCredentialSweeper(classSweeper(db)))
 	if err != nil {
 		t.Fatalf("NewAuthHandlers: %v", err)
 	}
@@ -173,7 +174,6 @@ func newClassAuthHandlers(t *testing.T, db *sql.DB, mutate func(*config.Config))
 func newClassAuthHandlersWithApp(t *testing.T, db *sql.DB) *AuthHandlers {
 	t.Helper()
 	cfg := &config.Config{}
-	cfg.Authz.RoleSource = string(approles.RoleSourceIdentity)
 	h, err := NewAuthHandlers(cfg, db, db, WithAuthCredentialSweeper(classSweeper(db)))
 	if err != nil {
 		t.Fatalf("NewAuthHandlers: %v", err)
@@ -304,6 +304,7 @@ func TestCredentialLifecycleClass_AuthorityReductionInvalidatesEveryCredentialFa
 				r := gin.New()
 				r.DELETE("/organizations/:id/members/:user_id", h.RemoveOrganizationMember())
 
+				mock.ExpectExec("DELETE FROM organization_member_roles").WithArgs("o1", "u1", []string{"o1"}).WillReturnResult(sqlmock.NewResult(0, 1))
 				mock.ExpectExec("DELETE FROM organization_members").WithArgs("o1", "u1", []string{"o1"}).
 					WillReturnResult(sqlmock.NewResult(0, 1))
 				expectWatermarkWrite(mock, "u1")
@@ -370,6 +371,7 @@ func TestCredentialLifecycleClass_AuthorityReductionInvalidatesEveryCredentialFa
 				// them, so afterwards there is nobody left to sweep.
 				mock.ExpectQuery("FROM organization_members").WithArgs("o1", []string{"o1"}).
 					WillReturnRows(sqlmock.NewRows(memberRowCols).AddRow("o1", "u1", nil, time.Now()))
+				mock.ExpectExec("DELETE FROM organization_member_roles").WithArgs("o1", []string{"o1"}).WillReturnResult(sqlmock.NewResult(0, 1))
 				mock.ExpectExec("DELETE FROM organizations").WithArgs("o1", []string{"o1"}).
 					WillReturnResult(sqlmock.NewResult(0, 1))
 				expectWatermarkWrite(mock, "u1")
@@ -401,6 +403,8 @@ func TestCredentialLifecycleClass_AuthorityReductionInvalidatesEveryCredentialFa
 				expectAllKeysRevoked(mock, "u1")
 				mock.ExpectExec("DELETE FROM users").WithArgs("u1").
 					WillReturnResult(sqlmock.NewResult(0, 1))
+				// The mirror purge runs only once the delete applied (approles.Members.PurgeUserRoles).
+				mock.ExpectExec("DELETE FROM organization_member_roles").WithArgs("u1").WillReturnResult(sqlmock.NewResult(0, 1))
 
 				w := httptest.NewRecorder()
 				r.ServeHTTP(w, httptest.NewRequest(http.MethodDelete, "/users/u1", nil))
@@ -423,8 +427,10 @@ func TestCredentialLifecycleClass_AuthorityReductionInvalidatesEveryCredentialFa
 				mock.ExpectQuery("SELECT id, email, name, oidc_sub").WithArgs("u1").
 					WillReturnRows(idUserRow("u1"))
 				mock.ExpectExec("UPDATE users").WillReturnResult(sqlmock.NewResult(0, 1))
+				mock.ExpectExec("DELETE FROM organization_member_roles").WithArgs("u1").WillReturnResult(sqlmock.NewResult(0, 2))
 				mock.ExpectQuery("DELETE FROM organization_members").WithArgs("u1").
 					WillReturnRows(sqlmock.NewRows([]string{"organization_id"}).AddRow("o1").AddRow("o2"))
+				mock.ExpectExec("DELETE FROM organization_member_roles").WillReturnResult(sqlmock.NewResult(0, 0))
 				expectWatermarkWrite(mock, "u1")
 				expectAllKeysRevoked(mock, "u1")
 
@@ -533,6 +539,8 @@ func TestCredentialLifecycleClass_AuthorityReductionInvalidatesEveryCredentialFa
 				expectOrgByName(mock, "o1", "acme")
 				mock.ExpectQuery("FROM organization_members").WithArgs("o1", "u1", []string{"o1"}).
 					WillReturnRows(sqlmock.NewRows(memberRowCols).AddRow("o1", "u1", "rt-editor", time.Now()))
+				expectAppRoleForPair(mock, "o1", "u1", &appRole{id: "rt-editor", name: "editor", scopes: `["state:read","state:write"]`}, []string{"o1"})
+				mock.ExpectExec("DELETE FROM organization_member_roles").WithArgs("o1", "u1", []string{"o1"}).WillReturnResult(sqlmock.NewResult(0, 1))
 				mock.ExpectExec("DELETE FROM organization_members").WithArgs("o1", "u1", []string{"o1"}).
 					WillReturnResult(sqlmock.NewResult(0, 1))
 				expectRetainedScopes(mock, "u1", `["state:read"]`)
@@ -563,6 +571,7 @@ func TestCredentialLifecycleClass_AuthorityReductionInvalidatesEveryCredentialFa
 				expectOrgByName(mock, "o1", "acme")
 				mock.ExpectQuery("FROM organization_members").WithArgs("o1", "u1", []string{"o1"}).
 					WillReturnRows(sqlmock.NewRows(memberRowCols).AddRow("o1", "u1", "rt-owner", time.Now()))
+				expectAppRoleForPair(mock, "o1", "u1", &appRole{id: "rt-owner", name: "org_owner", scopes: `["organizations:write"]`}, []string{"o1"})
 				expectRoleScopesLookup(mock, "viewer", []string{"state:read"})
 				expectMirrorRoleResolution(mock, "viewer", "rt-viewer")
 				// The mirror records the broader role: a genuine demotion.
@@ -596,6 +605,8 @@ func TestCredentialLifecycleClass_AuthorityReductionInvalidatesEveryCredentialFa
 				expectOrgByName(mock, "o1", "acme")
 				mock.ExpectQuery("FROM organization_members").WithArgs("o1", "u1", []string{"o1"}).
 					WillReturnRows(sqlmock.NewRows(memberRowCols).AddRow("o1", "u1", "rt-editor", time.Now()))
+				expectAppRoleForPair(mock, "o1", "u1", &appRole{id: "rt-editor", name: "editor", scopes: `["state:read","state:write"]`}, []string{"o1"})
+				mock.ExpectExec("DELETE FROM organization_member_roles").WithArgs("o1", "u1", []string{"o1"}).WillReturnResult(sqlmock.NewResult(0, 1))
 				mock.ExpectExec("DELETE FROM organization_members").WithArgs("o1", "u1", []string{"o1"}).
 					WillReturnResult(sqlmock.NewResult(0, 1))
 				expectRetainedScopes(mock, "u1", `["state:read"]`)
@@ -658,6 +669,7 @@ func TestCredentialLifecycleClass_PromotionRetainsKeys(t *testing.T) {
 	expectOrgByName(mock, "o1", "acme")
 	mock.ExpectQuery("FROM organization_members").WithArgs("o1", "u1", []string{"o1"}).
 		WillReturnRows(sqlmock.NewRows(memberRowCols).AddRow("o1", "u1", "rt-viewer", time.Now()))
+	expectAppRoleForPair(mock, "o1", "u1", &appRole{id: "rt-viewer", name: "viewer", scopes: `["state:read"]`}, []string{"o1"})
 	expectRoleScopesLookup(mock, "editor", []string{"state:read", "state:write"})
 	expectMirrorRoleResolution(mock, "editor", "rt-editor")
 	expectMirrorPriorRoleAbsent(mock)

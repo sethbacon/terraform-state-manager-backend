@@ -137,7 +137,7 @@ func twoConnections(t *testing.T) (*Members, sqlmock.Sqlmock, sqlmock.Sqlmock, f
 	if err != nil {
 		t.Fatalf("sqlmock.New (app): %v", err)
 	}
-	m := NewMembers(identityDB, appDB, RoleSourceIdentity)
+	m := NewMembers(identityDB, appDB)
 	return m, identityMock, appMock, func() {
 		_ = identityDB.Close()
 		_ = appDB.Close()
@@ -464,7 +464,7 @@ func TestNoAppConnection_DegradesToTheIdentityLegAlone(t *testing.T) {
 	defer func() { _ = identityDB.Close() }()
 	var sw sweeps
 
-	m := NewMembers(identityDB, nil, RoleSourceIdentity)
+	m := NewMembers(identityDB, nil)
 	if m.Store() != nil {
 		t.Fatal("a Members built without an app connection reported a mirror store")
 	}
@@ -599,6 +599,13 @@ func TestAFailedRevocationMirrorDoesNotReachIdentity(t *testing.T) {
 // shared repository exposes and this package does not override must still be
 // callable on *Members, or the wrapper would have been a rewrite rather than a
 // wrap.
+//
+// GetByID, because it carries no role. Before #599 this test used
+// CheckMembership, which is an OVERRIDE (reads.go) that happened to answer from
+// identity on a nil store — so it never exercised promotion at all, and it
+// stopped being evidence the moment the nil-store fallback became a refusal. A
+// read the wrapper does not touch is the only kind that can show the wrapper
+// left it alone.
 func TestReadsArePromotedUnchanged(t *testing.T) {
 	identityDB, identityMock, err := newSQLMockRegexp()
 	if err != nil {
@@ -606,13 +613,17 @@ func TestReadsArePromotedUnchanged(t *testing.T) {
 	}
 	defer func() { _ = identityDB.Close() }()
 
-	identityMock.ExpectQuery("SELECT .* FROM organization_members").
-		WillReturnRows(sqlmock.NewRows([]string{"organization_id", "user_id", "role_template_id", "created_at"}).
-			AddRow("org-1", "user-1", sql.NullString{}, time.Now()))
+	identityMock.ExpectQuery("SELECT .* FROM organizations").
+		WillReturnRows(sqlmock.NewRows([]string{"id", "name", "display_name", "idp_type", "idp_name", "created_at", "updated_at"}).
+			AddRow("org-1", "acme", "Acme", nil, nil, time.Now(), time.Now()))
 
-	m := NewMembers(identityDB, nil, RoleSourceIdentity)
-	if _, _, err := m.CheckMembership(context.Background(), "org-1", "user-1", idstore.OrgScopeOrganizations("org-1")); err != nil {
+	m := NewMembers(identityDB, nil)
+	org, err := m.GetByID(context.Background(), "org-1", idstore.OrgScopeAllOrganizations())
+	if err != nil {
 		t.Fatalf("a promoted read stopped working: %v", err)
+	}
+	if org == nil || org.ID != "org-1" {
+		t.Fatalf("GetByID returned %+v, want org-1", org)
 	}
 }
 

@@ -35,7 +35,7 @@ type readsEnv struct {
 	identity, app sqlmock.Sqlmock
 }
 
-func newReadsEnv(t *testing.T, source RoleSource) *readsEnv {
+func newReadsEnv(t *testing.T) *readsEnv {
 	t.Helper()
 	identityDB, identityMock, err := newSQLMockRegexp()
 	if err != nil {
@@ -49,7 +49,7 @@ func newReadsEnv(t *testing.T, source RoleSource) *readsEnv {
 		_ = identityDB.Close()
 		_ = appDB.Close()
 	})
-	return &readsEnv{members: NewMembers(identityDB, appDB, source), identity: identityMock, app: appMock}
+	return &readsEnv{members: NewMembers(identityDB, appDB), identity: identityMock, app: appMock}
 }
 
 // expectIdentityMembership stages the shared repository's user-membership read,
@@ -75,7 +75,7 @@ func expectAppRolesForUser(m sqlmock.Sqlmock, roleID, roleName, scopes string) {
 // state:read; the mirror says `admin` with admin. The scopes a session would be
 // minted from must be the mirror's.
 func TestGetUserCombinedScopes_AnswersFromTheApplicationsOwnTables(t *testing.T) {
-	env := newReadsEnv(t, RoleSourceApp)
+	env := newReadsEnv(t)
 	expectIdentityMembership(env.identity, identityRoleID, "viewer", `["state:read"]`)
 	expectAppRolesForUser(env.app, appRoleID, "admin", `["admin"]`)
 
@@ -88,27 +88,6 @@ func TestGetUserCombinedScopes_AnswersFromTheApplicationsOwnTables(t *testing.T)
 	}
 }
 
-// THE ROLLBACK POSITION ANSWERS FROM IDENTITY, and issues no app query at all.
-// Asserted on the value AND on the app mock having been asked nothing: a
-// rollback that read the mirror and then discarded it would still be reading the
-// table an operator rolled back to stop reading.
-func TestGetUserCombinedScopes_RollbackAnswersFromIdentity(t *testing.T) {
-	env := newReadsEnv(t, RoleSourceIdentity)
-	expectIdentityMembership(env.identity, identityRoleID, "viewer", `["state:read"]`)
-	// No app expectation: any query on that connection fails this test.
-
-	scopes, err := env.members.GetUserCombinedScopes(context.Background(), testUserID)
-	if err != nil {
-		t.Fatalf("GetUserCombinedScopes: %v", err)
-	}
-	if len(scopes) != 1 || scopes[0] != "state:read" {
-		t.Fatalf("scopes = %v, want [state:read]", scopes)
-	}
-	if env.members.Source() != RoleSourceIdentity {
-		t.Fatalf("Source() = %q, want %q", env.members.Source(), RoleSourceIdentity)
-	}
-}
-
 // A MEMBERSHIP THIS APPLICATION RECORDS NO ROLE FOR GRANTS NOTHING. This is the
 // direction a gap in the mirror has to fail in: the principal loses access they
 // should have (loud, and self-reporting) rather than keeping access they should
@@ -116,7 +95,7 @@ func TestGetUserCombinedScopes_RollbackAnswersFromIdentity(t *testing.T) {
 // identity's role NAME beside an empty scope set is a principal shown one role
 // and granted another.
 func TestGetUserMemberships_AMissingMirrorRowGrantsNothing(t *testing.T) {
-	env := newReadsEnv(t, RoleSourceApp)
+	env := newReadsEnv(t)
 	expectIdentityMembership(env.identity, identityRoleID, "admin", `["admin"]`)
 	env.app.ExpectQuery(`FROM organization_member_roles r`).
 		WithArgs(testUserID).
@@ -152,7 +131,7 @@ func TestGetUserMemberships_AMissingMirrorRowGrantsNothing(t *testing.T) {
 // decision on identity's roles. Identity grants the required scope here and the
 // mirror does not: the resolver must return the empty scope.
 func TestOrgScopeForUser_ResolvesFromTheApplicationsOwnRoles(t *testing.T) {
-	env := newReadsEnv(t, RoleSourceApp)
+	env := newReadsEnv(t)
 	expectIdentityMembership(env.identity, identityRoleID, "org_owner", `["organizations:write"]`)
 	expectAppRolesForUser(env.app, appRoleID, "viewer", `["state:read"]`)
 
@@ -173,7 +152,7 @@ func TestOrgScopeForUser_ResolvesFromTheApplicationsOwnRoles(t *testing.T) {
 // a resolver still reading identity would under-authorize an administrator this
 // application promoted.
 func TestOrgScopeForUser_GrantsFromTheApplicationsOwnRoles(t *testing.T) {
-	env := newReadsEnv(t, RoleSourceApp)
+	env := newReadsEnv(t)
 	expectIdentityMembership(env.identity, identityRoleID, "viewer", `["state:read"]`)
 	expectAppRolesForUser(env.app, appRoleID, "org_owner", `["organizations:write"]`)
 
@@ -192,7 +171,7 @@ func TestOrgScopeForUser_GrantsFromTheApplicationsOwnRoles(t *testing.T) {
 // not the other is the exact promotion trap this phase's class guard exists for,
 // so it is asserted behaviourally too.
 func TestGetUserScopesForOrg_AnswersFromTheApplicationsOwnTables(t *testing.T) {
-	env := newReadsEnv(t, RoleSourceApp)
+	env := newReadsEnv(t)
 	env.identity.ExpectQuery(`FROM organization_members om`).
 		WithArgs(testOrgID, testUserID).
 		WillReturnRows(sqlmock.NewRows([]string{
@@ -218,7 +197,7 @@ func TestGetUserScopesForOrg_AnswersFromTheApplicationsOwnTables(t *testing.T) {
 // CheckMembership is derived from GetMember. Membership stays identity's answer;
 // the ROLE ID it hands back is this application's, and the two must not be mixed.
 func TestCheckMembership_KeepsIdentitysMembershipAndTheApplicationsRole(t *testing.T) {
-	env := newReadsEnv(t, RoleSourceApp)
+	env := newReadsEnv(t)
 	env.identity.ExpectQuery(`FROM organization_members`).
 		WithArgs(testOrgID, testUserID, sqlmock.AnyArg()).
 		WillReturnRows(sqlmock.NewRows([]string{"organization_id", "user_id", "role_template_id", "created_at"}).
@@ -245,7 +224,7 @@ func TestCheckMembership_KeepsIdentitysMembershipAndTheApplicationsRole(t *testi
 // must not be consulted for one: the overlay decorates rows identity returned, so
 // "not a member" short-circuits before any app query.
 func TestCheckMembership_AbsentInIdentityIsNotAMember(t *testing.T) {
-	env := newReadsEnv(t, RoleSourceApp)
+	env := newReadsEnv(t)
 	env.identity.ExpectQuery(`FROM organization_members`).
 		WithArgs(testOrgID, testUserID, sqlmock.AnyArg()).
 		WillReturnError(sql.ErrNoRows)
@@ -266,7 +245,7 @@ func TestCheckMembership_AbsentInIdentityIsNotAMember(t *testing.T) {
 // column. Two members, two different roles, deliberately in the opposite order
 // from the identity rows.
 func TestListMembersWithUsers_OverlaysEachMemberSeparately(t *testing.T) {
-	env := newReadsEnv(t, RoleSourceApp)
+	env := newReadsEnv(t)
 	const otherUser = "22222222-0000-0000-0000-00000000000c"
 	env.identity.ExpectQuery(`FROM organization_members om`).
 		WithArgs(testOrgID, sqlmock.AnyArg()).
@@ -296,79 +275,6 @@ func TestListMembersWithUsers_OverlaysEachMemberSeparately(t *testing.T) {
 	if got[testUserID] != "viewer" || got[otherUser] != "editor" {
 		t.Fatalf("roles = %v, want %s->viewer and %s->editor; identity said admin for both, "+
 			"so anything else means the overlay keyed on the wrong column", got, testUserID, otherUser)
-	}
-}
-
-// AN UNDECIDED ROLE SOURCE DENIES. The zero RoleSource is what a construction
-// site that never thought about it holds, and there is no safe guess: defaulting
-// to identity would silently undo this phase on that path, and defaulting to app
-// would silently perform it on a path with no app tables. So it errors, with the
-// value in the message.
-func TestAnUndecidedRoleSourceIsRefused(t *testing.T) {
-	env := newReadsEnv(t, RoleSource(""))
-	expectIdentityMembership(env.identity, identityRoleID, "admin", `["admin"]`)
-
-	_, err := env.members.GetUserCombinedScopes(context.Background(), testUserID)
-	if !errors.Is(err, ErrNoRoleSource) {
-		t.Fatalf("GetUserCombinedScopes with no role source: got %v, want ErrNoRoleSource", err)
-	}
-}
-
-// A Members with NO app connection degrades to identity rather than answering
-// nothing, and says so through Source(). That is what keeps the unit-test rigs
-// and the constructions that predate an app connection working; in a server it
-// would mean this phase is not in effect on that path.
-func TestNoApplicationConnectionDegradesToIdentity(t *testing.T) {
-	identityDB, identityMock, err := newSQLMockRegexp()
-	if err != nil {
-		t.Fatalf("sqlmock.New: %v", err)
-	}
-	defer func() { _ = identityDB.Close() }()
-
-	m := NewMembers(identityDB, nil, RoleSourceApp)
-	if m.Source() != RoleSourceIdentity {
-		t.Fatalf("Source() = %q with no app connection, want %q", m.Source(), RoleSourceIdentity)
-	}
-	expectIdentityMembership(identityMock, identityRoleID, "viewer", `["state:read"]`)
-	scopes, err := m.GetUserCombinedScopes(context.Background(), testUserID)
-	if err != nil {
-		t.Fatalf("GetUserCombinedScopes: %v", err)
-	}
-	if len(scopes) != 1 || scopes[0] != "state:read" {
-		t.Fatalf("scopes = %v, want [state:read]", scopes)
-	}
-}
-
-// ParseRoleSource accepts exactly the two positions and refuses everything else,
-// including the empty string. Empty is refused rather than treated as "the
-// default" because config supplies the default: accepting it here would make a
-// mis-spelled key indistinguishable from an unset one at the layer that can no
-// longer tell.
-func TestParseRoleSource(t *testing.T) {
-	cases := []struct {
-		in      string
-		want    RoleSource
-		wantErr bool
-	}{
-		{"app", RoleSourceApp, false},
-		{"APP", RoleSourceApp, false},
-		{"  identity  ", RoleSourceIdentity, false},
-		{"identity", RoleSourceIdentity, false},
-		{"", "", true},
-		{"idenity", "", true},
-		{"shared", "", true},
-	}
-	for _, c := range cases {
-		got, err := ParseRoleSource(c.in)
-		if c.wantErr {
-			if err == nil {
-				t.Errorf("ParseRoleSource(%q) = %q, want an error", c.in, got)
-			}
-			continue
-		}
-		if err != nil || got != c.want {
-			t.Errorf("ParseRoleSource(%q) = (%q, %v), want (%q, nil)", c.in, got, err, c.want)
-		}
 	}
 }
 
@@ -452,7 +358,7 @@ func TestRoleForPair_DistinguishesNoRowFromANullRole(t *testing.T) {
 // deduplicates for the same reason, so a template that lists a scope twice does
 // not produce a session carrying it twice.
 func TestGetUserCombinedScopes_Deduplicates(t *testing.T) {
-	env := newReadsEnv(t, RoleSourceApp)
+	env := newReadsEnv(t)
 	env.identity.ExpectQuery(`FROM organization_members om`).
 		WithArgs(testUserID).
 		WillReturnRows(sqlmock.NewRows([]string{
@@ -475,5 +381,32 @@ func TestGetUserCombinedScopes_Deduplicates(t *testing.T) {
 	sort.Strings(got)
 	if len(got) != 2 || got[0] != "state:read" || got[1] != "state:write" {
 		t.Fatalf("scopes = %v, want [state:read state:write]", got)
+	}
+}
+
+// A Members with NO app connection REFUSES role reads rather than answering
+// them from identity's columns. The pre-#599 Members degraded to the identity
+// source here; that was the retired rollback position coming back in through
+// construction, on exactly the rigs and legacy sites nobody re-reads. So it
+// errors — with the sentinel handlers already map to 500 — and it errors BEFORE
+// touching identity: no expectation is staged on that leg, so a Members that
+// consulted identity first would fail this test on an unexpected query, not on
+// the sentinel.
+func TestNoApplicationConnectionRefusesRoleReads(t *testing.T) {
+	identityDB, _, err := newSQLMockRegexp()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer func() { _ = identityDB.Close() }()
+
+	m := NewMembers(identityDB, nil)
+	if _, err := m.GetUserCombinedScopes(context.Background(), testUserID); !errors.Is(err, ErrNoAppStore) {
+		t.Fatalf("GetUserCombinedScopes with no app connection: got %v, want ErrNoAppStore", err)
+	}
+	if _, err := m.GetUserScopesForOrg(context.Background(), testUserID, "org-1"); !errors.Is(err, ErrNoAppStore) {
+		t.Fatalf("GetUserScopesForOrg with no app connection: got %v, want ErrNoAppStore", err)
+	}
+	if _, _, err := m.CheckMembership(context.Background(), "org-1", testUserID, idstore.OrgScopeOrganizations("org-1")); !errors.Is(err, ErrNoAppStore) {
+		t.Fatalf("CheckMembership with no app connection: got %v, want ErrNoAppStore", err)
 	}
 }

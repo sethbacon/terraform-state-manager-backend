@@ -278,6 +278,37 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_drift_runs_state_created
     ON drift_runs (source_id, state_key, created_at DESC);
 ```
 
+## One-time notice: the authorization rollback lever is retired
+
+The release carrying #599 removes `TSM_AUTHZ_ROLE_SOURCE` (`authz.role_source`).
+It was the rollback for the per-app authorization cutover: `app` read roles from
+this application's own tables, `identity` put every role read back on the shared
+identity schema. This application now has exactly one role source — its own
+tables — and **a configuration that still sets the key, to any value, fails the
+boot** with an error naming it.
+
+Why it went: it was this application's last read of the shared `role_templates`,
+and while it existed the sibling registry could not stop seeding that table. A
+rollback lever that reads a table nobody keeps current is not a rollback; it is
+a silent downgrade to stale roles.
+
+Before rolling onto this release:
+
+1. Run `tsm-server authz-drift` against the deployment and require a **zero**
+   exit. This release is the last point at which a divergence between the two
+   schemas can be corrected by rolling back rather than by repair. Non-zero:
+   restart the backend (the startup reconcile repairs and logs what it changed)
+   and run it again.
+2. Delete `authz.role_source` from the config file and `TSM_AUTHZ_ROLE_SOURCE`
+   from the environment, Helm values and compose files. A deployment that
+   carried the default (`app`) explicitly is refused too — the setting chooses
+   nothing now, and leaving it in place is how it gets copied into the next
+   deployment as if it still did.
+
+Rollback of this release itself is a redeploy of the previous image: both tables
+are still written, so the previous build finds the shared schema current.
+Nothing is dropped and no migration runs.
+
 ## Version pinning
 
 Always pin image tags in production (`v1.0.0`, never `latest`); the chart's

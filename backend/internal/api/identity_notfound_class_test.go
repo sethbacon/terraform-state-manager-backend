@@ -245,6 +245,7 @@ func TestAdminDeleteOrganization_AlreadyGone_Returns204(t *testing.T) {
 	e := newAdminWriteEnv(t)
 	e.mock.ExpectQuery("FROM organization_members").WithArgs("o1", []string{"o1"}).
 		WillReturnRows(sqlmock.NewRows(memberRowCols))
+	e.mock.ExpectExec("DELETE FROM organization_member_roles").WithArgs("o1", []string{"o1"}).WillReturnResult(sqlmock.NewResult(0, 0))
 	e.mock.ExpectExec("DELETE FROM organizations").WithArgs("o1", []string{"o1"}).
 		WillReturnResult(sqlmock.NewResult(0, 0))
 	if w := e.do(http.MethodDelete, "/api/v1/admin/organizations/o1", ""); w.Code != http.StatusNoContent {
@@ -254,6 +255,7 @@ func TestAdminDeleteOrganization_AlreadyGone_Returns204(t *testing.T) {
 
 func TestAdminRemoveOrganizationMember_NotAMember_Returns204(t *testing.T) {
 	e := newAdminWriteEnv(t)
+	e.mock.ExpectExec("DELETE FROM organization_member_roles").WithArgs("o1", "u1", []string{"o1"}).WillReturnResult(sqlmock.NewResult(0, 0))
 	e.mock.ExpectExec("DELETE FROM organization_members").WithArgs("o1", "u1", []string{"o1"}).
 		WillReturnResult(sqlmock.NewResult(0, 0))
 	// AuthorityReduced still runs — it re-derives what the user retains rather
@@ -331,8 +333,10 @@ func TestReconcile_AlreadyRemovedMembership_CompletesLoop(t *testing.T) {
 	// Both look like members...
 	mock.ExpectQuery("FROM organization_members").WithArgs("o-alpha", "u1", []string{"o-alpha"}).
 		WillReturnRows(sqlmock.NewRows(memberRowCols).AddRow("o-alpha", "u1", nil, time.Now()))
+	expectAppRoleForPair(mock, "o-alpha", "u1", nil, []string{"o-alpha"})
 	mock.ExpectQuery("FROM organization_members").WithArgs("o-beta", "u1", []string{"o-beta"}).
 		WillReturnRows(sqlmock.NewRows(memberRowCols).AddRow("o-beta", "u1", nil, time.Now()))
+	expectAppRoleForPair(mock, "o-beta", "u1", nil, []string{"o-beta"})
 	// The mirror's own deletes run FIRST for each revocation (approles.Members).
 	mock.ExpectExec("DELETE FROM organization_member_roles").WithArgs("o-alpha", "u1", []string{"o-alpha"}).
 		WillReturnResult(sqlmock.NewResult(0, 0))
@@ -363,6 +367,7 @@ func TestReconcile_MembershipVanishedBeforeRoleUpdate_Continues(t *testing.T) {
 	expectOrgByName(mock, "o1", "platform")
 	mock.ExpectQuery("FROM organization_members").WithArgs("o1", "u1", []string{"o1"}).
 		WillReturnRows(sqlmock.NewRows(memberRowCols).AddRow("o1", "u1", nil, time.Now()))
+	expectAppRoleForPair(mock, "o1", "u1", nil, []string{"o1"})
 	expectRoleScopesLookup(mock, "editor", []string{"state:read", "state:write"})
 	expectMirrorRoleResolution(mock, "editor", "rt-editor")
 	expectMirrorPriorRoleAbsent(mock)

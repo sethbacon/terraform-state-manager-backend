@@ -259,6 +259,7 @@ func TestAPIKeyNeverCarriesAdminEvenWhenItsOwnerDoes(t *testing.T) {
 	orgMock.ExpectQuery("FROM organization_members om").WithArgs("u1").
 		WillReturnRows(sqlmock.NewRows(mwMembershipCols).
 			AddRow("o1", "default", nil, time.Now(), "admin", "Administrator", []byte(`["admin"]`)))
+	expectOwnerAppRoles(orgMock, "u1", "o1", "admin", `["admin"]`)
 
 	// A carrier IS wired, and the owner holds a row in it. The API-key path must
 	// still not reach it: authenticateAPIKey takes no carrier, so the row below
