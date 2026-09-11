@@ -1,5 +1,16 @@
 # Changelog
 
+## [3.23.0](https://github.com/sethbacon/terraform-state-manager-backend/compare/v3.22.2...v3.23.0) (2026-09-11)
+
+
+### ⚠ BREAKING CHANGES
+
+* **authz:** TSM_AUTHZ_ROLE_SOURCE (authz.role_source) is removed and REFUSED. A configuration that still sets it — to any value, `app` included — does not boot until the line is deleted. The `identity` rollback position no longer exists; rolling back the read model is a redeploy of the previous image, which still finds the shared schema current. Run `tsm-server authz-drift` and require a zero exit before upgrading onto this release. See docs/upgrade-guide.md.
+
+### Features
+
+* **authz:** retire TSM_AUTHZ_ROLE_SOURCE; roles resolve from this application's tables only ([#600](https://github.com/sethbacon/terraform-state-manager-backend/issues/600)) ([eb4214c](https://github.com/sethbacon/terraform-state-manager-backend/commit/eb4214cf77f8b8fc2b1fc1bcfedcb78d7ec4609e)), closes [#599](https://github.com/sethbacon/terraform-state-manager-backend/issues/599)
+
 ## [3.22.2](https://github.com/sethbacon/terraform-state-manager-backend/compare/v3.22.1...v3.22.2) (2026-09-09)
 
 
