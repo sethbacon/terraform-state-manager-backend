@@ -23,6 +23,7 @@ An Architecture Decision Record captures an important architectural decision mad
 | [004](004-role-seed-ownership.md)                    | Role-Seed Ownership in a Shared Identity Schema | Accepted |
 | [005](005-per-app-authorization-tables.md)           | Per-App Authorization Tables                   | Accepted |
 | [006](006-per-app-authorization-reads.md)            | Per-App Authorization Reads                    | Accepted |
+| [007](007-retire-identity-role-source.md)           | Retire the Identity Role Source                | Accepted |
 
 ## Creating a New ADR
 

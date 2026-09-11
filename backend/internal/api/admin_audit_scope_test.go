@@ -17,7 +17,6 @@ import (
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
 	"github.com/gin-gonic/gin"
 	idstore "github.com/sethbacon/terraform-suite-identity/identity/store"
-	"github.com/terraform-state-manager/terraform-state-manager/internal/approles"
 )
 
 // admin_audit_scope_test.go covers the tenant narrowing on audit-log READS as a
@@ -112,7 +111,7 @@ func newAuditScopeEnv(t *testing.T) *auditScopeEnv {
 		t.Fatalf("sqlmock.New: %v", err)
 	}
 	t.Cleanup(func() { db.Close() })
-	return &auditScopeEnv{h: NewAdminHandlers(db, nil, approles.RoleSourceIdentity), mock: mock, rec: rec}
+	return &auditScopeEnv{h: NewAdminHandlers(db, db), mock: mock, rec: rec}
 }
 
 // serveAs runs handler with callerID installed the way the real requireAuth
@@ -138,6 +137,13 @@ func expectAdminMemberships(mock sqlmock.Sqlmock, userID string, adminOrgIDs ...
 		rows.AddRow(orgID, "Org "+orgID, "rt-admin", time.Now(), "admin", "Admin", []byte(`["admin"]`))
 	}
 	mock.ExpectQuery("FROM organization_members om").WithArgs(userID).WillReturnRows(rows)
+	if len(adminOrgIDs) > 0 {
+		roles := make([]appRole, 0, len(adminOrgIDs))
+		for _, orgID := range adminOrgIDs {
+			roles = append(roles, appRole{orgID, "rt-admin", "admin", `["admin"]`})
+		}
+		expectAppRolesForUser(mock, userID, roles...)
+	}
 }
 
 // scopedAuditRow builds one audit row owned by orgID ("" meaning an org-less
@@ -345,6 +351,7 @@ func TestCallerOrgScope_BuildsFromAdminMembershipsOnly(t *testing.T) {
 		AddRow(auditScopeOrgA, "Org A", "rt-admin", time.Now(), "admin", "Admin", []byte(`["admin"]`)).
 		AddRow("org-c", "Org C", "rt-viewer", time.Now(), "viewer", "Viewer", []byte(`["state:read"]`))
 	e.mock.ExpectQuery("FROM organization_members om").WithArgs(auditScopeCaller).WillReturnRows(rows)
+	expectAppRolesForUser(e.mock, auditScopeCaller, appRole{auditScopeOrgA, "rt-admin", "admin", `["admin"]`}, appRole{"org-c", "rt-viewer", "viewer", `["state:read"]`})
 
 	gin.SetMode(gin.TestMode)
 	c, _ := gin.CreateTestContext(httptest.NewRecorder())

@@ -290,18 +290,28 @@ features (module freshness, the "Consumed by" join, audit federation).
 
 | Variable | Default | Required | Secret | Description |
 |---|---|---|---|---|
-| `TSM_AUTHZ_ROLE_SOURCE` | `app` | | | Which tables answer "what role does this principal hold here": `app` (this application's own `organization_member_roles` + `role_templates`) or `identity` (the shared schema, the previous behaviour) |
-| `TSM_AUTHZ_DRIFT_INTERVAL` | `15m` | | | How often the server re-compares the two sources and reports the difference. `0` disables the loop |
+| `TSM_AUTHZ_DRIFT_INTERVAL` | `15m` | | | How often the server re-compares this application's role tables with the shared identity schema's and reports the difference. `0` disables the loop |
 
 Membership is a fact the identity schema owns. **Which role that member holds in
-this application** is a row in this application's own schema, and `app` — the
-default — is what reads it.
+this application** is a row in this application's own schema, and that is the
+only place a role read resolves from.
 
-> **Run the gate before you upgrade.** A gap between the two sources does not
-> surface as an error. It surfaces as a user silently holding the wrong role:
-> losing access they should have, or keeping access they should not. Nothing in
-> the request path reports it. So before rolling a deployment onto a build whose
-> `TSM_AUTHZ_ROLE_SOURCE` defaults to `app`, run:
+> **`TSM_AUTHZ_ROLE_SOURCE` is retired and refused.** It was the rollback lever
+> for the read cutover: `app` read roles from this application's tables,
+> `identity` put every role read back on the shared schema. It was removed in
+> the release carrying #599, because it was this application's last read of the
+> shared `role_templates`, and while it existed the sibling registry could not
+> stop seeding that table without turning the lever into a silent downgrade to
+> stale roles. A configuration that still sets it, to **any** value, fails the
+> boot with an error naming the key. Delete the line.
+
+> **Run the gate before you upgrade onto the release that removes it.** A gap
+> between the two schemas does not surface as an error. It surfaces as a user
+> silently holding the wrong role: losing access they should have, or keeping
+> access they should not. Nothing in the request path reports it. The release
+> that retires the lever is the last point at which such a gap can be corrected
+> by rolling back rather than by repair, so before rolling a deployment onto it,
+> run:
 >
 > ```console
 > $ tsm-server authz-drift
@@ -314,15 +324,14 @@ default — is what reads it.
 > reads them, so the new build's `authz-drift` answers for the old build's data.
 >
 > If it is non-zero: restart the backend (the startup reconcile restates every
-> assignment from identity, sweeps what identity no longer has, and now logs what
-> it changed), then run it again. Drift that **survives a restart** means the
+> assignment from identity, sweeps what identity no longer has, and logs what it
+> changed), then run it again. Drift that **survives a restart** means the
 > reconcile is failing rather than that a single write slipped, and the startup
 > log will say why.
 
-> **Rollback.** Set `TSM_AUTHZ_ROLE_SOURCE=identity` and restart. Both tables are
-> written under either value — the dual write is not conditional on this setting —
-> so the shared schema is still current and nothing has to be migrated back. This
-> is a restart, not a restore.
+> **Rollback.** Redeploy the previous image. There is no in-place switch: both
+> tables are still written, so the previous build finds the shared schema
+> current, but this build has no setting that reads it.
 
 **Standing detection.** The running server re-compares the two sources every
 `TSM_AUTHZ_DRIFT_INTERVAL` and exports:
@@ -340,11 +349,11 @@ default — is what reads it.
 Alert on the counts **and** on the age of the last check. A detector that has
 stopped running exports a stale zero, which reads exactly like a healthy one.
 
-**Coupled deployments change behaviour here.** If `TSM_SUITE_ROLE_SEED_OWNER` is
-not `self` or `tsm`, this deployment has been authorizing against the *sibling's*
-definition of every role name. From the first boot on a build defaulting to `app`,
-it authorizes against its own. Run `authz-drift` on the current build first: its
-`template_drift` output names exactly which roles will change and how.
+**Coupled deployments.** This application authorizes against its *own*
+definition of every role name, whatever `TSM_SUITE_ROLE_SEED_OWNER` says; that
+setting governs only who seeds the shared copy. `authz-drift`'s `template_drift`
+output names the roles whose definitions differ between the two schemas, which
+on a coupled deployment is expected and non-zero.
 
 ## Endpoints a deployment should know
 

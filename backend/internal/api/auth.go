@@ -89,7 +89,7 @@ func NewAuthHandlers(cfg *config.Config, identityDB, appDB *sql.DB, opts ...Auth
 	h := &AuthHandlers{
 		cfg:         cfg,
 		userRepo:    idstore.NewUserRepository(identityDB),
-		orgRepo:     approles.NewMembers(identityDB, appDB, approles.RoleSource(cfg.Authz.RoleSource)),
+		orgRepo:     approles.NewMembers(identityDB, appDB),
 		tokenRepo:   idstore.NewTokenRepository(identityDB),
 		apiKeyRepo:  idstore.NewAPIKeyRepository(identityDB),
 		stateStore:  stateStore,

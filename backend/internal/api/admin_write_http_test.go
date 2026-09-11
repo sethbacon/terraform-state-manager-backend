@@ -30,11 +30,11 @@ func newAdminWriteEnv(t *testing.T) *sourcesEnv {
 
 	// The credential sweeper is wired exactly as the router wires it, so the
 	// offboarding routes are exercised on their production path (#330).
-	h := NewAdminHandlers(db, nil, approles.RoleSourceIdentity, WithAdminCredentialSweeper(
+	h := NewAdminHandlers(db, db, WithAdminCredentialSweeper(
 		credlifecycle.NewSweeper(
 			repositories.NewUserTokenRevocationRepository(db),
 			idstore.NewAPIKeyRepository(db),
-			approles.NewMembers(db, nil, approles.RoleSourceIdentity),
+			approles.NewMembers(db, db),
 			credlifecycle.NoPlatformAdminCarrier{},
 		)))
 	r := gin.New()
@@ -74,11 +74,11 @@ func newAdminWriteEnvWithApp(t *testing.T) *sourcesEnv {
 	}
 	t.Cleanup(func() { db.Close() })
 
-	h := NewAdminHandlers(db, db, approles.RoleSourceIdentity, WithAdminCredentialSweeper(
+	h := NewAdminHandlers(db, db, WithAdminCredentialSweeper(
 		credlifecycle.NewSweeper(
 			repositories.NewUserTokenRevocationRepository(db),
 			idstore.NewAPIKeyRepository(db),
-			approles.NewMembers(db, nil, approles.RoleSourceIdentity),
+			approles.NewMembers(db, db),
 			credlifecycle.NoPlatformAdminCarrier{},
 		)))
 	r := gin.New()
@@ -146,6 +146,8 @@ func TestAdminDeleteUser(t *testing.T) {
 	// mid-sweep survives it.
 	e.mock.ExpectExec("DELETE FROM api_keys").WithArgs("u1").WillReturnResult(sqlmock.NewResult(0, 0))
 	e.mock.ExpectExec("DELETE FROM users").WithArgs("u1").WillReturnResult(sqlmock.NewResult(0, 1))
+	// The mirror purge runs only once the delete applied (approles.Members.PurgeUserRoles).
+	e.mock.ExpectExec("DELETE FROM organization_member_roles").WithArgs("u1").WillReturnResult(sqlmock.NewResult(0, 1))
 	if w := e.do(http.MethodDelete, "/api/v1/admin/users/u1", ""); w.Code != http.StatusNoContent {
 		t.Errorf("delete: status = %d, want 204", w.Code)
 	}
@@ -168,6 +170,8 @@ func TestAdminDeleteUserRevokesAPIKeys(t *testing.T) {
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	e.mock.ExpectExec("DELETE FROM api_keys").WithArgs("u1").WillReturnResult(sqlmock.NewResult(0, 2))
 	e.mock.ExpectExec("DELETE FROM users").WithArgs("u1").WillReturnResult(sqlmock.NewResult(0, 1))
+	// The mirror purge runs only once the delete applied (approles.Members.PurgeUserRoles).
+	e.mock.ExpectExec("DELETE FROM organization_member_roles").WithArgs("u1").WillReturnResult(sqlmock.NewResult(0, 1))
 
 	if w := e.do(http.MethodDelete, "/api/v1/admin/users/u1", ""); w.Code != http.StatusNoContent {
 		t.Fatalf("delete: status = %d", w.Code)
@@ -187,9 +191,11 @@ func TestAdminGetUserMemberships(t *testing.T) {
 	e.mock.ExpectQuery("FROM organization_members om").WithArgs("caller-1").
 		WillReturnRows(sqlmock.NewRows(membershipCols).
 			AddRow("o1", "default", "rt-1", time.Now(), "admin", "Admin", []byte(`["admin"]`)))
+	expectAppRolesForUser(e.mock, "caller-1", appRole{"o1", "rt-1", "admin", `["admin"]`})
 	e.mock.ExpectQuery("FROM organization_members om").WithArgs("u1").
 		WillReturnRows(sqlmock.NewRows(membershipCols).
 			AddRow("o1", "default", nil, time.Now(), nil, nil, []byte(`[]`)))
+	expectAppRolesForUser(e.mock, "u1")
 	w := e.do(http.MethodGet, "/api/v1/admin/users/u1/memberships", "")
 	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"default"`) {
 		t.Fatalf("memberships: status = %d (%s)", w.Code, w.Body.String())
@@ -218,6 +224,7 @@ func TestAdminExportUserData(t *testing.T) {
 	e.mock.ExpectQuery("FROM organization_members om").WithArgs("u1").
 		WillReturnRows(sqlmock.NewRows(membershipCols).
 			AddRow("o1", "default", nil, time.Now(), nil, nil, []byte(`[]`)))
+	expectAppRolesForUser(e.mock, "u1")
 	e.mock.ExpectQuery("SELECT COUNT").WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
 	e.mock.ExpectQuery("FROM audit_logs al").
 		WillReturnRows(sqlmock.NewRows(auditCols).
@@ -248,8 +255,12 @@ func TestAdminEraseUser(t *testing.T) {
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	// The membership strip now RETURNS the organizations it emptied (an OrgScope
 	// since v0.25.0, not a count), so it is a query rather than an exec.
+	// REVOCATION: the mirror is swept BEFORE the identity strip, then again over
+	// the organizations the strip returns (approles.Members.RemoveAllMembershipsForUser).
+	e.mock.ExpectExec("DELETE FROM organization_member_roles").WithArgs("u1").WillReturnResult(sqlmock.NewResult(0, 2))
 	e.mock.ExpectQuery("DELETE FROM organization_members").WithArgs("u1").
 		WillReturnRows(sqlmock.NewRows([]string{"organization_id"}).AddRow("o1").AddRow("o2"))
+	e.mock.ExpectExec("DELETE FROM organization_member_roles").WillReturnResult(sqlmock.NewResult(0, 0))
 	// Erasure also revokes the user's sessions and API keys (the tombstone would
 	// otherwise keep both valid), in one bulk delete.
 	e.mock.ExpectExec("INSERT INTO user_token_revocations").WithArgs("u1").
@@ -314,6 +325,8 @@ func TestAdminOrganizationCRUD(t *testing.T) {
 	// so afterwards there is nobody left to sweep (none here).
 	e.mock.ExpectQuery("FROM organization_members").WithArgs("o1", []string{"o1"}).
 		WillReturnRows(sqlmock.NewRows([]string{"organization_id", "user_id", "role_template_id", "created_at"}))
+	// The mirror's assignments in the organization go before the identity delete.
+	e.mock.ExpectExec("DELETE FROM organization_member_roles").WithArgs("o1", []string{"o1"}).WillReturnResult(sqlmock.NewResult(0, 0))
 	e.mock.ExpectExec("DELETE FROM organizations").WithArgs("o1", []string{"o1"}).WillReturnResult(sqlmock.NewResult(0, 1))
 	if w := e.do(http.MethodDelete, "/api/v1/admin/organizations/o1", ""); w.Code != http.StatusNoContent {
 		t.Errorf("delete org: status = %d, want 204", w.Code)
@@ -328,6 +341,7 @@ func TestAdminOrganizationMembers(t *testing.T) {
 	e.mock.ExpectQuery("FROM organization_members om").WithArgs("o1", []string{"o1"}).
 		WillReturnRows(sqlmock.NewRows(memberWithUserCols).
 			AddRow("o1", "u1", nil, time.Now(), "Alice", "a@b.c", nil, nil, []byte(`[]`)))
+	expectAppRolesForOrganization(e.mock, "o1", nil, []string{"o1"})
 	w := e.do(http.MethodGet, "/api/v1/admin/organizations/o1/members", "")
 	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"a@b.c"`) {
 		t.Fatalf("list members: status = %d (%s)", w.Code, w.Body.String())
@@ -421,11 +435,11 @@ func TestAdminEraseUser_StripsMembershipsInEveryOrganization(t *testing.T) {
 	}
 	t.Cleanup(func() { db.Close() })
 
-	h := NewAdminHandlers(db, nil, approles.RoleSourceIdentity, WithAdminCredentialSweeper(
+	h := NewAdminHandlers(db, db, WithAdminCredentialSweeper(
 		credlifecycle.NewSweeper(
 			repositories.NewUserTokenRevocationRepository(db),
 			idstore.NewAPIKeyRepository(db),
-			approles.NewMembers(db, nil, approles.RoleSourceIdentity),
+			approles.NewMembers(db, db),
 			credlifecycle.NoPlatformAdminCarrier{},
 		)))
 	gin.SetMode(gin.TestMode)
@@ -437,11 +451,14 @@ func TestAdminEraseUser_StripsMembershipsInEveryOrganization(t *testing.T) {
 	mock.ExpectQuery("FROM organization_members om").WithArgs("caller-1").
 		WillReturnRows(sqlmock.NewRows(userMembershipCols).
 			AddRow("org-a", "Org A", "rt-admin", time.Now(), "admin", "Admin", []byte(`["admin"]`)))
+	expectAppRolesForUser(mock, "caller-1", appRole{"org-a", "rt-admin", "admin", `["admin"]`})
 	mock.ExpectQuery("SELECT id, email, name, oidc_sub").
 		WithArgs("u1", []string{"org-a"}).WillReturnRows(idUserRow("u1"))
 	mock.ExpectExec("UPDATE users").WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("DELETE FROM organization_member_roles").WithArgs("u1").WillReturnResult(sqlmock.NewResult(0, 2))
 	mock.ExpectQuery("DELETE FROM organization_members").WithArgs("u1").
 		WillReturnRows(sqlmock.NewRows([]string{"organization_id"}).AddRow("org-a").AddRow("org-b"))
+	mock.ExpectExec("DELETE FROM organization_member_roles").WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectExec("INSERT INTO user_token_revocations").WithArgs("u1").
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec("DELETE FROM api_keys").WithArgs("u1").WillReturnResult(sqlmock.NewResult(0, 1))
@@ -507,11 +524,11 @@ func TestDeleteUser_PurgesTheMirrorOnlyWhenTheDeleteApplied(t *testing.T) {
 		}
 		t.Cleanup(func() { _ = appDB.Close() })
 
-		h := NewAdminHandlers(identityDB, appDB, approles.RoleSourceIdentity, WithAdminCredentialSweeper(
+		h := NewAdminHandlers(identityDB, appDB, WithAdminCredentialSweeper(
 			credlifecycle.NewSweeper(
 				repositories.NewUserTokenRevocationRepository(identityDB),
 				idstore.NewAPIKeyRepository(identityDB),
-				approles.NewMembers(identityDB, nil, approles.RoleSourceIdentity),
+				approles.NewMembers(identityDB, appDB),
 				credlifecycle.NoPlatformAdminCarrier{},
 			)))
 		r := gin.New()

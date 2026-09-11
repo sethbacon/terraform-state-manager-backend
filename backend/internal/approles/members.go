@@ -33,9 +33,11 @@ type identityOrgs = idstore.OrganizationRepository
 //
 // This file is the WRITE set: every method that sets, changes or removes a role,
 // each calling the identity leg it replaces with the same arguments, returning
-// the same error, and mirroring. It is unchanged by Phase 3b — both places are
-// still written under either RoleSource, which is what makes rolling the reads
-// back a restart rather than a restore.
+// the same error, and mirroring. Both places are still written. The dual write
+// outlived the identity READ position (TSM_AUTHZ_ROLE_SOURCE=identity, retired in
+// #599) because identity.organization_members.role_template_id still exists and
+// CheckDrift still compares the two; both go in the final phase of
+// sethbacon/terraform-suite-identity#206, not before.
 //
 // The ROLE-CARRYING READS moved in Phase 3b and live in reads.go. Reads with no
 // role in them — GetByName, GetByID, List, Count, Search, GetUserOrganizations —
@@ -96,12 +98,12 @@ type identityOrgs = idstore.OrganizationRepository
 type Members struct {
 	*identityOrgs
 
+	// store is this application's own role tables, and the ONLY place a
+	// role-carrying read in reads.go resolves from. nil means the Members was
+	// built without an application connection: writes then degrade to the
+	// identity leg alone (the unit-test rig's shape), and every role read is
+	// refused with ErrNoAppStore rather than answered from identity's columns.
 	store *Store
-	// roleSource decides which tables the ROLE-CARRYING READS in reads.go
-	// resolve from. Writes are unaffected: both places are written under either
-	// value, which is what makes the identity value a working rollback rather
-	// than a downgrade to stale data.
-	roleSource RoleSource
 }
 
 // AuthorityReducer invalidates the credentials that carry a SNAPSHOT of the
@@ -161,46 +163,52 @@ type AuthorityReducer func(ctx context.Context, userID string, authorityChanged 
 // here assumes either.
 //
 // A nil appDB yields a Members with NO MIRROR: every write override degrades to
-// the identity leg alone and every read override degrades to identity. That is
-// for the unit-test rig and for the handful of constructions that predate an app
-// connection being available at that point in startup — never for the server,
-// where Reconcile's Verify runs first and aborts boot if the tables are absent or
-// misrouted.
+// the identity leg alone, and every ROLE-CARRYING READ is refused with
+// ErrNoAppStore. The write degradation is for the unit-test rig and for the
+// handful of constructions that predate an app connection being available at
+// that point in startup — never for the server, where Reconcile's Verify runs
+// first and aborts boot if the tables are absent or misrouted. The read refusal
+// is #599: a nil store used to fall back to identity's role columns, which was
+// the retired rollback position leaking back in through construction, silently,
+// on exactly the sites nobody re-reads.
 //
-// # Why the source is a MANDATORY parameter
+// # Why there is no third parameter any more
 //
-// Phase 3b makes "which tables answer a role question" a per-deployment decision
-// with a rollback position (RoleSource). Adding it as a third argument rather
-// than a default, or a setter, or a package variable, means every construction
-// site in the tree had to be edited to state its answer — and a new one cannot
-// compile without stating it. That is the same choice AuthorityReducer took, for
-// the same reason: an optional guard is how a guard goes silently absent, and the
-// failure it would hide here is a whole deployment still authorizing from the
-// shared schema while its operators believe it does not.
-func NewMembers(identityDB, appDB *sql.DB, source RoleSource) *Members {
-	m := &Members{identityOrgs: idstore.NewOrganizationRepository(identityDB), roleSource: source}
+// Phase 3b made "which tables answer a role question" a per-deployment decision
+// with a rollback position, and passed it here as a MANDATORY third argument so
+// that every construction site had to state its answer. #599 retired the
+// rollback position, so there is nothing left to state: this application's
+// tables answer, or nothing does. The argument went with the choice — a
+// parameter with one legal value is a guard that guards nothing, and a
+// construction site that "states" it is restating the compiler's own knowledge.
+func NewMembers(identityDB, appDB *sql.DB) *Members {
+	m := &Members{identityOrgs: idstore.NewOrganizationRepository(identityDB)}
 	if appDB != nil {
 		m.store = NewStore(appDB)
 	} else {
-		logDegradedSource(source)
+		logNoAppStore()
 	}
 	return m
 }
 
-// ErrNoAppStore reports a Members that was asked a role-template question and
-// has no application connection to answer it from. Distinct from ErrNoTemplate
-// — "this deployment cannot resolve templates at all" is a wiring fault, not a
-// role that does not exist — so a handler can answer 500 rather than 400.
-var ErrNoAppStore = errors.New("approles: no application database connection to resolve role templates from")
+// ErrNoAppStore reports a Members that was asked a role question — which
+// template a name or id denotes, or which role a principal holds — and has no
+// application connection to answer it from. Distinct from ErrNoTemplate: "this
+// deployment cannot resolve roles at all" is a wiring fault, not a role that
+// does not exist, so a handler can answer 500 rather than 400.
+//
+// It is a REFUSAL, not a fallback. The pre-#599 Members answered a role read on
+// a nil store from identity's role columns instead; that was the retired
+// rollback position leaking back in through construction, and it is exactly the
+// silent path this sentinel replaces.
+var ErrNoAppStore = errors.New("approles: no application database connection to resolve roles from")
 
 // TemplateByID resolves a role template from THIS APPLICATION's own tables.
 //
 // This is the only template lookup a handler can reach through a Members, and
 // that is the point: since sethbacon/terraform-suite-identity#206 Phase 3
 // retired the residual reads of identity.role_templates, what a role id or name
-// means is answered by this application's role_templates alone, under either
-// RoleSource — the rollback lever moves the ASSIGNMENT reads, not the policy of
-// what a role grants here.
+// means is answered by this application's role_templates alone.
 func (m *Members) TemplateByID(ctx context.Context, id string) (Template, error) {
 	if m.store == nil {
 		return Template{}, ErrNoAppStore

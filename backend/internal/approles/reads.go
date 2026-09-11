@@ -3,9 +3,7 @@ package approles
 import (
 	"context"
 	"errors"
-	"fmt"
 	"log/slog"
-	"strings"
 
 	idauth "github.com/sethbacon/terraform-suite-identity/identity/auth"
 	idmodels "github.com/sethbacon/terraform-suite-identity/identity/models"
@@ -43,8 +41,24 @@ import (
 // direction: a gap in the mirror costs a principal access they should have, and
 // is loud (they cannot do their job), rather than granting access they should not
 // have, which is silent. It is also exactly what CheckDrift reports as `missing`,
-// and what the gate in cmd/server (authz-drift) must show zero of before a
-// deployment is upgraded onto this build.
+// and what the gate in cmd/server (authz-drift) reports on.
+//
+// # There is no identity position any more
+//
+// Phase 3b shipped with a rollback lever, TSM_AUTHZ_ROLE_SOURCE=identity, that put
+// every role read back on the shared schema. It was retired in #599 (the head of
+// sethbacon/terraform-suite-identity#206 Phase 4): it was this application's last read of
+// the shared role_templates, and while it existed the sibling registry could not
+// stop seeding that table — because a lever that reads a table nobody keeps
+// current is not a rollback, it is a silent downgrade to stale data.
+//
+// So a Members has exactly one way to answer a role question: this application's
+// tables. A Members constructed WITHOUT an application connection cannot answer
+// it at all, and it refuses rather than guesses — every role-carrying read on it
+// returns ErrNoAppStore. The alternative, falling back to identity's role columns,
+// is precisely the path this file exists to have closed, and restoring it for a
+// nil store would reopen it on exactly the construction sites nobody is looking
+// at.
 //
 // # Go has no virtual dispatch, and that is the trap this file exists to avoid
 //
@@ -63,51 +77,6 @@ import (
 // promoted — deriving that list from the LIBRARY'S OWN SOURCE, so an upgrade that
 // adds a new one fails the guard instead of silently reading identity.
 
-// RoleSource names the tables an authorization read resolves a role from.
-//
-// It is the rollback lever. Phase 3a's dual write is unchanged by this phase, so
-// identity.organization_members still carries every current role assignment and
-// identity.role_templates still carries a role definition for every name; an
-// operator who finds the flip wrong sets this back to `identity`, restarts, and
-// is running Phase 3a's behaviour exactly, with no migration, no data movement and
-// no window. See docs/adr/006-per-app-authorization-reads.md.
-type RoleSource string
-
-const (
-	// RoleSourceApp resolves roles from THIS application's own tables. The
-	// Phase 3b default.
-	RoleSourceApp RoleSource = "app"
-	// RoleSourceIdentity resolves roles from the shared identity schema, as
-	// Phase 3a did. The rollback position.
-	RoleSourceIdentity RoleSource = "identity"
-)
-
-// ErrNoRoleSource reports a Members whose role source was never decided.
-//
-// A SENTINEL AND A DENIAL, not a default. The zero RoleSource is the value a
-// construction site that has not thought about it holds, and there is no safe
-// guess: defaulting to identity would silently un-do this phase on that path,
-// and defaulting to app would silently perform it on a path with no app tables.
-// So it resolves to nothing and says so, in the same shape reduceAuthority
-// refuses a nil AuthorityReducer.
-var ErrNoRoleSource = errors.New("approles: no role source was configured for this repository")
-
-// ParseRoleSource converts an operator's configured value into a RoleSource.
-//
-// Empty is NOT accepted as "the default". Config supplies the default (see
-// internal/config), and accepting empty here would make a mis-spelled key
-// indistinguishable from an unset one at the layer that can no longer tell.
-func ParseRoleSource(v string) (RoleSource, error) {
-	switch RoleSource(strings.ToLower(strings.TrimSpace(v))) {
-	case RoleSourceApp:
-		return RoleSourceApp, nil
-	case RoleSourceIdentity:
-		return RoleSourceIdentity, nil
-	default:
-		return "", fmt.Errorf("approles: unknown role source %q (want %q or %q)", v, RoleSourceApp, RoleSourceIdentity)
-	}
-}
-
 // Role is one resolved role, as TSM's own tables hold it.
 //
 // TemplateID is nil for a member recorded with no role — a state identity can
@@ -120,23 +89,6 @@ type Role struct {
 	Scopes      []string
 }
 
-// source returns the role source this repository actually reads from.
-//
-// A Members with no app connection has no tables to read, so it reports
-// identity regardless of what was asked for. That degradation is what keeps the
-// unit-test rigs and the handful of constructions that predate an app connection
-// working; it is announced at construction (NewMembers) rather than discovered,
-// because in a server it would mean this phase is not in effect at all.
-func (m *Members) source() RoleSource {
-	if m.store == nil {
-		return RoleSourceIdentity
-	}
-	return m.roleSource
-}
-
-// Source reports the role source in effect, for the startup line and for tests.
-func (m *Members) Source() RoleSource { return m.source() }
-
 // GetUserMemberships returns a user's memberships with the role each carries in
 // THIS application.
 //
@@ -145,12 +97,17 @@ func (m *Members) Source() RoleSource { return m.source() }
 // overlay reads the whole of one user's row set from the app tables, so the
 // platform-wide scope is spelled — see roleReadScope.
 func (m *Members) GetUserMemberships(ctx context.Context, userID string) ([]*idmodels.UserMembership, error) {
-	rows, err := m.identityOrgs.GetUserMemberships(ctx, userID)
-	if err != nil || m.source() == RoleSourceIdentity {
-		return rows, err
+	if m.store == nil {
+		return nil, ErrNoAppStore
 	}
-	if m.source() != RoleSourceApp {
-		return nil, unsetSource(m.roleSource)
+	rows, err := m.identityOrgs.GetUserMemberships(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	if len(rows) == 0 {
+		// Nothing to decorate; the library's empty-slice convention passes
+		// through untouched.
+		return rows, nil
 	}
 	roles, err := m.store.RolesForUser(ctx, userID, roleReadScope())
 	if err != nil {
@@ -218,12 +175,12 @@ func (m *Members) OrgScopeForUser(ctx context.Context, userID, required string, 
 
 // GetMemberWithRole returns one membership with the role it carries here.
 func (m *Members) GetMemberWithRole(ctx context.Context, orgID, userID string, scope idstore.OrgScope) (*idmodels.OrganizationMemberWithUser, error) {
-	row, err := m.identityOrgs.GetMemberWithRole(ctx, orgID, userID, scope)
-	if err != nil || m.source() == RoleSourceIdentity {
-		return row, err
+	if m.store == nil {
+		return nil, ErrNoAppStore
 	}
-	if m.source() != RoleSourceApp {
-		return nil, unsetSource(m.roleSource)
+	row, err := m.identityOrgs.GetMemberWithRole(ctx, orgID, userID, scope)
+	if err != nil {
+		return nil, err
 	}
 	role, _, err := m.store.RoleForPair(ctx, orgID, userID, scope)
 	if err != nil {
@@ -265,12 +222,15 @@ func (m *Members) GetUserScopesForOrg(ctx context.Context, userID, orgID string)
 // ListMembersWithUsers returns an organization's members with the role each
 // carries here.
 func (m *Members) ListMembersWithUsers(ctx context.Context, orgID string, scope idstore.OrgScope) ([]*idmodels.OrganizationMemberWithUser, error) {
-	rows, err := m.identityOrgs.ListMembersWithUsers(ctx, orgID, scope)
-	if err != nil || m.source() == RoleSourceIdentity {
-		return rows, err
+	if m.store == nil {
+		return nil, ErrNoAppStore
 	}
-	if m.source() != RoleSourceApp {
-		return nil, unsetSource(m.roleSource)
+	rows, err := m.identityOrgs.ListMembersWithUsers(ctx, orgID, scope)
+	if err != nil {
+		return nil, err
+	}
+	if len(rows) == 0 {
+		return rows, nil
 	}
 	roles, err := m.store.RolesForOrganization(ctx, orgID, scope)
 	if err != nil {
@@ -288,12 +248,12 @@ func (m *Members) ListMembersWithUsers(ctx context.Context, orgID string, scope 
 // GetMember returns one membership row, carrying the role id this application
 // records rather than identity's.
 func (m *Members) GetMember(ctx context.Context, orgID, userID string, scope idstore.OrgScope) (*idmodels.OrganizationMember, error) {
-	row, err := m.identityOrgs.GetMember(ctx, orgID, userID, scope)
-	if err != nil || m.source() == RoleSourceIdentity {
-		return row, err
+	if m.store == nil {
+		return nil, ErrNoAppStore
 	}
-	if m.source() != RoleSourceApp {
-		return nil, unsetSource(m.roleSource)
+	row, err := m.identityOrgs.GetMember(ctx, orgID, userID, scope)
+	if err != nil {
+		return nil, err
 	}
 	role, _, err := m.store.RoleForPair(ctx, orgID, userID, scope)
 	if err != nil {
@@ -325,12 +285,15 @@ func (m *Members) CheckMembership(ctx context.Context, orgID, userID string, sco
 // ListMembers returns an organization's membership rows, carrying the role ids
 // this application records.
 func (m *Members) ListMembers(ctx context.Context, orgID string, scope idstore.OrgScope) ([]*idmodels.OrganizationMember, error) {
-	rows, err := m.identityOrgs.ListMembers(ctx, orgID, scope)
-	if err != nil || m.source() == RoleSourceIdentity {
-		return rows, err
+	if m.store == nil {
+		return nil, ErrNoAppStore
 	}
-	if m.source() != RoleSourceApp {
-		return nil, unsetSource(m.roleSource)
+	rows, err := m.identityOrgs.ListMembers(ctx, orgID, scope)
+	if err != nil {
+		return nil, err
+	}
+	if len(rows) == 0 {
+		return rows, nil
 	}
 	roles, err := m.store.RolesForOrganization(ctx, orgID, scope)
 	if err != nil {
@@ -360,11 +323,6 @@ func (m *Members) ListMembers(ctx context.Context, orgID string, scope idstore.O
 // overlay cannot disclose a membership the caller could not already see.
 func roleReadScope() idstore.OrgScope { return idstore.OrgScopeAllOrganizations() }
 
-// unsetSource turns an undecided role source into a denial with the value in it.
-func unsetSource(s RoleSource) error {
-	return fmt.Errorf("%w: %q is not %q or %q", ErrNoRoleSource, s, RoleSourceApp, RoleSourceIdentity)
-}
-
 // applyToUserMembership replaces a membership row's role fields with this
 // application's answer.
 //
@@ -392,18 +350,15 @@ func applyToMemberWithUser(row *idmodels.OrganizationMemberWithUser, role Role) 
 	row.RoleTemplateScopes = nonNilScopes(role.Scopes)
 }
 
-// logDegradedSource announces a Members that was asked to read this
-// application's tables and has no connection to them.
+// logNoAppStore announces a Members built without an application connection.
 //
-// Announced rather than refused: the unit-test rigs and the constructions that
-// predate an app connection legitimately hold one, and refusing would turn a
-// documented degradation into a nil pointer somewhere less obvious. In a server
-// it means Phase 3b is not in effect on that path, which is a thing to see in the
-// log rather than infer from behaviour.
-func logDegradedSource(want RoleSource) {
-	if want != RoleSourceApp {
-		return
-	}
-	slog.Warn("role reads fall back to the shared identity schema: this repository has no application database connection",
-		"requested_source", string(RoleSourceApp), "effective_source", string(RoleSourceIdentity))
+// Announced at construction rather than discovered at the first read: every
+// role-carrying read on this repository returns ErrNoAppStore, and in a server
+// that means no principal can be authorized on this path at all. The unit-test
+// rigs that exercise only the identity leg's writes legitimately hold one; a
+// server never should, and this line in the log is how that is seen, rather than
+// inferred later from a wall of denials.
+func logNoAppStore() {
+	slog.Warn("role reads on this repository will be refused: it has no application database connection",
+		"error", ErrNoAppStore.Error())
 }

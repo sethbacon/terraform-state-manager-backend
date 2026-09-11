@@ -9,7 +9,6 @@ import (
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
 	"github.com/google/uuid"
 
-	"github.com/terraform-state-manager/terraform-state-manager/internal/approles"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/config"
 )
 
@@ -18,8 +17,8 @@ import (
 // ONE database serves BOTH connections, so the app-side statements the role
 // paths issue since the identity.role_templates reads were retired (template
 // resolution, the mirror upsert/delete) land on the same ordered mock as the
-// identity leg's, in call order. RoleSource stays identity in these rigs, so
-// the role-carrying READS are byte-for-byte what they were.
+// identity leg's, in call order. A role-carrying READ therefore needs
+// BOTH legs staged — the identity row, then the app-side overlay — in order.
 func newReconcileEnv(t *testing.T, mutate func(*config.Config)) (*AuthHandlers, sqlmock.Sqlmock) {
 	t.Helper()
 	db, mock, err := newSQLMock()
@@ -28,10 +27,6 @@ func newReconcileEnv(t *testing.T, mutate func(*config.Config)) (*AuthHandlers, 
 	}
 	t.Cleanup(func() { db.Close() })
 	cfg := &config.Config{}
-	// The rollback source, stated: these rigs stage identity-shaped rows for
-	// every role-carrying read, which is exactly what RoleSource=identity
-	// serves. The app tables still take every WRITE under either source.
-	cfg.Authz.RoleSource = string(approles.RoleSourceIdentity)
 	if mutate != nil {
 		mutate(cfg)
 	}
@@ -99,6 +94,7 @@ func TestReconcile_UpsertExistingMember(t *testing.T) {
 	// UPDATE, then the mirror upsert.
 	mock.ExpectQuery("FROM organization_members").WithArgs("o1", "u1", []string{"o1"}).
 		WillReturnRows(sqlmock.NewRows(memberRowCols).AddRow("o1", "u1", nil, time.Now()))
+	expectAppRoleForPair(mock, "o1", "u1", nil, []string{"o1"})
 	expectRoleScopesLookup(mock, "editor", []string{"state:read", "state:write"})
 	expectMirrorRoleResolution(mock, "editor", "rt-editor")
 	expectMirrorPriorRoleAbsent(mock)
@@ -149,6 +145,7 @@ func TestReconcile_DeprovisionsOnGroupLoss(t *testing.T) {
 	expectOrgByName(mock, "o1", "platform")
 	mock.ExpectQuery("FROM organization_members").WithArgs("o1", "u1", []string{"o1"}).
 		WillReturnRows(sqlmock.NewRows(memberRowCols).AddRow("o1", "u1", "rt-editor", time.Now()))
+	expectAppRoleForPair(mock, "o1", "u1", &appRole{id: "rt-editor", name: "editor", scopes: `["state:read","state:write"]`}, []string{"o1"})
 	// REVOCATION: the mirror's delete goes FIRST (see approles.Members).
 	mock.ExpectExec("DELETE FROM organization_member_roles").
 		WillReturnResult(sqlmock.NewResult(0, 1))
@@ -206,6 +203,7 @@ func TestReconcile_DefaultRoleFirstLoginOnly(t *testing.T) {
 	expectOrgByName(mock2, "o-def", "default")
 	mock2.ExpectQuery("FROM organization_members").WithArgs("o-def", "u1", []string{"o-def"}).
 		WillReturnRows(sqlmock.NewRows(memberRowCols).AddRow("o-def", "u1", "rt-admin", time.Now()))
+	expectAppRoleForPair(mock2, "o-def", "u1", &appRole{id: "rt-admin", name: "admin", scopes: `["admin"]`}, []string{"o-def"})
 
 	if err := h2.reconcileManagedMemberships(context.Background(), "u1", nil, nil, nil, "viewer"); err != nil {
 		t.Fatalf("existing member: %v", err)
@@ -274,6 +272,7 @@ func TestReconcile_ResolvedRoleCarriesScopeAdmin_UpdatePath_Rejected(t *testing.
 	expectOrgByName(mock, "o1", "platform")
 	mock.ExpectQuery("FROM organization_members").WithArgs("o1", "u1", []string{"o1"}).
 		WillReturnRows(sqlmock.NewRows(memberRowCols).AddRow("o1", "u1", "rt-editor", time.Now()))
+	expectAppRoleForPair(mock, "o1", "u1", &appRole{id: "rt-editor", name: "editor", scopes: `["state:read","state:write"]`}, []string{"o1"})
 	expectRoleScopesLookup(mock, "admin", []string{"admin"})
 	// No UPDATE (or the revoke DELETE) must follow.
 
@@ -374,6 +373,7 @@ func TestReconcile_AdminMappingThatLosesStillPreservesTheMembership(t *testing.T
 	expectOrgByName(mock, "o1", "platform")
 	mock.ExpectQuery("FROM organization_members").WithArgs("o1", "u1", []string{"o1"}).
 		WillReturnRows(sqlmock.NewRows(memberRowCols).AddRow("o1", "u1", "rt-admin", time.Now()))
+	expectAppRoleForPair(mock, "o1", "u1", &appRole{id: "rt-admin", name: "admin", scopes: `["admin"]`}, []string{"o1"})
 	// The guard walks the matching roles in order and stops at the refused one.
 	expectRoleScopesLookup(mock, "editor", []string{"states:read", "states:write"})
 	expectRoleScopesLookup(mock, "admin", []string{"admin"})

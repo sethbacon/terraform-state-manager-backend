@@ -145,6 +145,7 @@ func TestAPIKeyOwnedByAMemberAuthenticates(t *testing.T) {
 		orgMock.ExpectQuery("FROM organization_members om").WithArgs("u1").
 			WillReturnRows(sqlmock.NewRows(mwMembershipCols).
 				AddRow("org1", "default", nil, time.Now(), "viewer", "Viewer", []byte(`["state:read"]`)))
+		expectOwnerAppRoles(orgMock, "u1", "org1", "viewer", `["state:read"]`)
 	})
 	if code != http.StatusOK {
 		t.Fatalf("status = %d, want 200: a validly tied key was refused", code)

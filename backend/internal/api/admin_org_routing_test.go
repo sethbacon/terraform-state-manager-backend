@@ -8,7 +8,6 @@ import (
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
 	"github.com/gin-gonic/gin"
 
-	"github.com/terraform-state-manager/terraform-state-manager/internal/approles"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/auth"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/middleware"
 )
@@ -30,7 +29,7 @@ func newAdminOrgRoutingEnv(t *testing.T, callerUserID string, scopes []string) *
 	}
 	t.Cleanup(func() { db.Close() })
 
-	h := NewAdminHandlers(db, nil, approles.RoleSourceIdentity)
+	h := NewAdminHandlers(db, db)
 	r := gin.New()
 	r.Use(func(c *gin.Context) {
 		if callerUserID != "" {
@@ -78,6 +77,7 @@ func TestAdminOrgRouting_ListAllowsOrganizationsReadScope(t *testing.T) {
 	e.mock.ExpectQuery("FROM organization_members om").WithArgs("caller-1").
 		WillReturnRows(sqlmock.NewRows(userMembershipCols).
 			AddRow("org-a", "Org A", "rt-owner", time.Now(), "org_owner", "Owner", []byte(`["organizations:read"]`)))
+	expectAppRolesForUser(e.mock, "caller-1", appRole{"org-a", "rt-owner", "org_owner", `["organizations:read"]`})
 	e.mock.ExpectQuery("FROM organizations").
 		WithArgs([]string{"org-a"}, sqlmock.AnyArg(), sqlmock.AnyArg()).
 		WillReturnRows(sqlmock.NewRows(
@@ -112,12 +112,14 @@ func TestAdminOrgRouting_CreateAllowsOrganizationsCreateScope(t *testing.T) {
 		WithArgs("Acme", "").
 		WillReturnRows(sqlmock.NewRows([]string{"id", "created_at", "updated_at"}).
 			AddRow("org-1", time.Now(), time.Now()))
+	expectMirrorRoleResolution(e.mock, "org_owner", "rt-owner")
 	e.mock.ExpectQuery("SELECT id FROM role_templates").
 		WithArgs("org_owner").
 		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("rt-org-owner"))
 	e.mock.ExpectExec("INSERT INTO organization_members").
 		WithArgs("org-1", "caller-1", "rt-org-owner", []string{"org-1"}).
 		WillReturnResult(sqlmock.NewResult(0, 1))
+	expectMirrorUpsert(e.mock)
 	e.mock.ExpectQuery("INSERT INTO audit_logs").WillReturnRows(auditInsertReturn())
 
 	w := e.do(http.MethodPost, "/api/v1/admin/organizations", `{"name":"Acme"}`)
@@ -142,6 +144,7 @@ func TestAdminOrgRouting_AdminWildcardBypassesOrganizationsReadAndCreate(t *test
 	e.mock.ExpectQuery("FROM organization_members om").WithArgs("caller-1").
 		WillReturnRows(sqlmock.NewRows(userMembershipCols).
 			AddRow("org-a", "Org A", "rt-owner", time.Now(), "org_owner", "Owner", []byte(`["organizations:read"]`)))
+	expectAppRolesForUser(e.mock, "caller-1", appRole{"org-a", "rt-owner", "org_owner", `["organizations:read"]`})
 	e.mock.ExpectQuery("FROM organizations").
 		WithArgs([]string{"org-a"}, sqlmock.AnyArg(), sqlmock.AnyArg()).
 		WillReturnRows(sqlmock.NewRows(

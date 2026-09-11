@@ -1,7 +1,7 @@
 <!-- markdownlint-disable MD013 -->
 # 6. Per-App Authorization Reads
 
-**Status**: Accepted
+**Status**: Accepted — amended by [ADR 007](007-retire-identity-role-source.md), which retires the rollback lever this record introduced
 
 ## Context
 

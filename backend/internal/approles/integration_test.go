@@ -100,7 +100,7 @@ func newEnv(t *testing.T) *env {
 	return &env{
 		appDB:      appDB,
 		identityDB: identityDB,
-		members:    NewMembers(identityDB, appDB, RoleSourceApp),
+		members:    NewMembers(identityDB, appDB),
 		store:      NewStore(appDB),
 		users:      idstore.NewUserRepository(identityDB),
 		orgs:       idstore.NewOrganizationRepository(identityDB),
@@ -1237,24 +1237,25 @@ func equalStrings(a, b []string) bool {
 	return true
 }
 
-// TestIntegrationEffectiveScopesAreEquivalentBothWays IS THE PROOF THIS PHASE IS
-// GATED ON.
+// TestIntegrationRoleReadsAnswerFromThisApplicationsTables IS THE PROOF that the
+// overlay reads what it says it reads.
 //
 // It builds a representative estate — several organizations, principals holding
 // different roles in different ones, an administrator, a member with NO role, a
-// principal who belongs to nothing — and resolves EVERY authorization answer TSM
-// derives, twice: once through a repository reading the shared identity schema
-// (Phase 3a) and once through one reading this application's own tables
-// (Phase 3b). The two must agree, value for value.
+// principal who belongs to nothing — seeds it through the dual write, and
+// resolves EVERY authorization answer TSM derives through the one repository a
+// deployment has.
 //
-// # The negative control is half the test
-//
-// A comparison of two things that happen to agree passes whether or not either
-// side is being read. So the second half MUTATES one mirror row — the exact
-// failure this phase risks, a principal silently holding the wrong role — and
-// requires the SAME comparison to fail, and CheckDrift to name that pair. Without
-// it, this test would pass with the entire overlay deleted.
-func TestIntegrationEffectiveScopesAreEquivalentBothWays(t *testing.T) {
+// Until #599 this test compared that repository against a second one reading the
+// shared identity schema and required the two to agree, value for value: the
+// Phase 3b gate, with the rollback lever as the second reader. There is no second
+// reader any more. What survives is the half of the old proof that was doing the
+// work — the NEGATIVE CONTROL. A comparison of two things that happen to agree
+// passes whether or not either side is being read; only a mutation that MUST
+// change the answer shows which tables are answering. So the comparison is now
+// BEFORE against AFTER one mirror row is made wrong, per accessor, and CheckDrift
+// must name the pair.
+func TestIntegrationRoleReadsAnswerFromThisApplicationsTables(t *testing.T) {
 	e := newEnv(t)
 	ctx := context.Background()
 
@@ -1296,8 +1297,8 @@ func TestIntegrationEffectiveScopesAreEquivalentBothWays(t *testing.T) {
 		t.Fatalf("Reconcile: %v", err)
 	}
 
-	// THE GATE. Zero before the reads flip; asserted here so the proof below is
-	// known to be comparing a reconciled pair rather than two arbitrary tables.
+	// THE GATE. Zero before anything is compared; asserted so the proof below is
+	// known to be reading a reconciled pair rather than two arbitrary tables.
 	drift, err := CheckDrift(ctx, e.appDB, e.identityDB)
 	if err != nil {
 		t.Fatalf("CheckDrift: %v", err)
@@ -1309,32 +1310,18 @@ func TestIntegrationEffectiveScopesAreEquivalentBothWays(t *testing.T) {
 		t.Fatal("the drift check compared nothing: a clean result from an empty comparison is not agreement")
 	}
 
-	identityReader := NewMembers(e.identityDB, e.appDB, RoleSourceIdentity)
-	appReader := NewMembers(e.identityDB, e.appDB, RoleSourceApp)
-	if identityReader.Source() != RoleSourceIdentity || appReader.Source() != RoleSourceApp {
-		t.Fatalf("the two readers are not reading different sources: %q and %q",
-			identityReader.Source(), appReader.Source())
-	}
-
+	reader := NewMembers(e.identityDB, e.appDB)
+	before := make(map[string]resolution, len(principals))
 	for _, p := range principals {
-		fromIdentity := resolveWith(t, identityReader, p, orgIDs)
-		fromApp := resolveWith(t, appReader, p, orgIDs)
-		for accessor, diff := range diffs(fromIdentity, fromApp) {
-			t.Errorf("%s resolves differently depending on which tables are read — %s: %s", p.name, accessor, diff)
-		}
-	}
-	// The proof is worthless if the negative control below runs against an
-	// already-failing comparison.
-	if t.Failed() {
-		t.FailNow()
+		before[p.name] = resolveWith(t, reader, p, orgIDs)
 	}
 
 	// ---- NEGATIVE CONTROL -------------------------------------------------
 	//
 	// One mirror row is made wrong, in the direction that is silent in
-	// production: a principal KEEPS a role they should not. The comparison above
-	// must now fail for that principal and no other, and the drift check must
-	// name the pair.
+	// production: a principal KEEPS a role they should not. Every accessor must
+	// now answer differently for that principal and no other, and the drift
+	// check must name the pair.
 	// bob is `editor` in acme. The mirror is narrowed to `viewer` — a NARROWING,
 	// so that every dimension moves: the scope union loses state:write, the
 	// per-organization set loses it, the tenancy resolver stops returning acme for
@@ -1348,7 +1335,7 @@ func TestIntegrationEffectiveScopesAreEquivalentBothWays(t *testing.T) {
 		t.Fatalf("mutating a mirror row: %v", err)
 	}
 
-	got := diffs(resolveWith(t, identityReader, bob, orgIDs), resolveWith(t, appReader, bob, orgIDs))
+	got := diffs(before[bob.name], resolveWith(t, reader, bob, orgIDs))
 	for _, accessor := range []string{
 		"GetUserCombinedScopes",
 		"GetUserScopesForOrg",
@@ -1356,24 +1343,23 @@ func TestIntegrationEffectiveScopesAreEquivalentBothWays(t *testing.T) {
 		"GetUserMemberships",
 	} {
 		if _, moved := got[accessor]; !moved {
-			t.Errorf("%s gave the SAME answer from both sources after a mirror row was made wrong, so it is "+
-				"not reading this application's tables. A flip that moved the other accessors and left this one "+
-				"on identity would have been certified equivalent by a comparison that only asked whether "+
-				"ANYTHING differed.", accessor)
+			t.Errorf("%s gave the SAME answer after a mirror row was made wrong, so it is not reading this "+
+				"application's tables. An override answering from identity's columns — the retired rollback "+
+				"position — passes every test of a single method and fails exactly here.", accessor)
 		}
 	}
 	if len(got) == 0 {
-		t.Fatal("nothing changed at all with a mirror row pointing at a DIFFERENT role: the proof is not " +
-			"reading this application's tables and would have certified a broken flip")
+		t.Fatal("nothing changed at all with a mirror row pointing at a DIFFERENT role: the reads are not " +
+			"answering from this application's tables")
 	}
 
-	// Everyone else must still agree: a proof that fails for every principal
-	// whenever one row is wrong is not localising anything.
+	// Everyone else must still answer as before: a proof that changes for every
+	// principal whenever one row is wrong is not localising anything.
 	for _, p := range principals {
 		if p.name == bob.name {
 			continue
 		}
-		if other := diffs(resolveWith(t, identityReader, p, orgIDs), resolveWith(t, appReader, p, orgIDs)); len(other) > 0 {
+		if other := diffs(before[p.name], resolveWith(t, reader, p, orgIDs)); len(other) > 0 {
 			t.Errorf("%s changed answer because a DIFFERENT principal's row was mutated: %v", p.name, other)
 		}
 	}
@@ -1398,43 +1384,4 @@ func TestIntegrationEffectiveScopesAreEquivalentBothWays(t *testing.T) {
 	if !found {
 		t.Fatalf("the drift sample does not name the mutated pair (org=%s user=%s):\n%s", acme, bob.userID, drift.String())
 	}
-}
-
-// THE ROLLBACK IS REAL, asserted as a behaviour rather than as a paragraph.
-//
-// An operator who finds the flip wrong sets TSM_AUTHZ_ROLE_SOURCE=identity and
-// restarts. That works only if the shared schema is still CURRENT — which is the
-// property Phase 3a's dual write provides and this phase does not switch off. So:
-// perform a role change through the application AFTER the flip, then read it back
-// through a rollback-position repository and require the new role.
-func TestIntegrationRollbackToIdentityStillSeesPostFlipWrites(t *testing.T) {
-	e := newEnv(t)
-	ctx := context.Background()
-
-	e.alignedRoles(t)
-	org := e.newOrg(t, "acme")
-	user := e.newUser(t, "rollback@example.com")
-
-	// A grant made by a deployment running the FLIPPED build.
-	flipped := NewMembers(e.identityDB, e.appDB, RoleSourceApp)
-	if err := flipped.AddMemberWithParams(ctx, org, user, "editor", idstore.OrgScopeAllOrganizations(), sweepOfARealReduction); err != nil {
-		t.Fatalf("AddMemberWithParams: %v", err)
-	}
-	// ...then narrowed, which is the direction that matters: a rollback must not
-	// restore authority the flipped build had already withdrawn.
-	if err := flipped.UpdateMemberRole(ctx, org, user, "viewer", idstore.OrgScopeAllOrganizations(), sweepOfARealReduction); err != nil {
-		t.Fatalf("UpdateMemberRole: %v", err)
-	}
-
-	rolledBack := NewMembers(e.identityDB, e.appDB, RoleSourceIdentity)
-	scopes, err := rolledBack.GetUserCombinedScopes(ctx, user)
-	if err != nil {
-		t.Fatalf("rolled-back read: %v", err)
-	}
-	got := sortedCopy(scopes)
-	if len(got) != 1 || got[0] != "state:read" {
-		t.Fatalf("after rollback the principal resolves to %v, want this build's viewer scopes [state:read]. "+
-			"The shared schema went stale, so TSM_AUTHZ_ROLE_SOURCE=identity is not a rollback.", got)
-	}
-	assertNoDrift(t, e)
 }

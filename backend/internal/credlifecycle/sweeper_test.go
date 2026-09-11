@@ -37,7 +37,7 @@ func newSweeper(t *testing.T) (*Sweeper, sqlmock.Sqlmock) {
 	return NewSweeper(
 		repositories.NewUserTokenRevocationRepository(db),
 		idstore.NewAPIKeyRepository(db),
-		approles.NewMembers(db, nil, approles.RoleSourceIdentity),
+		approles.NewMembers(db, db),
 		NoPlatformAdminCarrier{},
 	), mock
 }
@@ -64,7 +64,7 @@ func sweeperWithAdmins(t *testing.T, src platformAdminSource) (*Sweeper, sqlmock
 	return NewSweeper(
 		repositories.NewUserTokenRevocationRepository(db),
 		idstore.NewAPIKeyRepository(db),
-		approles.NewMembers(db, nil, approles.RoleSourceIdentity),
+		approles.NewMembers(db, db),
 		src,
 	), mock
 }
@@ -152,6 +152,7 @@ func TestAuthorityReduced_RevokesOnlyOverAskingKeys(t *testing.T) {
 	mock.ExpectQuery("FROM organization_members om").WithArgs("u1").
 		WillReturnRows(sqlmock.NewRows(membershipCols).
 			AddRow("o1", "default", nil, time.Now(), "viewer", "Viewer", []byte(`["state:read"]`)))
+	expectAppRoles(mock, "u1", "o1", "viewer", `["state:read"]`)
 	mock.ExpectQuery("FROM api_keys").WithArgs("u1").
 		WillReturnRows(keyRow("k-retained", `["state:read"]`).
 			AddRow("k-overasking", "u1", "o1", "Deploy", nil, "hash", "tsm_def456",
@@ -180,6 +181,7 @@ func TestKeysOnly_LeavesWatermarkUntouched(t *testing.T) {
 	mock.ExpectQuery("FROM organization_members om").WithArgs("u1").
 		WillReturnRows(sqlmock.NewRows(membershipCols).
 			AddRow("o1", "default", nil, time.Now(), "viewer", "Viewer", []byte(`["state:read"]`)))
+	expectAppRoles(mock, "u1", "o1", "viewer", `["state:read"]`)
 	mock.ExpectQuery("FROM api_keys").WithArgs("u1").
 		WillReturnRows(keyRow("k1", `["state:write"]`))
 	mock.ExpectExec("DELETE FROM api_keys").WithArgs("k1").WillReturnResult(sqlmock.NewResult(0, 1))
@@ -269,6 +271,20 @@ func TestSweepFailuresReportIncomplete(t *testing.T) {
 
 // expectNoMemberships stages the membership read returning nothing, which is the
 // normal state for a platform admin.
+// expectAppRoles stages the app-side overlay a role-carrying read issues after
+// the identity leg (approles.Store.RolesForUser). Since #599 the role a principal
+// holds comes from THIS application's tables and nowhere else, so a rig that
+// stages a membership row carrying a role must stage the same role here — or the
+// sweeper sees a principal with no role at all, which is the fail-closed
+// direction and the wrong test. The identity row's role columns are overwritten
+// by this answer; they are kept in the staging only because the shared library
+// scans them.
+func expectAppRoles(mock sqlmock.Sqlmock, userID, orgID, role, scopesJSON string) {
+	mock.ExpectQuery("FROM organization_member_roles r").WithArgs(userID).
+		WillReturnRows(sqlmock.NewRows([]string{"organization_id", "role_template_id", "name", "display_name", "scopes"}).
+			AddRow(orgID, "rt-"+role, role, role, []byte(scopesJSON)))
+}
+
 func expectNoMemberships(mock sqlmock.Sqlmock) {
 	mock.ExpectQuery("(?s)FROM organization_members").
 		WillReturnRows(sqlmock.NewRows([]string{

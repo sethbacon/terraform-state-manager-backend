@@ -9,7 +9,6 @@ import (
 	"github.com/gin-gonic/gin"
 	idtenantscope "github.com/sethbacon/terraform-suite-identity/identity/tenantscope"
 
-	"github.com/terraform-state-manager/terraform-state-manager/internal/approles"
 	"github.com/terraform-state-manager/terraform-state-manager/internal/tenantscope"
 )
 
@@ -44,7 +43,7 @@ func newPlatformAdminAPIKeysEnv(t *testing.T) *apiKeysEnv {
 	t.Cleanup(func() { db.Close() })
 
 	scopes := []string{"admin"}
-	h := NewAPIKeysHandlers(db, nil, approles.RoleSourceIdentity)
+	h := NewAPIKeysHandlers(db, db)
 	h.audit = newAuditor(nil)
 	r := gin.New()
 	r.Use(func(c *gin.Context) {

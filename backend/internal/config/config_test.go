@@ -1,6 +1,8 @@
 package config
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -526,61 +528,55 @@ func TestStateSourceRootsEnvBinding(t *testing.T) {
 	}
 }
 
-// TestRoleSourceIsNormalisedAtLoad guards the shape that made the rollback lever
-// fail silently.
+// TestRoleSourceIsRefusedAtLoad pins #599: authz.role_source is a tombstone.
 //
-// The handler constructors turn authz.role_source into an approles.RoleSource
-// with a plain CAST. A cast cannot reject anything, and the one function that can
-// (approles.ParseRoleSource) is called only by the serve path, for the startup
-// line — which it derives from its OWN normalised copy. So `TSM_AUTHZ_ROLE_SOURCE=App`
-// booted, logged `source=app`, and left every repository holding "App": an
-// undecided source, which denies every role read. An authorization outage that
-// announced itself as healthy, on the setting an operator reaches for when
-// something is already wrong.
-//
-// Asserted on the loaded VALUE rather than on "it did not error", because the
-// broken version did not error either.
-func TestRoleSourceIsNormalisedAtLoad(t *testing.T) {
-	for _, c := range []struct{ set, want string }{
-		{"app", "app"},
-		{"App", "app"},
-		{"IDENTITY", "identity"},
-		{"  identity  ", "identity"},
-	} {
-		t.Setenv("TSM_AUTHZ_ROLE_SOURCE", c.set)
-		cfg, err := Load("")
-		if err != nil {
-			t.Fatalf("Load with role_source=%q: %v", c.set, err)
+// Refused for EVERY value, from EITHER source. `identity` is the rollback that no
+// longer exists; `app` is merely the truth, and accepting it would keep alive a
+// setting that chooses nothing. The env path is asserted separately from the
+// file path because they reach the loader by different routes — AutomaticEnv
+// decodes an override only for keys viper knows, and a retired key has no
+// default — so a regression in the explicit binding would let the env form
+// through while the file form still failed. Both must name the key and the
+// reason, because the operator reading the error is the one who put the line
+// there for a rollback and needs to learn there is not one.
+func TestRoleSourceIsRefusedAtLoad(t *testing.T) {
+	for _, set := range []string{"identity", "app", "App", "  identity  ", "shared"} {
+		t.Setenv("TSM_AUTHZ_ROLE_SOURCE", set)
+		_, err := Load("")
+		if err == nil {
+			t.Errorf("TSM_AUTHZ_ROLE_SOURCE=%q loaded: the retired rollback lever was accepted", set)
+			continue
 		}
-		if cfg.Authz.RoleSource != c.want {
-			t.Errorf("role_source %q loaded as %q, want %q — the cast at every construction site "+
-				"would produce a repository that denies every role read", c.set, cfg.Authz.RoleSource, c.want)
+		if !strings.Contains(err.Error(), "TSM_AUTHZ_ROLE_SOURCE") || !strings.Contains(err.Error(), "#599") {
+			t.Errorf("TSM_AUTHZ_ROLE_SOURCE=%q: the refusal names neither the setting nor the reason: %v", set, err)
 		}
 	}
+	t.Setenv("TSM_AUTHZ_ROLE_SOURCE", "")
 
-	// A value that is neither is left alone rather than coerced: refusing it is
-	// cmd/server's job, where the error can name it and stop the process. Silently
-	// mapping it to a default is how a typo becomes an authorization change.
-	t.Setenv("TSM_AUTHZ_ROLE_SOURCE", "shared")
-	cfg, err := Load("")
-	if err != nil {
-		t.Fatalf("Load: %v", err)
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte("authz:\n  role_source: identity\n"), 0o600); err != nil {
+		t.Fatalf("writing config: %v", err)
 	}
-	if cfg.Authz.RoleSource != "shared" {
-		t.Errorf("an unknown role_source was coerced to %q instead of being left for the boot to refuse", cfg.Authz.RoleSource)
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("a config file setting authz.role_source loaded: the retired lever was accepted from the file")
+	}
+	if !strings.Contains(err.Error(), "authz.role_source") {
+		t.Errorf("the file-path refusal does not name the key: %v", err)
 	}
 }
 
-// The default is the Phase 3b position, and it is asserted rather than assumed:
-// a default of "identity" would ship a build that reads the shared schema while
-// every document in the repository says it does not.
-func TestRoleSourceDefaultsToThisApplicationsTables(t *testing.T) {
+// Unset, the loader is untouched by the tombstone, and the standing detector
+// still defaults on: a default of zero would ship a build that never compares
+// the two tables while every document in the repository says it does.
+func TestRoleSourceUnsetLoadsAndDriftDetectorDefaultsOn(t *testing.T) {
+	t.Setenv("TSM_AUTHZ_ROLE_SOURCE", "")
 	cfg, err := Load("")
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if cfg.Authz.RoleSource != "app" {
-		t.Errorf("authz.role_source defaults to %q, want \"app\"", cfg.Authz.RoleSource)
+	if cfg.Authz.RoleSource != "" {
+		t.Errorf("authz.role_source loaded as %q with nothing set: the tombstone acquired a default", cfg.Authz.RoleSource)
 	}
 	if cfg.Authz.DriftInterval <= 0 {
 		t.Errorf("authz.drift_interval defaults to %v, so the standing detector never runs", cfg.Authz.DriftInterval)

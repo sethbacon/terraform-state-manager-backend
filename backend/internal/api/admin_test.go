@@ -20,7 +20,7 @@ func newAdminHandlers(t *testing.T) (*AdminHandlers, sqlmock.Sqlmock) {
 		t.Fatalf("sqlmock.New: %v", err)
 	}
 	t.Cleanup(func() { db.Close() })
-	return NewAdminHandlers(db, nil, approles.RoleSourceIdentity), mock
+	return NewAdminHandlers(db, db), mock
 }
 
 // newAdminHandlersWithApp wires the APP connection to the same sqlmock: the
@@ -34,7 +34,7 @@ func newAdminHandlersWithApp(t *testing.T) (*AdminHandlers, sqlmock.Sqlmock) {
 		t.Fatalf("sqlmock.New: %v", err)
 	}
 	t.Cleanup(func() { db.Close() })
-	return NewAdminHandlers(db, db, approles.RoleSourceIdentity), mock
+	return NewAdminHandlers(db, db), mock
 }
 
 // serveAdmin runs handler with NO caller in the context. Since identity
@@ -70,6 +70,7 @@ func expectCallerAdminOrg(mock sqlmock.Sqlmock, callerID, orgID string) {
 	mock.ExpectQuery("FROM organization_members om").WithArgs(callerID).
 		WillReturnRows(sqlmock.NewRows(userMembershipCols).
 			AddRow(orgID, "Org "+orgID, "rt-admin", time.Now(), "admin", "Admin", []byte(`["admin"]`)))
+	expectAppRolesForUser(mock, callerID, appRole{orgID, "rt-admin", "admin", `["admin"]`})
 }
 
 func TestPageParams(t *testing.T) {
