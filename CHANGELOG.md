@@ -1,5 +1,12 @@
 # Changelog
 
+## [3.23.1](https://github.com/sethbacon/terraform-state-manager-backend/compare/v3.23.0...v3.23.1) (2026-09-24)
+
+
+### Bug Fixes
+
+* **zizmor:** drop the dead github-app ignore for release-please.yml ([#610](https://github.com/sethbacon/terraform-state-manager-backend/issues/610)) ([1937b90](https://github.com/sethbacon/terraform-state-manager-backend/commit/1937b90c25c1ede6761bf221a7a0a442d7e7badd))
+
 ## [3.23.0](https://github.com/sethbacon/terraform-state-manager-backend/compare/v3.22.2...v3.23.0) (2026-09-11)
 
 
